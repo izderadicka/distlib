@@ -1,10 +1,10 @@
 name: CI
 
 on:
-  # `pull_request` covers feature branches; limiting `push` to master avoids running
-  # every branch twice while a PR is open, while still verifying what landed.
+  # Every branch is checked on push, so a feature branch is verified before a PR
+  # exists for it. Branches with an open PR are built twice (once per trigger);
+  # the concurrency group below at least cancels superseded runs.
   push:
-    branches: [master]
   pull_request:
 
 concurrency:
