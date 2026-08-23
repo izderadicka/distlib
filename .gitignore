@@ -1,0 +1,18 @@
+# Rust build artefacts
+/target/
+
+# Secrets — never committed (see CLAUDE.md § Security)
+.env
+.env.*
+!.env.example
+
+# Local node data directories (keys, redb, SQLite, tantivy, blobs)
+/data/
+*.distlib-data/
+
+# Logs
+*.log
+
+# Editor / OS noise
+.DS_Store
+*.swp

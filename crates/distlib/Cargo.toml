@@ -1,0 +1,18 @@
+[package]
+name = "distlib"
+description = "Distributed community media library for closed, trusted groups"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "distlib"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

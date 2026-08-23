@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = ["crates/distlib-core", "crates/distlib-net", "crates/distlib"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/izderadicka/distlib"
+authors = ["Ivan Zderadicka <ivan.zderadicka@gmail.com>"]
+
+# Versions are pinned exactly (`=`). The iroh family reached 1.0 and is version-locked
+# across crates, but the plan's pinning policy still applies: upgrade deliberately,
+# per-milestone, never mid-feature. See docs/plan-deltas.md#c1.
+[workspace.dependencies]
+# --- p2p stack -------------------------------------------------------------
+iroh = "=1.0.3"
+# Reserved for later phases; the compatible set as of iroh 1.0.3. Uncomment when the
+# phase that needs them lands, so Cargo.lock only grows with code that uses it.
+# iroh-blobs  = "=0.103.0"   # phase 2, content transfer
+# iroh-gossip = "=0.101.0"   # phase 4, heartbeats
+# iroh-docs   = "=0.101.0"   # phase 2, metadata sync
+# irpc        = "=0.17.0"    # phase 1, request/response over iroh connections
+
+# --- runtime & errors ------------------------------------------------------
+tokio = { version = "=1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
+thiserror = "=2.0.20"
+anyhow = "=1.0.104"
+
+# --- config, serialisation, CLI --------------------------------------------
+serde = { version = "=1.0.229", features = ["derive"] }
+figment = { version = "=0.10.19", features = ["toml", "env"] }
+toml = "=0.9.8"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+directories = "=6.0.0"
+
+# --- hashing ---------------------------------------------------------------
+blake3 = "=1.8.7"
+
+# --- observability ---------------------------------------------------------
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+# --- dev -------------------------------------------------------------------
+tempfile = "=3.27.0"
+proptest = "=1.11.0"
+
+# --- internal --------------------------------------------------------------
+distlib-core = { path = "crates/distlib-core" }
+distlib-net = { path = "crates/distlib-net" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# CLAUDE.md: never unwrap in library code; expect() only for invariant violations.
+unwrap_used = "deny"
