@@ -50,6 +50,7 @@ Three consequences that outlive Phase 0:
 | P0-3 | §9 | acceptance is "two containers on separate networks" | **in-process relay (`iroh::test_utils::run_relay_server`) plus `Builder::clear_ip_transports()`** | Makes the relay path structural instead of hoping loopback does not upgrade to a direct connection, and keeps the suite free of third-party infrastructure. `docker/` arrives in Phase 3 with the real binary. |
 | P0-4 | §8 | integration tests live in `tests/` at the workspace root | `crates/distlib-net/tests/` | A single-crate test directory needs no extra scaffolding. Root `tests/` is reserved for the Phase 1+ multi-crate cluster harness that actually needs it. |
 | P0-5 | §12 | openraft listed as a settled choice | **deliberately unpinned in Phase 0** | `0.9.25` (stable) vs `0.10.0-alpha.34` is a real decision with consequences, and Phase 0 does not depend on it. Decided at the start of Phase 1. |
+| P0-6 | §2 | platforms are Linux, Windows and macOS | **CI tests Linux only** | Deliberate, for turnaround speed while the codebase is small. The matrix is kept as a one-element list so widening it is a one-line change. See the carry-forward below. |
 
 ### Carried forward to Phase 1
 
@@ -60,6 +61,11 @@ Three consequences that outlive Phase 0:
   discovered while debugging. `crates/distlib-net/tests/transport.rs::outgoing_to_unknown_refused`
   pins the current behaviour so the exemption is a deliberate change.
 - **openraft version choice** (P0-5).
+- **Windows and macOS are unverified** (P0-6). §2 claims all three platforms, but CI exercises
+  only Linux. The first code that actually diverges is the `0600` key-file handling in
+  `distlib-core::identity` — `cfg(unix)` permissions with a Windows fallback — so that fallback
+  compiles and runs untested for now. Widen `.github/workflows/ci.yml`'s `test` matrix before
+  claiming cross-platform support anywhere user-facing (README, release artefacts).
 
 ---
 
