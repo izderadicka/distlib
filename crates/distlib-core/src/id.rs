@@ -1,0 +1,204 @@
+//! The identifiers the whole system is keyed by.
+
+use std::{fmt, str::FromStr};
+
+use iroh::PublicKey;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+use crate::error::CoreError;
+
+/// Domain separation tag for item fingerprints.
+///
+/// Changing this value changes the identity of every item in every catalogue,
+/// so it is versioned rather than edited.
+const ITEM_FINGERPRINT_TAG: &[u8] = b"distlib.item.v1";
+
+/// A member of the group.
+///
+/// A member *is* an ed25519 public key — the same key iroh uses as its
+/// endpoint identity — so there is nothing to steal server-side and nothing to
+/// revoke except group membership itself.
+///
+/// Note that `iroh::EndpointId` is a type alias for `iroh::PublicKey`, not a
+/// separate type, so [`Self::endpoint_id`] buys readability at the call site
+/// and nothing more; the compiler cannot tell the two roles apart. The newtype
+/// here is what actually keeps a member id from being mistaken for any other
+/// key, and v1 runs one node per member, so the two roles coincide anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemberId(PublicKey);
+
+impl MemberId {
+    /// The iroh endpoint identity this member connects with.
+    pub fn endpoint_id(&self) -> iroh::EndpointId {
+        self.0
+    }
+
+    /// The raw 32-byte public key.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+
+    /// A short prefix for logs. Not unique — never use it to look a member up.
+    pub fn fmt_short(&self) -> impl std::fmt::Display {
+        self.0.fmt_short()
+    }
+}
+
+impl From<PublicKey> for MemberId {
+    fn from(key: PublicKey) -> Self {
+        Self(key)
+    }
+}
+
+impl From<MemberId> for PublicKey {
+    fn from(id: MemberId) -> Self {
+        id.0
+    }
+}
+
+impl fmt::Display for MemberId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for MemberId {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PublicKey::from_str(s)
+            .map(Self)
+            .map_err(|_| CoreError::InvalidId {
+                kind: "member id",
+                value: s.to_owned(),
+            })
+    }
+}
+
+// Serialised through `Display`/`FromStr` rather than delegating to `PublicKey`,
+// so a member id is a readable string in config files and JSON regardless of
+// how iroh chooses to encode keys.
+impl Serialize for MemberId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for MemberId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_str(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// Identifies one group. Derived from the founding event in the membership log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GroupId(#[serde(with = "hex32")] [u8; 32]);
+
+/// Identifies one catalogue item by the set of content files it was born with.
+///
+/// Computed once at creation and then frozen: adding a missing chapter or a
+/// second format later must not change the id, because ratings, reviews,
+/// bookmarks and custodianship all key off it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ItemId(#[serde(with = "hex32")] [u8; 32]);
+
+impl ItemId {
+    /// Fingerprints the set of `role: content` blob hashes an item is made of.
+    ///
+    /// ```text
+    /// BLAKE3( "distlib.item.v1" || n || sorted[ h_i ] )
+    /// ```
+    ///
+    /// * **Sorted** so filename and insertion order cannot affect identity.
+    /// * **Counted** so the pre-image describes its own shape.
+    /// * **Domain separated** so an item id can never equal a blob hash.
+    ///
+    /// §5.2 of the design plan also length-prefixes each element. Every `h_i`
+    /// is a 32-byte BLAKE3 hash, so the concatenation is already unambiguous
+    /// and the prefix cannot distinguish anything. A future scheme admitting
+    /// variable-length elements would carry its own tag, which is what
+    /// prevents cross-version collisions — the length prefix never was.
+    /// Recorded as P0-7 in `docs/plan-deltas.md`.
+    ///
+    /// Cover art and subtitles are excluded by the caller — only content files
+    /// take part, so adding a cover does not create a different item.
+    ///
+    /// Callers pass a set: the catalogue keys files by blob hash, so duplicates
+    /// cannot occur. Duplicates are hashed as given rather than silently
+    /// collapsed, since a caller with duplicates has a bug worth surfacing.
+    pub fn from_content_hashes(hashes: &[[u8; 32]]) -> Self {
+        let mut sorted: Vec<&[u8; 32]> = hashes.iter().collect();
+        sorted.sort_unstable();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(ITEM_FINGERPRINT_TAG);
+        hasher.update(&(sorted.len() as u64).to_le_bytes());
+        for hash in sorted {
+            hasher.update(hash);
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    /// The raw 32-byte fingerprint.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Hex `Display`/`FromStr`/serde for the two 32-byte identifiers.
+macro_rules! hex_id {
+    ($ty:ty, $kind:literal) => {
+        impl $ty {
+            /// Wraps raw bytes without interpreting them.
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = CoreError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                blake3::Hash::from_hex(s)
+                    .map(|hash| Self(*hash.as_bytes()))
+                    .map_err(|_| CoreError::InvalidId {
+                        kind: $kind,
+                        value: s.to_owned(),
+                    })
+            }
+        }
+    };
+}
+
+hex_id!(GroupId, "group id");
+hex_id!(ItemId, "item id");
+
+/// Serde for `[u8; 32]` as a hex string, so ids stay readable in TOML and JSON.
+mod hex32 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub(super) fn serialize<S: Serializer>(
+        bytes: &[u8; 32],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&blake3::Hash::from_bytes(*bytes).to_hex())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[u8; 32], D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        blake3::Hash::from_hex(&raw)
+            .map(|hash| *hash.as_bytes())
+            .map_err(D::Error::custom)
+    }
+}
