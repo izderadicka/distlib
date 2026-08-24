@@ -16,12 +16,14 @@ const ITEM_FINGERPRINT_TAG: &[u8] = b"distlib.item.v1";
 /// A member of the group.
 ///
 /// A member *is* an ed25519 public key — the same key iroh uses as its
-/// `EndpointId` — so there is nothing to steal server-side and nothing to
+/// endpoint identity — so there is nothing to steal server-side and nothing to
 /// revoke except group membership itself.
 ///
-/// v1 runs one node per member, making member and endpoint identity equal.
-/// They are converted explicitly rather than used interchangeably, so the two
-/// meanings stay visible at the transport boundary.
+/// Note that `iroh::EndpointId` is a type alias for `iroh::PublicKey`, not a
+/// separate type, so [`Self::endpoint_id`] buys readability at the call site
+/// and nothing more; the compiler cannot tell the two roles apart. The newtype
+/// here is what actually keeps a member id from being mistaken for any other
+/// key, and v1 runs one node per member, so the two roles coincide anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemberId(PublicKey);
 
@@ -107,16 +109,19 @@ impl ItemId {
     /// Fingerprints the set of `role: content` blob hashes an item is made of.
     ///
     /// ```text
-    /// BLAKE3( "distlib.item.v1" || n || sorted[ len(h_i) || h_i ] )
+    /// BLAKE3( "distlib.item.v1" || n || sorted[ h_i ] )
     /// ```
     ///
     /// * **Sorted** so filename and insertion order cannot affect identity.
-    /// * **Counted and length-prefixed** so the concatenation is unambiguous.
-    ///   With fixed 32-byte hashes the length prefix is currently redundant;
-    ///   it is kept because the scheme is versioned by its tag, and a later
-    ///   revision admitting variable-length elements must not be able to
-    ///   collide with this one.
+    /// * **Counted** so the pre-image describes its own shape.
     /// * **Domain separated** so an item id can never equal a blob hash.
+    ///
+    /// §5.2 of the design plan also length-prefixes each element. Every `h_i`
+    /// is a 32-byte BLAKE3 hash, so the concatenation is already unambiguous
+    /// and the prefix cannot distinguish anything. A future scheme admitting
+    /// variable-length elements would carry its own tag, which is what
+    /// prevents cross-version collisions — the length prefix never was.
+    /// Recorded as P0-7 in `docs/plan-deltas.md`.
     ///
     /// Cover art and subtitles are excluded by the caller — only content files
     /// take part, so adding a cover does not create a different item.
@@ -132,7 +137,6 @@ impl ItemId {
         hasher.update(ITEM_FINGERPRINT_TAG);
         hasher.update(&(sorted.len() as u64).to_le_bytes());
         for hash in sorted {
-            hasher.update(&(hash.len() as u64).to_le_bytes());
             hasher.update(hash);
         }
         Self(*hasher.finalize().as_bytes())

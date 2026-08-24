@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// The result of any fallible operation in this crate.
+pub type Result<T> = std::result::Result<T, CoreError>;
+
 /// Errors produced while loading identity, configuration or paths.
 #[derive(Debug, Error)]
 pub enum CoreError {

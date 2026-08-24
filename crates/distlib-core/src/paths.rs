@@ -19,10 +19,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 
 /// The root of everything a node stores.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataDir(PathBuf);
 
 impl DataDir {
@@ -36,7 +36,7 @@ impl DataDir {
     ///
     /// The config file lives *inside* the data directory, so this deliberately
     /// consults no configuration — see [`CoreError::DataDirInConfig`].
-    pub fn resolve(override_root: Option<PathBuf>) -> Result<Self, CoreError> {
+    pub fn resolve(override_root: Option<PathBuf>) -> Result<Self> {
         if let Some(root) = override_root {
             return Ok(Self(root));
         }
@@ -61,7 +61,7 @@ impl DataDir {
     }
 
     /// Creates the root directory and any parents. Existing directories are fine.
-    pub fn create(&self) -> Result<(), CoreError> {
+    pub fn create(&self) -> Result<()> {
         std::fs::create_dir_all(&self.0).map_err(CoreError::io("create data directory", &self.0))
     }
 }

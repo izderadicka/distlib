@@ -8,13 +8,16 @@ use std::{fs, path::Path};
 
 use iroh::SecretKey;
 
-use crate::{error::CoreError, id::MemberId};
+use crate::{
+    error::{CoreError, Result},
+    id::MemberId,
+};
 
 /// Length of a raw ed25519 secret key.
 const KEY_LEN: usize = 32;
 
 /// Loads the secret key at `path`, generating and storing one if absent.
-pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey, CoreError> {
+pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
     match fs::read(path) {
         Ok(bytes) => {
             check_permissions(path)?;
@@ -29,7 +32,7 @@ pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey, CoreError> {
 ///
 /// Refuses to replace an existing key unless `force` is set: overwriting is
 /// indistinguishable from losing group membership.
-pub fn create_secret_key(path: &Path, force: bool) -> Result<SecretKey, CoreError> {
+pub fn create_secret_key(path: &Path, force: bool) -> Result<SecretKey> {
     if !force && path.exists() {
         return Err(CoreError::KeyExists {
             path: path.to_path_buf(),
@@ -49,7 +52,7 @@ pub fn member_id(secret: &SecretKey) -> MemberId {
     MemberId::from(secret.public())
 }
 
-fn decode(path: &Path, bytes: &[u8]) -> Result<SecretKey, CoreError> {
+fn decode(path: &Path, bytes: &[u8]) -> Result<SecretKey> {
     let bytes: [u8; KEY_LEN] = bytes.try_into().map_err(|_| CoreError::MalformedKey {
         path: path.to_path_buf(),
         len: bytes.len(),
@@ -58,7 +61,7 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<SecretKey, CoreError> {
 }
 
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), CoreError> {
+fn write_private(path: &Path, bytes: &[u8; KEY_LEN]) -> Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
 
     // Created 0600 in one step: opening first and chmod-ing after would leave a
@@ -77,13 +80,13 @@ fn write_private(path: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), CoreError> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), CoreError> {
+fn write_private(path: &Path, bytes: &[u8; KEY_LEN]) -> Result<()> {
     warn_permissions_unenforced(path);
     fs::write(path, bytes).map_err(CoreError::io("write secret key", path))
 }
 
 #[cfg(unix)]
-fn check_permissions(path: &Path) -> Result<(), CoreError> {
+fn check_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mode = fs::metadata(path)
@@ -101,7 +104,7 @@ fn check_permissions(path: &Path) -> Result<(), CoreError> {
 }
 
 #[cfg(not(unix))]
-fn check_permissions(path: &Path) -> Result<(), CoreError> {
+fn check_permissions(path: &Path) -> Result<()> {
     warn_permissions_unenforced(path);
     Ok(())
 }

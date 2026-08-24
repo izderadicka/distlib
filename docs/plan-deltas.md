@@ -51,6 +51,7 @@ Three consequences that outlive Phase 0:
 | P0-4 | §8 | integration tests live in `tests/` at the workspace root | `crates/distlib-net/tests/` | A single-crate test directory needs no extra scaffolding. Root `tests/` is reserved for the Phase 1+ multi-crate cluster harness that actually needs it. |
 | P0-5 | §12 | openraft listed as a settled choice | **deliberately unpinned in Phase 0** | `0.9.25` (stable) vs `0.10.0-alpha.34` is a real decision with consequences, and Phase 0 does not depend on it. Decided at the start of Phase 1. |
 | P0-6 | §2 | platforms are Linux, Windows and macOS | **CI tests Linux only** | Deliberate, for turnaround speed while the codebase is small. The matrix is kept as a one-element list so widening it is a one-line change. See the carry-forward below. |
+| P0-7 | §5.2 | `item_id = BLAKE3(tag \|\| n \|\| sorted[ len(h_i) \|\| h_i ])` | **the per-element length prefix is dropped**: `BLAKE3(tag \|\| n \|\| sorted[ h_i ])` | Every `h_i` is a 32-byte BLAKE3 hash, so the concatenation is already unambiguous and the prefix distinguishes nothing. The forward-compatibility argument does not hold either: a later scheme admitting variable-length elements would carry its own domain tag, and the tag is what prevents a cross-version collision. The count is kept — one field, and it makes the pre-image self-describing. **This changes every item id**, which is free now and would not be once a catalogue exists. |
 
 ### Carried forward to Phase 1
 

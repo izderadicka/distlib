@@ -18,7 +18,10 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{error::CoreError, id::MemberId};
+use crate::{
+    error::{CoreError, Result},
+    id::MemberId,
+};
 
 /// Prefix for every environment override.
 const ENV_PREFIX: &str = "DISTLIB_";
@@ -28,7 +31,7 @@ const ENV_NESTED_SEPARATOR: &str = "__";
 const DATA_DIR_KEY: &str = "data_dir";
 
 /// The whole configuration of a node.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Transport settings.
@@ -36,7 +39,7 @@ pub struct Config {
 }
 
 /// How this node talks to the network.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetConfig {
     /// Local socket to bind. Port 0 asks the OS to choose.
@@ -64,7 +67,7 @@ impl Default for NetConfig {
 }
 
 /// Relay selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayMode {
     /// The n0-operated default relays.
@@ -91,7 +94,7 @@ impl Config {
     ///
     /// A missing file is not an error: defaults plus environment overrides are
     /// a valid configuration.
-    pub fn load(config_file: &Path) -> Result<Self, CoreError> {
+    pub fn load(config_file: &Path) -> Result<Self> {
         // The data directory is resolved before this file can be found, so a
         // `data_dir` key here would be silently ignored. Say so instead.
         if Figment::from(Toml::file(config_file))
