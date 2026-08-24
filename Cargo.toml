@@ -51,6 +51,9 @@ tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
 # --- dev -------------------------------------------------------------------
+# Only for tests: the in-process relay server's self-signed certificates need
+# `CaTlsConfig`, which iroh does not re-export.
+iroh-relay = "=1.0.3"
 tempfile = "=3.27.0"
 proptest = "=1.11.0"
 

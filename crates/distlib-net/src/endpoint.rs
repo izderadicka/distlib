@@ -1,0 +1,63 @@
+//! Building the iroh endpoint from configuration.
+
+use distlib_core::{NetConfig, RelayMode as ConfigRelayMode};
+use iroh::{
+    Endpoint, RelayUrl, SecretKey,
+    endpoint::{Builder, RelayMode, presets},
+};
+
+use crate::{alpn, error::NetError, error::Result};
+
+/// Binds an endpoint for this node.
+///
+/// The relay mode decides which preset is used, and the preset is what
+/// determines whether the endpoint reaches the network at all:
+///
+/// * [`ConfigRelayMode::Default`] uses [`presets::N0`] — n0's relays plus DNS
+///   and pkarr address lookup.
+/// * The other modes build on [`presets::Minimal`], which sets only the crypto
+///   provider. No address lookup is configured, so an endpoint in these modes
+///   makes no DNS or pkarr requests and reaches only peers it is given explicit
+///   addresses for.
+pub async fn build_endpoint(secret_key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
+    let builder = match config.relay_mode {
+        ConfigRelayMode::Default => Endpoint::builder(presets::N0),
+        ConfigRelayMode::Disabled => {
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
+        }
+        ConfigRelayMode::Custom => {
+            Endpoint::builder(presets::Minimal).relay_mode(custom_relays(&config.relay_urls)?)
+        }
+    };
+
+    Ok(configure(builder, secret_key)
+        .bind_addr(config.bind_addr_v4)
+        .map_err(|source| NetError::InvalidRelayUrl {
+            url: source.to_string(),
+        })?
+        .bind()
+        .await?)
+}
+
+/// Applies the settings every distlib endpoint shares, whatever its relay mode.
+///
+/// Kept separate so tests can build endpoints with their own transport and
+/// relay setup while still offering exactly the ALPNs the router serves.
+pub fn configure(builder: Builder, secret_key: SecretKey) -> Builder {
+    builder.secret_key(secret_key).alpns(alpn::registered())
+}
+
+fn custom_relays(urls: &[String]) -> Result<RelayMode> {
+    if urls.is_empty() {
+        return Err(NetError::NoCustomRelays);
+    }
+    let parsed = urls
+        .iter()
+        .map(|url| {
+            url.parse::<RelayUrl>()
+                .map_err(|_| NetError::InvalidRelayUrl { url: url.clone() })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RelayMode::Custom(parsed.into_iter().collect()))
+}
