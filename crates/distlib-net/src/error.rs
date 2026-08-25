@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use distlib_core::MemberId;
-use iroh::endpoint::{BindError, ConnectError, ConnectionError};
+use iroh::endpoint::{BindError, ConnectError, ConnectWithOptsError, ConnectionError};
+
+use crate::hooks::close_code;
 use thiserror::Error;
 
 /// The result of any fallible operation in this crate.
@@ -44,6 +46,13 @@ pub enum NetError {
     #[error("{peer} did not answer within {timeout:?}")]
     Timeout { peer: MemberId, timeout: Duration },
 
+    /// Refused by an allowlist — ours or the peer's.
+    ///
+    /// Distinct from a network failure because the caller should stop rather
+    /// than retry: nothing about waiting or trying another path will help.
+    #[error("{peer} is not a member, or does not consider us one")]
+    Rejected { peer: MemberId },
+
     /// The peer answered, but not with something this protocol recognises.
     #[error("{peer} sent a reply this protocol does not recognise")]
     MalformedReply { peer: MemberId },
@@ -72,16 +81,20 @@ impl From<BindError> for NetError {
 
 impl NetError {
     pub(crate) fn connect(peer: MemberId) -> impl FnOnce(ConnectError) -> Self {
-        move |source| Self::Connect {
-            peer,
-            source: Box::new(source),
+        move |source| {
+            rejection(peer, &source).unwrap_or_else(|| Self::Connect {
+                peer,
+                source: Box::new(source),
+            })
         }
     }
 
     pub(crate) fn connection(peer: MemberId) -> impl FnOnce(ConnectionError) -> Self {
-        move |source| Self::Connection {
-            peer,
-            source: Box::new(source),
+        move |source| {
+            rejection(peer, &source).unwrap_or_else(|| Self::Connection {
+                peer,
+                source: Box::new(source),
+            })
         }
     }
 
@@ -89,9 +102,46 @@ impl NetError {
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        move |source| Self::Stream {
-            peer,
-            source: Box::new(source),
+        move |source| {
+            rejection(peer, &source).unwrap_or_else(|| Self::Stream {
+                peer,
+                source: Box::new(source),
+            })
         }
     }
+}
+
+/// Recognises an allowlist rejection anywhere in an error chain.
+///
+/// Two shapes mean the same thing to a caller, and neither is tied to a fixed
+/// call site:
+///
+/// * `ConnectWithOptsError::LocallyRejected` — *our* hook refused to dial,
+///   before any packet left the machine.
+/// * `ConnectionError::ApplicationClosed` carrying [`close_code::NOT_A_MEMBER`]
+///   — the *remote* refused us after the handshake. Because that arrives after
+///   the connection appears established, the initiator may well see `connect`
+///   succeed and fail on its first stream operation instead.
+///
+/// Matching wherever it appears in the chain keeps callers out of that timing
+/// detail; asserting on which call returned the error would pin an iroh
+/// internal.
+fn rejection(peer: MemberId, error: &(dyn std::error::Error + 'static)) -> Option<NetError> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if matches!(
+            error.downcast_ref::<ConnectWithOptsError>(),
+            Some(ConnectWithOptsError::LocallyRejected { .. })
+        ) {
+            return Some(NetError::Rejected { peer });
+        }
+        if let Some(ConnectionError::ApplicationClosed(close)) =
+            error.downcast_ref::<ConnectionError>()
+            && close.error_code == close_code::NOT_A_MEMBER
+        {
+            return Some(NetError::Rejected { peer });
+        }
+        current = error.source();
+    }
+    None
 }

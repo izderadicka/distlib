@@ -52,15 +52,20 @@ Three consequences that outlive Phase 0:
 | P0-5 | §12 | openraft listed as a settled choice | **deliberately unpinned in Phase 0** | `0.9.25` (stable) vs `0.10.0-alpha.34` is a real decision with consequences, and Phase 0 does not depend on it. Decided at the start of Phase 1. |
 | P0-6 | §2 | platforms are Linux, Windows and macOS | **CI tests Linux only** | Deliberate, for turnaround speed while the codebase is small. The matrix is kept as a one-element list so widening it is a one-line change. See the carry-forward below. |
 | P0-7 | §5.2 | `item_id = BLAKE3(tag \|\| n \|\| sorted[ len(h_i) \|\| h_i ])` | **the per-element length prefix is dropped**: `BLAKE3(tag \|\| n \|\| sorted[ h_i ])` | Every `h_i` is a 32-byte BLAKE3 hash, so the concatenation is already unambiguous and the prefix distinguishes nothing. The forward-compatibility argument does not hold either: a later scheme admitting variable-length elements would carry its own domain tag, and the tag is what prevents a cross-version collision. The count is kept — one field, and it makes the pre-image self-describing. **This changes every item id**, which is free now and would not be once a catalogue exists. |
+| P0-8 | §5.1, §9 | "allowlist hook at connection accept" | **two hooks, not one**: `before_connect` (refuse to dial a non-member) plus `after_handshake` (refuse a verified non-member) | `after_handshake` alone satisfies the acceptance criterion, but it fires only after packets have been exchanged, so an expelled member would learn the node is running. `before_connect` costs ~10 lines and closes that. `after_handshake` remains the authoritative check — it is the first point at which the peer's identity is proven rather than claimed — and is the only one that covers incoming connections. |
 
 ### Carried forward to Phase 1
 
-- **Outgoing connections are gated by the same allowlist hook** (consequence 2 of C1). The join
+- **Outgoing connections are gated by the same allowlist** (consequence 2 of C1). The join
   flow in §4.3 has a joiner connecting to a core node that is not yet in the joiner's log, and the
   joiner is not yet in the core node's log either. This needs a designed bootstrap exemption —
   scoped to the join ALPN and the addresses carried in the join ticket — rather than a workaround
-  discovered while debugging. `crates/distlib-net/tests/transport.rs::outgoing_to_unknown_refused`
+  discovered while debugging. `crates/distlib-net/tests/allowlist.rs::outgoing_to_unknown_refused`
   pins the current behaviour so the exemption is a deliberate change.
+
+  Note the exemption has to be made in **two** places, not one: `before_connect` refuses to dial a
+  non-member before any packet is sent, and `after_handshake` refuses the verified peer. The join
+  ALPN must be admitted by both.
 - **openraft version choice** (P0-5).
 - **Windows and macOS are unverified** (P0-6). §2 claims all three platforms, but CI exercises
   only Linux. The first code that actually diverges is the `0600` key-file handling in
