@@ -9,6 +9,15 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+distlib-core = { workspace = true }
+iroh = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay = { workspace = true }
 
 [lints]
 workspace = true
