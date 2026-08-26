@@ -5,12 +5,12 @@
 //! log, and expulsion must take effect on a running node — §4.4 requires open
 //! connections to a removed member to be closed, not merely refused next time.
 //!
-//! So the set is behind a [`tokio::sync::watch`] channel from the start rather
-//! than a frozen `HashSet`. Phase 1 replaces the *producer* — the Raft state
-//! machine drives [`AllowlistWriter`] — and nothing on the reading side has to
-//! change.
+//! That last requirement is why the set sits behind a [`tokio::sync::watch`]
+//! channel rather than a lock: closing live connections needs a *notification*,
+//! which a lock cannot provide. Phase 1 replaces only the producer — the Raft
+//! state machine drives [`AllowlistWriter`] — and the reading side is unchanged.
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use distlib_core::MemberId;
 use tokio::sync::watch;
@@ -21,16 +21,21 @@ use tokio::sync::watch;
 /// [`AllowlistWriter`] immediately. Cloneable is a requirement, not a
 /// convenience — `Builder::hooks` takes `impl EndpointHooks + 'static` and the
 /// hook must own its copy.
+///
+/// **Never hold the `borrow()` guard across an `.await`.** It is a read guard
+/// on the channel's internal lock, so keeping it alive across a suspension
+/// point would stall any concurrent write. Every method below borrows and drops
+/// within a single expression.
 #[derive(Debug, Clone)]
 pub struct Allowlist {
-    members: watch::Receiver<Arc<HashSet<MemberId>>>,
+    members: watch::Receiver<HashSet<MemberId>>,
     self_id: MemberId,
 }
 
 /// The write half. Whoever holds this decides membership.
 #[derive(Debug)]
 pub struct AllowlistWriter {
-    members: watch::Sender<Arc<HashSet<MemberId>>>,
+    members: watch::Sender<HashSet<MemberId>>,
 }
 
 /// Creates an allowlist containing `members`, readable by any number of clones.
@@ -42,7 +47,7 @@ pub fn allowlist(
     self_id: MemberId,
     members: impl IntoIterator<Item = MemberId>,
 ) -> (AllowlistWriter, Allowlist) {
-    let (tx, rx) = watch::channel(Arc::new(members.into_iter().collect()));
+    let (tx, rx) = watch::channel(members.into_iter().collect());
     (
         AllowlistWriter { members: tx },
         Allowlist {
@@ -63,11 +68,6 @@ impl Allowlist {
         *id == self.self_id || self.members.borrow().contains(id)
     }
 
-    /// The current set, without this node's own implicit membership.
-    pub fn snapshot(&self) -> Arc<HashSet<MemberId>> {
-        Arc::clone(&self.members.borrow())
-    }
-
     /// How many members are listed. Does not count this node.
     pub fn len(&self) -> usize {
         self.members.borrow().len()
@@ -76,11 +76,6 @@ impl Allowlist {
     /// Whether no other member is listed.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// This node's own identity.
-    pub fn self_id(&self) -> MemberId {
-        self.self_id
     }
 }
 
@@ -91,9 +86,9 @@ impl AllowlistWriter {
     /// the set from committed log state: the log is the truth, and applying a
     /// snapshot of it cannot drift the way a sequence of deltas can.
     pub fn replace(&self, members: impl IntoIterator<Item = MemberId>) {
-        let members: HashSet<_> = members.into_iter().collect();
-        // `send` fails only when every reader is gone, which means nothing is
-        // enforcing the policy any more — there is no one left to tell.
-        let _ = self.members.send(Arc::new(members));
+        // `send_replace` rather than `send`: it cannot fail when every reader
+        // has gone away, so there is no `Result` to discard. The previous set
+        // is returned and dropped.
+        self.members.send_replace(members.into_iter().collect());
     }
 }

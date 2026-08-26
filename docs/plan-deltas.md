@@ -66,6 +66,12 @@ Three consequences that outlive Phase 0:
   Note the exemption has to be made in **two** places, not one: `before_connect` refuses to dial a
   non-member before any packet is sent, and `after_handshake` refuses the verified peer. The join
   ALPN must be admitted by both.
+- **Expulsion must close connections that are already open** (§4.4), not merely refuse the next
+  attempt. `Allowlist` is built on a `tokio::sync::watch` channel precisely so that signal
+  exists, but Phase 0 **does not expose it** — there is no `changed()` accessor, because nothing
+  here consumes one. Phase 1 adds the accessor together with the eviction loop that awaits it and
+  closes live connections to removed members. Refusing the next attempt, which is all Phase 0
+  does, is not sufficient for the requirement.
 - **openraft version choice** (P0-5).
 - **Windows and macOS are unverified** (P0-6). §2 claims all three platforms, but CI exercises
   only Linux. The first code that actually diverges is the `0600` key-file handling in

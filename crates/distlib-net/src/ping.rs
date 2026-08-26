@@ -97,23 +97,23 @@ async fn exchange(
     let connection = endpoint
         .connect(addr, alpn::PING)
         .await
-        .map_err(NetError::connect(peer))?;
+        .map_err(|error| NetError::peer(peer, error))?;
 
     let (mut send, mut recv) = connection
         .open_bi()
         .await
-        .map_err(NetError::connection(peer))?;
+        .map_err(|error| NetError::peer(peer, error))?;
 
     send.write_all(payload)
         .await
-        .map_err(NetError::stream(peer))?;
+        .map_err(|error| NetError::peer(peer, error))?;
     // Closing our side is what tells the responder the payload is complete.
-    send.finish().map_err(NetError::stream(peer))?;
+    send.finish().map_err(|error| NetError::peer(peer, error))?;
 
     let reply = recv
         .read_to_end(PONG_PREFIX.len() + MAX_PAYLOAD)
         .await
-        .map_err(NetError::stream(peer))?;
+        .map_err(|error| NetError::peer(peer, error))?;
 
     connection.close(0u32.into(), b"done");
 
