@@ -6,7 +6,7 @@ use iroh::{
     endpoint::{Builder, RelayMode, presets},
 };
 
-use crate::{alpn, error::NetError, error::Result};
+use crate::{allowlist::Allowlist, alpn, error::NetError, error::Result, hooks::AllowlistHooks};
 
 /// Binds an endpoint for this node.
 ///
@@ -19,7 +19,11 @@ use crate::{alpn, error::NetError, error::Result};
 ///   provider. No address lookup is configured, so an endpoint in these modes
 ///   makes no DNS or pkarr requests and reaches only peers it is given explicit
 ///   addresses for.
-pub async fn build_endpoint(secret_key: SecretKey, config: &NetConfig) -> Result<Endpoint> {
+pub async fn build_endpoint(
+    secret_key: SecretKey,
+    config: &NetConfig,
+    allowlist: Allowlist,
+) -> Result<Endpoint> {
     let builder = match config.relay_mode {
         ConfigRelayMode::Default => Endpoint::builder(presets::N0),
         ConfigRelayMode::Disabled => {
@@ -30,7 +34,7 @@ pub async fn build_endpoint(secret_key: SecretKey, config: &NetConfig) -> Result
         }
     };
 
-    Ok(configure(builder, secret_key)
+    Ok(configure(builder, secret_key, allowlist)
         .bind_addr(config.bind_addr_v4)
         .map_err(|source| NetError::InvalidRelayUrl {
             url: source.to_string(),
@@ -42,9 +46,14 @@ pub async fn build_endpoint(secret_key: SecretKey, config: &NetConfig) -> Result
 /// Applies the settings every distlib endpoint shares, whatever its relay mode.
 ///
 /// Kept separate so tests can build endpoints with their own transport and
-/// relay setup while still offering exactly the ALPNs the router serves.
-pub fn configure(builder: Builder, secret_key: SecretKey) -> Builder {
-    builder.secret_key(secret_key).alpns(alpn::registered())
+/// relay setup while still getting the same ALPNs and — importantly — the same
+/// membership enforcement as production. A test that bypassed the hooks would
+/// be testing a configuration nothing ships.
+pub fn configure(builder: Builder, secret_key: SecretKey, allowlist: Allowlist) -> Builder {
+    builder
+        .secret_key(secret_key)
+        .alpns(alpn::registered())
+        .hooks(AllowlistHooks::new(allowlist))
 }
 
 fn custom_relays(urls: &[String]) -> Result<RelayMode> {
