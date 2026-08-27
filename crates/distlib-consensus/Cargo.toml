@@ -1,0 +1,23 @@
+[package]
+name = "distlib-consensus"
+description = "The membership log: signed events, their projection, and the Raft that commits them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+distlib-core = { workspace = true }
+iroh = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

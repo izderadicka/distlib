@@ -83,7 +83,16 @@ Three consequences that outlive Phase 0:
 
 ## Phase 1 — Membership log (Raft core)
 
-*Not started.*
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P1-1 | §4.2 | "Append-only log of **signed** events"; followers "verify the core's signatures" — the scheme is not specified | **Each event is signed by the member who proposed it**, in an envelope carrying `proposer` and `at`, verified when the event is applied | The transport already authenticates *who served us the log* (iroh connections are mutually authenticated), so what a signature adds is attribution of the entry itself: a compromised core node cannot invent a `MemberExpelled` and attribute it to somebody else. It gives §4.3's "proposer is recorded — auditability over ceremony" real weight for ~64 bytes and one verify per entry. It does **not** defend against a core node that refuses to serve entries or serves a stale prefix — that is Raft's problem, and outside §2's threat model either way. |
+| P1-2 | §4.2 | `MemberAdded { invited_by }` and `MemberExpelled { proposed_by }` | **Both fields dropped** | The signing envelope already carries an authenticated `proposer`, which is the same member. Keeping both would let them disagree with no rule for which wins — and only the signed one means anything. |
+| P1-3 | §4.2 | `MemberRecord` carries `joined_at` and `last_changed` | **Both fields dropped** | They are the proposer's clock, which nothing verifies and nothing keeps in step, so they can never be authoritative. Nothing derived from the log reads them, and they are not lost: each event's envelope carries `at`, so a UI wanting "joined on" reads it from the `MemberAdded` entry. Keeping them in the projection would invite exactly the mistake the `Timestamp` docs warn against — comparing timestamps to decide what happened first, when log order is the only truth. |
+
+### Still to come in Phase 1
+
+- openraft's version, storage, network layer and the wiring that makes the allowlist come from
+  the log — PRs 2 through 5. The Phase 0 carry-forwards below stay open until then.
 
 ## Phase 2 — Catalogue & library basics
 
