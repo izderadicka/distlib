@@ -165,6 +165,26 @@ impl RawMemberId {
     }
 }
 
+/// Builds a `RawMemberId` from a small integer, for test harnesses only.
+///
+/// openraft's storage conformance suite requires `NodeId: From<u64>` so it can
+/// mint node ids in its fixtures. That is meaningless in this domain — an
+/// integer is not a member — so it is behind a feature and never exists in a
+/// production build.
+///
+/// Contrast the `Default` question, where a feature flag would *not* have been
+/// enough: `MemberId` refuses `Default` because `#[serde(default)]` could then
+/// silently invent a member in real code. This impl carries no such risk,
+/// because it cannot be reached unless something explicitly turns it on.
+#[cfg(feature = "testing")]
+impl From<u64> for RawMemberId {
+    fn from(id: u64) -> Self {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&id.to_le_bytes());
+        Self(bytes)
+    }
+}
+
 impl From<MemberId> for RawMemberId {
     fn from(id: MemberId) -> Self {
         Self(*id.as_bytes())
