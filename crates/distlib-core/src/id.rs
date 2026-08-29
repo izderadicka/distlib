@@ -33,6 +33,17 @@ impl MemberId {
         self.0
     }
 
+    /// The same key, named for its cryptographic role rather than its transport
+    /// one — for verifying a signature this member produced.
+    ///
+    /// `iroh::EndpointId` is an alias of `PublicKey`, so this returns exactly
+    /// what [`Self::endpoint_id`] does. Two names because the two uses read
+    /// differently at a call site, which is the same reason iroh keeps the
+    /// alias at all.
+    pub fn as_public_key(&self) -> &PublicKey {
+        &self.0
+    }
+
     /// The raw 32-byte public key.
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
