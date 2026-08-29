@@ -9,6 +9,12 @@
 //! connection is authenticated by. That is the whole reason the allowlist lives
 //! on the endpoint rather than inside any one protocol.
 
+// `RPCError` is openraft's type and appears in signatures openraft dictates, so
+// it cannot be boxed without breaking the trait impls; the helpers below carry
+// the same type through. Not ours to fix — the same call log_store.rs and
+// state_machine.rs make.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use distlib_core::{MemberId, RawMemberId};
