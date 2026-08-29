@@ -165,6 +165,45 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
     }
 }
 
+/// A failure of the transport itself, as distinct from an answer.
+///
+/// The transport can fail to reach a peer, or fail to exchange bytes with one.
+/// It cannot produce a *Raft* error: those are decided by the remote's Raft and
+/// travel back inside a successful [`Response`].
+///
+/// This exists because `RPCError`'s third parameter defaults to `Infallible`,
+/// so an `RPCError<NodeId, NodeAddr>` has a `RemoteError` variant whose payload
+/// is uninhabited — a case that cannot occur but still has to be answered for
+/// when converting to the wider type openraft's traits return. Naming the two
+/// things the transport can actually do removes the impossible case rather than
+/// requiring a branch that argues it away.
+#[derive(Debug)]
+enum TransportError {
+    /// The peer could not be dialled. openraft backs off before retrying these.
+    Unreachable(Unreachable),
+    /// The exchange failed once a connection existed. openraft retries at once.
+    Network(NetworkError),
+}
+
+impl TransportError {
+    fn network(error: &(impl std::error::Error + 'static)) -> Self {
+        Self::Network(NetworkError::new(error))
+    }
+
+    fn unreachable(error: &(impl std::error::Error + 'static)) -> Self {
+        Self::Unreachable(Unreachable::new(error))
+    }
+}
+
+impl<E: std::error::Error> From<TransportError> for RPCError<NodeId, NodeAddr, E> {
+    fn from(error: TransportError) -> Self {
+        match error {
+            TransportError::Unreachable(inner) => Self::Unreachable(inner),
+            TransportError::Network(inner) => Self::Network(inner),
+        }
+    }
+}
+
 /// Sends Raft RPCs to one peer.
 #[derive(Debug, Clone)]
 pub struct RaftClient {
@@ -180,8 +219,9 @@ impl RaftClient {
     ///
     /// An empty [`NodeAddr`] is meaningful rather than broken: it means "find
     /// them by member id", which works whenever address lookup is configured.
-    fn endpoint_addr(&self) -> Result<EndpointAddr, Unreachable> {
-        let member = MemberId::try_from(self.target).map_err(|error| Unreachable::new(&error))?;
+    fn endpoint_addr(&self) -> Result<EndpointAddr, TransportError> {
+        let member =
+            MemberId::try_from(self.target).map_err(|error| TransportError::unreachable(&error))?;
         let mut addr = EndpointAddr::new(member.endpoint_id());
 
         for socket in &self.addr.direct {
@@ -189,7 +229,7 @@ impl RaftClient {
         }
         if let Some(url) = &self.addr.relay {
             let relay: RelayUrl = url.parse().map_err(|_| {
-                Unreachable::new(&std::io::Error::other(format!(
+                TransportError::unreachable(&std::io::Error::other(format!(
                     "member {member} lists an unparseable relay url: {url}"
                 )))
             })?;
@@ -203,7 +243,7 @@ impl RaftClient {
     /// Failures drop the cached connection. A half-open connection that is
     /// never replaced would fail every future RPC to this peer, which for a
     /// follower means never hearing another heartbeat.
-    async fn call(&self, request: Request) -> Result<Response, RPCError<NodeId, NodeAddr>> {
+    async fn call(&self, request: Request) -> Result<Response, TransportError> {
         match self.exchange(request).await {
             Ok(response) => Ok(response),
             Err(error) => {
@@ -213,32 +253,32 @@ impl RaftClient {
         }
     }
 
-    async fn exchange(&self, request: Request) -> Result<Response, RPCError<NodeId, NodeAddr>> {
-        let encoded = postcard::to_stdvec(&request)
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+    async fn exchange(&self, request: Request) -> Result<Response, TransportError> {
+        let encoded =
+            postcard::to_stdvec(&request).map_err(|error| TransportError::network(&error))?;
 
         let connection = self.connection().await?;
         let (mut send, mut recv) = connection
             .open_bi()
             .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+            .map_err(|error| TransportError::network(&error))?;
 
         send.write_all(&encoded)
             .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+            .map_err(|error| TransportError::network(&error))?;
         send.finish()
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+            .map_err(|error| TransportError::network(&error))?;
 
         let encoded = recv
             .read_to_end(MAX_RPC_BYTES)
             .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+            .map_err(|error| TransportError::network(&error))?;
 
-        postcard::from_bytes(&encoded).map_err(|error| RPCError::Network(NetworkError::new(&error)))
+        postcard::from_bytes(&encoded).map_err(|error| TransportError::network(&error))
     }
 
     /// The cached connection, dialling if there is not one.
-    async fn connection(&self) -> Result<Connection, RPCError<NodeId, NodeAddr>> {
+    async fn connection(&self) -> Result<Connection, TransportError> {
         let mut cached = self.connection.lock().await;
         if let Some(connection) = cached.as_ref() {
             return Ok(connection.clone());
@@ -252,7 +292,7 @@ impl RaftClient {
             // Unreachable rather than Network: openraft backs off before
             // retrying an unreachable peer, which is the right response to a
             // member who is simply offline, and members here are often offline.
-            .map_err(|error| RPCError::Unreachable(Unreachable::new(&error)))?;
+            .map_err(|error| TransportError::unreachable(&error))?;
 
         *cached = Some(connection.clone());
         Ok(connection)
@@ -265,13 +305,9 @@ impl RaftNetwork<TypeConfig> for RaftClient {
         rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, NodeAddr, RaftError<NodeId>>> {
-        match self
-            .call(Request::AppendEntries(rpc))
-            .await
-            .map_err(widen)?
-        {
+        match self.call(Request::AppendEntries(rpc)).await? {
             Response::AppendEntries(result) => result.map_err(|error| remote(self.target, error)),
-            other => Err(mismatched(self.target, &other)),
+            other => Err(mismatched(self.target, &other).into()),
         }
     }
 
@@ -280,9 +316,9 @@ impl RaftNetwork<TypeConfig> for RaftClient {
         rpc: VoteRequest<NodeId>,
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, NodeAddr, RaftError<NodeId>>> {
-        match self.call(Request::Vote(rpc)).await.map_err(widen)? {
+        match self.call(Request::Vote(rpc)).await? {
             Response::Vote(result) => result.map_err(|error| remote(self.target, error)),
-            other => Err(mismatched(self.target, &other)),
+            other => Err(mismatched(self.target, &other).into()),
         }
     }
 
@@ -294,31 +330,9 @@ impl RaftNetwork<TypeConfig> for RaftClient {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, NodeAddr, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        match self
-            .call(Request::InstallSnapshot(rpc))
-            .await
-            .map_err(widen)?
-        {
+        match self.call(Request::InstallSnapshot(rpc)).await? {
             Response::InstallSnapshot(result) => result.map_err(|error| remote(self.target, error)),
-            other => Err(mismatched(self.target, &other)),
-        }
-    }
-}
-
-/// Re-labels a transport failure for a specific RPC's error type.
-///
-/// The transport cannot produce a `RemoteError`, so only the other variants can
-/// appear here; this just moves them into the wider type openraft expects.
-fn widen<E: std::error::Error>(error: RPCError<NodeId, NodeAddr>) -> RPCError<NodeId, NodeAddr, E> {
-    match error {
-        RPCError::Timeout(inner) => RPCError::Timeout(inner),
-        RPCError::Unreachable(inner) => RPCError::Unreachable(inner),
-        RPCError::PayloadTooLarge(inner) => RPCError::PayloadTooLarge(inner),
-        RPCError::Network(inner) => RPCError::Network(inner),
-        RPCError::RemoteError(inner) => {
-            RPCError::Network(NetworkError::new(&std::io::Error::other(format!(
-                "unexpected remote error from the transport layer: {inner}"
-            ))))
+            other => Err(mismatched(self.target, &other).into()),
         }
     }
 }
@@ -330,13 +344,10 @@ fn remote<E: std::error::Error>(target: NodeId, error: E) -> RPCError<NodeId, No
 /// A peer answered a different RPC than it was asked.
 ///
 /// Only reachable if the two ends disagree about the protocol, which the ALPN
-/// version exists to prevent; treated as a network fault so openraft retries
+/// version exists to prevent. Treated as a transport fault so openraft retries
 /// rather than concluding anything about Raft state.
-fn mismatched<E: std::error::Error>(
-    target: NodeId,
-    response: &Response,
-) -> RPCError<NodeId, NodeAddr, E> {
-    RPCError::Network(NetworkError::new(&std::io::Error::other(format!(
+fn mismatched(target: NodeId, response: &Response) -> TransportError {
+    TransportError::network(&std::io::Error::other(format!(
         "member {target} answered a different request than it was asked: {response:?}"
-    ))))
+    )))
 }
