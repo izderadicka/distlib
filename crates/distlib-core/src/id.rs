@@ -102,6 +102,73 @@ impl<'de> Deserialize<'de> for MemberId {
     }
 }
 
+/// A member id as plain bytes, before anyone has checked it is a real key.
+///
+/// Exists for framework boundaries that will not accept [`MemberId`]. openraft's
+/// `NodeId` is the first: it requires `Default`, which an ed25519 public key
+/// cannot sensibly have — `PublicKey` validates that its bytes decompress to a
+/// point on the curve, so there is no "default key" to return.
+///
+/// Deliberately *not* solved by giving `MemberId` a `Default`. A `MemberId` is
+/// somebody, and a type whose default value is a member is a hazard in a system
+/// where membership is the security boundary: `#[serde(default)]` on any config
+/// or wire struct would then silently produce a member instead of an error.
+/// openraft needs the bound only so its own storage conformance suite can build
+/// placeholder log ids, which is not a reason to weaken the domain vocabulary.
+///
+/// This is the workspace's one unvalidated representation, and
+/// [`MemberId::try_from`] is its single validation point — so bytes arriving
+/// from any framework or off any wire are checked in exactly one place.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct RawMemberId([u8; 32]);
+
+impl RawMemberId {
+    /// Wraps raw bytes without interpreting them.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<MemberId> for RawMemberId {
+    fn from(id: MemberId) -> Self {
+        Self(*id.as_bytes())
+    }
+}
+
+impl TryFrom<RawMemberId> for MemberId {
+    type Error = CoreError;
+
+    /// Checks the bytes really are an ed25519 public key.
+    ///
+    /// Fallible on purpose: this is the boundary where unvalidated bytes become
+    /// an identity, and the default all-zeros sentinel must not quietly pass for
+    /// somebody.
+    fn try_from(raw: RawMemberId) -> Result<Self, Self::Error> {
+        PublicKey::from_bytes(&raw.0)
+            .map(Self)
+            .map_err(|_| CoreError::InvalidId {
+                kind: "member id",
+                value: blake3::Hash::from_bytes(raw.0).to_hex().to_string(),
+            })
+    }
+}
+
+impl fmt::Display for RawMemberId {
+    /// Hex, matching how a valid [`MemberId`] renders — so a log line reads the
+    /// same whether or not the bytes turned out to be a key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
+    }
+}
+
 /// Identifies one group. Derived from the founding event in the membership log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

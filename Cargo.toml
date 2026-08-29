@@ -52,6 +52,16 @@ toml = "=0.9.8"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 directories = "=6.0.0"
 
+# --- consensus & storage ---------------------------------------------------
+# `storage-v2` is not optional: it is the feature that un-seals RaftLogStorage
+# and RaftStateMachine (`impl<T> Sealed for T {}` is gated on it), so without it
+# they cannot be implemented at all. 0.10 is still an alpha that has not moved
+# in months; see P1-1 in docs/plan-deltas.md.
+openraft = { version = "=0.9.25", features = ["storage-v2", "serde"] }
+# The engine the iroh family already uses: iroh-blobs 0.103 and iroh-docs 0.101
+# both resolve to redb 4.2.0, so matching it adds no second storage engine.
+redb = "=4.2.0"
+
 # --- hashing ---------------------------------------------------------------
 blake3 = "=1.8.7"
 
