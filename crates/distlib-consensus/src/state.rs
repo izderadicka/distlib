@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ConsensusError, Result},
-    event::{MemberRecord, MembershipEvent},
+    event::{MemberRecord, MembershipEvent, check_founders},
     signed::SignedEvent,
 };
 
@@ -42,10 +42,11 @@ impl MembershipState {
     /// On error the state is left untouched: every rule is checked before
     /// anything is mutated, so a rejected event cannot half-apply.
     pub fn apply(&mut self, signed: &SignedEvent) -> Result<()> {
-        signed.verify()?;
+        // Reaching the event verifies it; there is no accessor that does not.
+        let event = signed.event()?;
         let proposer = signed.proposer();
 
-        match signed.event_unverified() {
+        match event {
             MembershipEvent::GroupFounded { group_id, founders } => {
                 self.found(*group_id, founders, proposer)
             }
@@ -117,9 +118,9 @@ impl MembershipState {
         if self.group.is_some() {
             return Err(ConsensusError::AlreadyFounded);
         }
-        if founders.is_empty() {
-            return Err(ConsensusError::NoFounders);
-        }
+        // Non-empty and duplicate-free. Re-checked here rather than trusted from
+        // the constructor, because this event may have arrived from another node.
+        check_founders(founders)?;
         // A founder who is not in their own founding set would create a group
         // they are not a member of, and could never propose anything to it.
         if !founders.iter().any(|founder| founder.member_id == proposer) {

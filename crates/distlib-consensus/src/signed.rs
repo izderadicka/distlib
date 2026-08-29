@@ -52,8 +52,9 @@ impl SignedEvent {
 
     /// Checks the signature against the proposer's key.
     ///
-    /// Called on apply rather than on receipt, so a forged entry cannot reach
-    /// the state machine even if it made it into the log.
+    /// Useful on its own at a storage or transport boundary, where an entry is
+    /// worth rejecting before it is written down but nothing needs to look
+    /// inside it yet.
     pub fn verify(&self) -> Result<()> {
         let payload = signing_payload(&self.event, &self.proposer, self.at)?;
         self.proposer
@@ -64,12 +65,15 @@ impl SignedEvent {
             })
     }
 
-    /// The event, without checking its signature.
+    /// The event, once its signature checks out.
     ///
-    /// Named to be awkward at a call site that has not verified: use
-    /// [`Self::verify`] first, or let the state machine's apply do it.
-    pub fn event_unverified(&self) -> &MembershipEvent {
-        &self.event
+    /// The only way to reach the event, so there is no path that reads one
+    /// without verifying it first — a caller cannot forget. Verification is an
+    /// ed25519 check on a short message, and the membership log is small, so
+    /// paying it per access is not worth an escape hatch.
+    pub fn event(&self) -> Result<&MembershipEvent> {
+        self.verify()?;
+        Ok(&self.event)
     }
 
     /// The member who proposed this event. Only meaningful once verified.

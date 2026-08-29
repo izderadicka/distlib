@@ -7,6 +7,8 @@
 use distlib_core::{GroupId, MemberId};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ConsensusError, Result};
+
 /// Domain tag for deriving a group id, so it cannot collide with an item id or
 /// any other BLAKE3 output in the system.
 const GROUP_ID_TAG: &[u8] = b"distlib.group.v1";
@@ -110,7 +112,16 @@ impl MembershipEvent {
     /// The founder set is sorted for the same reason `ItemId` sorts its hashes —
     /// so the value does not depend on the order they were listed in — and `at`
     /// separates two groups founded by the same people.
-    pub fn found(founders: Vec<MemberRecord>, at: Timestamp) -> Self {
+    ///
+    /// Fallible because the derivation is only well defined for a set. A
+    /// repeated founder would put `n` and the hashed sequence out of step with
+    /// the membership the event actually establishes — the state folds founders
+    /// into a map, so `[a, a, b]` yields two members but an id derived from
+    /// three entries. Two different events would then describe the same group
+    /// under different ids.
+    pub fn found(founders: Vec<MemberRecord>, at: Timestamp) -> Result<Self> {
+        check_founders(&founders)?;
+
         let mut ids: Vec<[u8; 32]> = founders
             .iter()
             .map(|record| *record.member_id.as_bytes())
@@ -125,9 +136,27 @@ impl MembershipEvent {
         }
         hasher.update(&at.as_millis().to_le_bytes());
 
-        Self::GroupFounded {
+        Ok(Self::GroupFounded {
             group_id: GroupId::from_bytes(*hasher.finalize().as_bytes()),
             founders,
-        }
+        })
     }
+}
+
+/// The rule a founder set must satisfy: non-empty, and no member twice.
+///
+/// Checked in two places on purpose — [`MembershipEvent::found`] so a locally
+/// built event cannot be malformed, and again on apply, because an event
+/// arriving from another node is not ours to trust.
+pub(crate) fn check_founders(founders: &[MemberRecord]) -> Result<()> {
+    if founders.is_empty() {
+        return Err(ConsensusError::NoFounders);
+    }
+
+    let mut ids: Vec<MemberId> = founders.iter().map(|record| record.member_id).collect();
+    ids.sort_unstable();
+    if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(ConsensusError::DuplicateFounder { member: pair[0] });
+    }
+    Ok(())
 }

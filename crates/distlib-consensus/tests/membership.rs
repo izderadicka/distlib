@@ -5,7 +5,7 @@
 use distlib_consensus::{
     ConsensusError, MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp,
 };
-use distlib_core::MemberId;
+use distlib_core::{GroupId, MemberId};
 use iroh::SecretKey;
 use proptest::prelude::*;
 
@@ -49,10 +49,9 @@ fn founded() -> (MembershipState, Signer) {
     let alice = Signer::generate();
     let mut state = MembershipState::new();
     state
-        .apply(&alice.sign(MembershipEvent::found(
-            vec![alice.record("alice")],
-            Timestamp::from_millis(1),
-        )))
+        .apply(&alice.sign(
+            MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap(),
+        ))
         .unwrap();
     (state, alice)
 }
@@ -79,10 +78,9 @@ fn founding_seeds_members_and_core() {
 fn a_group_is_founded_only_once() {
     let (mut state, alice) = founded();
 
-    let again = alice.sign(MembershipEvent::found(
-        vec![alice.record("alice")],
-        Timestamp::from_millis(2),
-    ));
+    let again = alice.sign(
+        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(2)).unwrap(),
+    );
 
     assert_eq!(state.apply(&again), Err(ConsensusError::AlreadyFounded));
 }
@@ -106,14 +104,62 @@ fn a_founder_must_be_in_their_own_founding_set() {
     let bob = Signer::generate();
     let mut state = MembershipState::new();
 
-    let event = alice.sign(MembershipEvent::found(
-        vec![bob.record("bob")],
-        Timestamp::from_millis(1),
-    ));
+    let event = alice
+        .sign(MembershipEvent::found(vec![bob.record("bob")], Timestamp::from_millis(1)).unwrap());
 
     assert_eq!(
         state.apply(&event),
         Err(ConsensusError::FounderNotIncluded { proposer: alice.id })
+    );
+}
+
+#[test]
+fn a_repeated_founder_is_refused_when_building_the_event() {
+    let alice = Signer::generate();
+
+    let built = MembershipEvent::found(
+        vec![alice.record("alice"), alice.record("alice again")],
+        Timestamp::from_millis(1),
+    );
+
+    assert_eq!(
+        built.unwrap_err(),
+        ConsensusError::DuplicateFounder { member: alice.id },
+        "the group id is derived from the founder list, so it is only well \
+         defined for a set"
+    );
+}
+
+#[test]
+fn a_repeated_founder_is_refused_on_apply() {
+    // Hand-built rather than via `found`, standing in for an event arriving
+    // from a node whose constructor we did not run. Without this check the
+    // founders would collapse into the member map and leave the group id
+    // describing a larger set than the group actually has.
+    let alice = Signer::generate();
+    let bob = Signer::generate();
+    let mut state = MembershipState::new();
+
+    let event = alice.sign(MembershipEvent::GroupFounded {
+        group_id: GroupId::from_bytes([7; 32]),
+        founders: vec![
+            alice.record("alice"),
+            bob.record("bob"),
+            alice.record("dup"),
+        ],
+    });
+
+    assert_eq!(
+        state.apply(&event),
+        Err(ConsensusError::DuplicateFounder { member: alice.id })
+    );
+}
+
+#[test]
+fn a_group_cannot_be_founded_empty() {
+    assert_eq!(
+        MembershipEvent::found(Vec::new(), Timestamp::from_millis(1)).unwrap_err(),
+        ConsensusError::NoFounders
     );
 }
 
@@ -123,8 +169,8 @@ fn the_group_id_does_not_depend_on_founder_order() {
     let bob = Signer::generate();
     let at = Timestamp::from_millis(7);
 
-    let one = MembershipEvent::found(vec![alice.record("a"), bob.record("b")], at);
-    let other = MembershipEvent::found(vec![bob.record("b"), alice.record("a")], at);
+    let one = MembershipEvent::found(vec![alice.record("a"), bob.record("b")], at).unwrap();
+    let other = MembershipEvent::found(vec![bob.record("b"), alice.record("a")], at).unwrap();
 
     let (
         MembershipEvent::GroupFounded {
@@ -446,8 +492,9 @@ fn apply_scenario(
             .iter()
             .map(|s| s.record("founder"))
             .collect();
-        let _ =
-            state.apply(&pool[0].sign(MembershipEvent::found(records, Timestamp::from_millis(1))));
+        let _ = state.apply(
+            &pool[0].sign(MembershipEvent::found(records, Timestamp::from_millis(1)).unwrap()),
+        );
     }
     for &(actor, subject, kind) in &ops[range] {
         let (actor, subject) = (&pool[actor % pool.len()], &pool[subject % pool.len()]);

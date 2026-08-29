@@ -35,6 +35,14 @@ pub enum ConsensusError {
     #[error("a group must be founded with at least one member")]
     NoFounders,
 
+    /// The same member appeared twice in a founder set.
+    ///
+    /// Rejected rather than collapsed because the group id is derived from the
+    /// founder list: a duplicate would leave the id describing a different set
+    /// from the membership the event establishes.
+    #[error("{member} appears more than once in the founder set")]
+    DuplicateFounder { member: MemberId },
+
     /// The proposer is not currently a member.
     ///
     /// The check that keeps the log closed: only people already inside the
