@@ -2,6 +2,7 @@
 
 // `declare_raft_types!` expands its default `SnapshotData = Cursor<Vec<u8>>`
 // unqualified, so the type has to be in scope here even though we never name it.
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::net::SocketAddr;
 
@@ -56,7 +57,16 @@ pub struct NodeAddr {
     pub relay: Option<String>,
 
     /// Socket addresses to try directly.
-    pub direct: Vec<SocketAddr>,
+    ///
+    /// A set, not a list, for three reasons that all point the same way. These
+    /// values are persisted in the Raft log and compared across nodes, and
+    /// openraft's `Node` bound requires `Eq`; with a `Vec`, the same two
+    /// addresses listed in a different order would compare unequal and encode
+    /// to different bytes, so openraft would see a membership change where
+    /// nothing changed. A set also removes duplicates for free. Nothing is
+    /// lost: iroh races the paths it is given rather than treating them as a
+    /// preference order.
+    pub direct: BTreeSet<SocketAddr>,
 }
 
 impl NodeAddr {
@@ -73,7 +83,7 @@ impl NodeAddr {
 
     /// Adds a directly dialable socket address.
     pub fn with_direct(mut self, addr: SocketAddr) -> Self {
-        self.direct.push(addr);
+        self.direct.insert(addr);
         self
     }
 
