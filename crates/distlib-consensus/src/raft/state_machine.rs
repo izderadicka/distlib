@@ -27,19 +27,22 @@ use openraft::{
     EntryPayload, ErrorSubject, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
     StoredMembership, storage::RaftStateMachine,
 };
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     raft::{
-        db::{NodeId, StorageResult, reading, write_txn, writing},
+        db::{
+            KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
+            write_key, write_txn, writing,
+        },
         types::{NodeAddr, TypeConfig},
     },
     state::MembershipState,
 };
 
 /// State machine storage, keyed by the constants below.
-const SM: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_state_machine");
+const SM: KeyValueTable = TableDefinition::new("raft_state_machine");
 
 const APPLIED: &str = "applied";
 const SNAPSHOT: &str = "snapshot";
@@ -76,17 +79,20 @@ pub struct StateMachineStore {
 impl StateMachineStore {
     /// Opens (or creates) the state machine in `db`, restoring what was applied.
     pub fn from_database(db: Arc<Database>) -> StorageResult<Self> {
-        let fail = writing(ErrorSubject::StateMachine);
-        let txn = db.begin_write().map_err(|source| fail(&source))?;
-        txn.open_table(SM).map_err(|source| fail(&source))?;
-        txn.commit().map_err(|source| fail(&source))?;
+        ensure_tables(&db, ErrorSubject::StateMachine, |txn| {
+            let fail = writing(ErrorSubject::StateMachine);
+            txn.open_table(SM).map_err(|source| fail(&source))?;
+            Ok(())
+        })?;
 
         let store = Self {
             db,
             applied: Arc::new(Mutex::new(Applied::default())),
             snapshot_seq: Arc::new(AtomicU64::new(0)),
         };
-        if let Some(applied) = store.read::<Applied>(APPLIED)? {
+        if let Some(applied) =
+            read_key::<Applied>(&store.db, SM, APPLIED, ErrorSubject::StateMachine)?
+        {
             *store.lock() = applied;
         }
         Ok(store)
@@ -97,6 +103,11 @@ impl StateMachineStore {
         let fail = writing(ErrorSubject::StateMachine);
         let db = Database::create(path).map_err(|source| fail(&source))?;
         Self::from_database(Arc::new(db))
+    }
+
+    /// The snapshot currently stored, if any.
+    fn stored_snapshot(&self) -> StorageResult<Option<StoredSnapshot>> {
+        read_key(&self.db, SM, SNAPSHOT, ErrorSubject::Snapshot(None))
     }
 
     /// The membership derived from everything applied so far.
@@ -115,35 +126,6 @@ impl StateMachineStore {
     /// into a second failure.
     fn lock(&self) -> std::sync::MutexGuard<'_, Applied> {
         self.applied.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> StorageResult<Option<T>> {
-        let fail = reading(ErrorSubject::StateMachine);
-        let txn = self.db.begin_read().map_err(|source| fail(&source))?;
-        let table = txn.open_table(SM).map_err(|source| fail(&source))?;
-        let Some(value) = table.get(key).map_err(|source| fail(&source))? else {
-            return Ok(None);
-        };
-        Ok(Some(
-            postcard::from_bytes(value.value()).map_err(|source| fail(&source))?,
-        ))
-    }
-
-    async fn write(&self, key: &'static str, encoded: Vec<u8>) -> StorageResult<()> {
-        write_txn(&self.db, ErrorSubject::StateMachine, move |txn| {
-            let fail = writing(ErrorSubject::StateMachine);
-            let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
-            table
-                .insert(key, encoded.as_slice())
-                .map_err(|source| fail(&source))?;
-            Ok(())
-        })
-        .await
-    }
-
-    fn encode<T: Serialize>(value: &T) -> StorageResult<Vec<u8>> {
-        let fail = writing(ErrorSubject::StateMachine);
-        postcard::to_stdvec(value).map_err(|source| fail(&source))
     }
 }
 
@@ -205,10 +187,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 }
                 responses.push(());
             }
-            Self::encode(&*applied)?
+            encode(&*applied, ErrorSubject::StateMachine)?
         };
 
-        self.write(APPLIED, encoded).await?;
+        write_key(&self.db, SM, APPLIED, encoded, ErrorSubject::StateMachine).await?;
         Ok(responses)
     }
 
@@ -231,31 +213,47 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         meta: &SnapshotMeta<NodeId, NodeAddr>,
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> StorageResult<()> {
+        let subject = ErrorSubject::Snapshot(Some(meta.signature()));
         let data = snapshot.into_inner();
-        let applied: Applied = postcard::from_bytes(&data)
-            .map_err(|source| reading(ErrorSubject::Snapshot(Some(meta.signature())))(&source))?;
+        let applied: Applied =
+            postcard::from_bytes(&data).map_err(|source| reading(subject.clone())(&source))?;
 
-        let stored = Self::encode(&StoredSnapshot {
-            meta: meta.clone(),
-            data,
-        })?;
-        let encoded = Self::encode(&applied)?;
+        let stored = encode(
+            &StoredSnapshot {
+                meta: meta.clone(),
+                data: data.clone(),
+            },
+            subject.clone(),
+        )?;
 
         *self.lock() = applied;
-        // State first, then the snapshot that produced it: a crash in between
-        // leaves a node that has the right state but will re-fetch a snapshot,
-        // rather than one advertising a snapshot it never applied.
-        self.write(APPLIED, encoded).await?;
-        self.write(SNAPSHOT, stored).await
+
+        // Both keys in one transaction. The applied state and the snapshot it
+        // came from cannot then disagree after a crash, and it is one fsync
+        // rather than two. `data` is reused verbatim for APPLIED rather than
+        // re-encoded: it decoded into `Applied` above, so the bytes already are
+        // that value, and storing them twice from one source keeps the two keys
+        // literally identical.
+        let insert_subject = subject.clone();
+        write_txn(&self.db, subject, move |txn| {
+            let fail = writing(insert_subject);
+            let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
+            table
+                .insert(APPLIED, data.as_slice())
+                .map_err(|source| fail(&source))?;
+            table
+                .insert(SNAPSHOT, stored.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
+        .await
     }
 
     async fn get_current_snapshot(&mut self) -> StorageResult<Option<Snapshot<TypeConfig>>> {
-        Ok(self
-            .read::<StoredSnapshot>(SNAPSHOT)?
-            .map(|stored| Snapshot {
-                meta: stored.meta,
-                snapshot: Box::new(Cursor::new(stored.data)),
-            }))
+        Ok(self.stored_snapshot()?.map(|stored| Snapshot {
+            meta: stored.meta,
+            snapshot: Box::new(Cursor::new(stored.data)),
+        }))
     }
 }
 
@@ -269,28 +267,56 @@ pub struct SnapshotBuilder {
 
 impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
     async fn build_snapshot(&mut self) -> StorageResult<Snapshot<TypeConfig>> {
-        let data = StateMachineStore::encode(&self.applied)?;
-
         // Two snapshots can share a `last_log_id`, so the sequence number is
         // what keeps their ids distinct during a transfer.
         let snapshot_id = match self.applied.last_applied {
             Some(log_id) => format!("{}-{}-{}", log_id.leader_id, log_id.index, self.seq),
             None => format!("--{}", self.seq),
         };
-
         let meta = SnapshotMeta {
             last_log_id: self.applied.last_applied,
             last_membership: self.applied.membership.clone(),
             snapshot_id,
         };
 
-        let stored = StateMachineStore::encode(&StoredSnapshot {
-            meta: meta.clone(),
-            data: data.clone(),
-        })?;
-        write_txn(&self.db, ErrorSubject::StateMachine, move |txn| {
-            let fail = writing(ErrorSubject::StateMachine);
+        let subject = ErrorSubject::Snapshot(Some(meta.signature()));
+        let data = encode(&self.applied, subject.clone())?;
+        let stored = encode(
+            &StoredSnapshot {
+                meta: meta.clone(),
+                data: data.clone(),
+            },
+            subject.clone(),
+        )?;
+
+        let ours = self.applied.last_applied;
+        let insert_subject = subject.clone();
+        write_txn(&self.db, subject, move |txn| {
+            let fail = writing(insert_subject);
             let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
+
+            // openraft spawns `build_snapshot` onto its own task while the state
+            // machine worker keeps running, so a builder started at an older log
+            // id can still be in flight when a newer snapshot is installed from
+            // the leader. Overwriting blindly would move `get_current_snapshot`
+            // *backwards* — and since openraft purges the log up to an installed
+            // snapshot, the entries needed to bridge the gap are already gone,
+            // leaving this node unable to catch anyone up.
+            let newer_exists = {
+                let existing = table.get(SNAPSHOT).map_err(|source| fail(&source))?;
+                match existing {
+                    Some(value) => {
+                        let stored: StoredSnapshot =
+                            postcard::from_bytes(value.value()).map_err(|source| fail(&source))?;
+                        stored.meta.last_log_id > ours
+                    }
+                    None => false,
+                }
+            };
+            if newer_exists {
+                return Ok(());
+            }
+
             table
                 .insert(SNAPSHOT, stored.as_slice())
                 .map_err(|source| fail(&source))?;
@@ -298,6 +324,9 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
         })
         .await?;
 
+        // Returned regardless: openraft asked this builder for a snapshot and
+        // gets the one it built. Only the *stored* current snapshot is held
+        // back from going backwards.
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),

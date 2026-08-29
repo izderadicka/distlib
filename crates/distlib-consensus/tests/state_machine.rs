@@ -289,3 +289,60 @@ async fn the_state_machine_shares_a_database_with_the_log() {
     assert!(sm.membership().is_member(&alice.id));
     drop(log);
 }
+
+#[tokio::test]
+async fn a_stale_builder_does_not_overwrite_a_newer_snapshot() {
+    // openraft spawns `build_snapshot` onto its own task while the state machine
+    // worker keeps running, so a builder started at an older log id can still be
+    // in flight when a newer snapshot arrives from the leader. If it then
+    // overwrote the stored snapshot, `get_current_snapshot` would move backwards
+    // — and since openraft purges the log up to an installed snapshot, the
+    // entries needed to bridge the gap are already gone, leaving this node
+    // unable to catch anyone up.
+    let (mut store, _dir) = new_store();
+    let alice = Signer::generate();
+    let bob = Signer::generate();
+    store.apply(vec![founding(&alice)]).await.unwrap();
+
+    // A builder capturing the state at log 1, held while the world moves on.
+    let mut stale = store.get_snapshot_builder().await;
+
+    // A newer snapshot arrives and is installed, as from a leader.
+    let (mut source, _source_dir) = new_store();
+    source.apply(vec![founding(&alice)]).await.unwrap();
+    source
+        .apply(vec![entry(
+            5,
+            alice.sign(MembershipEvent::MemberAdded {
+                member: bob.record("bob"),
+            }),
+        )])
+        .await
+        .unwrap();
+    let newer = source
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .unwrap();
+    let newer_id = newer.meta.snapshot_id.clone();
+    store
+        .install_snapshot(&newer.meta, newer.snapshot)
+        .await
+        .unwrap();
+
+    // Only now does the stale builder finish.
+    let built = stale.build_snapshot().await.unwrap();
+    assert_eq!(
+        built.meta.last_log_id,
+        Some(log_id(1)),
+        "the builder still returns what it captured"
+    );
+
+    let current = store.get_current_snapshot().await.unwrap().unwrap();
+    assert_eq!(
+        current.meta.snapshot_id, newer_id,
+        "but the stored snapshot must not go backwards"
+    );
+    assert_eq!(current.meta.last_log_id, Some(log_id(5)));
+}

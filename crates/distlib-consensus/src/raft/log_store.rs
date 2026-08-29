@@ -29,7 +29,7 @@ use openraft::{
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::raft::{
-    db::{NodeId, StorageResult, reading, write_txn, writing},
+    db::{KeyValueTable, NodeId, StorageResult, ensure_tables, reading, write_txn, writing},
     types::TypeConfig,
 };
 
@@ -37,7 +37,7 @@ use crate::raft::{
 const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
 
 /// Everything else Raft persists, under the fixed keys below.
-const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
+const META: KeyValueTable = TableDefinition::new("raft_meta");
 
 const VOTE: &str = "vote";
 const COMMITTED: &str = "committed";
@@ -74,19 +74,14 @@ impl LogStore {
     }
 
     /// Creates both tables so later read transactions cannot fail on a missing
-    /// one — redb only creates a table when it is opened for writing.
-    ///
-    /// Synchronous, unlike the other writes: this runs once at startup, not on
-    /// the Raft path.
+    /// one.
     fn ensure_tables(&self) -> StorageResult<()> {
-        let fail = writing(ErrorSubject::Store);
-        let txn = self.db.begin_write().map_err(|source| fail(&source))?;
-        {
+        ensure_tables(&self.db, ErrorSubject::Store, |txn| {
+            let fail = writing(ErrorSubject::Store);
             txn.open_table(LOG).map_err(|source| fail(&source))?;
             txn.open_table(META).map_err(|source| fail(&source))?;
-        }
-        txn.commit().map_err(|source| fail(&source))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     fn read_meta<T>(&self, key: &str, subject: ErrorSubject<NodeId>) -> StorageResult<Option<T>>
