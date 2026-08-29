@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Test-harness affordances that must not exist in a production build. Currently
+# `RawMemberId: From<u64>`, which openraft's storage conformance suite requires.
+testing = []
+
 [dependencies]
 iroh = { workspace = true }
 blake3 = { workspace = true }

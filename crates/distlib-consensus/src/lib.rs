@@ -18,6 +18,6 @@ pub mod state;
 
 pub use error::{ConsensusError, Result};
 pub use event::{MemberRecord, MembershipEvent, Timestamp};
-pub use raft::{LogStore, NodeAddr, TypeConfig};
+pub use raft::{LogStore, NodeAddr, StateMachineStore, TypeConfig};
 pub use signed::SignedEvent;
 pub use state::MembershipState;

@@ -21,8 +21,12 @@ redb = { workspace = true }
 tokio = { workspace = true }
 # openraft's own error payload type, needed to build a StorageIOError.
 anyerror = { workspace = true }
+# The state machine warns when a committed event is rejected.
+tracing = { workspace = true }
 
 [dev-dependencies]
+# Enables `RawMemberId: From<u64>`, which openraft's conformance suite needs.
+distlib-core = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 
