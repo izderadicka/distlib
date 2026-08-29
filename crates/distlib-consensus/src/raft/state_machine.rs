@@ -171,7 +171,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             // Proposals are validated before they are submitted;
                             // this is the backstop for one that should not have
                             // got through.
-                            tracing::warn!(
+                            tracing::error!(
                                 %error,
                                 log_id = %entry.log_id,
                                 "committed membership event rejected; skipping it"
