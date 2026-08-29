@@ -1,0 +1,333 @@
+//! The Raft log, persisted in redb.
+//!
+//! Two tables and nothing clever. The log is a `u64 -> postcard(Entry)` map, and
+//! everything else Raft needs to remember across a restart — its vote, the
+//! committed pointer, the last purged id — lives in a small metadata table under
+//! fixed keys.
+//!
+//! Durability is what this file exists for. openraft's contract is explicit that
+//! a vote must be on disk before `save_vote` returns and that entries must be on
+//! disk before the `append` callback fires; redb's `commit()` is the point where
+//! that becomes true, so every write commits before it returns or reports.
+//!
+//! That commit fsyncs, which is why the write paths run on the blocking pool
+//! rather than inline. They are called from openraft's core loop, and an fsync
+//! that takes tens of milliseconds on a loaded disk would stall Raft processing
+//! for its duration — which the `append` docs ask implementations to avoid.
+
+// Every signature here is fixed by openraft's traits, and `StorageError` is its
+// type: 280 bytes, which clippy objects to and we cannot box without breaking
+// the impls. Not ours to fix — the same call the `figment::Jail` closures got.
+#![allow(clippy::result_large_err)]
+
+use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
+
+use openraft::{
+    ErrorSubject, ErrorVerb, LogId, LogState, RaftLogReader, StorageError, StorageIOError, Vote,
+    storage::{LogFlushed, RaftLogStorage},
+};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
+
+use crate::raft::types::TypeConfig;
+
+/// Log entries, keyed by index.
+const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
+
+/// Everything else Raft persists, under the fixed keys below.
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
+
+const VOTE: &str = "vote";
+const COMMITTED: &str = "committed";
+const LAST_PURGED: &str = "last_purged";
+
+type Entry = openraft::impls::Entry<TypeConfig>;
+type NodeId = <TypeConfig as openraft::RaftTypeConfig>::NodeId;
+type StorageResult<T> = Result<T, StorageError<NodeId>>;
+
+/// Reports a failure against the part of the store it came from.
+///
+/// The subject travels into the fatal error a node dies with, so a disk failure
+/// while saving a vote has to say "vote" rather than pointing whoever debugs it
+/// at the log.
+fn failing(
+    subject: ErrorSubject<NodeId>,
+    verb: ErrorVerb,
+) -> impl Fn(&(dyn std::error::Error + 'static)) -> StorageError<NodeId> {
+    // `from_dyn` rather than `new`: the concrete type is erased here so one
+    // closure can report failures from several redb error types at a call site.
+    move |source| {
+        StorageIOError::new(
+            subject.clone(),
+            verb,
+            anyerror::AnyError::from_dyn(source, None),
+        )
+        .into()
+    }
+}
+
+fn writing(
+    subject: ErrorSubject<NodeId>,
+) -> impl Fn(&(dyn std::error::Error + 'static)) -> StorageError<NodeId> {
+    failing(subject, ErrorVerb::Write)
+}
+
+fn reading(
+    subject: ErrorSubject<NodeId>,
+) -> impl Fn(&(dyn std::error::Error + 'static)) -> StorageError<NodeId> {
+    failing(subject, ErrorVerb::Read)
+}
+
+/// A Raft log stored in a redb database.
+///
+/// Cheap to clone — clones share one database handle. openraft asks for a
+/// separate reader via [`RaftLogStorage::get_log_reader`] and uses it from
+/// replication tasks concurrently with writes, which redb's MVCC handles
+/// directly, so the reader is just another clone rather than a second type.
+#[derive(Debug, Clone)]
+pub struct LogStore {
+    db: Arc<Database>,
+}
+
+impl LogStore {
+    /// Opens (or creates) the log at `path`.
+    pub fn open(path: impl AsRef<std::path::Path>) -> StorageResult<Self> {
+        let fail = writing(ErrorSubject::Store);
+        let db = Database::create(path).map_err(|source| fail(&source))?;
+        let store = Self { db: Arc::new(db) };
+        store.ensure_tables()?;
+        Ok(store)
+    }
+
+    /// Shares an already-open database.
+    pub fn from_database(db: Arc<Database>) -> StorageResult<Self> {
+        let store = Self { db };
+        store.ensure_tables()?;
+        Ok(store)
+    }
+
+    /// Creates both tables so later read transactions cannot fail on a missing
+    /// one — redb only creates a table when it is opened for writing.
+    ///
+    /// Synchronous, unlike the other writes: this runs once at startup, not on
+    /// the Raft path.
+    fn ensure_tables(&self) -> StorageResult<()> {
+        let fail = writing(ErrorSubject::Store);
+        let txn = self.db.begin_write().map_err(|source| fail(&source))?;
+        {
+            txn.open_table(LOG).map_err(|source| fail(&source))?;
+            txn.open_table(META).map_err(|source| fail(&source))?;
+        }
+        txn.commit().map_err(|source| fail(&source))?;
+        Ok(())
+    }
+
+    /// Runs `f` in a write transaction on the blocking pool, then commits.
+    ///
+    /// The commit is an fsync, and this is what keeps it off the async worker
+    /// running openraft's core loop. Everything `f` needs is moved in, so
+    /// nothing is borrowed across the await.
+    async fn write_txn<F>(&self, subject: ErrorSubject<NodeId>, f: F) -> StorageResult<()>
+    where
+        F: FnOnce(&WriteTransaction) -> StorageResult<()> + Send + 'static,
+    {
+        let db = Arc::clone(&self.db);
+        let joining = writing(subject.clone());
+
+        tokio::task::spawn_blocking(move || {
+            let fail = writing(subject);
+            let txn = db.begin_write().map_err(|source| fail(&source))?;
+            f(&txn)?;
+            txn.commit().map_err(|source| fail(&source))
+        })
+        .await
+        .map_err(|source| joining(&source))?
+    }
+
+    fn read_meta<T>(&self, key: &str, subject: ErrorSubject<NodeId>) -> StorageResult<Option<T>>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let fail = reading(subject);
+        let txn = self.db.begin_read().map_err(|source| fail(&source))?;
+        let table = txn.open_table(META).map_err(|source| fail(&source))?;
+        let Some(value) = table.get(key).map_err(|source| fail(&source))? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            postcard::from_bytes(value.value()).map_err(|source| fail(&source))?,
+        ))
+    }
+
+    async fn write_meta<T>(
+        &self,
+        key: &'static str,
+        value: &T,
+        subject: ErrorSubject<NodeId>,
+    ) -> StorageResult<()>
+    where
+        T: serde::Serialize,
+    {
+        let fail = writing(subject.clone());
+        let encoded = postcard::to_stdvec(value).map_err(|source| fail(&source))?;
+
+        self.write_txn(subject.clone(), move |txn| {
+            let fail = writing(subject);
+            let mut table = txn.open_table(META).map_err(|source| fail(&source))?;
+            table
+                .insert(key, encoded.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The id of the last entry still present, ignoring anything purged.
+    fn last_log_id(&self) -> StorageResult<Option<LogId<NodeId>>> {
+        let fail = reading(ErrorSubject::Logs);
+        let txn = self.db.begin_read().map_err(|source| fail(&source))?;
+        let table = txn.open_table(LOG).map_err(|source| fail(&source))?;
+        let Some((_, value)) = table.last().map_err(|source| fail(&source))? else {
+            return Ok(None);
+        };
+        let entry: Entry = postcard::from_bytes(value.value()).map_err(|source| fail(&source))?;
+        Ok(Some(entry.log_id))
+    }
+}
+
+impl RaftLogReader<TypeConfig> for LogStore {
+    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
+        &mut self,
+        range: RB,
+    ) -> StorageResult<Vec<Entry>> {
+        let fail = reading(ErrorSubject::Logs);
+        let txn = self.db.begin_read().map_err(|source| fail(&source))?;
+        let table = txn.open_table(LOG).map_err(|source| fail(&source))?;
+
+        table
+            .range(range)
+            .map_err(|source| fail(&source))?
+            .map(|row| {
+                let (_, value) = row.map_err(|source| fail(&source))?;
+                postcard::from_bytes(value.value()).map_err(|source| fail(&source))
+            })
+            .collect()
+    }
+}
+
+impl RaftLogStorage<TypeConfig> for LogStore {
+    type LogReader = Self;
+
+    async fn get_log_state(&mut self) -> StorageResult<LogState<TypeConfig>> {
+        let last_purged_log_id: Option<LogId<NodeId>> =
+            self.read_meta(LAST_PURGED, ErrorSubject::Logs)?.flatten();
+        // Per the trait: with no entries present, `last_log_id` is the purge
+        // watermark rather than `None`, or Raft would believe the log restarted
+        // from nothing after a full purge.
+        let last_log_id = self.last_log_id()?.or(last_purged_log_id);
+
+        Ok(LogState {
+            last_purged_log_id,
+            last_log_id,
+        })
+    }
+
+    async fn get_log_reader(&mut self) -> Self::LogReader {
+        self.clone()
+    }
+
+    async fn save_vote(&mut self, vote: &Vote<NodeId>) -> StorageResult<()> {
+        // Stored bare: a missing key in META already means "no vote saved", so
+        // wrapping it in an `Option` would only add a layer to peel back off.
+        self.write_meta(VOTE, vote, ErrorSubject::Vote).await
+    }
+
+    async fn read_vote(&mut self) -> StorageResult<Option<Vote<NodeId>>> {
+        self.read_meta(VOTE, ErrorSubject::Vote)
+    }
+
+    async fn save_committed(&mut self, committed: Option<LogId<NodeId>>) -> StorageResult<()> {
+        // Here the `Option` is the caller's own, so it is stored as given. The
+        // subject stays `Logs`: this is a pointer into the log, not a vote.
+        self.write_meta(COMMITTED, &committed, ErrorSubject::Logs)
+            .await
+    }
+
+    async fn read_committed(&mut self) -> StorageResult<Option<LogId<NodeId>>> {
+        Ok(self.read_meta(COMMITTED, ErrorSubject::Logs)?.flatten())
+    }
+
+    async fn append<I>(&mut self, entries: I, callback: LogFlushed<TypeConfig>) -> StorageResult<()>
+    where
+        I: IntoIterator<Item = Entry> + Send,
+        I::IntoIter: Send,
+    {
+        let fail = writing(ErrorSubject::Logs);
+        // Encoded up front so only the I/O crosses onto the blocking pool, and
+        // so a borrowed iterator does not have to outlive this call.
+        let encoded: Vec<(u64, Vec<u8>)> = entries
+            .into_iter()
+            .map(|entry| {
+                let bytes = postcard::to_stdvec(&entry).map_err(|source| fail(&source))?;
+                Ok((entry.log_id.index, bytes))
+            })
+            .collect::<StorageResult<_>>()?;
+
+        self.write_txn(ErrorSubject::Logs, move |txn| {
+            let fail = writing(ErrorSubject::Logs);
+            let mut table = txn.open_table(LOG).map_err(|source| fail(&source))?;
+            for (index, bytes) in encoded {
+                table
+                    .insert(index, bytes.as_slice())
+                    .map_err(|source| fail(&source))?;
+            }
+            Ok(())
+        })
+        .await?;
+
+        // Only now are the entries on disk, which is what the callback promises.
+        // Signalling before the commit would let Raft treat unflushed entries as
+        // durable and acknowledge a write it could still lose.
+        callback.log_io_completed(Ok(()));
+        Ok(())
+    }
+
+    async fn truncate(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
+        self.write_txn(ErrorSubject::Logs, move |txn| {
+            let fail = writing(ErrorSubject::Logs);
+            let mut table = txn.open_table(LOG).map_err(|source| fail(&source))?;
+            // Inclusive of `log_id`: the entry at that index is a conflicting one
+            // being replaced, not one being kept. Bounded to the affected range,
+            // because plain `retain` walks the whole table to delete a handful.
+            table
+                .retain_in(log_id.index.., |_, _| false)
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn purge(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
+        let fail = writing(ErrorSubject::Logs);
+        let watermark = postcard::to_stdvec(&Some(log_id)).map_err(|source| fail(&source))?;
+
+        // Entries and watermark in one transaction. Split across two commits, a
+        // crash in between would leave the entries gone but the watermark still
+        // behind them, and `get_log_state` would then advertise a range with a
+        // hole in it — the one thing the trait says must never happen. One
+        // commit is also one fsync rather than two, and purge runs after every
+        // snapshot.
+        self.write_txn(ErrorSubject::Logs, move |txn| {
+            let fail = writing(ErrorSubject::Logs);
+            let mut table = txn.open_table(LOG).map_err(|source| fail(&source))?;
+            table
+                .retain_in(..=log_id.index, |_, _| false)
+                .map_err(|source| fail(&source))?;
+
+            let mut meta = txn.open_table(META).map_err(|source| fail(&source))?;
+            meta.insert(LAST_PURGED, watermark.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
+        .await
+    }
+}

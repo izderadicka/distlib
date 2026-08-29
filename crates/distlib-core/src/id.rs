@@ -102,6 +102,100 @@ impl<'de> Deserialize<'de> for MemberId {
     }
 }
 
+/// Hex `Display`, `FromStr` and `from_bytes` for the 32-byte identifiers.
+///
+/// Defined before its uses because `macro_rules!` is textually scoped.
+macro_rules! hex_id {
+    ($ty:ty, $kind:literal) => {
+        impl $ty {
+            /// Wraps raw bytes without interpreting them.
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = CoreError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                blake3::Hash::from_hex(s)
+                    .map(|hash| Self(*hash.as_bytes()))
+                    .map_err(|_| CoreError::InvalidId {
+                        kind: $kind,
+                        value: s.to_owned(),
+                    })
+            }
+        }
+    };
+}
+
+/// A member id as plain bytes, before anyone has checked it is a real key.
+///
+/// Exists for framework boundaries that will not accept [`MemberId`]. openraft's
+/// `NodeId` is the first: it requires `Default`, which an ed25519 public key
+/// cannot sensibly have — `PublicKey` validates that its bytes decompress to a
+/// point on the curve, so there is no "default key" to return.
+///
+/// Deliberately *not* solved by giving `MemberId` a `Default`. A `MemberId` is
+/// somebody, and a type whose default value is a member is a hazard in a system
+/// where membership is the security boundary: `#[serde(default)]` on any config
+/// or wire struct would then silently produce a member instead of an error.
+/// openraft needs the bound only so its own storage conformance suite can build
+/// placeholder log ids, which is not a reason to weaken the domain vocabulary.
+///
+/// This is the workspace's one unvalidated representation, and
+/// [`MemberId::try_from`] is its single validation point — so bytes arriving
+/// from any framework or off any wire are checked in exactly one place.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct RawMemberId([u8; 32]);
+
+impl RawMemberId {
+    /// The raw bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<MemberId> for RawMemberId {
+    fn from(id: MemberId) -> Self {
+        Self(*id.as_bytes())
+    }
+}
+
+impl TryFrom<RawMemberId> for MemberId {
+    type Error = CoreError;
+
+    /// Checks the bytes really are an ed25519 public key.
+    ///
+    /// Fallible on purpose: this is the boundary where unvalidated bytes become
+    /// an identity, and roughly half of all 32-byte values do not decompress to
+    /// a point on the curve.
+    ///
+    /// The all-zeros [`Default`] is *not* one of them — it is a valid low-order
+    /// point and converts happily. That is harmless for a different reason: no
+    /// usable secret key exists for it, so it can never sign a membership event
+    /// and therefore can never propose its way into a log or be admitted by a
+    /// valid one. It only ever arises where openraft asks for a `Default`, which
+    /// is inside openraft's own test suite.
+    fn try_from(raw: RawMemberId) -> Result<Self, Self::Error> {
+        PublicKey::from_bytes(&raw.0)
+            .map(Self)
+            .map_err(|_| CoreError::InvalidId {
+                kind: "member id",
+                value: blake3::Hash::from_bytes(raw.0).to_hex().to_string(),
+            })
+    }
+}
+
 /// Identifies one group. Derived from the founding event in the membership log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -159,39 +253,9 @@ impl ItemId {
     }
 }
 
-/// Hex `Display`/`FromStr`/serde for the two 32-byte identifiers.
-macro_rules! hex_id {
-    ($ty:ty, $kind:literal) => {
-        impl $ty {
-            /// Wraps raw bytes without interpreting them.
-            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-                Self(bytes)
-            }
-        }
-
-        impl fmt::Display for $ty {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
-            }
-        }
-
-        impl FromStr for $ty {
-            type Err = CoreError;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                blake3::Hash::from_hex(s)
-                    .map(|hash| Self(*hash.as_bytes()))
-                    .map_err(|_| CoreError::InvalidId {
-                        kind: $kind,
-                        value: s.to_owned(),
-                    })
-            }
-        }
-    };
-}
-
 hex_id!(GroupId, "group id");
 hex_id!(ItemId, "item id");
+hex_id!(RawMemberId, "raw member id");
 
 /// Serde for `[u8; 32]` as a hex string, so ids stay readable in TOML and JSON.
 mod hex32 {

@@ -15,9 +15,16 @@ blake3 = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+openraft = { workspace = true }
+redb = { workspace = true }
+# spawn_blocking, so redb's fsync stays off the async workers.
+tokio = { workspace = true }
+# openraft's own error payload type, needed to build a StorageIOError.
+anyerror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

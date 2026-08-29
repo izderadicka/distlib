@@ -12,5 +12,5 @@ pub mod paths;
 
 pub use config::{Config, NetConfig, RelayMode};
 pub use error::CoreError;
-pub use id::{GroupId, ItemId, MemberId};
+pub use id::{GroupId, ItemId, MemberId, RawMemberId};
 pub use paths::DataDir;
