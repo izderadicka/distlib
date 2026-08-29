@@ -102,6 +102,39 @@ impl<'de> Deserialize<'de> for MemberId {
     }
 }
 
+/// Hex `Display`, `FromStr` and `from_bytes` for the 32-byte identifiers.
+///
+/// Defined before its uses because `macro_rules!` is textually scoped.
+macro_rules! hex_id {
+    ($ty:ty, $kind:literal) => {
+        impl $ty {
+            /// Wraps raw bytes without interpreting them.
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = CoreError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                blake3::Hash::from_hex(s)
+                    .map(|hash| Self(*hash.as_bytes()))
+                    .map_err(|_| CoreError::InvalidId {
+                        kind: $kind,
+                        value: s.to_owned(),
+                    })
+            }
+        }
+    };
+}
+
 /// A member id as plain bytes, before anyone has checked it is a real key.
 ///
 /// Exists for framework boundaries that will not accept [`MemberId`]. openraft's
@@ -126,11 +159,6 @@ impl<'de> Deserialize<'de> for MemberId {
 pub struct RawMemberId([u8; 32]);
 
 impl RawMemberId {
-    /// Wraps raw bytes without interpreting them.
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
     /// The raw bytes.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -149,8 +177,15 @@ impl TryFrom<RawMemberId> for MemberId {
     /// Checks the bytes really are an ed25519 public key.
     ///
     /// Fallible on purpose: this is the boundary where unvalidated bytes become
-    /// an identity, and the default all-zeros sentinel must not quietly pass for
-    /// somebody.
+    /// an identity, and roughly half of all 32-byte values do not decompress to
+    /// a point on the curve.
+    ///
+    /// The all-zeros [`Default`] is *not* one of them — it is a valid low-order
+    /// point and converts happily. That is harmless for a different reason: no
+    /// usable secret key exists for it, so it can never sign a membership event
+    /// and therefore can never propose its way into a log or be admitted by a
+    /// valid one. It only ever arises where openraft asks for a `Default`, which
+    /// is inside openraft's own test suite.
     fn try_from(raw: RawMemberId) -> Result<Self, Self::Error> {
         PublicKey::from_bytes(&raw.0)
             .map(Self)
@@ -158,14 +193,6 @@ impl TryFrom<RawMemberId> for MemberId {
                 kind: "member id",
                 value: blake3::Hash::from_bytes(raw.0).to_hex().to_string(),
             })
-    }
-}
-
-impl fmt::Display for RawMemberId {
-    /// Hex, matching how a valid [`MemberId`] renders — so a log line reads the
-    /// same whether or not the bytes turned out to be a key.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
     }
 }
 
@@ -226,39 +253,9 @@ impl ItemId {
     }
 }
 
-/// Hex `Display`/`FromStr`/serde for the two 32-byte identifiers.
-macro_rules! hex_id {
-    ($ty:ty, $kind:literal) => {
-        impl $ty {
-            /// Wraps raw bytes without interpreting them.
-            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-                Self(bytes)
-            }
-        }
-
-        impl fmt::Display for $ty {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", blake3::Hash::from_bytes(self.0).to_hex())
-            }
-        }
-
-        impl FromStr for $ty {
-            type Err = CoreError;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                blake3::Hash::from_hex(s)
-                    .map(|hash| Self(*hash.as_bytes()))
-                    .map_err(|_| CoreError::InvalidId {
-                        kind: $kind,
-                        value: s.to_owned(),
-                    })
-            }
-        }
-    };
-}
-
 hex_id!(GroupId, "group id");
 hex_id!(ItemId, "item id");
+hex_id!(RawMemberId, "raw member id");
 
 /// Serde for `[u8; 32]` as a hex string, so ids stay readable in TOML and JSON.
 mod hex32 {

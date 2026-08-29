@@ -123,3 +123,52 @@ fn member_id_is_the_endpoint_id() {
 
     assert_eq!(member.endpoint_id(), secret.public());
 }
+
+// --- RawMemberId ------------------------------------------------------------
+
+#[test]
+fn a_raw_member_id_round_trips_through_a_real_member() {
+    let member = MemberId::from(iroh::SecretKey::generate().public());
+
+    let raw = distlib_core::RawMemberId::from(member);
+
+    assert_eq!(MemberId::try_from(raw).unwrap(), member);
+    assert_eq!(raw.to_string(), member.to_string(), "both render as hex");
+}
+
+#[test]
+fn the_default_raw_member_id_is_all_zeros_and_unusable_as_an_identity() {
+    // Worth pinning precisely, because the obvious assumption is wrong: the
+    // all-zeros value IS a valid curve point and converts to a MemberId
+    // without complaint. What makes it harmless is that it is a low-order
+    // point with no usable secret key, so nothing can ever sign as it — and
+    // every membership event is admitted only against its proposer\'s
+    // signature. The sentinel therefore cannot propose its way into a log.
+    let sentinel = distlib_core::RawMemberId::default();
+
+    assert_eq!(sentinel.as_bytes(), &[0u8; 32]);
+    assert!(MemberId::try_from(sentinel).is_ok());
+}
+
+#[test]
+fn a_raw_member_id_survives_a_string_round_trip() {
+    let raw = distlib_core::RawMemberId::from_bytes([9; 32]);
+
+    assert_eq!(
+        distlib_core::RawMemberId::from_str(&raw.to_string()).unwrap(),
+        raw
+    );
+}
+
+#[test]
+fn raw_bytes_that_are_not_a_key_are_refused() {
+    // Unvalidated in, validated out — arbitrary bytes are a legal RawMemberId
+    // and an illegal MemberId, which is the point of having both. Around half
+    // of all 32-byte values fail to decompress to a curve point; this is one.
+    let raw = distlib_core::RawMemberId::from_bytes([2; 32]);
+
+    assert!(
+        MemberId::try_from(raw).is_err(),
+        "conversion has to actually validate, not just reinterpret bytes"
+    );
+}

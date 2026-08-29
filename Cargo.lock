@@ -991,6 +991,7 @@ dependencies = [
 name = "distlib-consensus"
 version = "0.1.0"
 dependencies = [
+ "anyerror",
  "blake3",
  "distlib-core",
  "iroh",
@@ -1002,7 +1003,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
