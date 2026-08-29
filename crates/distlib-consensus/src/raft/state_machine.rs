@@ -67,13 +67,27 @@ struct StoredSnapshot {
     data: Vec<u8>,
 }
 
+/// Everything a state machine handle shares with its clones.
+///
+/// openraft clones the store freely, so one `Arc` around the lot means a clone
+/// is a single refcount bump and adding shared state later does not add another
+/// pointer to keep in step.
+#[derive(Debug)]
+struct Inner {
+    /// Nested rather than flattened, because the database outlives this store:
+    /// it is handed in already shared with [`crate::LogStore`], and cloned out
+    /// again for each [`SnapshotBuilder`]. The other two fields belong to the
+    /// state machine alone.
+    db: Arc<Database>,
+    applied: Mutex<Applied>,
+    /// Distinguishes snapshots built at the same log id.
+    snapshot_seq: AtomicU64,
+}
+
 /// The membership state machine, persisted in redb.
 #[derive(Debug, Clone)]
 pub struct StateMachineStore {
-    db: Arc<Database>,
-    applied: Arc<Mutex<Applied>>,
-    /// Distinguishes snapshots built at the same log id.
-    snapshot_seq: Arc<AtomicU64>,
+    inner: Arc<Inner>,
 }
 
 impl StateMachineStore {
@@ -86,12 +100,14 @@ impl StateMachineStore {
         })?;
 
         let store = Self {
-            db,
-            applied: Arc::new(Mutex::new(Applied::default())),
-            snapshot_seq: Arc::new(AtomicU64::new(0)),
+            inner: Arc::new(Inner {
+                db,
+                applied: Mutex::new(Applied::default()),
+                snapshot_seq: AtomicU64::new(0),
+            }),
         };
         if let Some(applied) =
-            read_key::<Applied>(&store.db, SM, APPLIED, ErrorSubject::StateMachine)?
+            read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
             *store.lock() = applied;
         }
@@ -107,7 +123,7 @@ impl StateMachineStore {
 
     /// The snapshot currently stored, if any.
     fn stored_snapshot(&self) -> StorageResult<Option<StoredSnapshot>> {
-        read_key(&self.db, SM, SNAPSHOT, ErrorSubject::Snapshot(None))
+        read_key(&self.inner.db, SM, SNAPSHOT, ErrorSubject::Snapshot(None))
     }
 
     /// The membership derived from everything applied so far.
@@ -125,7 +141,10 @@ impl StateMachineStore {
     /// elsewhere, and refusing to serve the state afterwards would turn that
     /// into a second failure.
     fn lock(&self) -> std::sync::MutexGuard<'_, Applied> {
-        self.applied.lock().unwrap_or_else(PoisonError::into_inner)
+        self.inner
+            .applied
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -190,7 +209,14 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
-        write_key(&self.db, SM, APPLIED, encoded, ErrorSubject::StateMachine).await?;
+        write_key(
+            &self.inner.db,
+            SM,
+            APPLIED,
+            encoded,
+            ErrorSubject::StateMachine,
+        )
+        .await?;
         Ok(responses)
     }
 
@@ -198,9 +224,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // A copy taken now, so later applies cannot change what this builder
         // produces — which is what the trait asks for.
         SnapshotBuilder {
-            db: Arc::clone(&self.db),
+            db: Arc::clone(&self.inner.db),
             applied: self.lock().clone(),
-            seq: self.snapshot_seq.fetch_add(1, Ordering::Relaxed),
+            seq: self.inner.snapshot_seq.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -235,7 +261,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // that value, and storing them twice from one source keeps the two keys
         // literally identical.
         let insert_subject = subject.clone();
-        write_txn(&self.db, subject, move |txn| {
+        write_txn(&self.inner.db, subject, move |txn| {
             let fail = writing(insert_subject);
             let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
             table
