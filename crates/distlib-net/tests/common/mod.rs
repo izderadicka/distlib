@@ -45,12 +45,17 @@ impl Member {
 /// socket addresses it is bound to.
 pub async fn direct_endpoint(member: &Member, allowlist: Allowlist) -> Endpoint {
     let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
-    configure(builder, member.secret.clone(), allowlist)
-        .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .expect("loopback is a valid bind address")
-        .bind()
-        .await
-        .expect("endpoint failed to bind")
+    configure(
+        builder,
+        member.secret.clone(),
+        allowlist,
+        distlib_net::alpn::registered(),
+    )
+    .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    .expect("loopback is a valid bind address")
+    .bind()
+    .await
+    .expect("endpoint failed to bind")
 }
 
 /// An endpoint that can *only* use the given relay: `clear_ip_transports`
@@ -64,10 +69,15 @@ pub async fn relay_endpoint(member: &Member, allowlist: Allowlist, relays: Relay
         .relay_mode(relays)
         .clear_ip_transports()
         .ca_tls_config(CaTlsConfig::insecure_skip_verify());
-    configure(builder, member.secret.clone(), allowlist)
-        .bind()
-        .await
-        .expect("endpoint failed to bind")
+    configure(
+        builder,
+        member.secret.clone(),
+        allowlist,
+        distlib_net::alpn::registered(),
+    )
+    .bind()
+    .await
+    .expect("endpoint failed to bind")
 }
 
 /// The address of an endpoint reachable only over IP.

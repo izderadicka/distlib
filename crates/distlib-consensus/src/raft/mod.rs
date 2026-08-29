@@ -4,9 +4,11 @@
 
 pub(crate) mod db;
 pub mod log_store;
+pub mod network;
 pub mod state_machine;
 pub mod types;
 
 pub use log_store::LogStore;
+pub use network::{RaftClient, RaftNetworkFactoryImpl, RaftProtocol};
 pub use state_machine::StateMachineStore;
 pub use types::{NodeAddr, TypeConfig};

@@ -34,25 +34,37 @@ pub async fn build_endpoint(
         }
     };
 
-    Ok(configure(builder, secret_key, allowlist)
-        .bind_addr(config.bind_addr_v4)
-        .map_err(|source| NetError::InvalidRelayUrl {
-            url: source.to_string(),
-        })?
-        .bind()
-        .await?)
+    Ok(
+        configure(builder, secret_key, allowlist, alpn::registered())
+            .bind_addr(config.bind_addr_v4)
+            .map_err(|source| NetError::InvalidRelayUrl {
+                url: source.to_string(),
+            })?
+            .bind()
+            .await?,
+    )
 }
 
 /// Applies the settings every distlib endpoint shares, whatever its relay mode.
 ///
 /// Kept separate so tests can build endpoints with their own transport and
-/// relay setup while still getting the same ALPNs and — importantly — the same
-/// membership enforcement as production. A test that bypassed the hooks would
-/// be testing a configuration nothing ships.
-pub fn configure(builder: Builder, secret_key: SecretKey, allowlist: Allowlist) -> Builder {
+/// relay setup while still getting — importantly — the same membership
+/// enforcement as production. A test that bypassed the hooks would be testing a
+/// configuration nothing ships.
+///
+/// `alpns` is a parameter rather than always [`alpn::registered`] because the
+/// endpoint must advertise exactly what its router serves, and that depends on
+/// the caller: a node running consensus serves [`alpn::RAFT`] too, which
+/// `distlib-net` cannot handle itself.
+pub fn configure(
+    builder: Builder,
+    secret_key: SecretKey,
+    allowlist: Allowlist,
+    alpns: Vec<Vec<u8>>,
+) -> Builder {
     builder
         .secret_key(secret_key)
-        .alpns(alpn::registered())
+        .alpns(alpns)
         .hooks(AllowlistHooks::new(allowlist))
 }
 

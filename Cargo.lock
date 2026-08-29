@@ -994,6 +994,7 @@ dependencies = [
  "anyerror",
  "blake3",
  "distlib-core",
+ "distlib-net",
  "iroh",
  "openraft",
  "postcard",
