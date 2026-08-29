@@ -117,19 +117,14 @@ impl ProtocolHandler for RaftProtocol {
                 Err(_) => return Ok(()),
             };
 
-            let encoded = recv
-                .read_to_end(MAX_RPC_BYTES)
-                .await
-                .map_err(AcceptError::from_err)?;
-            let request: Request = postcard::from_bytes(&encoded).map_err(AcceptError::from_err)?;
+            let encoded = recv.read_to_end(MAX_RPC_BYTES).await.accepting()?;
+            let request: Request = postcard::from_bytes(&encoded).accepting()?;
 
             let response = self.answer(request).await;
-            let encoded = postcard::to_stdvec(&response).map_err(AcceptError::from_err)?;
+            let encoded = postcard::to_stdvec(&response).accepting()?;
 
-            send.write_all(&encoded)
-                .await
-                .map_err(AcceptError::from_err)?;
-            send.finish().map_err(AcceptError::from_err)?;
+            send.write_all(&encoded).await.accepting()?;
+            send.finish().accepting()?;
         }
     }
 }
@@ -165,6 +160,44 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
     }
 }
 
+/// Labels a failure as the kind of RPC failure it is.
+///
+/// A `From` impl would be the idiomatic way to get bare `?` here, but the
+/// orphan rule forbids it: `RPCError` is openraft's and the I/O errors are
+/// quinn's, so neither is ours to implement across. This is the `.context()`
+/// shape instead — and it keeps the choice visible at each call site, which
+/// matters because the two are not interchangeable: openraft backs off before
+/// retrying an unreachable peer and retries a network failure immediately.
+trait FailedRpc<T> {
+    /// The peer could not be dialled at all.
+    fn unreachable<E: std::error::Error>(self) -> Result<T, RPCError<NodeId, NodeAddr, E>>;
+
+    /// The exchange failed once there was a connection.
+    fn network<E: std::error::Error>(self) -> Result<T, RPCError<NodeId, NodeAddr, E>>;
+
+    /// A failure while serving a request, for the accept side.
+    fn accepting(self) -> Result<T, AcceptError>;
+}
+
+impl<T, F> FailedRpc<T> for Result<T, F>
+where
+    // `Send + Sync` is `AcceptError::from_err`'s requirement, not ours; every
+    // error this file handles — quinn's, postcard's, io — satisfies it.
+    F: std::error::Error + Send + Sync + 'static,
+{
+    fn unreachable<E: std::error::Error>(self) -> Result<T, RPCError<NodeId, NodeAddr, E>> {
+        self.map_err(|error| RPCError::Unreachable(Unreachable::new(&error)))
+    }
+
+    fn network<E: std::error::Error>(self) -> Result<T, RPCError<NodeId, NodeAddr, E>> {
+        self.map_err(|error| RPCError::Network(NetworkError::new(&error)))
+    }
+
+    fn accepting(self) -> Result<T, AcceptError> {
+        self.map_err(AcceptError::from_err)
+    }
+}
+
 /// Sends Raft RPCs to one peer.
 #[derive(Debug, Clone)]
 pub struct RaftClient {
@@ -183,19 +216,21 @@ impl RaftClient {
     fn endpoint_addr<E: std::error::Error>(
         &self,
     ) -> Result<EndpointAddr, RPCError<NodeId, NodeAddr, E>> {
-        let member = MemberId::try_from(self.target)
-            .map_err(|error| RPCError::Unreachable(Unreachable::new(&error)))?;
+        let member = MemberId::try_from(self.target).unreachable()?;
         let mut addr = EndpointAddr::new(member.endpoint_id());
 
         for socket in &self.addr.direct {
             addr = addr.with_ip_addr(*socket);
         }
         if let Some(url) = &self.addr.relay {
-            let relay: RelayUrl = url.parse().map_err(|_| {
-                RPCError::Unreachable(Unreachable::new(&std::io::Error::other(format!(
-                    "member {member} lists an unparseable relay url: {url}"
-                ))))
-            })?;
+            let relay: RelayUrl = url
+                .parse()
+                .map_err(|_| {
+                    std::io::Error::other(format!(
+                        "member {member} lists an unparseable relay url: {url}"
+                    ))
+                })
+                .unreachable()?;
             addr = addr.with_relay_url(relay);
         }
         Ok(addr)
@@ -223,27 +258,17 @@ impl RaftClient {
         &self,
         request: Request,
     ) -> Result<Response, RPCError<NodeId, NodeAddr, E>> {
-        let encoded = postcard::to_stdvec(&request)
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+        let encoded = postcard::to_stdvec(&request).network()?;
 
         let connection = self.connection().await?;
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+        let (mut send, mut recv) = connection.open_bi().await.network()?;
 
-        send.write_all(&encoded)
-            .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
-        send.finish()
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+        send.write_all(&encoded).await.network()?;
+        send.finish().network()?;
 
-        let encoded = recv
-            .read_to_end(MAX_RPC_BYTES)
-            .await
-            .map_err(|error| RPCError::Network(NetworkError::new(&error)))?;
+        let encoded = recv.read_to_end(MAX_RPC_BYTES).await.network()?;
 
-        postcard::from_bytes(&encoded).map_err(|error| RPCError::Network(NetworkError::new(&error)))
+        postcard::from_bytes(&encoded).network()
     }
 
     /// The cached connection, dialling if there is not one.
@@ -263,7 +288,7 @@ impl RaftClient {
             // Unreachable rather than Network: openraft backs off before
             // retrying an unreachable peer, which is the right response to a
             // member who is simply offline, and members here are often offline.
-            .map_err(|error| RPCError::Unreachable(Unreachable::new(&error)))?;
+            .unreachable()?;
 
         *cached = Some(connection.clone());
         Ok(connection)
