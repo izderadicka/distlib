@@ -34,6 +34,7 @@ use openraft::{
     },
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::raft::types::{NodeAddr, TypeConfig};
@@ -177,11 +178,17 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
 /// when converting to the wider type openraft's traits return. Naming the two
 /// things the transport can actually do removes the impossible case rather than
 /// requiring a branch that argues it away.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum TransportError {
     /// The peer could not be dialled. openraft backs off before retrying these.
+    ///
+    /// Transparent because openraft's own error already says what happened; the
+    /// variant exists to carry the retry policy, not a second message.
+    #[error(transparent)]
     Unreachable(Unreachable),
+
     /// The exchange failed once a connection existed. openraft retries at once.
+    #[error(transparent)]
     Network(NetworkError),
 }
 
@@ -350,4 +357,18 @@ fn mismatched(target: NodeId, response: &Response) -> TransportError {
     TransportError::network(&std::io::Error::other(format!(
         "member {target} answered a different request than it was asked: {response:?}"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TransportError;
+
+    /// The reason this type uses `thiserror` rather than a bare `derive(Debug)`:
+    /// without it there is no `Display` and no source chain, so nothing that
+    /// logs or wraps a transport failure can say what went wrong.
+    #[test]
+    fn a_transport_failure_is_a_real_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<TransportError>();
+    }
 }
