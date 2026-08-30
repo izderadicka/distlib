@@ -220,9 +220,20 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             // Returning an error here instead would be a fatal
                             // storage failure on *every* node at once: one
                             // malformed proposal would take down the group.
-                            // Proposals are validated before they are submitted;
-                            // this is the backstop for one that should not have
-                            // got through.
+                            //
+                            // Nothing validates before submitting, and that is
+                            // deliberate. The commonest rejection is a race —
+                            // two members expelling the same peer, one arriving
+                            // second — which no pre-check can catch, since it
+                            // was valid when checked. The proposer learns the
+                            // verdict from the write's response instead.
+                            //
+                            // The refused entry stays in the log until
+                            // compaction, which is worth having: it records who
+                            // proposed what and when the group disagreed with
+                            // them. Logged at `error` for the same reason —
+                            // one is routine, a stream of them means something
+                            // is wrong.
                             tracing::error!(
                                 %error,
                                 log_id = %entry.log_id,
