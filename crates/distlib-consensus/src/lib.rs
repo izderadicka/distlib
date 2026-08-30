@@ -12,12 +12,14 @@
 
 pub mod error;
 pub mod event;
+pub mod node;
 pub mod raft;
 pub mod signed;
 pub mod state;
 
 pub use error::{ConsensusError, Result};
 pub use event::{MemberRecord, MembershipEvent, Timestamp};
+pub use node::MembershipNode;
 pub use raft::{
     LogStore, NodeAddr, RaftClient, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
     TypeConfig,

@@ -29,6 +29,7 @@ use openraft::{
 };
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::{
     raft::{
@@ -82,6 +83,14 @@ struct Inner {
     applied: Mutex<Applied>,
     /// Distinguishes snapshots built at the same log id.
     snapshot_seq: AtomicU64,
+    /// Announces the membership after every change.
+    ///
+    /// The point of the crate: a committed event has to reach the connection
+    /// allowlist, and a watch channel is how that happens without the state
+    /// machine knowing anything about the network. Kept here rather than
+    /// published by the caller, so nothing can apply an entry and forget to say
+    /// so.
+    membership: watch::Sender<MembershipState>,
 }
 
 /// The membership state machine, persisted in redb.
@@ -104,11 +113,13 @@ impl StateMachineStore {
                 db,
                 applied: Mutex::new(Applied::default()),
                 snapshot_seq: AtomicU64::new(0),
+                membership: watch::channel(MembershipState::new()).0,
             }),
         };
         if let Some(applied) =
             read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
+            store.inner.membership.send_replace(applied.state.clone());
             *store.lock() = applied;
         }
         Ok(store)
@@ -132,6 +143,26 @@ impl StateMachineStore {
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
         self.lock().state.clone()
+    }
+
+    /// Watches the membership, for whoever has to react to it changing.
+    ///
+    /// Each subscriber gets its own cursor, so a caller cannot miss a change by
+    /// sharing a receiver with somebody else.
+    pub fn subscribe(&self) -> watch::Receiver<MembershipState> {
+        self.inner.membership.subscribe()
+    }
+
+    /// Publishes the membership if applying changed it.
+    ///
+    /// Compared rather than sent unconditionally, because most entries do not
+    /// touch the membership — a `Blank` from a new leader, or Raft's own voter
+    /// configuration — and a spurious notification would make every observer
+    /// re-derive an allowlist that has not moved.
+    fn announce(&self, state: &MembershipState) {
+        if *self.inner.membership.borrow() != *state {
+            self.inner.membership.send_replace(state.clone());
+        }
     }
 
     /// A poison-tolerant lock.
@@ -167,7 +198,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is ever held across an await.
-        let encoded = {
+        let (encoded, derived) = {
             let mut applied = self.lock();
             for entry in entries {
                 applied.last_applied = Some(entry.log_id);
@@ -206,7 +237,8 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 }
                 responses.push(());
             }
-            encode(&*applied, ErrorSubject::StateMachine)?
+            let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
+            (encoded, applied.state.clone())
         };
 
         write_key(
@@ -217,6 +249,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             ErrorSubject::StateMachine,
         )
         .await?;
+
+        // After the commit: an observer told about a membership the node could
+        // still lose to a crash would be enforcing one that never happened.
+        self.announce(&derived);
         Ok(responses)
     }
 
