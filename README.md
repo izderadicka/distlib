@@ -57,17 +57,41 @@ data dir   /tmp/a
 The key is written to `<data-dir>/keys/node.key` with mode `0600`, and a node that
 finds it readable by anyone else refuses to start.
 
-**2. Agree on the founding core group.** This is the one thing that cannot come from
-the log, because it is what makes reading the log possible — founders have to reach
-each other to replicate the first entry, and they will not connect to anyone they have
-not been told about. So it is stated once, identically, in *both* configs:
+**2. Pin a port**, in each `<data-dir>/config.toml`. Founding writes each node's
+address into the log, and an OS-chosen port is a different port after the next restart:
 
 ```toml
-# /tmp/a/config.toml — and the same [consensus] block in /tmp/b/config.toml
 [net]
 bind_addr_v4 = "127.0.0.1:11204"   # 11205 for B
 relay_mode   = "disabled"          # loopback needs no relay
+```
 
+**3. Ask each node who it is.** Founding needs every founder's id and address, and
+there is no group yet to ask — so this exchange happens out of band, once:
+
+```sh
+distlib --data-dir /tmp/b whoami
+```
+
+```
+identity   d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84
+data dir   /tmp/b
+
+Send this to whoever is founding the group, for their [consensus] core:
+
+  { member = "d7e1c2bc…", name = "", addrs = ["127.0.0.1:11205"] }
+```
+
+`whoami` creates the identity if there is not one yet, so it is all a founder's friends
+need to run. It prints the member id, never the secret key.
+
+**4. Agree on the founding core group.** This is the one thing that cannot come from
+the log, because it is what makes reading the log possible — founders have to reach
+each other to replicate the first entry, and they will not connect to anyone they have
+not been told about. Whoever is founding collects the lines, adds names, and sends the
+finished block back, so it is identical in *every* founder's config:
+
+```toml
 [consensus]
 core = [
   { member = "<A's id>", name = "alice", addrs = ["127.0.0.1:11204"] },
@@ -75,12 +99,12 @@ core = [
 ]
 ```
 
-Pin a port on every core node. Founding writes each node's address into the log, and
-an OS-chosen port is a different port after the next restart. Across the internet
-rather than loopback, leave `relay_mode = "default"` and drop `addrs`: the relays
-handle discovery and hole-punching, and the member id is enough.
+That scales to however many of you there are: three friends who all want a say run
+`whoami`, one of them assembles the list, and all three configs end up the same. Across
+the internet rather than loopback, leave `relay_mode = "default"` and drop `addrs` — the
+relays handle discovery and hole-punching, and the member id is enough.
 
-**3. Start B**, which has nothing to do but wait:
+**5. Start B**, which has nothing to do but wait:
 
 ```sh
 distlib --data-dir /tmp/b run
@@ -92,7 +116,7 @@ INFO listening addr=127.0.0.1:11205
 WARN this node is in no group; found one with `distlib run --found-group`, or wait for a founder to admit it
 ```
 
-**4. Found the group from A**, in another terminal:
+**6. Found the group from A**, in another terminal:
 
 ```sh
 distlib --data-dir /tmp/a run --found-group
@@ -110,7 +134,7 @@ at that level.
 
 Run `--found-group` on exactly one founder, once. The others just `run`.
 
-**5. Look at the group.** Stop a node and ask it who it thinks is in the group:
+**7. Look at the group.** Stop a node and ask it who it thinks is in the group:
 
 ```sh
 distlib --data-dir /tmp/b members
@@ -172,6 +196,7 @@ them hold for every protocol added later.
 | Command | What it does |
 |---|---|
 | `distlib init [--force]` | Create the data directory, generate the identity, write a starter config. `--force` replaces an existing identity — which is how a node leaves its group. |
+| `distlib whoami` | Print this node's id as a line for a founder's `[consensus] core`. Creates the identity if there is not one. |
 | `distlib run` | Run the node until `Ctrl-C`. |
 | `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
 | `distlib members` | List the group as this node's log has it. Needs the node stopped. |

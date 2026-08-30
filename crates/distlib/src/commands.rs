@@ -11,7 +11,7 @@ use distlib_core::{
     identity::{create_secret_key, load_or_create_secret_key, member_id},
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
-use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, Watcher as _};
+use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 
 /// How long `status --online` waits to reach a relay before giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -135,6 +135,93 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     relay_task.abort();
     memberships.abort();
     node.shutdown().await;
+    Ok(())
+}
+
+/// `distlib whoami`
+///
+/// What a founder needs from everyone else before they can found the group.
+/// Founding writes each member's id and address into the log, and the log is
+/// what the group is — so those have to be collected out of band, once, before
+/// there is any group to ask.
+pub async fn whoami(paths: &Paths) -> Result<()> {
+    let config = load_config(&paths.config_file)?;
+    let secret = load_or_create_secret_key(&paths.secret_key_file())?;
+    let me = member_id(&secret);
+
+    println!("identity   {me}");
+    println!("data dir   {}", paths.data_dir.root().display());
+
+    // Only ever this node's own entry, so the name is left for whoever pastes
+    // it: they are the one who has to recognise it in `distlib members`.
+    let mut entry = CoreMember {
+        member: me,
+        name: String::new(),
+        addrs: Vec::new(),
+        relay: None,
+    };
+
+    let pinned = config.net.bind_addr_v4.port() != 0;
+    // Deliberately no address rather than a wrong one. An OS-chosen port is a
+    // different port next time, and the whole point of this line is that the
+    // founder pastes it once and it keeps working.
+    let mut note = if pinned {
+        Vec::new()
+    } else {
+        vec![
+            "No address shown: bind_addr_v4 has no fixed port, so any address here".to_owned(),
+            "would be wrong after the next restart. Pin a port in config.toml and run".to_owned(),
+            "this again — a founder needs one on a LAN, or with relay_mode = \"disabled\"."
+                .to_owned(),
+        ]
+    };
+
+    if pinned {
+        match build_endpoint(
+            secret,
+            &config.net,
+            AllowlistHooks::new(allowlist(me, []).1),
+            distlib_net::alpn::registered(),
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                let addr = local_addr(&endpoint);
+                entry.addrs = addr.direct.into_iter().collect();
+                entry.relay = addr.relay;
+                endpoint.close().await;
+            }
+            Err(error) => {
+                tracing::debug!(?error, "could not bind to discover addresses");
+                note = vec![
+                    format!(
+                        "No address shown: {} is already bound, most likely by this",
+                        config.net.bind_addr_v4
+                    ),
+                    "node already running. Stop it and run this again.".to_owned(),
+                ];
+            }
+        }
+    }
+
+    println!();
+    println!("Send this to whoever is founding the group, for their [consensus] core:");
+    println!();
+    println!("  {}", entry.to_toml_inline());
+    println!();
+    println!("They set `name` to whatever they want you called. Every founder needs the same");
+    println!("`core` list, so they send the finished block back to all of you.");
+    if entry.addrs.len() > 1 {
+        println!();
+        println!("Several addresses are listed because this machine has several interfaces.");
+        println!("Keep the one your friends can actually reach and delete the rest.");
+    }
+    if !note.is_empty() {
+        println!();
+        for line in note {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -365,6 +452,16 @@ fn founders(
 }
 
 /// This node's own dialable address.
+///
+/// From `addr()` rather than `bound_sockets()`, which is the difference between
+/// an address a peer can use and one it cannot: a node bound to `0.0.0.0:11204`
+/// reports exactly that as its bound socket, and no peer can dial a wildcard.
+/// `addr()` resolves it to the machine's actual interface addresses, and does so
+/// immediately — there is nothing to wait for.
+///
+/// The relay comes from `home_relay_status` instead, because `addr()` carries a
+/// relay only once one has been established, which takes a moment and never
+/// happens with `relay_mode = "disabled"`.
 fn local_addr(endpoint: &Endpoint) -> NodeAddr {
     NodeAddr {
         relay: endpoint
@@ -372,7 +469,15 @@ fn local_addr(endpoint: &Endpoint) -> NodeAddr {
             .get()
             .first()
             .map(|relay| relay.url().to_string()),
-        direct: endpoint.bound_sockets().into_iter().collect(),
+        direct: endpoint
+            .addr()
+            .addrs
+            .into_iter()
+            .filter_map(|addr| match addr {
+                TransportAddr::Ip(socket) => Some(socket),
+                _ => None,
+            })
+            .collect(),
     }
 }
 
@@ -525,6 +630,37 @@ mod tests {
                 .collect(),
             relay: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_founder_never_records_a_wildcard_address() {
+        // Every other founder dials what founding writes into the log, and
+        // nobody can dial 0.0.0.0. A node bound to a wildcard reports exactly
+        // that as its bound socket, so the address has to be resolved to the
+        // machine's real interfaces before it goes in.
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(
+                "0.0.0.0:0"
+                    .parse::<SocketAddr>()
+                    .expect("a literal address"),
+            )
+            .expect("a bindable address")
+            .bind()
+            .await
+            .expect("binding a wildcard address");
+
+        let recorded = local_addr(&endpoint);
+
+        assert!(
+            recorded
+                .direct
+                .iter()
+                .all(|addr| !addr.ip().is_unspecified()),
+            "a wildcard is not dialable; got {:?}",
+            recorded.direct
+        );
+        endpoint.close().await;
     }
 
     #[test]

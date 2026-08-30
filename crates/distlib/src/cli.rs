@@ -66,6 +66,13 @@ pub enum Command {
         found_group: bool,
     },
 
+    /// Print this node's identity as a line for a founder's `[consensus] core`.
+    ///
+    /// Creates the identity if there is not one. Run this on every founder but
+    /// the one doing the founding, and send them the output — they cannot found
+    /// a group without knowing who is in it.
+    Whoami,
+
     /// List the members of this node's group.
     ///
     /// Reads the local database, so it needs the node stopped: a running node

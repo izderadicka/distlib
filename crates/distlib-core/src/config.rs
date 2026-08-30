@@ -29,8 +29,6 @@ const ENV_PREFIX: &str = "DISTLIB_";
 const ENV_NESTED_SEPARATOR: &str = "__";
 /// The one key resolved before configuration is read, and so forbidden in it.
 const DATA_DIR_KEY: &str = "data_dir";
-/// The phase 0 allowlist, replaced by `[consensus] core`.
-const ALLOWLIST_KEY: &str = "net.allowlist";
 
 /// The whole configuration of a node.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -149,19 +147,6 @@ impl Config {
             });
         }
 
-        // `net.allowlist` was phase 0's membership. `deny_unknown_fields`
-        // already refuses it, but with a figment error that names the field and
-        // not the thing that replaced it — and every config file written before
-        // this release has one.
-        if Figment::from(Toml::file(config_file))
-            .find_value(ALLOWLIST_KEY)
-            .is_ok()
-        {
-            return Err(CoreError::AllowlistInConfig {
-                path: config_file.to_path_buf(),
-            });
-        }
-
         Ok(Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file(config_file))
             .merge(Self::env())
@@ -219,6 +204,9 @@ impl Config {
              # the log itself; this is the one thing that cannot, because reaching\n\
              # the log means connecting to these nodes first.\n\
              #\n\
+             # Run `distlib whoami` on each founder; it prints the line to put\n\
+             # here. Every founder needs the same list.\n\
+             #\n\
              # Leave it empty to found a group with this node alone:\n\
              #\n\
              #   distlib run --found-group\n\
@@ -247,8 +235,12 @@ impl Config {
 }
 
 impl CoreMember {
-    /// This member as a TOML inline table, for the starter file.
-    fn to_toml_inline(&self) -> String {
+    /// This member as a TOML inline table, ready to paste into `[consensus] core`.
+    ///
+    /// Public so `distlib whoami` prints exactly what `init` writes: one
+    /// renderer, so the line a founder is handed cannot drift from the file it
+    /// goes into.
+    pub fn to_toml_inline(&self) -> String {
         let addrs = self
             .addrs
             .iter()

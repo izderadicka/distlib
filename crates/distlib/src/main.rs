@@ -3,7 +3,7 @@
 mod cli;
 mod commands;
 
-use std::time::Duration;
+use std::{io::IsTerminal as _, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init { force } => commands::init(&paths, force),
         Command::Run { found_group } => commands::run(&paths, found_group).await,
+        Command::Whoami => commands::whoami(&paths).await,
         Command::Members => commands::members(&paths),
         Command::Status { online } => commands::status(&paths, online).await,
         Command::Ping {
@@ -81,5 +82,10 @@ fn init_tracing(verbose: u8) {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        // Colour only for a terminal. `distlib run > node.log` is the ordinary
+        // way to keep a node's output, and escape codes in that file make it
+        // unreadable and ungreppable — `members=3` is not even a substring of a
+        // coloured line, because the `=` is wrapped in them.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 }

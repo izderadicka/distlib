@@ -983,6 +983,7 @@ dependencies = [
  "distlib-core",
  "distlib-net",
  "iroh",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

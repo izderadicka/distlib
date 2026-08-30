@@ -158,27 +158,6 @@ fn a_bad_member_id_in_the_core_group_is_rejected() {
 }
 
 #[test]
-fn the_phase_0_allowlist_is_rejected_by_name() {
-    // Every config file written before phase 1 has this key. `deny_unknown_fields`
-    // would refuse it anyway, but with an error that names the field and not the
-    // thing that replaced it.
-    Jail::expect_with(|jail| {
-        jail.create_file(
-            CONFIG,
-            &format!("[net]\nallowlist = [\"{}\"]\n", a_member()),
-        )?;
-
-        let error = Config::load(Path::new(CONFIG)).unwrap_err().to_string();
-
-        assert!(
-            error.contains("[consensus] core"),
-            "the error must say where the allowlist went; got {error}"
-        );
-        Ok(())
-    });
-}
-
-#[test]
 fn the_starter_file_reloads_as_what_it_came_from() {
     // The starter file is hand-rendered so it can carry comments; this keeps it
     // honest about matching the struct it claims to describe.

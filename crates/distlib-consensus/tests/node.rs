@@ -355,3 +355,61 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
     assert!(founder.node.membership().is_member(&founder.id));
     founder.node.shutdown().await;
 }
+
+#[tokio::test]
+async fn three_founders_converge_on_one_group() {
+    // The shape people actually start with: a few friends who all want a say
+    // from the beginning. Worth its own test because quorum stops being trivial
+    // here — with three voters the founder needs one of the other two to grant
+    // its vote before it can commit anything, where with one it needed nobody.
+    let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
+    let ids: Vec<MemberId> = keys
+        .iter()
+        .map(|key| MemberId::from(key.public()))
+        .collect();
+
+    let mut peers = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let others = ids
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, id)| *id)
+            .collect();
+        peers.push(Peer::start(key.clone(), others).await);
+    }
+
+    let founders = peers
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| (peer.record(&format!("founder-{index}")), peer.addr.clone()))
+        .collect();
+    peers[0]
+        .node
+        .init_group(founders, &peers[0].secret)
+        .await
+        .unwrap();
+
+    for peer in &peers {
+        wait_for(
+            peer,
+            "the founding event to reach every founder",
+            |membership| membership.group_id().is_some(),
+        )
+        .await;
+    }
+
+    let group = peers[0].node.membership().group_id();
+    for peer in &peers {
+        let membership = peer.node.membership();
+        assert_eq!(membership.group_id(), group, "one group, not three");
+        assert_eq!(membership.core().len(), 3, "all three founders are voters");
+        for id in &ids {
+            assert!(membership.is_member(id));
+        }
+    }
+
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}

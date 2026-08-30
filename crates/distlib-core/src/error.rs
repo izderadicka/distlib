@@ -36,14 +36,6 @@ pub enum CoreError {
     )]
     DataDirInConfig { path: PathBuf },
 
-    /// `net.allowlist` in the config file.
-    #[error(
-        "{path} sets net.allowlist, which no longer exists: membership now comes \
-         from the log. List the founding core group under [consensus] core \
-         instead, or delete the key if this node is already in a group"
-    )]
-    AllowlistInConfig { path: PathBuf },
-
     /// No platform data directory could be determined and none was given.
     #[error("could not determine a default data directory; pass --data-dir")]
     NoDataDir,
