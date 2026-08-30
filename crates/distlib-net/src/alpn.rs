@@ -8,17 +8,26 @@
 //! version: a breaking change to the framing gets a new ALPN, so old and new
 //! nodes fail to negotiate rather than misinterpreting each other.
 //!
-//! Later phases add `distlib/raft/0` (phase 1 consensus) and
-//! `distlib/memberlog/0` (phase 1 log replication) as they gain handlers.
+//! `distlib/memberlog/0` joins them when phase 1b adds log replication for
+//! non-core followers.
 
 /// Liveness check. Echoes a payload back with a `pong:` prefix.
 pub const PING: &[u8] = b"distlib/ping/0";
 
-/// Every ALPN this build accepts, for `Builder::alpns`.
+/// Raft consensus RPC for the membership log (§4.5).
 ///
-/// An ALPN must appear here *and* have a handler registered on the router;
-/// offering one without a handler would advertise a protocol that then refuses
-/// every stream.
+/// Served by `distlib-consensus`, not by [`crate::Node`] — see
+/// [`registered`].
+pub const RAFT: &[u8] = b"distlib/raft/0";
+
+/// The ALPNs [`crate::Node`] serves.
+///
+/// Not "every ALPN that exists": an endpoint must offer exactly what its router
+/// handles, since advertising a protocol with no handler means negotiating it
+/// successfully and then refusing every stream. [`RAFT`] is deliberately absent
+/// — `Node` has no Raft to serve it with, and a node running consensus builds
+/// its own router and passes the wider set to
+/// [`crate::endpoint::configure`].
 pub fn registered() -> Vec<Vec<u8>> {
     vec![PING.to_vec()]
 }
