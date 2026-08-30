@@ -11,8 +11,10 @@
 
 mod common;
 
-use common::{Member, direct_addr, direct_endpoint};
-use distlib_net::{NetError, Node, allowlist, ping};
+use std::time::Duration;
+
+use common::{Member, direct_addr, direct_endpoint, direct_endpoint_with};
+use distlib_net::{AllowlistHooks, NetError, Node, allowlist, ping};
 use iroh::EndpointAddr;
 
 #[tokio::test]
@@ -151,4 +153,124 @@ async fn dropping_the_writer_freezes_the_set() {
 
     assert!(list.is_allowed(&client.id));
     assert_eq!(list.len(), 1);
+}
+
+// --- eviction (§4.4) --------------------------------------------------------
+
+#[tokio::test]
+async fn expulsion_closes_a_connection_that_is_already_open() {
+    // The requirement Phase 0 could not meet. Refusing an expelled member's
+    // *next* attempt leaves one expelled mid-transfer carrying on over the
+    // connection they already had.
+    let server = Member::generate();
+    let client = Member::generate();
+    let (server_writer, server_list) = server.admitting([client.id]);
+    let (_keep_client, client_list) = client.admitting([server.id]);
+
+    let hooks = AllowlistHooks::new(server_list);
+    let node = Node::spawn(direct_endpoint_with(&server, hooks.clone()).await);
+    let client_endpoint = direct_endpoint(&client, client_list).await;
+    let evictions = tokio::spawn(hooks.evict_expelled());
+
+    // A live connection, held open rather than completed and dropped.
+    let connection = client_endpoint
+        .connect(direct_addr(node.endpoint()), distlib_net::alpn::PING)
+        .await
+        .unwrap();
+
+    server_writer.replace([]);
+
+    // The close arrives without the client doing anything to provoke it.
+    let reason = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+        .await
+        .expect("an expelled member's open connection must be closed, not left running");
+
+    assert!(
+        format!("{reason:?}").contains("not a member"),
+        "the peer should be told why it was closed; got {reason:?}"
+    );
+
+    evictions.abort();
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_member_who_stays_admitted_keeps_its_connection() {
+    // The other half: eviction must not close connections to members who are
+    // still in the group when the set changes for some other reason.
+    let server = Member::generate();
+    let client = Member::generate();
+    let other = Member::generate();
+    let (server_writer, server_list) = server.admitting([client.id]);
+    let (_keep_client, client_list) = client.admitting([server.id]);
+
+    let hooks = AllowlistHooks::new(server_list);
+    let node = Node::spawn(direct_endpoint_with(&server, hooks.clone()).await);
+    let client_endpoint = direct_endpoint(&client, client_list).await;
+    let evictions = tokio::spawn(hooks.evict_expelled());
+
+    let connection = client_endpoint
+        .connect(direct_addr(node.endpoint()), distlib_net::alpn::PING)
+        .await
+        .unwrap();
+
+    // Someone else joins; the client is still a member.
+    server_writer.replace([client.id, other.id]);
+
+    let still_open = tokio::time::timeout(Duration::from_secs(2), connection.closed()).await;
+    assert!(
+        still_open.is_err(),
+        "an unrelated membership change must not disturb a current member"
+    );
+
+    evictions.abort();
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_eviction_loop_stops_when_membership_can_no_longer_change() {
+    // Dropping the writer means nothing can ever change again, so the loop has
+    // nothing left to react to and should return rather than spin.
+    let member = Member::generate();
+    let (writer, list) = member.admitting([]);
+    let hooks = AllowlistHooks::new(list);
+
+    let evictions = tokio::spawn(hooks.evict_expelled());
+    drop(writer);
+
+    tokio::time::timeout(Duration::from_secs(5), evictions)
+        .await
+        .expect("the loop must end once the allowlist is frozen")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn repeated_connections_do_not_accumulate() {
+    // A node runs for months while its membership rarely changes, so the
+    // connection table cannot rely on an allowlist change to get tidied. Each
+    // reconnect prunes what the previous one left behind.
+    let server = Member::generate();
+    let client = Member::generate();
+    let (_keep_server, server_list) = server.admitting([client.id]);
+    let (_keep_client, client_list) = client.admitting([server.id]);
+
+    let hooks = AllowlistHooks::new(server_list);
+    let node = Node::spawn(direct_endpoint_with(&server, hooks.clone()).await);
+    let client_endpoint = direct_endpoint(&client, client_list).await;
+    let addr = direct_addr(node.endpoint());
+
+    for _ in 0..10 {
+        let reply = ping::ping(&client_endpoint, addr.clone(), b"hello")
+            .await
+            .unwrap();
+        assert_eq!(reply, b"hello");
+    }
+
+    let tracked = hooks.tracked_connections();
+
+    assert!(
+        tracked <= 2,
+        "ten connections should not leave ten handles behind; {tracked} tracked"
+    );
+    node.shutdown().await;
 }

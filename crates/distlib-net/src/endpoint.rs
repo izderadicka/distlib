@@ -6,7 +6,7 @@ use iroh::{
     endpoint::{Builder, RelayMode, presets},
 };
 
-use crate::{allowlist::Allowlist, alpn, error::NetError, error::Result, hooks::AllowlistHooks};
+use crate::{alpn, error::NetError, error::Result, hooks::AllowlistHooks};
 
 /// Binds an endpoint for this node.
 ///
@@ -22,7 +22,7 @@ use crate::{allowlist::Allowlist, alpn, error::NetError, error::Result, hooks::A
 pub async fn build_endpoint(
     secret_key: SecretKey,
     config: &NetConfig,
-    allowlist: Allowlist,
+    hooks: AllowlistHooks,
 ) -> Result<Endpoint> {
     let builder = match config.relay_mode {
         ConfigRelayMode::Default => Endpoint::builder(presets::N0),
@@ -34,15 +34,13 @@ pub async fn build_endpoint(
         }
     };
 
-    Ok(
-        configure(builder, secret_key, allowlist, alpn::registered())
-            .bind_addr(config.bind_addr_v4)
-            .map_err(|source| NetError::InvalidRelayUrl {
-                url: source.to_string(),
-            })?
-            .bind()
-            .await?,
-    )
+    Ok(configure(builder, secret_key, hooks, alpn::registered())
+        .bind_addr(config.bind_addr_v4)
+        .map_err(|source| NetError::InvalidRelayUrl {
+            url: source.to_string(),
+        })?
+        .bind()
+        .await?)
 }
 
 /// Applies the settings every distlib endpoint shares, whatever its relay mode.
@@ -56,16 +54,17 @@ pub async fn build_endpoint(
 /// endpoint must advertise exactly what its router serves, and that depends on
 /// the caller: a node running consensus serves [`alpn::RAFT`] too, which
 /// `distlib-net` cannot handle itself.
+///
+/// The hooks are passed in rather than built here so the caller can keep a
+/// clone and run [`AllowlistHooks::evict_expelled`] on it. Both halves need the
+/// same connection table, and the endpoint takes ownership of its copy.
 pub fn configure(
     builder: Builder,
     secret_key: SecretKey,
-    allowlist: Allowlist,
+    hooks: AllowlistHooks,
     alpns: Vec<Vec<u8>>,
 ) -> Builder {
-    builder
-        .secret_key(secret_key)
-        .alpns(alpns)
-        .hooks(AllowlistHooks::new(allowlist))
+    builder.secret_key(secret_key).alpns(alpns).hooks(hooks)
 }
 
 fn custom_relays(urls: &[String]) -> Result<RelayMode> {

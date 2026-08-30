@@ -11,7 +11,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_core::MemberId;
-use distlib_net::{Allowlist, AllowlistWriter, allowlist, endpoint::configure};
+use distlib_net::{Allowlist, AllowlistHooks, AllowlistWriter, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr,
     endpoint::{RelayMode, presets},
@@ -44,11 +44,16 @@ impl Member {
 /// An endpoint with no relays and no address lookup: reachable only at the
 /// socket addresses it is bound to.
 pub async fn direct_endpoint(member: &Member, allowlist: Allowlist) -> Endpoint {
+    direct_endpoint_with(member, AllowlistHooks::new(allowlist)).await
+}
+
+/// As above, but with hooks the caller keeps a clone of — for eviction.
+pub async fn direct_endpoint_with(member: &Member, hooks: AllowlistHooks) -> Endpoint {
     let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
     configure(
         builder,
         member.secret.clone(),
-        allowlist,
+        hooks,
         distlib_net::alpn::registered(),
     )
     .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -72,7 +77,7 @@ pub async fn relay_endpoint(member: &Member, allowlist: Allowlist, relays: Relay
     configure(
         builder,
         member.secret.clone(),
-        allowlist,
+        AllowlistHooks::new(allowlist),
         distlib_net::alpn::registered(),
     )
     .bind()
