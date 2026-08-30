@@ -157,15 +157,15 @@ ping
 ```
 
 Nothing in A's config file mentions C, or B. A admits B and refuses C entirely because
-of what its copy of the log says. The same holds in the other direction — a node will
-not *dial* a non-member either, and refuses before a packet leaves the machine:
+of what its copy of the log says.
 
-```
-INFO refused to dial a non-member peer=46db77a915c57d0e… alpn=distlib/raft/0
-```
+The same holds in the other direction — a node will not *dial* a non-member either, and
+refuses before a packet leaves the machine. There is no way to provoke that from the
+commands above (`ping` treats the id you typed as consent, and nothing else dials a
+non-member), so it is covered by `distlib-net`'s tests rather than shown here.
 
-That check lives on the endpoint rather than in any one protocol, which is what makes
-it hold for every protocol added later.
+Both checks live on the endpoint rather than in any one protocol, which is what makes
+them hold for every protocol added later.
 
 ## Commands
 

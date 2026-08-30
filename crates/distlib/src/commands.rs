@@ -205,13 +205,27 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
 
     if online {
         let (_writer, allowed) = allowlist(me, config.consensus.core.iter().map(|c| c.member));
-        let endpoint = build_endpoint(
+        let endpoint = match build_endpoint(
             secret,
             &config.net,
             AllowlistHooks::new(allowed),
             distlib_consensus::alpns(),
         )
-        .await?;
+        .await
+        {
+            Ok(endpoint) => endpoint,
+            // Binding a pinned port fails while the node holds it — which is
+            // the normal state now that core nodes pin one. Say so instead of
+            // discarding everything printed above.
+            Err(error) => {
+                tracing::debug!(?error, "could not bind for --online");
+                println!(
+                    "address    unavailable — {} is already bound",
+                    config.net.bind_addr_v4
+                );
+                return Ok(());
+            }
+        };
         // Bounded, because "online" means a relay has been reached and with
         // `relay_mode = "disabled"` there is no relay to reach — the wait would
         // never end. The direct addresses are known either way.

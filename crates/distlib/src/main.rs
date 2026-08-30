@@ -57,10 +57,12 @@ async fn main() -> Result<()> {
 /// now and should not have to notice that `RUST_LOG` is set in their shell.
 /// Otherwise `DISTLIB_LOG` is consulted, then `RUST_LOG`, then a quiet default.
 ///
-/// openraft is turned down a level in every case. It logs each election, vote
-/// and state transition at `info`, including a debug-formatted dump of the
-/// whole `RaftState` at startup — detail for someone debugging consensus, and
-/// noise thick enough at the default level to bury this node's own output.
+/// openraft is turned down unless an explicit filter is set. It logs each
+/// election, vote and state transition at `info`, including a debug-formatted
+/// dump of the whole `RaftState` at startup — detail for someone debugging
+/// consensus, and noise thick enough at the default level to bury this node's
+/// own output. `DISTLIB_LOG` and `RUST_LOG` are left exactly as written:
+/// someone who sets one has said what they want to see.
 fn init_tracing(verbose: u8) {
     let filter = match verbose {
         0 => EnvFilter::try_from_env("DISTLIB_LOG")
