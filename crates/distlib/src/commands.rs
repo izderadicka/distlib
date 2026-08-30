@@ -7,7 +7,7 @@ use distlib_core::{
     Config, DataDir, MemberId,
     identity::{create_secret_key, load_or_create_secret_key, member_id},
 };
-use distlib_net::{Node, allowlist, build_endpoint, ping};
+use distlib_net::{AllowlistHooks, Node, allowlist, build_endpoint, ping};
 use iroh::{EndpointAddr, RelayUrl, Watcher as _};
 
 /// Everything a command needs to find this node's files.
@@ -70,7 +70,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // The writer is unused in phase 0 but must outlive the endpoint: from
     // phase 1 the Raft state machine drives it to expel members at runtime.
     let (_allowlist_writer, allowed) = allowlist(me, config.net.allowlist.iter().copied());
-    let endpoint = build_endpoint(secret, &config.net, allowed).await?;
+    let endpoint = build_endpoint(secret, &config.net, AllowlistHooks::new(allowed)).await?;
     let node = Node::spawn(endpoint);
 
     tracing::info!(member = %me, "node started");
@@ -122,7 +122,7 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
 
     if online {
         let (_writer, allowed) = allowlist(me, config.net.allowlist.iter().copied());
-        let endpoint = build_endpoint(secret, &config.net, allowed).await?;
+        let endpoint = build_endpoint(secret, &config.net, AllowlistHooks::new(allowed)).await?;
         endpoint.online().await;
         let addr = endpoint.addr();
         for transport in &addr.addrs {
@@ -147,7 +147,7 @@ pub async fn ping(
     let me = member_id(&secret);
 
     let (_writer, allowed) = allowlist(me, config.net.allowlist.iter().copied());
-    let endpoint = build_endpoint(secret, &config.net, allowed).await?;
+    let endpoint = build_endpoint(secret, &config.net, AllowlistHooks::new(allowed)).await?;
 
     let result = ping::ping_with_timeout(
         &endpoint,

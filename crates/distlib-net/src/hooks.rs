@@ -6,10 +6,18 @@
 //! a check inside `PingProtocol` would protect `distlib/ping/0` and nothing
 //! else. **Do not move this into a protocol handler.**
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+};
+
 use distlib_core::MemberId;
 use iroh::{
     EndpointAddr,
-    endpoint::{AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks},
+    endpoint::{
+        AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks,
+        WeakConnectionHandle,
+    },
 };
 
 use crate::allowlist::Allowlist;
@@ -28,16 +36,90 @@ pub mod close_code {
 /// Human-readable reason sent alongside [`close_code::NOT_A_MEMBER`].
 pub const NOT_A_MEMBER_REASON: &[u8] = b"not a member";
 
-/// Refuses every connection to or from a non-member.
+/// Refuses every connection to or from a non-member, and closes the ones an
+/// expulsion invalidates.
+///
+/// Clone to hold one copy while the endpoint owns another: every clone shares
+/// the same connection table, which is what lets [`Self::evict_expelled`] reach
+/// connections the hook recorded.
 #[derive(Debug, Clone)]
 pub struct AllowlistHooks {
     allowlist: Allowlist,
+    /// Connections seen since start-up, by peer.
+    ///
+    /// Weak handles, because [`EndpointHooks`] is explicit that holding a
+    /// strong [`Connection`] keeps it alive and disables close-on-drop. A dead
+    /// entry simply fails to upgrade, and is pruned when noticed.
+    connections: Arc<Mutex<HashMap<MemberId, Vec<WeakConnectionHandle>>>>,
 }
 
 impl AllowlistHooks {
     /// Enforces `allowlist` on the endpoint it is installed on.
     pub fn new(allowlist: Allowlist) -> Self {
-        Self { allowlist }
+        Self {
+            allowlist,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// The allowlist being enforced.
+    pub fn allowlist(&self) -> &Allowlist {
+        &self.allowlist
+    }
+
+    /// Closes open connections whenever the allowlist stops admitting a peer.
+    ///
+    /// §4.4 requires this: refusing a removed member's *next* attempt is not
+    /// enough, because a member expelled mid-transfer would otherwise carry on
+    /// with the connection they already had. Run it as a task alongside the
+    /// endpoint.
+    ///
+    /// Returns when the allowlist can no longer change — the writer has been
+    /// dropped — since there is nothing further to react to.
+    pub async fn evict_expelled(mut self) {
+        while self.allowlist.changed().await.is_ok() {
+            self.evict_once();
+        }
+    }
+
+    /// One pass: close what is no longer admitted, forget what has died.
+    fn evict_once(&self) {
+        let mut connections = self.lock();
+        connections.retain(|peer, handles| {
+            if self.allowlist.is_allowed(peer) {
+                // Still a member; keep only the handles still alive.
+                handles.retain(|handle| handle.upgrade().is_some());
+                return !handles.is_empty();
+            }
+
+            for connection in handles.iter().filter_map(WeakConnectionHandle::upgrade) {
+                // The same code a refused handshake gets, so an evicted peer
+                // and a rejected one cannot tell the two apart — and both learn
+                // to stop retrying.
+                connection.close(close_code::NOT_A_MEMBER, NOT_A_MEMBER_REASON);
+            }
+            tracing::info!(peer = %peer, "closed connections to a former member");
+            false
+        });
+    }
+
+    /// Records a connection so an expulsion can find it later.
+    fn remember(&self, peer: MemberId, connection: &Connection) {
+        self.lock()
+            .entry(peer)
+            .or_default()
+            .push(connection.weak_handle());
+    }
+
+    /// A poison-tolerant lock.
+    ///
+    /// Nothing here panics while holding it, so a poisoned lock means an
+    /// unrelated panic elsewhere; refusing to enforce membership afterwards
+    /// would turn that into a security failure rather than a second bug.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<MemberId, Vec<WeakConnectionHandle>>> {
+        self.connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -70,6 +152,9 @@ impl EndpointHooks for AllowlistHooks {
     async fn after_handshake(&self, conn: &Connection) -> AfterHandshakeOutcome {
         let peer = MemberId::from(conn.remote_id());
         if self.allowlist.is_allowed(&peer) {
+            // Recorded only once admitted: a rejected connection is closed
+            // here and there is nothing left to evict later.
+            self.remember(peer, conn);
             return AfterHandshakeOutcome::Accept;
         }
         // Logged at info, not debug: this is the audit trail for who tried to

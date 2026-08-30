@@ -77,6 +77,20 @@ impl Allowlist {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Waits until the set changes.
+    ///
+    /// The reason this is a `watch` channel rather than a lock. §4.4 requires
+    /// that expelling a member close connections that are *already open*, not
+    /// merely refuse the next attempt, and that needs a signal rather than a
+    /// value someone happens to read again.
+    ///
+    /// Returns an error once the writer is gone, which means the set can never
+    /// change again — for a caller looping on this, that is the signal to stop
+    /// rather than a failure.
+    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.members.changed().await
+    }
 }
 
 impl AllowlistWriter {

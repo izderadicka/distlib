@@ -23,7 +23,7 @@ use distlib_consensus::{
     LogStore, NodeAddr, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
 };
 use distlib_core::{MemberId, RawMemberId};
-use distlib_net::{allowlist, endpoint::configure};
+use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -56,7 +56,7 @@ impl Node {
         // exactly that and no more.
         let mut alpns = distlib_net::alpn::registered();
         alpns.push(distlib_net::alpn::RAFT.to_vec());
-        let endpoint = configure(builder, secret, allowed, alpns)
+        let endpoint = configure(builder, secret, AllowlistHooks::new(allowed), alpns)
             .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .unwrap()
             .bind()
