@@ -19,7 +19,7 @@ pub mod state;
 
 pub use error::{ConsensusError, Result};
 pub use event::{MemberRecord, MembershipEvent, Timestamp};
-pub use node::MembershipNode;
+pub use node::{MembershipNode, RAFT_DB, alpns};
 pub use raft::{
     LogStore, NodeAddr, RaftClient, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
     TypeConfig,

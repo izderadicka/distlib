@@ -52,7 +52,33 @@ pub enum Command {
     },
 
     /// Run the node until interrupted.
-    Run,
+    Run {
+        /// Found the group described by `[consensus] core` on startup.
+        ///
+        /// Run this on exactly one founder, once. The other founders just
+        /// `run`; they receive the founding entry by replication.
+        ///
+        /// It is a flag on `run` rather than a command of its own because the
+        /// founder has to stay up afterwards to replicate what it wrote, and
+        /// because the node's database is held exclusively by one process — a
+        /// separate command could not open it while the node was running.
+        #[arg(long)]
+        found_group: bool,
+    },
+
+    /// Print this node's identity as a line for a founder's `[consensus] core`.
+    ///
+    /// Creates the identity if there is not one. Run this on every founder but
+    /// the one doing the founding, and send them the output — they cannot found
+    /// a group without knowing who is in it.
+    Whoami,
+
+    /// List the members of this node's group.
+    ///
+    /// Reads the local database, so it needs the node stopped: a running node
+    /// holds that file exclusively. While it runs, its log reports every
+    /// membership change instead.
+    Members,
 
     /// Print this node's identity and where its data lives.
     Status {

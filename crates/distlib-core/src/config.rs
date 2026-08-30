@@ -36,6 +36,8 @@ const DATA_DIR_KEY: &str = "data_dir";
 pub struct Config {
     /// Transport settings.
     pub net: NetConfig,
+    /// The group this node belongs to.
+    pub consensus: ConsensusConfig,
 }
 
 /// How this node talks to the network.
@@ -48,11 +50,6 @@ pub struct NetConfig {
     pub relay_mode: RelayMode,
     /// Relay URLs, used only when `relay_mode` is [`RelayMode::Custom`].
     pub relay_urls: Vec<String>,
-    /// Members this node will talk to.
-    ///
-    /// Static in phase 0. From phase 1 the allowlist is derived from the
-    /// committed membership log and this field goes away.
-    pub allowlist: Vec<MemberId>,
 }
 
 impl Default for NetConfig {
@@ -61,9 +58,53 @@ impl Default for NetConfig {
             bind_addr_v4: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
             relay_mode: RelayMode::default(),
             relay_urls: Vec::new(),
-            allowlist: Vec::new(),
         }
     }
+}
+
+/// The group this node founds or belongs to.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsensusConfig {
+    /// The founding core group, this node included.
+    ///
+    /// The one piece of membership that cannot come from the log, because it is
+    /// what makes reading the log possible: core nodes have to reach each other
+    /// to replicate the founding entry, and they will not connect to anyone
+    /// outside the allowlist. So the founding set is stated once, here, and
+    /// from the moment `GroupFounded` is applied the log is authoritative and
+    /// this is never consulted again.
+    ///
+    /// Empty means no group has been founded. `distlib run --found-group` with
+    /// an empty list founds one with this node alone.
+    pub core: Vec<CoreMember>,
+}
+
+/// A founding core member.
+///
+/// Carries an address, unlike anything else that names a member: the log that
+/// would otherwise supply it is exactly what these addresses are needed to
+/// fetch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreMember {
+    /// The member's id — their public key.
+    pub member: MemberId,
+
+    /// Display name recorded in the founding event. Metadata, not identity.
+    #[serde(default)]
+    pub name: String,
+
+    /// Socket addresses to try directly.
+    ///
+    /// Required with `relay_mode = "disabled"` or on a LAN, where there is no
+    /// address lookup to fall back on.
+    #[serde(default)]
+    pub addrs: Vec<SocketAddr>,
+
+    /// A relay to reach this member through.
+    #[serde(default)]
+    pub relay: Option<String>,
 }
 
 /// Relay selection.
@@ -135,14 +176,6 @@ impl Config {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let allowlist = quoted(
-            &self
-                .net
-                .allowlist
-                .iter()
-                .map(MemberId::to_string)
-                .collect::<Vec<_>>(),
-        );
 
         format!(
             "# distlib configuration.\n\
@@ -156,18 +189,72 @@ impl Config {
              \n\
              [net]\n\
              # Local socket to bind; port 0 lets the OS choose.\n\
+             #\n\
+             # Pin a port on a core node. Founding records this node's address in\n\
+             # the log, and an OS-chosen port is different after every restart.\n\
              bind_addr_v4 = \"{bind}\"\n\
              \n\
              # \"default\" (n0 relays), \"disabled\", or \"custom\" with relay_urls below.\n\
              relay_mode = \"{relay_mode}\"\n\
              relay_urls = [{relay_urls}]\n\
              \n\
-             # Members this node will talk to. Phase 0 only: from phase 1 the\n\
-             # allowlist comes from the committed membership log.\n\
-             allowlist = [{allowlist}]\n",
+             [consensus]\n\
+             # The founding core group, this node included — the members who vote\n\
+             # on the membership log. Everything else about membership comes from\n\
+             # the log itself; this is the one thing that cannot, because reaching\n\
+             # the log means connecting to these nodes first.\n\
+             #\n\
+             # Run `distlib whoami` on each founder; it prints the line to put\n\
+             # here. Every founder needs the same list.\n\
+             #\n\
+             # Leave it empty to found a group with this node alone:\n\
+             #\n\
+             #   distlib run --found-group\n\
+             #\n\
+             # To found with others, list every founder here — the same list in\n\
+             # every founder's config — and have one of them run --found-group.\n\
+             # `addrs` is required unless relays are enabled and can find them.\n\
+             #\n\
+             #   core = [\n\
+             #     {{ member = \"<their id>\", name = \"alice\", addrs = [\"192.168.1.10:11204\"] }},\n\
+             #     {{ member = \"<your id>\", name = \"bob\", addrs = [\"192.168.1.11:11204\"] }},\n\
+             #   ]\n\
+             core = [{core}]\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
+            core = self
+                .consensus
+                .core
+                .iter()
+                .map(CoreMember::to_toml_inline)
+                .collect::<Vec<_>>()
+                .join(", "),
         )
+    }
+}
+
+impl CoreMember {
+    /// This member as a TOML inline table, ready to paste into `[consensus] core`.
+    ///
+    /// Public so `distlib whoami` prints exactly what `init` writes: one
+    /// renderer, so the line a founder is handed cannot drift from the file it
+    /// goes into.
+    pub fn to_toml_inline(&self) -> String {
+        let addrs = self
+            .addrs
+            .iter()
+            .map(|addr| format!("\"{addr}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut out = format!(
+            "{{ member = \"{}\", name = \"{}\", addrs = [{addrs}]",
+            self.member, self.name
+        );
+        if let Some(relay) = &self.relay {
+            out.push_str(&format!(", relay = \"{relay}\""));
+        }
+        out.push_str(" }");
+        out
     }
 }
