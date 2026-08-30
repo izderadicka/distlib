@@ -15,10 +15,8 @@
 // state_machine.rs make.
 #![allow(clippy::result_large_err)]
 
-use std::sync::Arc;
-
 use distlib_core::{MemberId, RawMemberId};
-use distlib_net::alpn;
+use distlib_net::{Connections, alpn};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
     endpoint::Connection,
@@ -34,9 +32,12 @@ use openraft::{
     },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
-use crate::raft::types::{NodeAddr, TypeConfig};
+use crate::{
+    error::ConsensusError,
+    raft::types::{NodeAddr, TypeConfig},
+    signed::SignedEvent,
+};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -54,6 +55,13 @@ enum Request {
     AppendEntries(AppendEntriesRequest<TypeConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
+    /// A membership event a follower wants committed.
+    ///
+    /// Not part of Raft's own protocol, but it travels the same way and between
+    /// the same nodes. §4.3 has a member submit a proposal to *any* core node,
+    /// and only the leader can commit one, so a follower has to be able to hand
+    /// it on.
+    Propose(Box<SignedEvent>),
 }
 
 /// What it answers.
@@ -69,6 +77,8 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
+    /// What became of a forwarded event.
+    Propose(ProposeOutcome),
 }
 
 /// Serves `distlib/raft/0` by handing requests to the local Raft.
@@ -100,6 +110,21 @@ impl RaftProtocol {
             Request::Vote(rpc) => Response::Vote(self.raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
                 Response::InstallSnapshot(self.raft.install_snapshot(rpc).await)
+            }
+            Request::Propose(event) => {
+                Response::Propose(match self.raft.client_write(*event).await {
+                    // The write reached the log; `data` is the state machine's
+                    // verdict on whether it then took effect.
+                    Ok(written) => match written.data {
+                        Ok(()) => ProposeOutcome::Applied,
+                        Err(rejected) => ProposeOutcome::Rejected(rejected),
+                    },
+                    // Includes this node having lost leadership since the hint was
+                    // issued. Its own `ForwardToLeader` is no use to the sender —
+                    // their Raft learns the new leader from replication — so it
+                    // travels as a message.
+                    Err(error) => ProposeOutcome::NotCommitted(error.to_string()),
+                })
             }
         }
     }
@@ -133,6 +158,12 @@ impl ProtocolHandler for RaftProtocol {
 #[derive(Debug, Clone)]
 pub struct RaftNetworkFactoryImpl {
     endpoint: Endpoint,
+    /// The node's connections, not this factory's.
+    ///
+    /// Passed in rather than created here so every protocol on the node shares
+    /// one set: openraft keeps a client per peer for replication, a forwarded
+    /// proposal needs one too, and phase 1b's log replication will as well.
+    connections: Connections,
 }
 
 impl RaftNetworkFactoryImpl {
@@ -140,8 +171,11 @@ impl RaftNetworkFactoryImpl {
     ///
     /// The endpoint must offer [`alpn::RAFT`] and have the allowlist hooks
     /// installed; both come from `distlib_net::endpoint::configure`.
-    pub fn new(endpoint: Endpoint) -> Self {
-        Self { endpoint }
+    pub fn new(endpoint: Endpoint, connections: Connections) -> Self {
+        Self {
+            endpoint,
+            connections,
+        }
     }
 }
 
@@ -155,7 +189,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             endpoint: self.endpoint.clone(),
             target,
             addr: node.clone(),
-            connection: Arc::new(Mutex::new(None)),
+            connections: self.connections.clone(),
         }
     }
 }
@@ -204,8 +238,9 @@ pub struct RaftClient {
     endpoint: Endpoint,
     target: NodeId,
     addr: NodeAddr,
-    /// Reused across RPCs, and dropped on any failure so the next call redials.
-    connection: Arc<Mutex<Option<Connection>>>,
+    /// The node's connections. Shared with every other protocol, so a peer is
+    /// dialled once per protocol however many callers want it.
+    connections: Connections,
 }
 
 impl RaftClient {
@@ -248,7 +283,11 @@ impl RaftClient {
         match self.exchange(request).await {
             Ok(response) => Ok(response),
             Err(error) => {
-                *self.connection.lock().await = None;
+                // Only this peer's raft connection: a failure here says nothing
+                // about other peers, or about other protocols to this one.
+                if let Ok(peer) = MemberId::try_from(self.target) {
+                    self.connections.forget(peer, alpn::RAFT);
+                }
                 Err(error)
             }
         }
@@ -275,24 +314,72 @@ impl RaftClient {
     async fn connection<E: std::error::Error>(
         &self,
     ) -> Result<Connection, RPCError<NodeId, NodeAddr, E>> {
-        let mut cached = self.connection.lock().await;
-        if let Some(connection) = cached.as_ref() {
-            return Ok(connection.clone());
-        }
-
+        let peer = MemberId::try_from(self.target).unreachable()?;
         let addr = self.endpoint_addr()?;
-        let connection = self
-            .endpoint
-            .connect(addr, alpn::RAFT)
+
+        self.connections
+            .get_or_connect(&self.endpoint, peer, addr, alpn::RAFT)
             .await
             // Unreachable rather than Network: openraft backs off before
             // retrying an unreachable peer, which is the right response to a
             // member who is simply offline, and members here are often offline.
-            .unreachable()?;
-
-        *cached = Some(connection.clone());
-        Ok(connection)
+            .unreachable()
     }
+}
+
+impl RaftClient {
+    /// Asks this peer, which should be the leader, to commit `event`.
+    ///
+    /// Used when a follower is handed a proposal it cannot commit itself.
+    pub async fn propose(&self, event: SignedEvent) -> Result<(), ProposeError> {
+        match self
+            .call::<std::convert::Infallible>(Request::Propose(Box::new(event)))
+            .await
+            .map_err(|error| ProposeError::Unreachable(error.to_string()))?
+        {
+            Response::Propose(ProposeOutcome::Applied) => Ok(()),
+            Response::Propose(ProposeOutcome::Rejected(error)) => {
+                Err(ProposeError::Rejected(error))
+            }
+            Response::Propose(ProposeOutcome::NotCommitted(error)) => {
+                Err(ProposeError::NotCommitted(error))
+            }
+            other => Err(ProposeError::Unreachable(format!(
+                "member {} answered a different request than it was asked: {other:?}",
+                self.target
+            ))),
+        }
+    }
+}
+
+/// What the leader did with a forwarded proposal.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ProposeOutcome {
+    /// Committed and applied.
+    Applied,
+    /// Committed, then refused by the rules — the log has it, the state does not.
+    Rejected(ConsensusError),
+    /// Never made it into the log.
+    NotCommitted(String),
+}
+
+/// Why a forwarded proposal did not take effect.
+#[derive(Debug, thiserror::Error)]
+pub enum ProposeError {
+    /// The leader could not be reached, or answered nonsense.
+    #[error("could not reach the leader: {0}")]
+    Unreachable(String),
+
+    /// The leader was reached but did not commit — it may have lost the term.
+    #[error("the leader did not commit the proposal: {0}")]
+    NotCommitted(String),
+
+    /// The event committed and was then refused by the rules.
+    ///
+    /// Distinct from the others because retrying cannot help: every node
+    /// reaches the same verdict.
+    #[error(transparent)]
+    Rejected(ConsensusError),
 }
 
 impl RaftNetwork<TypeConfig> for RaftClient {

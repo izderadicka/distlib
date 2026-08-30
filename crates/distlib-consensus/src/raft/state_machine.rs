@@ -29,8 +29,10 @@ use openraft::{
 };
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::{
+    error::ConsensusError,
     raft::{
         db::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
@@ -82,6 +84,14 @@ struct Inner {
     applied: Mutex<Applied>,
     /// Distinguishes snapshots built at the same log id.
     snapshot_seq: AtomicU64,
+    /// Announces the membership after every change.
+    ///
+    /// The point of the crate: a committed event has to reach the connection
+    /// allowlist, and a watch channel is how that happens without the state
+    /// machine knowing anything about the network. Kept here rather than
+    /// published by the caller, so nothing can apply an entry and forget to say
+    /// so.
+    membership: watch::Sender<MembershipState>,
 }
 
 /// The membership state machine, persisted in redb.
@@ -104,11 +114,13 @@ impl StateMachineStore {
                 db,
                 applied: Mutex::new(Applied::default()),
                 snapshot_seq: AtomicU64::new(0),
+                membership: watch::channel(MembershipState::new()).0,
             }),
         };
         if let Some(applied) =
             read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
+            store.inner.membership.send_replace(applied.state.clone());
             *store.lock() = applied;
         }
         Ok(store)
@@ -132,6 +144,26 @@ impl StateMachineStore {
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
         self.lock().state.clone()
+    }
+
+    /// Watches the membership, for whoever has to react to it changing.
+    ///
+    /// Each subscriber gets its own cursor, so a caller cannot miss a change by
+    /// sharing a receiver with somebody else.
+    pub fn subscribe(&self) -> watch::Receiver<MembershipState> {
+        self.inner.membership.subscribe()
+    }
+
+    /// Publishes the membership if applying changed it.
+    ///
+    /// Compared rather than sent unconditionally, because most entries do not
+    /// touch the membership — a `Blank` from a new leader, or Raft's own voter
+    /// configuration — and a spurious notification would make every observer
+    /// re-derive an allowlist that has not moved.
+    fn announce(&self, state: &MembershipState) {
+        if *self.inner.membership.borrow() != *state {
+            self.inner.membership.send_replace(state.clone());
+        }
     }
 
     /// A poison-tolerant lock.
@@ -158,7 +190,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         Ok((applied.last_applied, applied.membership.clone()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<()>>
+    async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<Result<(), ConsensusError>>>
     where
         I: IntoIterator<Item = Entry> + Send,
         I::IntoIter: Send,
@@ -167,17 +199,18 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is ever held across an await.
-        let encoded = {
+        let (encoded, derived) = {
             let mut applied = self.lock();
             for entry in entries {
                 applied.last_applied = Some(entry.log_id);
 
                 match entry.payload {
                     // A no-op a new leader commits to establish its term.
-                    EntryPayload::Blank => {}
+                    EntryPayload::Blank => responses.push(Ok(())),
 
                     EntryPayload::Normal(event) => {
-                        if let Err(error) = applied.state.apply(&event) {
+                        let verdict = applied.state.apply(&event);
+                        if let Err(error) = &verdict {
                             // Raft has already committed this entry, so every
                             // node sees it and every node rejects it the same
                             // way — `MembershipState::apply` is deterministic
@@ -187,26 +220,41 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             // Returning an error here instead would be a fatal
                             // storage failure on *every* node at once: one
                             // malformed proposal would take down the group.
-                            // Proposals are validated before they are submitted;
-                            // this is the backstop for one that should not have
-                            // got through.
+                            //
+                            // Nothing validates before submitting, and that is
+                            // deliberate. The commonest rejection is a race —
+                            // two members expelling the same peer, one arriving
+                            // second — which no pre-check can catch, since it
+                            // was valid when checked. The proposer learns the
+                            // verdict from the write's response instead.
+                            //
+                            // The refused entry stays in the log until
+                            // compaction, which is worth having: it records who
+                            // proposed what and when the group disagreed with
+                            // them. Logged at `error` for the same reason —
+                            // one is routine, a stream of them means something
+                            // is wrong.
                             tracing::error!(
                                 %error,
                                 log_id = %entry.log_id,
                                 "committed membership event rejected; skipping it"
                             );
                         }
+                        // Reported back to whoever proposed it, so they learn
+                        // the entry committed but did not take effect.
+                        responses.push(verdict);
                     }
 
                     // Raft's own voter configuration. The trait asks only that
                     // it be stored, so it is stored.
                     EntryPayload::Membership(membership) => {
                         applied.membership = StoredMembership::new(Some(entry.log_id), membership);
+                        responses.push(Ok(()));
                     }
                 }
-                responses.push(());
             }
-            encode(&*applied, ErrorSubject::StateMachine)?
+            let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
+            (encoded, applied.state.clone())
         };
 
         write_key(
@@ -217,6 +265,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             ErrorSubject::StateMachine,
         )
         .await?;
+
+        // After the commit: an observer told about a membership the node could
+        // still lose to a crash would be enforcing one that never happened.
+        self.announce(&derived);
         Ok(responses)
     }
 
@@ -252,6 +304,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             subject.clone(),
         )?;
 
+        let membership = applied.state.clone();
         *self.lock() = applied;
 
         // Both keys in one transaction. The applied state and the snapshot it
@@ -272,7 +325,16 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 .map_err(|source| fail(&source))?;
             Ok(())
         })
-        .await
+        .await?;
+
+        // A snapshot replaces the membership wholesale, so observers need
+        // telling just as much as after an apply — more so, because this is how
+        // a node that fell behind far enough to be caught up by snapshot learns
+        // about an expulsion. Without this the allowlist would keep admitting a
+        // member the group removed while that node was away, until some later
+        // entry happened to change the membership again.
+        self.announce(&membership);
+        Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> StorageResult<Option<Snapshot<TypeConfig>>> {

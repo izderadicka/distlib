@@ -8,12 +8,15 @@ pub type Result<T> = std::result::Result<T, ConsensusError>;
 
 /// Why an event could not be produced or applied.
 ///
+/// Serialisable because it is what the state machine reports back to whoever
+/// proposed the event, which may be another node.
+///
 /// Every variant here means "this entry does not belong in the state", and a
 /// node that sees one has been handed something invalid. They are worth
 /// distinguishing because they say very different things about *who* is at
 /// fault — a bad signature implicates whoever served it, a rule violation
 /// implicates the proposer.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConsensusError {
     /// The signature does not match the proposer's key.
     #[error("event carries a signature that {proposer} did not produce")]
@@ -59,9 +62,18 @@ pub enum ConsensusError {
     InvalidCoreGroup,
 
     /// Serialising an event failed.
-    #[error("could not encode an event")]
-    Encode {
-        #[from]
-        source: postcard::Error,
-    },
+    ///
+    /// Carries the message rather than `postcard::Error`, because this type is
+    /// the verdict Raft returns to a proposer and so has to cross the wire —
+    /// and because a domain error has no business naming a codec's type.
+    #[error("could not encode an event: {message}")]
+    Encode { message: String },
+}
+
+impl From<postcard::Error> for ConsensusError {
+    fn from(source: postcard::Error) -> Self {
+        Self::Encode {
+            message: source.to_string(),
+        }
+    }
 }

@@ -92,7 +92,7 @@ impl AllowlistHooks {
     fn is_live(handle: &WeakConnectionHandle) -> bool {
         handle
             .upgrade()
-            .is_some_and(|connection| connection.close_reason().is_none())
+            .is_some_and(|connection| crate::connections::is_live(&connection))
     }
 
     /// One pass: close what is no longer admitted, forget what has died.
@@ -133,9 +133,10 @@ impl AllowlistHooks {
 
     /// How many connections are currently tracked.
     ///
-    /// The number `evict_expelled` would have to walk. Worth being able to see:
-    /// it is the quantity that would reveal a leak here, and it is small by
-    /// construction — see [`Self::remember`].
+    /// The number [`Self::evict_expelled`] would have to walk. Worth being able
+    /// to see: it is the quantity that would reveal a leak here. It stays small
+    /// because a peer's finished connections are dropped when it reconnects, so
+    /// the total is bounded by the size of the group rather than by uptime.
     pub fn tracked_connections(&self) -> usize {
         self.lock().values().map(Vec::len).sum()
     }
