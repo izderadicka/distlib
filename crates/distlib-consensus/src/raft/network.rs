@@ -15,7 +15,7 @@
 // state_machine.rs make.
 #![allow(clippy::result_large_err)]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::alpn;
@@ -161,6 +161,15 @@ impl ProtocolHandler for RaftProtocol {
 #[derive(Debug, Clone)]
 pub struct RaftNetworkFactoryImpl {
     endpoint: Endpoint,
+    /// One connection per peer, shared by every client this factory makes.
+    ///
+    /// Held here rather than per client because a node talks to the same peer
+    /// for several reasons at once — openraft keeps a client per peer for
+    /// replication, and a proposal being forwarded needs one too. Caching in
+    /// the client would open a second connection to a peer already connected;
+    /// caching here means all of them multiplex over the one QUIC connection,
+    /// which is what it is for.
+    connections: Arc<Mutex<HashMap<NodeId, Connection>>>,
 }
 
 impl RaftNetworkFactoryImpl {
@@ -169,7 +178,10 @@ impl RaftNetworkFactoryImpl {
     /// The endpoint must offer [`alpn::RAFT`] and have the allowlist hooks
     /// installed; both come from `distlib_net::endpoint::configure`.
     pub fn new(endpoint: Endpoint) -> Self {
-        Self { endpoint }
+        Self {
+            endpoint,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -183,7 +195,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             endpoint: self.endpoint.clone(),
             target,
             addr: node.clone(),
-            connection: Arc::new(Mutex::new(None)),
+            connections: Arc::clone(&self.connections),
         }
     }
 }
@@ -232,8 +244,10 @@ pub struct RaftClient {
     endpoint: Endpoint,
     target: NodeId,
     addr: NodeAddr,
-    /// Reused across RPCs, and dropped on any failure so the next call redials.
-    connection: Arc<Mutex<Option<Connection>>>,
+    /// Shared with every other client from the same factory, so a peer is
+    /// dialled once however many reasons there are to talk to it. Dropped on
+    /// failure so the next call redials.
+    connections: Arc<Mutex<HashMap<NodeId, Connection>>>,
 }
 
 impl RaftClient {
@@ -276,7 +290,9 @@ impl RaftClient {
         match self.exchange(request).await {
             Ok(response) => Ok(response),
             Err(error) => {
-                *self.connection.lock().await = None;
+                // Only this peer's entry: a failure here says nothing about
+                // connections to anybody else.
+                self.connections.lock().await.remove(&self.target);
                 Err(error)
             }
         }
@@ -303,8 +319,8 @@ impl RaftClient {
     async fn connection<E: std::error::Error>(
         &self,
     ) -> Result<Connection, RPCError<NodeId, NodeAddr, E>> {
-        let mut cached = self.connection.lock().await;
-        if let Some(connection) = cached.as_ref() {
+        let mut connections = self.connections.lock().await;
+        if let Some(connection) = connections.get(&self.target) {
             return Ok(connection.clone());
         }
 
@@ -318,7 +334,7 @@ impl RaftClient {
             // member who is simply offline, and members here are often offline.
             .unreachable()?;
 
-        *cached = Some(connection.clone());
+        connections.insert(self.target, connection.clone());
         Ok(connection)
     }
 }

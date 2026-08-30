@@ -6,12 +6,7 @@
 //! state machine to the allowlist, and one closes connections the change
 //! invalidates (§4.4).
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-    sync::{Arc, Mutex, PoisonError},
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, alpn, ping::PingProtocol};
@@ -27,8 +22,8 @@ use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
     raft::{
-        LogStore, NodeAddr, ProposeError, RaftClient, RaftNetworkFactoryImpl, RaftProtocol,
-        StateMachineStore, TypeConfig,
+        LogStore, NodeAddr, ProposeError, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
+        TypeConfig,
     },
     signed::SignedEvent,
     state::MembershipState,
@@ -113,11 +108,12 @@ pub struct MembershipNode {
     /// and dropping it would freeze membership at whatever was last applied.
     allowlist_updates: JoinHandle<()>,
     evictions: JoinHandle<()>,
-    /// Clients for peers this node has forwarded a proposal to.
+    /// The same factory openraft replicates through.
     ///
-    /// Keyed by leader, because leadership moves and the previous leader's
-    /// client stays useful when it comes back.
-    forward_clients: Mutex<HashMap<RawMemberId, RaftClient>>,
+    /// Kept rather than built per forward so a forwarded proposal travels over
+    /// the connection this node already has to that peer, instead of opening a
+    /// second one for the purpose.
+    network: RaftNetworkFactoryImpl,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -162,10 +158,13 @@ impl MembershipNode {
         let log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
         let state_machine = StateMachineStore::from_database(db).map_err(raft_failed)?;
 
+        // One factory, cloned into Raft: clones share a connection per peer, so
+        // replication and a forwarded proposal use the same one.
+        let network = RaftNetworkFactoryImpl::new(endpoint.clone());
         let raft = Raft::new(
             RawMemberId::from(id),
             Arc::new(Config::default().validate().map_err(raft_failed)?),
-            RaftNetworkFactoryImpl::new(endpoint.clone()),
+            network.clone(),
             log,
             state_machine.clone(),
         )
@@ -189,7 +188,7 @@ impl MembershipNode {
             router,
             allowlist_updates,
             evictions,
-            forward_clients: Mutex::new(HashMap::new()),
+            network,
         })
     }
 
@@ -332,42 +331,14 @@ impl MembershipNode {
         event: SignedEvent,
     ) -> std::result::Result<(), ProposeError> {
         tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
-        self.client_for(leader, addr).await.propose(event).await
-    }
-
-    /// A client for `leader`, reused across forwards.
-    ///
-    /// Building one per proposal would pay a fresh dial and TLS handshake to a
-    /// peer this node almost certainly already has a live raft connection to —
-    /// and now that a failed forward is retried, it would pay it again on every
-    /// attempt. `RaftClient` caches its own connection, so keeping the client
-    /// keeps the connection.
-    async fn client_for(&self, leader: RawMemberId, addr: NodeAddr) -> RaftClient {
-        // Scoped so the guard is gone before the await below. Holding a
-        // blocking lock across a suspension point is how an executor gets
-        // wedged, and clippy is right to refuse it.
-        {
-            let clients = self.lock_clients();
-            if let Some(client) = clients.get(&leader) {
-                return client.clone();
-            }
-        }
-
-        let client = RaftNetworkFactoryImpl::new(self.router.endpoint().clone())
+        // Cheap: `new_client` only records where to dial, and the connection it
+        // ends up using is the one already open for replication.
+        self.network
+            .clone()
             .new_client(leader, &addr)
-            .await;
-
-        // Two concurrent proposals to a new leader can both get here and one
-        // client is discarded. That costs nothing — `new_client` does not dial,
-        // it only records where to — and is cheaper than holding the lock.
-        self.lock_clients().insert(leader, client.clone());
-        client
-    }
-
-    fn lock_clients(&self) -> std::sync::MutexGuard<'_, HashMap<RawMemberId, RaftClient>> {
-        self.forward_clients
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .await
+            .propose(event)
+            .await
     }
 
     /// Stops consensus, the router and the background tasks.
