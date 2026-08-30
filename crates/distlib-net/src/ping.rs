@@ -64,6 +64,11 @@ impl ProtocolHandler for PingProtocol {
 }
 
 /// Pings `addr` and returns the echoed payload, without the `pong:` prefix.
+///
+/// Dials fresh every time rather than using [`crate::Connections`], which is
+/// deliberate now that a pool exists next door. This is a liveness probe: over
+/// a pooled connection it would answer "is this cached connection still alive",
+/// when the question being asked is "can I reach this member now".
 pub async fn ping(endpoint: &Endpoint, addr: EndpointAddr, payload: &[u8]) -> Result<Vec<u8>> {
     ping_with_timeout(endpoint, addr, payload, DEFAULT_TIMEOUT).await
 }

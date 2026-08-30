@@ -88,7 +88,7 @@ impl Node {
         let raft = Raft::new(
             RawMemberId::from(me),
             config,
-            RaftNetworkFactoryImpl::new(endpoint.clone()),
+            RaftNetworkFactoryImpl::new(endpoint.clone(), distlib_net::Connections::new()),
             log,
             state_machine,
         )

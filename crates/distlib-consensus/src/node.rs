@@ -9,7 +9,7 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use distlib_core::{MemberId, RawMemberId};
-use distlib_net::{AllowlistHooks, AllowlistWriter, alpn, ping::PingProtocol};
+use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
 use iroh::{Endpoint, protocol::Router};
 use openraft::{
     Config, Raft, RaftNetworkFactory, ServerState,
@@ -114,6 +114,8 @@ pub struct MembershipNode {
     /// the connection this node already has to that peer, instead of opening a
     /// second one for the purpose.
     network: RaftNetworkFactoryImpl,
+    /// Every connection this node holds, across protocols.
+    connections: Connections,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -158,9 +160,11 @@ impl MembershipNode {
         let log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
         let state_machine = StateMachineStore::from_database(db).map_err(raft_failed)?;
 
-        // One factory, cloned into Raft: clones share a connection per peer, so
-        // replication and a forwarded proposal use the same one.
-        let network = RaftNetworkFactoryImpl::new(endpoint.clone());
+        // The node's connections, shared by everything it speaks: openraft's
+        // replication, forwarded proposals, and whatever protocols come later.
+        // One factory, cloned into Raft, so all of them draw on the same set.
+        let connections = Connections::new();
+        let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
         let raft = Raft::new(
             RawMemberId::from(id),
             Arc::new(Config::default().validate().map_err(raft_failed)?),
@@ -189,12 +193,18 @@ impl MembershipNode {
             allowlist_updates,
             evictions,
             network,
+            connections,
         })
     }
 
     /// This node's identity.
     pub fn id(&self) -> MemberId {
         self.id
+    }
+
+    /// The connections this node holds, for any protocol added alongside Raft.
+    pub fn connections(&self) -> &Connections {
+        &self.connections
     }
 
     /// The membership derived from the log so far.

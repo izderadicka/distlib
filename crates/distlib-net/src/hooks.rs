@@ -92,7 +92,7 @@ impl AllowlistHooks {
     fn is_live(handle: &WeakConnectionHandle) -> bool {
         handle
             .upgrade()
-            .is_some_and(|connection| connection.close_reason().is_none())
+            .is_some_and(|connection| crate::connections::is_live(&connection))
     }
 
     /// One pass: close what is no longer admitted, forget what has died.

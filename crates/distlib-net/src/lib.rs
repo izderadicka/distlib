@@ -9,6 +9,7 @@
 
 pub mod allowlist;
 pub mod alpn;
+pub mod connections;
 pub mod endpoint;
 pub mod error;
 pub mod hooks;
@@ -16,6 +17,7 @@ pub mod node;
 pub mod ping;
 
 pub use allowlist::{Allowlist, AllowlistWriter, allowlist};
+pub use connections::Connections;
 pub use endpoint::build_endpoint;
 pub use error::{NetError, Result};
 pub use hooks::{AllowlistHooks, close_code};

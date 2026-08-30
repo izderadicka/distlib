@@ -15,10 +15,8 @@
 // state_machine.rs make.
 #![allow(clippy::result_large_err)]
 
-use std::{collections::HashMap, sync::Arc};
-
 use distlib_core::{MemberId, RawMemberId};
-use distlib_net::alpn;
+use distlib_net::{Connections, alpn};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
     endpoint::Connection,
@@ -34,7 +32,6 @@ use openraft::{
     },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use crate::{
     error::ConsensusError,
@@ -161,15 +158,12 @@ impl ProtocolHandler for RaftProtocol {
 #[derive(Debug, Clone)]
 pub struct RaftNetworkFactoryImpl {
     endpoint: Endpoint,
-    /// One connection per peer, shared by every client this factory makes.
+    /// The node's connections, not this factory's.
     ///
-    /// Held here rather than per client because a node talks to the same peer
-    /// for several reasons at once — openraft keeps a client per peer for
-    /// replication, and a proposal being forwarded needs one too. Caching in
-    /// the client would open a second connection to a peer already connected;
-    /// caching here means all of them multiplex over the one QUIC connection,
-    /// which is what it is for.
-    connections: Arc<Mutex<HashMap<NodeId, Connection>>>,
+    /// Passed in rather than created here so every protocol on the node shares
+    /// one set: openraft keeps a client per peer for replication, a forwarded
+    /// proposal needs one too, and phase 1b's log replication will as well.
+    connections: Connections,
 }
 
 impl RaftNetworkFactoryImpl {
@@ -177,10 +171,10 @@ impl RaftNetworkFactoryImpl {
     ///
     /// The endpoint must offer [`alpn::RAFT`] and have the allowlist hooks
     /// installed; both come from `distlib_net::endpoint::configure`.
-    pub fn new(endpoint: Endpoint) -> Self {
+    pub fn new(endpoint: Endpoint, connections: Connections) -> Self {
         Self {
             endpoint,
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections,
         }
     }
 }
@@ -195,7 +189,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             endpoint: self.endpoint.clone(),
             target,
             addr: node.clone(),
-            connections: Arc::clone(&self.connections),
+            connections: self.connections.clone(),
         }
     }
 }
@@ -244,10 +238,9 @@ pub struct RaftClient {
     endpoint: Endpoint,
     target: NodeId,
     addr: NodeAddr,
-    /// Shared with every other client from the same factory, so a peer is
-    /// dialled once however many reasons there are to talk to it. Dropped on
-    /// failure so the next call redials.
-    connections: Arc<Mutex<HashMap<NodeId, Connection>>>,
+    /// The node's connections. Shared with every other protocol, so a peer is
+    /// dialled once per protocol however many callers want it.
+    connections: Connections,
 }
 
 impl RaftClient {
@@ -290,9 +283,11 @@ impl RaftClient {
         match self.exchange(request).await {
             Ok(response) => Ok(response),
             Err(error) => {
-                // Only this peer's entry: a failure here says nothing about
-                // connections to anybody else.
-                self.connections.lock().await.remove(&self.target);
+                // Only this peer's raft connection: a failure here says nothing
+                // about other peers, or about other protocols to this one.
+                if let Ok(peer) = MemberId::try_from(self.target) {
+                    self.connections.forget(peer, alpn::RAFT);
+                }
                 Err(error)
             }
         }
@@ -319,23 +314,16 @@ impl RaftClient {
     async fn connection<E: std::error::Error>(
         &self,
     ) -> Result<Connection, RPCError<NodeId, NodeAddr, E>> {
-        let mut connections = self.connections.lock().await;
-        if let Some(connection) = connections.get(&self.target) {
-            return Ok(connection.clone());
-        }
-
+        let peer = MemberId::try_from(self.target).unreachable()?;
         let addr = self.endpoint_addr()?;
-        let connection = self
-            .endpoint
-            .connect(addr, alpn::RAFT)
+
+        self.connections
+            .get_or_connect(&self.endpoint, peer, addr, alpn::RAFT)
             .await
             // Unreachable rather than Network: openraft backs off before
             // retrying an unreachable peer, which is the right response to a
             // member who is simply offline, and members here are often offline.
-            .unreachable()?;
-
-        connections.insert(self.target, connection.clone());
-        Ok(connection)
+            .unreachable()
     }
 }
 
