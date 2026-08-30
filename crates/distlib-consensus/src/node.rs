@@ -32,6 +32,15 @@ use crate::{
 /// The file holding a node's whole Raft state, under its data directory.
 pub const RAFT_DB: &str = "raft.redb";
 
+/// The ALPNs a [`MembershipNode`] serves.
+///
+/// What the endpoint must advertise, since an endpoint offering a protocol its
+/// router cannot handle negotiates it and then refuses every stream. Wider than
+/// [`alpn::registered`], which covers only what `distlib-net` can serve alone.
+pub fn alpns() -> Vec<Vec<u8>> {
+    vec![alpn::PING.to_vec(), alpn::RAFT.to_vec()]
+}
+
 /// How many times a proposal re-checks who the leader is before giving up.
 ///
 /// More than one because the answer can change underneath: the leader named in
@@ -175,8 +184,8 @@ impl MembershipNode {
         .await
         .map_err(raft_failed)?;
 
-        // Ping and Raft: exactly what this router serves, which is what the
-        // endpoint must have been told to advertise.
+        // Exactly `alpns()`, which is what the endpoint must have been told to
+        // advertise.
         let router = Router::builder(endpoint)
             .accept(alpn::PING, PingProtocol)
             .accept(alpn::RAFT, RaftProtocol::new(raft.clone()))
@@ -202,6 +211,11 @@ impl MembershipNode {
         self.id
     }
 
+    /// The endpoint this node serves and dials on.
+    pub fn endpoint(&self) -> &Endpoint {
+        self.router.endpoint()
+    }
+
     /// The connections this node holds, for any protocol added alongside Raft.
     pub fn connections(&self) -> &Connections {
         &self.connections
@@ -210,6 +224,15 @@ impl MembershipNode {
     /// The membership derived from the log so far.
     pub fn membership(&self) -> MembershipState {
         self.state_machine.membership()
+    }
+
+    /// Watches the membership, for whoever has to react to it changing.
+    ///
+    /// A running node holds the database exclusively, so this is the only way
+    /// anything outside the process can see the group: `distlib run` logs each
+    /// change rather than leaving observers to poll a file they cannot open.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<MembershipState> {
+        self.state_machine.subscribe()
     }
 
     /// The Raft, for callers that need to propose or inspect it.

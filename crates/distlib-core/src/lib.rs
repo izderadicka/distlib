@@ -10,7 +10,7 @@ pub mod id;
 pub mod identity;
 pub mod paths;
 
-pub use config::{Config, NetConfig, RelayMode};
+pub use config::{Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;
 pub use id::{GroupId, ItemId, MemberId, RawMemberId};
 pub use paths::DataDir;

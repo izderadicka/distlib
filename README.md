@@ -7,18 +7,23 @@ and no account to sign up for.
 Every member is an ed25519 keypair. There is nothing to steal server-side and nothing
 to revoke except membership itself. Nodes connect peer-to-peer over
 [iroh](https://iroh.computer) (QUIC, with hole-punching through relays when a direct
-path is not available), and a node refuses to talk to anyone outside its allowlist —
-in both directions.
+path is not available), and a node refuses to talk to anyone outside the group — in
+both directions.
+
+Who is in the group is decided by the group. Members are admitted and expelled through
+a signed, replicated log that every node folds into the same answer, and each node
+enforces *its own copy* of that answer. There is no administrator and no config file
+to edit.
 
 See [docs/distlib-plan.md](docs/distlib-plan.md) for the design, and
 [docs/plan-deltas.md](docs/plan-deltas.md) for where the implementation has
 deliberately diverged from it.
 
-> **Status: phase 0.** Identity, configuration, transport and membership enforcement
-> work. There is no catalogue, no content transfer, no consensus and no UI yet — the
-> only thing two nodes can currently do is prove they can reach each other. The
-> allowlist is static, read from the config file; from phase 1 it comes from a
-> replicated membership log.
+> **Status: phase 1a.** Identity, transport, and the membership log work: a group can
+> be founded, members admitted and expelled, and every node derives what it will talk
+> to from the committed log. There is no catalogue, no content transfer and no UI yet.
+> Members who are not part of the core group cannot yet follow the log — that is
+> phase 1b — so for now every member is a founder.
 
 ## Build
 
@@ -28,10 +33,10 @@ Requires Rust 1.91 or newer.
 cargo build --release
 ```
 
-## Quickstart: two nodes, one ping
+## Quickstart: found a group
 
-Each node keeps everything under a single data directory, so a second node on the
-same machine is just a second `--data-dir`.
+Each node keeps everything under a single data directory, so a second node on the same
+machine is just a second `--data-dir`.
 
 **1. Create both identities.**
 
@@ -44,81 +49,123 @@ Each prints a member id — the node's public key, and the only name it has:
 
 ```
 wrote      /tmp/a/config.toml
-identity   46db77a915c57d0e8861986ca17e8c6e0f1c99d077fcd5b97de1ff8874752bb6 (new)
+identity   07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92 (new)
 data dir   /tmp/a
 ```
 
-`init` is safe to run twice: it reports an existing identity rather than replacing
-it. The key is written to `<data-dir>/keys/node.key` with mode `0600`, and a node
-that finds it readable by anyone else refuses to start.
+`init` is safe to run twice: it reports an existing identity rather than replacing it.
+The key is written to `<data-dir>/keys/node.key` with mode `0600`, and a node that
+finds it readable by anyone else refuses to start.
 
-**2. Admit each other.** Membership is mutual and explicit — put each node's id in
-the other's `allowlist` in `<data-dir>/config.toml`, and give A a fixed port so B
-knows where to find it:
+**2. Agree on the founding core group.** This is the one thing that cannot come from
+the log, because it is what makes reading the log possible — founders have to reach
+each other to replicate the first entry, and they will not connect to anyone they have
+not been told about. So it is stated once, identically, in *both* configs:
 
 ```toml
-# /tmp/a/config.toml
+# /tmp/a/config.toml — and the same [consensus] block in /tmp/b/config.toml
 [net]
-bind_addr_v4 = "127.0.0.1:11204"
+bind_addr_v4 = "127.0.0.1:11204"   # 11205 for B
 relay_mode   = "disabled"          # loopback needs no relay
-allowlist    = ["<B's member id>"]
+
+[consensus]
+core = [
+  { member = "<A's id>", name = "alice", addrs = ["127.0.0.1:11204"] },
+  { member = "<B's id>", name = "bob",   addrs = ["127.0.0.1:11205"] },
+]
 ```
 
-```toml
-# /tmp/b/config.toml
-[net]
-bind_addr_v4 = "127.0.0.1:0"
-relay_mode   = "disabled"
-allowlist    = ["<A's member id>"]
-```
+Pin a port on every core node. Founding writes each node's address into the log, and
+an OS-chosen port is a different port after the next restart. Across the internet
+rather than loopback, leave `relay_mode = "default"` and drop `addrs`: the relays
+handle discovery and hole-punching, and the member id is enough.
 
-**3. Run A**, in one terminal:
+**3. Start B**, which has nothing to do but wait:
 
 ```sh
-distlib --data-dir /tmp/a run
+distlib --data-dir /tmp/b run
 ```
 
 ```
-INFO node started member=46db77a915c57d0e…
-INFO listening addr=127.0.0.1:11204
+INFO node started member=d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84
+INFO listening addr=127.0.0.1:11205
+WARN this node is in no group; found one with `distlib run --found-group`, or wait for a founder to admit it
 ```
 
-**4. Ping it from B**, in another:
+**4. Found the group from A**, in another terminal:
 
 ```sh
-distlib --data-dir /tmp/b ping <A's member id> --addr 127.0.0.1:11204
-ping
+distlib --data-dir /tmp/a run --found-group
 ```
 
-Across the internet rather than loopback, leave `relay_mode = "default"` and drop
-`--addr`: the relays handle discovery and hole-punching, and the member id is enough.
+```
+INFO founding the group founders="alice (07238d74…), bob (d7e1c2bc…)"
+INFO membership group=a287e5e86a780cd4… members=2 core=2 who="alice (07238d74…), bob (d7e1c2bc…)"
+```
 
-## Watching the allowlist work
+B logs the same line a moment later, without having been told anything: it received
+the founding entry by replication and folded it into the same membership. A couple of
+`WARN` lines from openraft around the election are normal — it logs its own bookkeeping
+at that level.
 
-Take B out of A's `allowlist`, restart A, and ping again:
+Run `--found-group` on exactly one founder, once. The others just `run`.
+
+**5. Look at the group.** Stop a node and ask it who it thinks is in the group:
+
+```sh
+distlib --data-dir /tmp/b members
+```
 
 ```
-Error: ping to 46db77a915c57d0e… failed
+group      a287e5e86a780cd49f6269e794faaaa2e3d3c28cc6f7c8d26d73bd50e9168529
+members    2 (2 core)
+  alice (07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92)  core
+  bob (d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84)  core
+```
+
+It needs the node stopped: the database is held exclusively by the running process.
+While a node runs, it logs the membership on every change instead — the `INFO
+membership` line above is how you watch a group live.
+
+## Watching membership do its job
+
+Membership is not advisory. Start A again, and have a node that is in no group try to
+reach it:
+
+```sh
+distlib --data-dir /tmp/c ping <A's id> --addr 127.0.0.1:11204
+```
+
+```
+Error: ping to 07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92 failed
 
 Caused by:
-    46db77a915c57d0e… is not a member, or does not consider us one
+    07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92 is not a member, or does not consider us one
 ```
 
 A logs who tried:
 
 ```
-INFO rejected a connection from a non-member peer=05469a8446acb8b4…
+INFO rejected a connection from a non-member peer=000f146b2481608c…
 ```
 
-The same happens in the other direction — a node will not *dial* someone missing
-from its own allowlist, and refuses before a single packet leaves the machine:
+while B, who is in the log, is answered:
+
+```sh
+distlib --data-dir /tmp/b ping <A's id> --addr 127.0.0.1:11204
+ping
+```
+
+Nothing in A's config file mentions C, or B. A admits B and refuses C entirely because
+of what its copy of the log says. The same holds in the other direction — a node will
+not *dial* a non-member either, and refuses before a packet leaves the machine:
 
 ```
-INFO refused to dial a non-member peer=46db77a915c57d0e… alpn=distlib/ping/0
+INFO refused to dial a non-member peer=46db77a915c57d0e… alpn=distlib/raft/0
 ```
 
-That check lives on the endpoint rather than in any one protocol, which is what
-makes it hold for every protocol added later.
+That check lives on the endpoint rather than in any one protocol, which is what makes
+it hold for every protocol added later.
 
 ## Commands
 
@@ -126,10 +173,15 @@ makes it hold for every protocol added later.
 |---|---|
 | `distlib init [--force]` | Create the data directory, generate the identity, write a starter config. `--force` replaces an existing identity — which is how a node leaves its group. |
 | `distlib run` | Run the node until `Ctrl-C`. |
-| `distlib status [--online]` | Identity, paths, relay mode, allowlist size. `--online` also binds and prints the dialable address. |
+| `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
+| `distlib members` | List the group as this node's log has it. Needs the node stopped. |
+| `distlib status [--online]` | Identity, paths, relay mode, group and standing. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
 
 Global flags: `--data-dir/-d`, `--config/-c`, `--verbose/-v` (repeat for more).
+
+`-v` also turns openraft's own logging up; it is kept at `warn` by default, where it
+would otherwise bury everything else.
 
 ## Configuration
 
@@ -141,9 +193,13 @@ underscore:
 DISTLIB_NET__BIND_ADDR_V4=0.0.0.0:11204 distlib run
 ```
 
+`[consensus] core` is the only place membership is ever configured, it is only read
+before a group exists, and it is never consulted again once one does. Everything else
+about who belongs comes from the log.
+
 The data directory is the one thing that cannot be configured in the file, since the
-file lives inside it. Use `--data-dir` or `DISTLIB_DATA_DIR`; setting `data_dir` in
-the config is an error rather than being silently ignored.
+file lives inside it. Use `--data-dir` or `DISTLIB_DATA_DIR`; setting `data_dir` in the
+config is an error rather than being silently ignored.
 
 ## Development
 

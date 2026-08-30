@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 distlib-core = { workspace = true }
 distlib-net = { workspace = true }
+distlib-consensus = { workspace = true }
 iroh = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

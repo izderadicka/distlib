@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init { force } => commands::init(&paths, force),
-        Command::Run => commands::run(&paths).await,
+        Command::Run { found_group } => commands::run(&paths, found_group).await,
+        Command::Members => commands::members(&paths),
         Command::Status { online } => commands::status(&paths, online).await,
         Command::Ping {
             member,
@@ -55,13 +56,24 @@ async fn main() -> Result<()> {
 /// `-v` wins when given, because someone who passes it is asking for output
 /// now and should not have to notice that `RUST_LOG` is set in their shell.
 /// Otherwise `DISTLIB_LOG` is consulted, then `RUST_LOG`, then a quiet default.
+///
+/// openraft is turned down a level in every case. It logs each election, vote
+/// and state transition at `info`, including a debug-formatted dump of the
+/// whole `RaftState` at startup — detail for someone debugging consensus, and
+/// noise thick enough at the default level to bury this node's own output.
 fn init_tracing(verbose: u8) {
     let filter = match verbose {
         0 => EnvFilter::try_from_env("DISTLIB_LOG")
             .or_else(|_| EnvFilter::try_from_default_env())
-            .unwrap_or_else(|_| EnvFilter::new("info")),
-        1 => EnvFilter::new("info,distlib=debug,distlib_net=debug,distlib_core=debug"),
-        _ => EnvFilter::new("debug,distlib=trace,distlib_net=trace,distlib_core=trace"),
+            .unwrap_or_else(|_| EnvFilter::new("info,openraft=warn")),
+        1 => EnvFilter::new(
+            "info,distlib=debug,distlib_net=debug,distlib_core=debug,\
+             distlib_consensus=debug,openraft=info",
+        ),
+        _ => EnvFilter::new(
+            "debug,distlib=trace,distlib_net=trace,distlib_core=trace,\
+             distlib_consensus=trace,openraft=debug",
+        ),
     };
 
     tracing_subscriber::fmt()

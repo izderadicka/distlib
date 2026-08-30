@@ -979,6 +979,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "distlib-consensus",
  "distlib-core",
  "distlib-net",
  "iroh",

@@ -6,7 +6,7 @@ use iroh::{
     endpoint::{Builder, RelayMode, presets},
 };
 
-use crate::{alpn, error::NetError, error::Result, hooks::AllowlistHooks};
+use crate::{error::NetError, error::Result, hooks::AllowlistHooks};
 
 /// Binds an endpoint for this node.
 ///
@@ -19,10 +19,15 @@ use crate::{alpn, error::NetError, error::Result, hooks::AllowlistHooks};
 ///   provider. No address lookup is configured, so an endpoint in these modes
 ///   makes no DNS or pkarr requests and reaches only peers it is given explicit
 ///   addresses for.
+///
+/// `alpns` must be exactly what the caller's router will serve — see
+/// [`configure`]. [`crate::alpn::registered`] is the right answer only for a node
+/// serving nothing but [`crate::Node`]'s protocols.
 pub async fn build_endpoint(
     secret_key: SecretKey,
     config: &NetConfig,
     hooks: AllowlistHooks,
+    alpns: Vec<Vec<u8>>,
 ) -> Result<Endpoint> {
     let builder = match config.relay_mode {
         ConfigRelayMode::Default => Endpoint::builder(presets::N0),
@@ -34,7 +39,7 @@ pub async fn build_endpoint(
         }
     };
 
-    Ok(configure(builder, secret_key, hooks, alpn::registered())
+    Ok(configure(builder, secret_key, hooks, alpns)
         .bind_addr(config.bind_addr_v4)
         .map_err(|source| NetError::InvalidRelayUrl {
             url: source.to_string(),
@@ -50,9 +55,9 @@ pub async fn build_endpoint(
 /// enforcement as production. A test that bypassed the hooks would be testing a
 /// configuration nothing ships.
 ///
-/// `alpns` is a parameter rather than always [`alpn::registered`] because the
+/// `alpns` is a parameter rather than always [`crate::alpn::registered`] because the
 /// endpoint must advertise exactly what its router serves, and that depends on
-/// the caller: a node running consensus serves [`alpn::RAFT`] too, which
+/// the caller: a node running consensus serves [`crate::alpn::RAFT`] too, which
 /// `distlib-net` cannot handle itself.
 ///
 /// The hooks are passed in rather than built here so the caller can keep a

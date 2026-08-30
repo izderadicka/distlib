@@ -46,13 +46,11 @@ impl Peer {
         let (writer, reader) = allowlist(id, bootstrap);
         let hooks = AllowlistHooks::new(reader);
 
-        let mut alpns = distlib_net::alpn::registered();
-        alpns.push(distlib_net::alpn::RAFT.to_vec());
         let endpoint = configure(
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            alpns,
+            distlib_consensus::alpns(),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
