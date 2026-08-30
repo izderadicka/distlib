@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
-use iroh::{Endpoint, protocol::Router};
+use iroh::{Endpoint, SecretKey, protocol::Router};
 use openraft::{
     Config, Raft, RaftNetworkFactory, ServerState,
     error::{ClientWriteError, RaftError},
@@ -248,7 +248,7 @@ impl MembershipNode {
     pub async fn init_group(
         &self,
         founders: Vec<(MemberRecord, NodeAddr)>,
-        secret_key: &iroh::SecretKey,
+        secret_key: &SecretKey,
     ) -> Result<()> {
         let voters: BTreeMap<_, _> = founders
             .iter()
@@ -271,10 +271,11 @@ impl MembershipNode {
             .await
             .map_err(raft_failed)?;
 
-        let at = Timestamp::now();
-        let event = MembershipEvent::found(records, at)?;
-        self.propose(SignedEvent::sign(secret_key, event, at)?)
-            .await
+        self.propose(
+            MembershipEvent::found(records, Timestamp::now())?,
+            secret_key,
+        )
+        .await
     }
 
     /// Commits a signed event through Raft, forwarding to the leader if needed.
@@ -289,7 +290,53 @@ impl MembershipNode {
     /// Returns once the event is committed. If this node is the leader that is
     /// also when it has been applied here; otherwise it arrives with the next
     /// replication.
-    pub async fn propose(&self, event: SignedEvent) -> Result<()> {
+    ///
+    /// Signing happens here rather than in the caller because a proposal is
+    /// made *against a particular membership* — see
+    /// [`MembershipState::changed_at`] — and this node is the one that knows
+    /// which membership it has seen. A caller handing in a pre-signed event
+    /// would be stating a view it had no way to be sure of.
+    pub async fn propose(&self, event: MembershipEvent, secret_key: &SecretKey) -> Result<()> {
+        match self.propose_once(&event, secret_key).await {
+            // Somebody else changed the membership between reading it and
+            // committing this. Catch up to what the group actually is, then
+            // propose against that.
+            //
+            // Deliberately not re-signing with the `current` from the error:
+            // that would assert a view of the group this node has not seen,
+            // which is the exact thing the check exists to prevent. Waiting
+            // until we really hold it costs a replication round and keeps the
+            // statement honest.
+            Err(NodeError::Event(ConsensusError::StaleProposal { current, .. })) => {
+                self.catch_up_to(current).await?;
+                self.propose_once(&event, secret_key).await
+            }
+            other => other,
+        }
+    }
+
+    /// Waits until this node's membership has reached `changed_at`.
+    async fn catch_up_to(&self, changed_at: u64) -> Result<()> {
+        let mut memberships = self.state_machine.subscribe();
+        tokio::time::timeout(LEADERSHIP_TIMEOUT, async {
+            while memberships.borrow_and_update().changed_at() < changed_at {
+                if memberships.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await
+        .map_err(|_| NodeError::NoLeader)
+    }
+
+    /// One attempt: sign against the membership this node holds, and commit it.
+    async fn propose_once(&self, event: &MembershipEvent, secret_key: &SecretKey) -> Result<()> {
+        let event = SignedEvent::sign(
+            secret_key,
+            event.clone(),
+            Timestamp::now(),
+            self.membership().changed_at(),
+        )?;
         let mut unreached = None;
 
         for _ in 0..PROPOSE_ATTEMPTS {

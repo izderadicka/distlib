@@ -39,20 +39,46 @@ impl Signer {
         }
     }
 
-    fn sign(&self, event: MembershipEvent) -> SignedEvent {
-        SignedEvent::sign(&self.secret, event, Timestamp::from_millis(1)).unwrap()
+    fn sign(&self, event: MembershipEvent, changed_at: u64) -> SignedEvent {
+        SignedEvent::sign(&self.secret, event, Timestamp::from_millis(1), changed_at).unwrap()
     }
+}
+
+/// `who` proposes `event` against the membership as it stands, applied as the
+/// next log entry.
+///
+/// The index only has to be monotonic here — nothing in this file is a real
+/// Raft log — but it must move, because it is what the next proposal is
+/// checked against.
+fn propose(
+    state: &mut MembershipState,
+    who: &Signer,
+    event: MembershipEvent,
+) -> Result<(), ConsensusError> {
+    let seen = state.changed_at();
+    let signed = who.sign(event, seen);
+    state.apply(seen + 1, &signed)
+}
+
+/// Applies an already-signed event as the next entry.
+///
+/// For the cases that build one by hand — a tampered signature, a deliberately
+/// stale `changed_at` — where [`propose`] would sign a correct one.
+fn apply_next(state: &mut MembershipState, signed: &SignedEvent) -> Result<(), ConsensusError> {
+    let index = state.changed_at() + 1;
+    state.apply(index, signed)
 }
 
 /// A founded group with `alice` as its single founder.
 fn founded() -> (MembershipState, Signer) {
     let alice = Signer::generate();
     let mut state = MembershipState::new();
-    state
-        .apply(&alice.sign(
-            MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap(),
-        ))
-        .unwrap();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap(),
+    )
+    .unwrap();
     (state, alice)
 }
 
@@ -80,9 +106,13 @@ fn a_group_is_founded_only_once() {
 
     let again = alice.sign(
         MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(2)).unwrap(),
+        state.changed_at(),
     );
 
-    assert_eq!(state.apply(&again), Err(ConsensusError::AlreadyFounded));
+    assert_eq!(
+        apply_next(&mut state, &again),
+        Err(ConsensusError::AlreadyFounded)
+    );
 }
 
 #[test]
@@ -90,11 +120,17 @@ fn events_before_founding_are_refused() {
     let alice = Signer::generate();
     let mut state = MembershipState::new();
 
-    let event = alice.sign(MembershipEvent::MemberAdded {
-        member: alice.record("alice"),
-    });
+    let event = alice.sign(
+        MembershipEvent::MemberAdded {
+            member: alice.record("alice"),
+        },
+        state.changed_at(),
+    );
 
-    assert_eq!(state.apply(&event), Err(ConsensusError::NotFounded));
+    assert_eq!(
+        apply_next(&mut state, &event),
+        Err(ConsensusError::NotFounded)
+    );
 }
 
 #[test]
@@ -104,11 +140,13 @@ fn a_founder_must_be_in_their_own_founding_set() {
     let bob = Signer::generate();
     let mut state = MembershipState::new();
 
-    let event = alice
-        .sign(MembershipEvent::found(vec![bob.record("bob")], Timestamp::from_millis(1)).unwrap());
+    let event = alice.sign(
+        MembershipEvent::found(vec![bob.record("bob")], Timestamp::from_millis(1)).unwrap(),
+        state.changed_at(),
+    );
 
     assert_eq!(
-        state.apply(&event),
+        apply_next(&mut state, &event),
         Err(ConsensusError::FounderNotIncluded { proposer: alice.id })
     );
 }
@@ -140,17 +178,20 @@ fn a_repeated_founder_is_refused_on_apply() {
     let bob = Signer::generate();
     let mut state = MembershipState::new();
 
-    let event = alice.sign(MembershipEvent::GroupFounded {
-        group_id: GroupId::from_bytes([7; 32]),
-        founders: vec![
-            alice.record("alice"),
-            bob.record("bob"),
-            alice.record("dup"),
-        ],
-    });
+    let event = alice.sign(
+        MembershipEvent::GroupFounded {
+            group_id: GroupId::from_bytes([7; 32]),
+            founders: vec![
+                alice.record("alice"),
+                bob.record("bob"),
+                alice.record("dup"),
+            ],
+        },
+        state.changed_at(),
+    );
 
     assert_eq!(
-        state.apply(&event),
+        apply_next(&mut state, &event),
         Err(ConsensusError::DuplicateFounder { member: alice.id })
     );
 }
@@ -194,12 +235,15 @@ fn a_non_member_cannot_propose() {
     let (mut state, _alice) = founded();
     let outsider = Signer::generate();
 
-    let event = outsider.sign(MembershipEvent::MemberAdded {
-        member: outsider.record("outsider"),
-    });
+    let event = outsider.sign(
+        MembershipEvent::MemberAdded {
+            member: outsider.record("outsider"),
+        },
+        state.changed_at(),
+    );
 
     assert_eq!(
-        state.apply(&event),
+        apply_next(&mut state, &event),
         Err(ConsensusError::ProposerNotAMember {
             proposer: outsider.id
         }),
@@ -211,25 +255,34 @@ fn a_non_member_cannot_propose() {
 fn an_expelled_member_can_no_longer_propose() {
     let (mut state, alice) = founded();
     let bob = Signer::generate();
-    state
-        .apply(&alice.sign(MembershipEvent::MemberAdded {
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
             member: bob.record("bob"),
-        }))
-        .unwrap();
-    state
-        .apply(&alice.sign(MembershipEvent::MemberExpelled {
+        },
+    )
+    .unwrap();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberExpelled {
             member: bob.id,
             reason: "left".to_owned(),
-        }))
-        .unwrap();
+        },
+    )
+    .unwrap();
 
-    let event = bob.sign(MembershipEvent::MemberExpelled {
-        member: alice.id,
-        reason: "revenge".to_owned(),
-    });
+    let event = bob.sign(
+        MembershipEvent::MemberExpelled {
+            member: alice.id,
+            reason: "revenge".to_owned(),
+        },
+        state.changed_at(),
+    );
 
     assert_eq!(
-        state.apply(&event),
+        apply_next(&mut state, &event),
         Err(ConsensusError::ProposerNotAMember { proposer: bob.id })
     );
 }
@@ -248,10 +301,13 @@ fn a_signature_from_the_wrong_key_is_refused() {
     //
     // The event names only Alice, so Mallory's id occurs once (as proposer) and
     // the splice cannot hit the wrong field.
-    let forged = mallory.sign(MembershipEvent::PledgeChanged {
-        member: alice.id,
-        pledge_bytes: 99,
-    });
+    let forged = mallory.sign(
+        MembershipEvent::PledgeChanged {
+            member: alice.id,
+            pledge_bytes: 99,
+        },
+        state.changed_at(),
+    );
     let mut bytes = postcard::to_stdvec(&forged).unwrap();
     let alice_id = postcard::to_stdvec(&alice.id).unwrap();
     let mallory_id = postcard::to_stdvec(&mallory.id).unwrap();
@@ -272,7 +328,7 @@ fn a_signature_from_the_wrong_key_is_refused() {
     let tampered: SignedEvent = postcard::from_bytes(&bytes).unwrap();
     assert!(
         matches!(
-            state.apply(&tampered),
+            apply_next(&mut state, &tampered),
             Err(ConsensusError::BadSignature { .. })
         ),
         "an event re-attributed to another member must not verify"
@@ -285,24 +341,33 @@ fn a_signature_from_the_wrong_key_is_refused() {
 fn expulsion_removes_from_the_allowlist_and_the_core() {
     let (mut state, alice) = founded();
     let bob = Signer::generate();
-    state
-        .apply(&alice.sign(MembershipEvent::MemberAdded {
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
             member: bob.record("bob"),
-        }))
-        .unwrap();
-    state
-        .apply(&alice.sign(MembershipEvent::CoreGroupChanged {
+        },
+    )
+    .unwrap();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::CoreGroupChanged {
             core: vec![alice.id, bob.id],
-        }))
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert!(state.core().contains(&bob.id));
 
-    state
-        .apply(&alice.sign(MembershipEvent::MemberExpelled {
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberExpelled {
             member: bob.id,
             reason: "inactive".to_owned(),
-        }))
-        .unwrap();
+        },
+    )
+    .unwrap();
 
     assert!(!allowlist(&state).contains(&bob.id));
     assert!(
@@ -328,7 +393,7 @@ fn an_expelled_member_can_be_re_admitted() {
             member: bob.record("bob again"),
         },
     ] {
-        state.apply(&alice.sign(event)).unwrap();
+        propose(&mut state, &alice, event).unwrap();
     }
 
     assert!(state.is_member(&bob.id), "the latest event wins");
@@ -340,13 +405,16 @@ fn expelling_a_non_member_is_refused() {
     let (mut state, alice) = founded();
     let stranger = Signer::generate();
 
-    let event = alice.sign(MembershipEvent::MemberExpelled {
-        member: stranger.id,
-        reason: "who?".to_owned(),
-    });
+    let event = alice.sign(
+        MembershipEvent::MemberExpelled {
+            member: stranger.id,
+            reason: "who?".to_owned(),
+        },
+        state.changed_at(),
+    );
 
     assert_eq!(
-        state.apply(&event),
+        apply_next(&mut state, &event),
         Err(ConsensusError::UnknownMember {
             member: stranger.id
         })
@@ -360,11 +428,17 @@ fn the_core_group_must_be_members() {
     let (mut state, alice) = founded();
     let outsider = Signer::generate();
 
-    let event = alice.sign(MembershipEvent::CoreGroupChanged {
-        core: vec![alice.id, outsider.id],
-    });
+    let event = alice.sign(
+        MembershipEvent::CoreGroupChanged {
+            core: vec![alice.id, outsider.id],
+        },
+        state.changed_at(),
+    );
 
-    assert_eq!(state.apply(&event), Err(ConsensusError::InvalidCoreGroup));
+    assert_eq!(
+        apply_next(&mut state, &event),
+        Err(ConsensusError::InvalidCoreGroup)
+    );
 }
 
 #[test]
@@ -373,9 +447,15 @@ fn the_core_group_cannot_be_emptied() {
     // event that would restore its voters.
     let (mut state, alice) = founded();
 
-    let event = alice.sign(MembershipEvent::CoreGroupChanged { core: vec![] });
+    let event = alice.sign(
+        MembershipEvent::CoreGroupChanged { core: vec![] },
+        state.changed_at(),
+    );
 
-    assert_eq!(state.apply(&event), Err(ConsensusError::InvalidCoreGroup));
+    assert_eq!(
+        apply_next(&mut state, &event),
+        Err(ConsensusError::InvalidCoreGroup)
+    );
 }
 
 // --- pledges ----------------------------------------------------------------
@@ -384,14 +464,181 @@ fn the_core_group_cannot_be_emptied() {
 fn a_pledge_change_updates_the_record() {
     let (mut state, alice) = founded();
 
-    state
-        .apply(&alice.sign(MembershipEvent::PledgeChanged {
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::PledgeChanged {
             member: alice.id,
             pledge_bytes: 42,
-        }))
-        .unwrap();
+        },
+    )
+    .unwrap();
 
     assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, 42);
+}
+
+#[test]
+fn a_member_cannot_set_another_members_pledge() {
+    // A pledge is a promise about the proposer's own storage, and §5.5 makes
+    // custodian assignment depend on it. If anyone could rewrite anyone else's,
+    // one member could move everybody's data.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    let refused = propose(
+        &mut state,
+        &alice,
+        MembershipEvent::PledgeChanged {
+            member: bob.id,
+            pledge_bytes: 1 << 40,
+        },
+    );
+
+    assert_eq!(
+        refused,
+        Err(ConsensusError::PledgeNotOwn {
+            proposer: alice.id,
+            member: bob.id,
+        })
+    );
+    assert_eq!(
+        state.member(&bob.id).unwrap().pledge_bytes,
+        0,
+        "the refused event must leave the record alone"
+    );
+}
+
+#[test]
+fn a_non_core_member_cannot_change_the_core_group() {
+    // The core group is the set of Raft voters. A member outside it rewriting
+    // the set could remove every voter but themselves.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+    assert!(!state.core().contains(&bob.id), "bob joined after founding");
+
+    let refused = propose(
+        &mut state,
+        &bob,
+        MembershipEvent::CoreGroupChanged { core: vec![bob.id] },
+    );
+
+    assert_eq!(
+        refused,
+        Err(ConsensusError::NotCoreMember { proposer: bob.id })
+    );
+    assert_eq!(
+        state.core().iter().copied().collect::<Vec<_>>(),
+        vec![alice.id],
+        "the voter set must be untouched"
+    );
+}
+
+#[test]
+fn a_core_member_can_change_the_core_group() {
+    // The other half of the rule: the check must not refuse everybody.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::CoreGroupChanged {
+            core: vec![alice.id, bob.id],
+        },
+    )
+    .unwrap();
+
+    assert!(state.core().contains(&bob.id));
+}
+
+#[test]
+fn a_proposal_against_a_superseded_membership_is_refused() {
+    // What makes a stale view announce itself. Without this a node behind on
+    // the log proposes against a group that has already moved on, and finds out
+    // only from whatever the change happened to do to its proposal.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+
+    // Alice reads the membership here...
+    let seen = state.changed_at();
+
+    // ...and somebody else changes it before her proposal lands.
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    let stale = alice.sign(
+        MembershipEvent::MemberExpelled {
+            member: bob.id,
+            reason: "decided before bob existed".to_owned(),
+        },
+        seen,
+    );
+
+    assert_eq!(
+        apply_next(&mut state, &stale),
+        Err(ConsensusError::StaleProposal {
+            seen,
+            current: state.changed_at(),
+        })
+    );
+    assert!(
+        state.is_member(&bob.id),
+        "the refused event changed nothing"
+    );
+}
+
+#[test]
+fn founding_is_proposed_against_the_empty_membership() {
+    // The uniform case of the rule above: before anything is applied there is
+    // nothing to have seen, so a founder proposes against zero and the check
+    // needs no exception for founding.
+    let alice = Signer::generate();
+    let mut state = MembershipState::new();
+    let founding =
+        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap();
+
+    let invented = alice.sign(founding.clone(), 9);
+    assert_eq!(
+        apply_next(&mut state, &invented),
+        Err(ConsensusError::StaleProposal {
+            seen: 9,
+            current: 0
+        }),
+        "a founder cannot claim to have seen a membership that never existed"
+    );
+
+    propose(&mut state, &alice, founding).unwrap();
+    assert!(state.group_id().is_some());
 }
 
 // --- properties -------------------------------------------------------------
@@ -492,9 +739,11 @@ fn apply_scenario(
             .iter()
             .map(|s| s.record("founder"))
             .collect();
-        let _ = state.apply(
-            &pool[0].sign(MembershipEvent::found(records, Timestamp::from_millis(1)).unwrap()),
+        let signed = pool[0].sign(
+            MembershipEvent::found(records, Timestamp::from_millis(1)).unwrap(),
+            state.changed_at(),
         );
+        let _ = apply_next(state, &signed);
     }
     for &(actor, subject, kind) in &ops[range] {
         let (actor, subject) = (&pool[actor % pool.len()], &pool[subject % pool.len()]);
@@ -511,6 +760,6 @@ fn apply_scenario(
             },
         };
         // Refused events are expected and are exactly what the rules are for.
-        let _ = state.apply(&actor.sign(event));
+        let _ = propose(state, actor, event);
     }
 }

@@ -265,6 +265,8 @@ fn sample_event() -> distlib_consensus::SignedEvent {
         &secret,
         MembershipEvent::found(vec![record], Timestamp::from_millis(1)).unwrap(),
         Timestamp::from_millis(1),
+        // Founding is always proposed against an empty membership.
+        0,
     )
     .unwrap()
 }

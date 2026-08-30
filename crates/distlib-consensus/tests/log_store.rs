@@ -63,6 +63,9 @@ fn entry(term: u64, index: u64) -> Entry<TypeConfig> {
         &secret,
         MembershipEvent::MemberAdded { member: record },
         Timestamp::from_millis(index),
+        // Never folded into a state here — these entries only get written and
+        // read back — so the membership it was proposed against is irrelevant.
+        0,
     )
     .unwrap();
 

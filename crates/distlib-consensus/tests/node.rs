@@ -12,9 +12,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{
-    MemberRecord, MembershipEvent, MembershipNode, NodeAddr, SignedEvent, Timestamp,
-};
+use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, NodeAddr};
 use distlib_core::MemberId;
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
@@ -82,10 +80,6 @@ impl Peer {
             display_name: name.to_owned(),
             pledge_bytes: 0,
         }
-    }
-
-    fn sign(&self, event: MembershipEvent) -> SignedEvent {
-        SignedEvent::sign(&self.secret, event, Timestamp::now()).unwrap()
     }
 }
 
@@ -165,13 +159,16 @@ async fn admitting_a_member_reaches_every_node() {
     let newcomer = MemberId::from(SecretKey::generate().public());
     first
         .node
-        .propose(first.sign(MembershipEvent::MemberAdded {
-            member: MemberRecord {
-                member_id: newcomer,
-                display_name: "newcomer".to_owned(),
-                pledge_bytes: 0,
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "newcomer".to_owned(),
+                    pledge_bytes: 0,
+                },
             },
-        }))
+            &first.secret,
+        )
         .await
         .unwrap();
 
@@ -295,13 +292,16 @@ async fn a_follower_can_propose() {
     let newcomer = MemberId::from(SecretKey::generate().public());
     second
         .node
-        .propose(second.sign(MembershipEvent::MemberAdded {
-            member: MemberRecord {
-                member_id: newcomer,
-                display_name: "admitted by a follower".to_owned(),
-                pledge_bytes: 0,
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "admitted by a follower".to_owned(),
+                    pledge_bytes: 0,
+                },
             },
-        }))
+            &second.secret,
+        )
         .await
         .expect("a follower must be able to propose");
 
@@ -341,10 +341,13 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
     let stranger = MemberId::from(SecretKey::generate().public());
     let error = founder
         .node
-        .propose(founder.sign(MembershipEvent::MemberExpelled {
-            member: stranger,
-            reason: "never joined".to_owned(),
-        }))
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: stranger,
+                reason: "never joined".to_owned(),
+            },
+            &founder.secret,
+        )
         .await
         .expect_err("a refused event must not be reported as success");
 
