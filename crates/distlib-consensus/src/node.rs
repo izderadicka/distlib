@@ -11,7 +11,10 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, alpn, ping::PingProtocol};
 use iroh::{Endpoint, protocol::Router};
-use openraft::{Config, Raft, ServerState};
+use openraft::{
+    Config, Raft, RaftNetworkFactory, ServerState,
+    error::{ClientWriteError, RaftError},
+};
 use redb::Database;
 use tokio::task::JoinHandle;
 
@@ -19,7 +22,8 @@ use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
     raft::{
-        LogStore, NodeAddr, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
+        LogStore, NodeAddr, ProposeError, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
+        TypeConfig,
     },
     signed::SignedEvent,
     state::MembershipState,
@@ -27,6 +31,12 @@ use crate::{
 
 /// The file holding a node's whole Raft state, under its data directory.
 pub const RAFT_DB: &str = "raft.redb";
+
+/// How many times a proposal re-checks who the leader is before giving up.
+///
+/// More than one because the answer can change underneath: the leader named in
+/// a `ForwardToLeader` may have lost the term by the time we dial it.
+const PROPOSE_ATTEMPTS: usize = 3;
 
 /// How long founding waits for the first election to settle.
 ///
@@ -57,6 +67,18 @@ pub enum NodeError {
     /// The event itself was not valid.
     #[error(transparent)]
     Event(#[from] ConsensusError),
+
+    /// The leader was known but would not take the proposal.
+    #[error("could not get {leader} to commit the proposal")]
+    Forward {
+        leader: MemberId,
+        #[source]
+        source: ProposeError,
+    },
+
+    /// No leader emerged in time, so there was nobody able to commit.
+    #[error("no leader is available to commit the proposal")]
+    NoLeader,
 }
 
 /// The result of starting or driving a node.
@@ -206,16 +228,65 @@ impl MembershipNode {
             .await
     }
 
-    /// Commits a signed event through Raft.
+    /// Commits a signed event through Raft, forwarding to the leader if needed.
     ///
-    /// Returns once it is committed and applied here; other members apply it as
-    /// replication reaches them.
+    /// Only the leader can commit, and most nodes are not it: a member admitted
+    /// to the core group later will be a follower, and so will a node that
+    /// restarted while somebody else held the term. §4.3 has a member submit a
+    /// proposal to *any* core node, so this hands it on rather than failing —
+    /// openraft returns `ForwardToLeader` and expects the application to do the
+    /// forwarding itself.
+    ///
+    /// Returns once the event is committed. If this node is the leader that is
+    /// also when it has been applied here; otherwise it arrives with the next
+    /// replication.
     pub async fn propose(&self, event: SignedEvent) -> Result<()> {
-        self.raft
-            .client_write(event)
+        for _ in 0..PROPOSE_ATTEMPTS {
+            let forward = match self.raft.client_write(event.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => forward,
+                Err(other) => return Err(raft_failed(other)),
+            };
+
+            match (forward.leader_id, forward.leader_node) {
+                (Some(leader), Some(addr)) => return self.forward(leader, addr, event).await,
+                // An election is in progress, or this node has not heard from
+                // one yet. There is nobody to forward to, so wait for a leader
+                // and try again rather than failing a proposal that is only
+                // momentarily unroutable.
+                _ => {
+                    self.raft
+                        .wait(Some(LEADERSHIP_TIMEOUT))
+                        .metrics(
+                            |metrics| metrics.current_leader.is_some(),
+                            "a leader to emerge",
+                        )
+                        .await
+                        .map_err(raft_failed)?;
+                }
+            }
+        }
+        Err(NodeError::NoLeader)
+    }
+
+    /// Hands a proposal to the leader over the raft ALPN.
+    async fn forward(&self, leader: RawMemberId, addr: NodeAddr, event: SignedEvent) -> Result<()> {
+        // The leader id came from Raft's own membership, which we put there
+        // from real MemberIds, so this cannot fail in practice.
+        let member =
+            MemberId::try_from(leader).map_err(|error| NodeError::Raft(Box::new(error)))?;
+        tracing::debug!(leader = %member, "forwarding a proposal to the leader");
+
+        let client = RaftNetworkFactoryImpl::new(self.router.endpoint().clone())
+            .new_client(leader, &addr)
+            .await;
+        client
+            .propose(event)
             .await
-            .map(|_| ())
-            .map_err(raft_failed)
+            .map_err(|source| NodeError::Forward {
+                leader: member,
+                source,
+            })
     }
 
     /// Stops consensus, the router and the background tasks.

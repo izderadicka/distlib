@@ -36,7 +36,10 @@ use openraft::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::raft::types::{NodeAddr, TypeConfig};
+use crate::{
+    raft::types::{NodeAddr, TypeConfig},
+    signed::SignedEvent,
+};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -54,6 +57,13 @@ enum Request {
     AppendEntries(AppendEntriesRequest<TypeConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
+    /// A membership event a follower wants committed.
+    ///
+    /// Not part of Raft's own protocol, but it travels the same way and between
+    /// the same nodes. §4.3 has a member submit a proposal to *any* core node,
+    /// and only the leader can commit one, so a follower has to be able to hand
+    /// it on.
+    Propose(Box<SignedEvent>),
 }
 
 /// What it answers.
@@ -69,6 +79,13 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
+    /// Whether the leader committed the forwarded event.
+    ///
+    /// Carries the outcome as a message rather than a typed openraft error:
+    /// what the caller can do about a failure here is the same either way, and
+    /// a follower has no use for the leader's `ForwardToLeader` pointing at
+    /// itself.
+    Propose(Result<(), String>),
 }
 
 /// Serves `distlib/raft/0` by handing requests to the local Raft.
@@ -101,6 +118,13 @@ impl RaftProtocol {
             Request::InstallSnapshot(rpc) => {
                 Response::InstallSnapshot(self.raft.install_snapshot(rpc).await)
             }
+            Request::Propose(event) => Response::Propose(
+                self.raft
+                    .client_write(*event)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+            ),
         }
     }
 }
@@ -293,6 +317,37 @@ impl RaftClient {
         *cached = Some(connection.clone());
         Ok(connection)
     }
+}
+
+impl RaftClient {
+    /// Asks this peer, which should be the leader, to commit `event`.
+    ///
+    /// Used when a follower is handed a proposal it cannot commit itself.
+    pub async fn propose(&self, event: SignedEvent) -> Result<(), ProposeError> {
+        match self
+            .call::<std::convert::Infallible>(Request::Propose(Box::new(event)))
+            .await
+            .map_err(|error| ProposeError::Unreachable(error.to_string()))?
+        {
+            Response::Propose(result) => result.map_err(ProposeError::Refused),
+            other => Err(ProposeError::Unreachable(format!(
+                "member {} answered a different request than it was asked: {other:?}",
+                self.target
+            ))),
+        }
+    }
+}
+
+/// Why a forwarded proposal did not commit.
+#[derive(Debug, thiserror::Error)]
+pub enum ProposeError {
+    /// The leader could not be reached, or answered nonsense.
+    #[error("could not reach the leader: {0}")]
+    Unreachable(String),
+
+    /// The leader was reached and declined — it may have lost leadership since.
+    #[error("the leader refused the proposal: {0}")]
+    Refused(String),
 }
 
 impl RaftNetwork<TypeConfig> for RaftClient {

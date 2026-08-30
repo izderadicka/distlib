@@ -254,3 +254,66 @@ async fn founding_replaces_the_seed_with_the_log() {
     assert!(founder.hooks.allowlist().is_allowed(&founder.id));
     founder.node.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_follower_can_propose() {
+    // §4.3 has a member submit a proposal to *any* core node, and most core
+    // nodes are not the leader: one admitted to the core group later is a
+    // follower, and so is a node that restarted while somebody else held the
+    // term. Only the leader can commit, so a follower has to hand it on.
+    let one = SecretKey::generate();
+    let two = SecretKey::generate();
+    let (one_id, two_id) = (MemberId::from(one.public()), MemberId::from(two.public()));
+
+    let first = Peer::start(one, vec![two_id]).await;
+    let second = Peer::start(two, vec![one_id]).await;
+
+    // `first` founds, so `first` is the leader and `second` is not.
+    first
+        .node
+        .init_group(
+            vec![
+                (first.record("first"), first.addr.clone()),
+                (second.record("second"), second.addr.clone()),
+            ],
+            &first.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&second, "the founding event to replicate", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    assert_ne!(
+        second.node.raft().metrics().borrow().current_leader,
+        Some(distlib_core::RawMemberId::from(second.id)),
+        "this test is only meaningful while `second` is a follower"
+    );
+
+    // The follower proposes. Without forwarding this fails with
+    // ForwardToLeader and the group can never be grown by anyone but its
+    // founder.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    second
+        .node
+        .propose(second.sign(MembershipEvent::MemberAdded {
+            member: MemberRecord {
+                member_id: newcomer,
+                display_name: "admitted by a follower".to_owned(),
+                pledge_bytes: 0,
+            },
+        }))
+        .await
+        .expect("a follower must be able to propose");
+
+    for peer in [&first, &second] {
+        wait_for(peer, "the proposal to reach every node", |membership| {
+            membership.is_member(&newcomer)
+        })
+        .await;
+    }
+
+    first.node.shutdown().await;
+    second.node.shutdown().await;
+}
