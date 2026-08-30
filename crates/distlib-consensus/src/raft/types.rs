@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use distlib_core::RawMemberId;
 use serde::{Deserialize, Serialize};
 
-use crate::signed::SignedEvent;
+use crate::{error::ConsensusError, signed::SignedEvent};
 
 openraft::declare_raft_types!(
     /// The membership log's Raft configuration.
@@ -18,9 +18,12 @@ openraft::declare_raft_types!(
     /// the thing Raft replicates and the thing the projection folds are the same
     /// value, with no wrapper in between.
     ///
-    /// `R = ()` — committing an event yields nothing a caller needs back. What
-    /// they want to know afterwards ("am I still a member?") is read from the
-    /// projection, not returned from the write.
+    /// `R = Result<(), ConsensusError>` — the verdict the state machine reached.
+    /// Committing an entry and applying it are different things here: a
+    /// committed event whose rules do not hold is skipped rather than fatal
+    /// (P1-8), so a write that returns `Ok` says only that the entry is in the
+    /// log. Carrying the verdict is what lets a proposer learn that the thing
+    /// they asked for did not actually happen.
     ///
     /// `NodeId = RawMemberId` rather than `MemberId`, because openraft requires
     /// `Default`. See [`RawMemberId`] for why that is not solved by giving
@@ -33,7 +36,7 @@ openraft::declare_raft_types!(
     /// already satisfies the `AsyncRead + AsyncWrite + AsyncSeek` bounds.
     pub TypeConfig:
         D = SignedEvent,
-        R = (),
+        R = Result<(), ConsensusError>,
         NodeId = RawMemberId,
         Node = NodeAddr,
 );

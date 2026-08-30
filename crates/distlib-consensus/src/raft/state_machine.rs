@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::{
+    error::ConsensusError,
     raft::{
         db::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
@@ -189,7 +190,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         Ok((applied.last_applied, applied.membership.clone()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<()>>
+    async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<Result<(), ConsensusError>>>
     where
         I: IntoIterator<Item = Entry> + Send,
         I::IntoIter: Send,
@@ -205,10 +206,11 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
                 match entry.payload {
                     // A no-op a new leader commits to establish its term.
-                    EntryPayload::Blank => {}
+                    EntryPayload::Blank => responses.push(Ok(())),
 
                     EntryPayload::Normal(event) => {
-                        if let Err(error) = applied.state.apply(&event) {
+                        let verdict = applied.state.apply(&event);
+                        if let Err(error) = &verdict {
                             // Raft has already committed this entry, so every
                             // node sees it and every node rejects it the same
                             // way — `MembershipState::apply` is deterministic
@@ -227,15 +229,18 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 "committed membership event rejected; skipping it"
                             );
                         }
+                        // Reported back to whoever proposed it, so they learn
+                        // the entry committed but did not take effect.
+                        responses.push(verdict);
                     }
 
                     // Raft's own voter configuration. The trait asks only that
                     // it be stored, so it is stored.
                     EntryPayload::Membership(membership) => {
                         applied.membership = StoredMembership::new(Some(entry.log_id), membership);
+                        responses.push(Ok(()));
                     }
                 }
-                responses.push(());
             }
             let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
             (encoded, applied.state.clone())
@@ -288,6 +293,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             subject.clone(),
         )?;
 
+        let membership = applied.state.clone();
         *self.lock() = applied;
 
         // Both keys in one transaction. The applied state and the snapshot it
@@ -308,7 +314,16 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 .map_err(|source| fail(&source))?;
             Ok(())
         })
-        .await
+        .await?;
+
+        // A snapshot replaces the membership wholesale, so observers need
+        // telling just as much as after an apply — more so, because this is how
+        // a node that fell behind far enough to be caught up by snapshot learns
+        // about an expulsion. Without this the allowlist would keep admitting a
+        // member the group removed while that node was away, until some later
+        // entry happened to change the membership again.
+        self.announce(&membership);
+        Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> StorageResult<Option<Snapshot<TypeConfig>>> {

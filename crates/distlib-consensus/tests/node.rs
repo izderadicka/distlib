@@ -317,3 +317,43 @@ async fn a_follower_can_propose() {
     first.node.shutdown().await;
     second.node.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
+    // Committing and applying are different things. A committed event whose
+    // rules do not hold is skipped rather than fatal, so returning Ok on the
+    // strength of the commit would tell a caller their change took effect when
+    // the membership never moved.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // Expelling somebody who is not a member: it commits, and every state
+    // machine refuses it.
+    let stranger = MemberId::from(SecretKey::generate().public());
+    let error = founder
+        .node
+        .propose(founder.sign(MembershipEvent::MemberExpelled {
+            member: stranger,
+            reason: "never joined".to_owned(),
+        }))
+        .await
+        .expect_err("a refused event must not be reported as success");
+
+    assert!(
+        format!("{error}").contains(&stranger.to_string()),
+        "the caller should learn which member was not found; got {error}"
+    );
+    assert!(founder.node.membership().is_member(&founder.id));
+    founder.node.shutdown().await;
+}

@@ -9,6 +9,6 @@ pub mod state_machine;
 pub mod types;
 
 pub use log_store::LogStore;
-pub use network::{ProposeError, RaftClient, RaftNetworkFactoryImpl, RaftProtocol};
+pub use network::{ProposeError, ProposeOutcome, RaftClient, RaftNetworkFactoryImpl, RaftProtocol};
 pub use state_machine::StateMachineStore;
 pub use types::{NodeAddr, TypeConfig};

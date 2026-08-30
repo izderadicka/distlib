@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
+    error::ConsensusError,
     raft::types::{NodeAddr, TypeConfig},
     signed::SignedEvent,
 };
@@ -79,13 +80,8 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
-    /// Whether the leader committed the forwarded event.
-    ///
-    /// Carries the outcome as a message rather than a typed openraft error:
-    /// what the caller can do about a failure here is the same either way, and
-    /// a follower has no use for the leader's `ForwardToLeader` pointing at
-    /// itself.
-    Propose(Result<(), String>),
+    /// What became of a forwarded event.
+    Propose(ProposeOutcome),
 }
 
 /// Serves `distlib/raft/0` by handing requests to the local Raft.
@@ -118,13 +114,21 @@ impl RaftProtocol {
             Request::InstallSnapshot(rpc) => {
                 Response::InstallSnapshot(self.raft.install_snapshot(rpc).await)
             }
-            Request::Propose(event) => Response::Propose(
-                self.raft
-                    .client_write(*event)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-            ),
+            Request::Propose(event) => {
+                Response::Propose(match self.raft.client_write(*event).await {
+                    // The write reached the log; `data` is the state machine's
+                    // verdict on whether it then took effect.
+                    Ok(written) => match written.data {
+                        Ok(()) => ProposeOutcome::Applied,
+                        Err(rejected) => ProposeOutcome::Rejected(rejected),
+                    },
+                    // Includes this node having lost leadership since the hint was
+                    // issued. Its own `ForwardToLeader` is no use to the sender —
+                    // their Raft learns the new leader from replication — so it
+                    // travels as a message.
+                    Err(error) => ProposeOutcome::NotCommitted(error.to_string()),
+                })
+            }
         }
     }
 }
@@ -329,7 +333,13 @@ impl RaftClient {
             .await
             .map_err(|error| ProposeError::Unreachable(error.to_string()))?
         {
-            Response::Propose(result) => result.map_err(ProposeError::Refused),
+            Response::Propose(ProposeOutcome::Applied) => Ok(()),
+            Response::Propose(ProposeOutcome::Rejected(error)) => {
+                Err(ProposeError::Rejected(error))
+            }
+            Response::Propose(ProposeOutcome::NotCommitted(error)) => {
+                Err(ProposeError::NotCommitted(error))
+            }
             other => Err(ProposeError::Unreachable(format!(
                 "member {} answered a different request than it was asked: {other:?}",
                 self.target
@@ -338,16 +348,34 @@ impl RaftClient {
     }
 }
 
-/// Why a forwarded proposal did not commit.
+/// What the leader did with a forwarded proposal.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ProposeOutcome {
+    /// Committed and applied.
+    Applied,
+    /// Committed, then refused by the rules — the log has it, the state does not.
+    Rejected(ConsensusError),
+    /// Never made it into the log.
+    NotCommitted(String),
+}
+
+/// Why a forwarded proposal did not take effect.
 #[derive(Debug, thiserror::Error)]
 pub enum ProposeError {
     /// The leader could not be reached, or answered nonsense.
     #[error("could not reach the leader: {0}")]
     Unreachable(String),
 
-    /// The leader was reached and declined — it may have lost leadership since.
-    #[error("the leader refused the proposal: {0}")]
-    Refused(String),
+    /// The leader was reached but did not commit — it may have lost the term.
+    #[error("the leader did not commit the proposal: {0}")]
+    NotCommitted(String),
+
+    /// The event committed and was then refused by the rules.
+    ///
+    /// Distinct from the others because retrying cannot help: every node
+    /// reaches the same verdict.
+    #[error(transparent)]
+    Rejected(ConsensusError),
 }
 
 impl RaftNetwork<TypeConfig> for RaftClient {

@@ -346,3 +346,70 @@ async fn a_stale_builder_does_not_overwrite_a_newer_snapshot() {
     );
     assert_eq!(current.meta.last_log_id, Some(log_id(5)));
 }
+
+#[tokio::test]
+async fn installing_a_snapshot_announces_the_membership() {
+    // How a node that fell far behind learns about an expulsion: the leader
+    // purged the log it needed, so it is caught up by snapshot instead. The
+    // allowlist and the eviction task are driven only by this channel, so a
+    // silent install leaves an expelled member admitted — and its connections
+    // open — until some later entry happens to change the membership, which for
+    // a quiet group may be never.
+    let (mut source, _source_dir) = new_store();
+    let alice = Signer::generate();
+    source.apply(vec![founding(&alice)]).await.unwrap();
+    let snapshot = source
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .unwrap();
+
+    let (mut target, _target_dir) = new_store();
+    let mut memberships = target.subscribe();
+    assert!(memberships.borrow_and_update().is_empty());
+
+    target
+        .install_snapshot(&snapshot.meta, snapshot.snapshot)
+        .await
+        .unwrap();
+
+    assert!(
+        memberships.has_changed().unwrap(),
+        "an installed snapshot must be announced, or nothing downstream reacts"
+    );
+    assert!(memberships.borrow_and_update().is_member(&alice.id));
+}
+
+#[tokio::test]
+async fn apply_reports_whether_an_event_took_effect() {
+    // `R` carries the verdict because committing and applying are different
+    // things: a committed event whose rules do not hold is skipped rather than
+    // fatal, so the commit alone says nothing about whether it happened.
+    let (mut store, _dir) = new_store();
+    let alice = Signer::generate();
+    let stranger = Signer::generate();
+
+    let verdicts = store
+        .apply(vec![
+            founding(&alice),
+            entry(
+                2,
+                stranger.sign(MembershipEvent::MemberAdded {
+                    member: stranger.record("uninvited"),
+                }),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(verdicts.len(), 2);
+    assert!(verdicts[0].is_ok(), "the founding event applied");
+    assert_eq!(
+        verdicts[1],
+        Err(distlib_consensus::ConsensusError::ProposerNotAMember {
+            proposer: stranger.id
+        }),
+        "a rejected event reports why, rather than passing for success"
+    );
+}

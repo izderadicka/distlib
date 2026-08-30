@@ -6,7 +6,12 @@
 //! state machine to the allowlist, and one closes connections the change
 //! invalidates (§4.4).
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, alpn, ping::PingProtocol};
@@ -22,8 +27,8 @@ use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
     raft::{
-        LogStore, NodeAddr, ProposeError, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
-        TypeConfig,
+        LogStore, NodeAddr, ProposeError, RaftClient, RaftNetworkFactoryImpl, RaftProtocol,
+        StateMachineStore, TypeConfig,
     },
     signed::SignedEvent,
     state::MembershipState,
@@ -37,6 +42,12 @@ pub const RAFT_DB: &str = "raft.redb";
 /// More than one because the answer can change underneath: the leader named in
 /// a `ForwardToLeader` may have lost the term by the time we dial it.
 const PROPOSE_ATTEMPTS: usize = 3;
+
+/// How long to wait before asking again who the leader is.
+///
+/// Long enough for replication to tell this node about a term it missed, short
+/// enough not to stall a proposal that would otherwise succeed immediately.
+const FORWARD_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// How long founding waits for the first election to settle.
 ///
@@ -68,10 +79,10 @@ pub enum NodeError {
     #[error(transparent)]
     Event(#[from] ConsensusError),
 
-    /// The leader was known but would not take the proposal.
+    /// A leader was known but could not be got to commit, on every attempt.
     #[error("could not get {leader} to commit the proposal")]
     Forward {
-        leader: MemberId,
+        leader: RawMemberId,
         #[source]
         source: ProposeError,
     },
@@ -102,6 +113,11 @@ pub struct MembershipNode {
     /// and dropping it would freeze membership at whatever was last applied.
     allowlist_updates: JoinHandle<()>,
     evictions: JoinHandle<()>,
+    /// Clients for peers this node has forwarded a proposal to.
+    ///
+    /// Keyed by leader, because leadership moves and the previous leader's
+    /// client stays useful when it comes back.
+    forward_clients: Mutex<HashMap<RawMemberId, RaftClient>>,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -173,6 +189,7 @@ impl MembershipNode {
             router,
             allowlist_updates,
             evictions,
+            forward_clients: Mutex::new(HashMap::new()),
         })
     }
 
@@ -241,15 +258,44 @@ impl MembershipNode {
     /// also when it has been applied here; otherwise it arrives with the next
     /// replication.
     pub async fn propose(&self, event: SignedEvent) -> Result<()> {
+        let mut unreached = None;
+
         for _ in 0..PROPOSE_ATTEMPTS {
             let forward = match self.raft.client_write(event.clone()).await {
-                Ok(_) => return Ok(()),
+                // The write reached the log; `data` carries the state machine's
+                // verdict on whether the event then took effect. A committed
+                // event whose rules do not hold is skipped rather than fatal
+                // (P1-8), so reporting `Ok` on the strength of the commit alone
+                // would tell the caller something happened when it did not.
+                Ok(written) => return written.data.map_err(NodeError::Event),
                 Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => forward,
                 Err(other) => return Err(raft_failed(other)),
             };
 
             match (forward.leader_id, forward.leader_node) {
-                (Some(leader), Some(addr)) => return self.forward(leader, addr, event).await,
+                (Some(leader), Some(addr)) => {
+                    match self.forward(leader, addr, event.clone()).await {
+                        Ok(()) => return Ok(()),
+
+                        // The rules refused it. Every node reaches that verdict
+                        // identically, so asking somebody else cannot change it.
+                        Err(ProposeError::Rejected(error)) => {
+                            return Err(NodeError::Event(error));
+                        }
+
+                        // The hint was stale or the leader unreachable: the
+                        // named node may have lost the term before we dialled
+                        // it. Our own Raft learns the new leader from
+                        // replication, so ask it again rather than giving up —
+                        // this is the case PROPOSE_ATTEMPTS exists for, and
+                        // what the previous version got wrong by returning here.
+                        Err(error) => {
+                            tracing::debug!(%error, "forwarding failed; asking again");
+                            unreached = Some((leader, error));
+                            tokio::time::sleep(FORWARD_RETRY_DELAY).await;
+                        }
+                    }
+                }
                 // An election is in progress, or this node has not heard from
                 // one yet. There is nobody to forward to, so wait for a leader
                 // and try again rather than failing a proposal that is only
@@ -266,27 +312,62 @@ impl MembershipNode {
                 }
             }
         }
-        Err(NodeError::NoLeader)
+        // Out of attempts. Say which of the two happened: a leader we could not
+        // get to commit is a different problem from never finding one.
+        match unreached {
+            Some((leader, source)) => Err(NodeError::Forward { leader, source }),
+            None => Err(NodeError::NoLeader),
+        }
     }
 
     /// Hands a proposal to the leader over the raft ALPN.
-    async fn forward(&self, leader: RawMemberId, addr: NodeAddr, event: SignedEvent) -> Result<()> {
-        // The leader id came from Raft's own membership, which we put there
-        // from real MemberIds, so this cannot fail in practice.
-        let member =
-            MemberId::try_from(leader).map_err(|error| NodeError::Raft(Box::new(error)))?;
-        tracing::debug!(leader = %member, "forwarding a proposal to the leader");
+    ///
+    /// Returns the leader's outcome unwrapped, so the caller can tell a verdict
+    /// — which no amount of retrying will change, since every node reaches it
+    /// identically — from a failure to reach the leader, which retrying might.
+    async fn forward(
+        &self,
+        leader: RawMemberId,
+        addr: NodeAddr,
+        event: SignedEvent,
+    ) -> std::result::Result<(), ProposeError> {
+        tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
+        self.client_for(leader, addr).await.propose(event).await
+    }
+
+    /// A client for `leader`, reused across forwards.
+    ///
+    /// Building one per proposal would pay a fresh dial and TLS handshake to a
+    /// peer this node almost certainly already has a live raft connection to —
+    /// and now that a failed forward is retried, it would pay it again on every
+    /// attempt. `RaftClient` caches its own connection, so keeping the client
+    /// keeps the connection.
+    async fn client_for(&self, leader: RawMemberId, addr: NodeAddr) -> RaftClient {
+        // Scoped so the guard is gone before the await below. Holding a
+        // blocking lock across a suspension point is how an executor gets
+        // wedged, and clippy is right to refuse it.
+        {
+            let clients = self.lock_clients();
+            if let Some(client) = clients.get(&leader) {
+                return client.clone();
+            }
+        }
 
         let client = RaftNetworkFactoryImpl::new(self.router.endpoint().clone())
             .new_client(leader, &addr)
             .await;
+
+        // Two concurrent proposals to a new leader can both get here and one
+        // client is discarded. That costs nothing — `new_client` does not dial,
+        // it only records where to — and is cheaper than holding the lock.
+        self.lock_clients().insert(leader, client.clone());
         client
-            .propose(event)
-            .await
-            .map_err(|source| NodeError::Forward {
-                leader: member,
-                source,
-            })
+    }
+
+    fn lock_clients(&self) -> std::sync::MutexGuard<'_, HashMap<RawMemberId, RaftClient>> {
+        self.forward_clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Stops consensus, the router and the background tasks.
