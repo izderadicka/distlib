@@ -82,13 +82,26 @@ impl AllowlistHooks {
         }
     }
 
+    /// Whether a recorded connection is still worth keeping.
+    ///
+    /// `upgrade` alone is not the test. The handle holds a `Weak` on iroh's
+    /// internal connection state, which outlives the `Connection` the protocol
+    /// handler dropped, so a finished connection still upgrades — for the
+    /// lifetime of the endpoint. `close_reason` is what actually says it is
+    /// over.
+    fn is_live(handle: &WeakConnectionHandle) -> bool {
+        handle
+            .upgrade()
+            .is_some_and(|connection| connection.close_reason().is_none())
+    }
+
     /// One pass: close what is no longer admitted, forget what has died.
     fn evict_once(&self) {
         let mut connections = self.lock();
         connections.retain(|peer, handles| {
             if self.allowlist.is_allowed(peer) {
-                // Still a member; keep only the handles still alive.
-                handles.retain(|handle| handle.upgrade().is_some());
+                // Still a member; keep only the connections still open.
+                handles.retain(Self::is_live);
                 return !handles.is_empty();
             }
 
@@ -104,11 +117,27 @@ impl AllowlistHooks {
     }
 
     /// Records a connection so an expulsion can find it later.
+    ///
+    /// Prunes this peer's finished connections on the way in. A reconnect is
+    /// the natural moment to notice the previous one has ended, and doing it
+    /// here keeps the table bounded without a timer or a task per connection: a
+    /// peer that reconnects repeatedly cleans up after itself, and one that
+    /// never reconnects leaves at most a single closed handle behind. The total
+    /// is bounded by the size of the group rather than by uptime.
     fn remember(&self, peer: MemberId, connection: &Connection) {
-        self.lock()
-            .entry(peer)
-            .or_default()
-            .push(connection.weak_handle());
+        let mut connections = self.lock();
+        let handles = connections.entry(peer).or_default();
+        handles.retain(Self::is_live);
+        handles.push(connection.weak_handle());
+    }
+
+    /// How many connections are currently tracked.
+    ///
+    /// The number `evict_expelled` would have to walk. Worth being able to see:
+    /// it is the quantity that would reveal a leak here, and it is small by
+    /// construction — see [`Self::remember`].
+    pub fn tracked_connections(&self) -> usize {
+        self.lock().values().map(Vec::len).sum()
     }
 
     /// A poison-tolerant lock.

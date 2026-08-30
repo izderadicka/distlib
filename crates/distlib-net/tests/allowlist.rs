@@ -243,3 +243,34 @@ async fn the_eviction_loop_stops_when_membership_can_no_longer_change() {
         .expect("the loop must end once the allowlist is frozen")
         .unwrap();
 }
+
+#[tokio::test]
+async fn repeated_connections_do_not_accumulate() {
+    // A node runs for months while its membership rarely changes, so the
+    // connection table cannot rely on an allowlist change to get tidied. Each
+    // reconnect prunes what the previous one left behind.
+    let server = Member::generate();
+    let client = Member::generate();
+    let (_keep_server, server_list) = server.admitting([client.id]);
+    let (_keep_client, client_list) = client.admitting([server.id]);
+
+    let hooks = AllowlistHooks::new(server_list);
+    let node = Node::spawn(direct_endpoint_with(&server, hooks.clone()).await);
+    let client_endpoint = direct_endpoint(&client, client_list).await;
+    let addr = direct_addr(node.endpoint());
+
+    for _ in 0..10 {
+        let reply = ping::ping(&client_endpoint, addr.clone(), b"hello")
+            .await
+            .unwrap();
+        assert_eq!(reply, b"hello");
+    }
+
+    let tracked = hooks.tracked_connections();
+
+    assert!(
+        tracked <= 2,
+        "ten connections should not leave ten handles behind; {tracked} tracked"
+    );
+    node.shutdown().await;
+}
