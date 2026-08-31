@@ -416,3 +416,102 @@ async fn three_founders_converge_on_one_group() {
         peer.node.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
+    // The reason `distlib/raft/0` and `distlib/memberlog/0` are two protocols.
+    // Being in the allowlist proves you are a member; it is not licence to take
+    // part in consensus, because a `Vote` from a non-voter can disrupt a term.
+    // Proposing is the opposite: §4.3 and §4.4 open it to every member.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // A member of the group who was never made a voter.
+    let bystander = Peer::start(SecretKey::generate(), vec![founder.id]).await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: bystander.record("bystander"),
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the bystander to be admitted", |membership| {
+        membership.is_member(&bystander.id)
+    })
+    .await;
+    assert!(
+        !founder.node.membership().core().contains(&bystander.id),
+        "this test is only meaningful while the bystander is not a voter"
+    );
+
+    let founder_addr = distlib_consensus::NodeAddr {
+        relay: None,
+        direct: founder.addr.direct.clone(),
+    };
+
+    // Raft: refused. The ALPN is advertised, so the connection is established
+    // and then closed — which is the earliest point the peer's identity is
+    // proven and the voter set can be consulted.
+    let raft = bystander
+        .node
+        .endpoint()
+        .connect(
+            founder_addr.to_endpoint_addr(founder.id).unwrap(),
+            distlib_net::alpn::RAFT,
+        )
+        .await
+        .expect("a member may open the connection; it is the RPCs that are refused");
+    let closed = tokio::time::timeout(Duration::from_secs(10), raft.closed())
+        .await
+        .expect("the core node must close a raft connection from a non-voter");
+    assert!(
+        format!("{closed}").contains("not a voter"),
+        "closed for the wrong reason: {closed}"
+    );
+
+    // Memberlog: served. Same peer, same node, different conversation.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    let event = distlib_consensus::SignedEvent::sign(
+        &bystander.secret,
+        MembershipEvent::MemberAdded {
+            member: MemberRecord {
+                member_id: newcomer,
+                display_name: "invited by a non-voter".to_owned(),
+                pledge_bytes: 0,
+            },
+        },
+        distlib_consensus::Timestamp::now(),
+        founder.node.membership().changed_at(),
+    )
+    .unwrap();
+
+    distlib_consensus::MemberlogClient::new(
+        bystander.node.endpoint().clone(),
+        bystander.node.connections().clone(),
+    )
+    .propose(founder.id, &founder_addr, event)
+    .await
+    .expect("every member may propose, voter or not");
+
+    wait_for(&founder, "the proposal to be committed", |membership| {
+        membership.is_member(&newcomer)
+    })
+    .await;
+
+    founder.node.shutdown().await;
+    bystander.node.shutdown().await;
+}

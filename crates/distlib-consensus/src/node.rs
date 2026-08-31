@@ -12,7 +12,7 @@ use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use openraft::{
-    Config, Raft, RaftNetworkFactory, ServerState,
+    Config, Raft, ServerState,
     error::{ClientWriteError, RaftError},
 };
 use redb::Database;
@@ -22,8 +22,8 @@ use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
     raft::{
-        LogStore, NodeAddr, ProposeError, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
-        TypeConfig,
+        LogStore, MemberlogClient, MemberlogProtocol, NodeAddr, ProposeError,
+        RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
     },
     signed::SignedEvent,
     state::MembershipState,
@@ -38,7 +38,11 @@ pub const RAFT_DB: &str = "raft.redb";
 /// router cannot handle negotiates it and then refuses every stream. Wider than
 /// [`alpn::registered`], which covers only what `distlib-net` can serve alone.
 pub fn alpns() -> Vec<Vec<u8>> {
-    vec![alpn::PING.to_vec(), alpn::RAFT.to_vec()]
+    vec![
+        alpn::PING.to_vec(),
+        alpn::RAFT.to_vec(),
+        alpn::MEMBERLOG.to_vec(),
+    ]
 }
 
 /// How many times a proposal re-checks who the leader is before giving up.
@@ -117,12 +121,12 @@ pub struct MembershipNode {
     /// and dropping it would freeze membership at whatever was last applied.
     allowlist_updates: JoinHandle<()>,
     evictions: JoinHandle<()>,
-    /// The same factory openraft replicates through.
+    /// Speaks `distlib/memberlog/0`, for handing a proposal to the leader.
     ///
     /// Kept rather than built per forward so a forwarded proposal travels over
-    /// the connection this node already has to that peer, instead of opening a
+    /// the connection this node already has to that peer, rather than opening a
     /// second one for the purpose.
-    network: RaftNetworkFactoryImpl,
+    memberlog: MemberlogClient,
     /// Every connection this node holds, across protocols.
     connections: Connections,
 }
@@ -173,11 +177,15 @@ impl MembershipNode {
         // replication, forwarded proposals, and whatever protocols come later.
         // One factory, cloned into Raft, so all of them draw on the same set.
         let connections = Connections::new();
+        // Forwarding no longer goes through this factory: a proposal travels
+        // over `distlib/memberlog/0`, which every member may speak, while the
+        // factory serves Raft's own replication between voters.
         let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
+        let memberlog = MemberlogClient::new(endpoint.clone(), connections.clone());
         let raft = Raft::new(
             RawMemberId::from(id),
             Arc::new(Config::default().validate().map_err(raft_failed)?),
-            network.clone(),
+            network,
             log,
             state_machine.clone(),
         )
@@ -189,6 +197,7 @@ impl MembershipNode {
         let router = Router::builder(endpoint)
             .accept(alpn::PING, PingProtocol)
             .accept(alpn::RAFT, RaftProtocol::new(raft.clone()))
+            .accept(alpn::MEMBERLOG, MemberlogProtocol::new(raft.clone()))
             .spawn();
 
         let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
@@ -201,7 +210,7 @@ impl MembershipNode {
             router,
             allowlist_updates,
             evictions,
-            network,
+            memberlog,
             connections,
         })
     }
@@ -411,14 +420,11 @@ impl MembershipNode {
         event: SignedEvent,
     ) -> std::result::Result<(), ProposeError> {
         tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
-        // Cheap: `new_client` only records where to dial, and the connection it
-        // ends up using is the one already open for replication.
-        self.network
-            .clone()
-            .new_client(leader, &addr)
-            .await
-            .propose(event)
-            .await
+        let leader = MemberId::try_from(leader).map_err(|error| ProposeError::Unreachable {
+            member: self.id,
+            message: format!("the leader's id is not a member id: {error}"),
+        })?;
+        self.memberlog.propose(leader, &addr, event).await
     }
 
     /// Stops consensus, the router and the background tasks.

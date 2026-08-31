@@ -3,11 +3,15 @@
 //! One request per bidirectional stream, postcard on the wire — the same shape
 //! as `distlib/ping/0`, on the `distlib/raft/0` ALPN reserved for it in Phase 0.
 //!
-//! There is no authentication here and none is needed: `AllowlistHooks` refuses
-//! a connection from a non-member after the TLS handshake, so by the time a
-//! stream reaches this handler the peer is a member of the group whose key the
-//! connection is authenticated by. That is the whole reason the allowlist lives
-//! on the endpoint rather than inside any one protocol.
+//! **Voters only.** `AllowlistHooks` gets a connection this far only if the
+//! peer is a member, but membership is not enough here: these are Raft's own
+//! RPCs, and a node that processes a `Vote` or an `AppendEntries` from a
+//! non-voter can have its consensus disrupted by any member in the allowlist.
+//! §4.2 makes the core group the only voters, so this handler checks that the
+//! peer is one before answering anything.
+//!
+//! A member who is not a voter has [`crate::raft::memberlog`] instead: that is
+//! where proposals go, and it is open to everyone.
 
 // `RPCError` is openraft's type and appears in signatures openraft dictates, so
 // it cannot be boxed without breaking the trait impls; the helpers below carry
@@ -33,11 +37,7 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::ConsensusError,
-    raft::types::{NodeAddr, TypeConfig},
-    signed::SignedEvent,
-};
+use crate::raft::types::{NodeAddr, TypeConfig};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -49,19 +49,19 @@ pub const MAX_RPC_BYTES: usize = 16 * 1024 * 1024;
 
 type NodeId = RawMemberId;
 
+/// Close code for a peer that is a member but not a Raft voter.
+///
+/// Distinct from the allowlist's own refusal so the two are told apart in a
+/// packet capture or a log: one is "you are not in this group", the other is
+/// "you are, but consensus is not yours to take part in".
+pub const NOT_A_VOTER: u32 = 2;
+
 /// What one node asks another.
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
     AppendEntries(AppendEntriesRequest<TypeConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
-    /// A membership event a follower wants committed.
-    ///
-    /// Not part of Raft's own protocol, but it travels the same way and between
-    /// the same nodes. §4.3 has a member submit a proposal to *any* core node,
-    /// and only the leader can commit one, so a follower has to be able to hand
-    /// it on.
-    Propose(Box<SignedEvent>),
 }
 
 /// What it answers.
@@ -77,8 +77,6 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
-    /// What became of a forwarded event.
-    Propose(ProposeOutcome),
 }
 
 /// Serves `distlib/raft/0` by handing requests to the local Raft.
@@ -111,27 +109,37 @@ impl RaftProtocol {
             Request::InstallSnapshot(rpc) => {
                 Response::InstallSnapshot(self.raft.install_snapshot(rpc).await)
             }
-            Request::Propose(event) => {
-                Response::Propose(match self.raft.client_write(*event).await {
-                    // The write reached the log; `data` is the state machine's
-                    // verdict on whether it then took effect.
-                    Ok(written) => match written.data {
-                        Ok(()) => ProposeOutcome::Applied,
-                        Err(rejected) => ProposeOutcome::Rejected(rejected),
-                    },
-                    // Includes this node having lost leadership since the hint was
-                    // issued. Its own `ForwardToLeader` is no use to the sender —
-                    // their Raft learns the new leader from replication — so it
-                    // travels as a message.
-                    Err(error) => ProposeOutcome::NotCommitted(error.to_string()),
-                })
-            }
         }
+    }
+
+    /// Whether `peer` is currently one of this group's Raft voters.
+    ///
+    /// An empty voter set means this node has not been initialised or has not
+    /// yet received the founding entry. It cannot know who the voters are, so
+    /// it accepts from any member — which during that window is exactly the
+    /// configured core seed, since nobody else is in the allowlist yet. Without
+    /// this, founding could not happen: a founder sends `Vote` to peers whose
+    /// Raft membership is still empty, and they would refuse it.
+    fn is_voter(&self, peer: MemberId) -> bool {
+        let metrics = self.raft.metrics();
+        let membership = &metrics.borrow().membership_config;
+        let mut voters = membership.voter_ids().peekable();
+        voters.peek().is_none()
+            || voters.any(|voter| MemberId::try_from(voter).is_ok_and(|voter| voter == peer))
     }
 }
 
 impl ProtocolHandler for RaftProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        // Voters only. The allowlist got them this far, which proves they are
+        // a member; being a member is not licence to take part in consensus.
+        let peer = MemberId::from(connection.remote_id());
+        if !self.is_voter(peer) {
+            tracing::info!(%peer, "refused raft rpc from a non-voter");
+            connection.close(NOT_A_VOTER.into(), b"not a voter");
+            return Ok(());
+        }
+
         // One stream per RPC, and a connection carries many: a follower is
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
@@ -325,61 +333,6 @@ impl RaftClient {
             // member who is simply offline, and members here are often offline.
             .unreachable()
     }
-}
-
-impl RaftClient {
-    /// Asks this peer, which should be the leader, to commit `event`.
-    ///
-    /// Used when a follower is handed a proposal it cannot commit itself.
-    pub async fn propose(&self, event: SignedEvent) -> Result<(), ProposeError> {
-        match self
-            .call::<std::convert::Infallible>(Request::Propose(Box::new(event)))
-            .await
-            .map_err(|error| ProposeError::Unreachable(error.to_string()))?
-        {
-            Response::Propose(ProposeOutcome::Applied) => Ok(()),
-            Response::Propose(ProposeOutcome::Rejected(error)) => {
-                Err(ProposeError::Rejected(error))
-            }
-            Response::Propose(ProposeOutcome::NotCommitted(error)) => {
-                Err(ProposeError::NotCommitted(error))
-            }
-            other => Err(ProposeError::Unreachable(format!(
-                "member {} answered a different request than it was asked: {other:?}",
-                self.target
-            ))),
-        }
-    }
-}
-
-/// What the leader did with a forwarded proposal.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ProposeOutcome {
-    /// Committed and applied.
-    Applied,
-    /// Committed, then refused by the rules — the log has it, the state does not.
-    Rejected(ConsensusError),
-    /// Never made it into the log.
-    NotCommitted(String),
-}
-
-/// Why a forwarded proposal did not take effect.
-#[derive(Debug, thiserror::Error)]
-pub enum ProposeError {
-    /// The leader could not be reached, or answered nonsense.
-    #[error("could not reach the leader: {0}")]
-    Unreachable(String),
-
-    /// The leader was reached but did not commit — it may have lost the term.
-    #[error("the leader did not commit the proposal: {0}")]
-    NotCommitted(String),
-
-    /// The event committed and was then refused by the rules.
-    ///
-    /// Distinct from the others because retrying cannot help: every node
-    /// reaches the same verdict.
-    #[error(transparent)]
-    Rejected(ConsensusError),
 }
 
 impl RaftNetwork<TypeConfig> for RaftClient {

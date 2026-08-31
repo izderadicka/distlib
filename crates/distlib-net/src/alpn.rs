@@ -8,17 +8,24 @@
 //! version: a breaking change to the framing gets a new ALPN, so old and new
 //! nodes fail to negotiate rather than misinterpreting each other.
 //!
-//! `distlib/memberlog/0` joins them when phase 1b adds log replication for
-//! non-core followers.
 
 /// Liveness check. Echoes a payload back with a `pong:` prefix.
 pub const PING: &[u8] = b"distlib/ping/0";
 
 /// Raft consensus RPC for the membership log (§4.5).
 ///
-/// Served by `distlib-consensus`, not by [`crate::Node`] — see
-/// [`registered`].
+/// Served by `distlib-consensus`, not by [`crate::Node`] — see [`registered`].
+/// Spoken **between Raft voters only**: the core group. A member who is not a
+/// voter has [`MEMBERLOG`] instead.
 pub const RAFT: &[u8] = b"distlib/raft/0";
+
+/// What a member says to a core node about the membership log (§4.2, §4.3).
+///
+/// Submitting a proposal, and — from phase 1b — fetching the log as a non-core
+/// follower. Separate from [`RAFT`] because the audiences differ: consensus is
+/// between voters, while proposing is open to every member, and one ALPN
+/// serving both would mean serving Raft to whoever could propose.
+pub const MEMBERLOG: &[u8] = b"distlib/memberlog/0";
 
 /// The ALPNs [`crate::Node`] serves.
 ///

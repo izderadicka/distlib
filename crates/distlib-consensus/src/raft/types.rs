@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::net::SocketAddr;
 
-use distlib_core::RawMemberId;
+use distlib_core::{MemberId, RawMemberId};
+use iroh::{EndpointAddr, RelayUrl};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ConsensusError, signed::SignedEvent};
@@ -94,4 +95,40 @@ impl NodeAddr {
     pub fn is_empty(&self) -> bool {
         self.relay.is_none() && self.direct.is_empty()
     }
+
+    /// This address as something iroh can dial, for `member`.
+    ///
+    /// Lives here rather than in either protocol because both of them need it:
+    /// Raft dials voters, and `distlib/memberlog/0` dials core nodes, from the
+    /// same addressing.
+    ///
+    /// An empty [`NodeAddr`] yields an address carrying only the member id,
+    /// which is meaningful rather than broken — it means "find them by id",
+    /// which works whenever address lookup is configured.
+    pub fn to_endpoint_addr(&self, member: MemberId) -> Result<EndpointAddr, BadRelayUrl> {
+        let mut addr = EndpointAddr::new(member.endpoint_id());
+        for socket in &self.direct {
+            addr = addr.with_ip_addr(*socket);
+        }
+        if let Some(url) = &self.relay {
+            let relay: RelayUrl = url.parse().map_err(|_| BadRelayUrl {
+                member,
+                url: url.clone(),
+            })?;
+            addr = addr.with_relay_url(relay);
+        }
+        Ok(addr)
+    }
+}
+
+/// A [`NodeAddr`] whose relay URL no longer parses.
+///
+/// Its own error because the URL is stored as a `String` — a log entry must
+/// stay readable even when one field in it has stopped making sense — so the
+/// parse happens at dial time and can fail there.
+#[derive(Debug, thiserror::Error)]
+#[error("member {member} lists an unparseable relay url: {url}")]
+pub struct BadRelayUrl {
+    pub member: MemberId,
+    pub url: String,
 }
