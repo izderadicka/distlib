@@ -26,7 +26,11 @@ use crate::{
 /// pre-image includes `MemberId`s in their serde form (a string), so changing
 /// how a member id renders would change every signature; that is what bumping
 /// this tag is for.
-const SIGNING_DOMAIN: &[u8] = b"distlib.membership.v1";
+///
+/// v2 added `changed_at` to the pre-image. Without the bump an entry signed by
+/// a v1 build would fail with `BadSignature` — indistinguishable from
+/// tampering — rather than as the version mismatch it is.
+const SIGNING_DOMAIN: &[u8] = b"distlib.membership.v2";
 
 /// A membership event, with the member who proposed it and their signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

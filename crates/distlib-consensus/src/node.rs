@@ -6,7 +6,7 @@
 //! state machine to the allowlist, and one closes connections the change
 //! invalidates (§4.4).
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 use distlib_core::{MemberId, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
@@ -98,6 +98,14 @@ pub enum NodeError {
     /// No leader emerged in time, so there was nobody able to commit.
     #[error("no leader is available to commit the proposal")]
     NoLeader,
+
+    /// This node could not catch up to the membership the group is at.
+    ///
+    /// Distinct from [`NodeError::NoLeader`]: a leader exists and answered —
+    /// it refused the proposal as being made against a superseded membership —
+    /// and this node then failed to reach that membership itself.
+    #[error("this node did not catch up to the membership at index {changed_at}")]
+    BehindTheGroup { changed_at: u64 },
 }
 
 /// The result of starting or driving a node.
@@ -155,11 +163,20 @@ impl MembershipNode {
     /// allowlist — the founding set has to come from outside the log exactly
     /// once. From the moment a `GroupFounded` is applied, the log wins and the
     /// seed is never consulted again.
+    ///
+    /// `founding_core` is the configured founding core group — `[consensus]
+    /// core`, this node included. It is the only thing that can say who the
+    /// Raft voters are before Raft has been initialised, and so decides who
+    /// this node will speak `distlib/raft/0` with during founding. Pass an
+    /// empty set for a node that is not founding a group: it will then serve
+    /// consensus to nobody, which is what a node with no Raft of its own
+    /// should do.
     pub async fn start(
         endpoint: Endpoint,
         hooks: AllowlistHooks,
         allowlist: AllowlistWriter,
         data_dir: &Path,
+        founding_core: BTreeSet<MemberId>,
     ) -> Result<Self> {
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
@@ -196,7 +213,10 @@ impl MembershipNode {
         // advertise.
         let router = Router::builder(endpoint)
             .accept(alpn::PING, PingProtocol)
-            .accept(alpn::RAFT, RaftProtocol::new(raft.clone()))
+            .accept(
+                alpn::RAFT,
+                RaftProtocol::new(raft.clone(), state_machine.clone(), founding_core),
+            )
             .accept(alpn::MEMBERLOG, MemberlogProtocol::new(raft.clone()))
             .spawn();
 
@@ -325,17 +345,25 @@ impl MembershipNode {
     }
 
     /// Waits until this node's membership has reached `changed_at`.
+    ///
+    /// Failing here is not `NoLeader`: a leader demonstrably exists, since one
+    /// just refused the proposal for being stale. What failed is this node
+    /// keeping up with it.
     async fn catch_up_to(&self, changed_at: u64) -> Result<()> {
         let mut memberships = self.state_machine.subscribe();
+        let behind = || NodeError::BehindTheGroup { changed_at };
+
         tokio::time::timeout(LEADERSHIP_TIMEOUT, async {
             while memberships.borrow_and_update().changed_at() < changed_at {
-                if memberships.changed().await.is_err() {
-                    return;
-                }
+                // The state machine is gone — shutdown. Returning `Ok` here
+                // would send `propose` into a second attempt that is certain to
+                // be stale for exactly the same reason as the first.
+                memberships.changed().await.map_err(|_| behind())?;
             }
+            Ok(())
         })
         .await
-        .map_err(|_| NodeError::NoLeader)
+        .map_err(|_| behind())?
     }
 
     /// One attempt: sign against the membership this node holds, and commit it.
@@ -420,9 +448,14 @@ impl MembershipNode {
         event: SignedEvent,
     ) -> std::result::Result<(), ProposeError> {
         tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
-        let leader = MemberId::try_from(leader).map_err(|error| ProposeError::Unreachable {
-            member: self.id,
-            message: format!("the leader's id is not a member id: {error}"),
+        // Not `Unreachable`: that names a member who could not be reached, and
+        // the only id we have here is one that is not a member id at all.
+        // Reporting it against `self.id` would blame the one node that is
+        // certainly reachable.
+        let leader = MemberId::try_from(leader).map_err(|error| {
+            ProposeError::NotCommitted(format!(
+                "the leader's id {leader} is not a member id: {error}"
+            ))
         })?;
         self.memberlog.propose(leader, &addr, event).await
     }

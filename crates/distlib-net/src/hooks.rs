@@ -31,10 +31,20 @@ pub mod close_code {
     /// A distinct code so the far side can tell "refused by policy" from a
     /// network failure and stop retrying.
     pub const NOT_A_MEMBER: VarInt = VarInt::from_u32(0x1000);
+
+    /// The peer is a member, but not a Raft voter.
+    ///
+    /// Distinct from [`NOT_A_MEMBER`] because they mean different things to
+    /// whoever reads a packet capture: one is "you are not in this group", the
+    /// other "you are, but consensus is not yours to take part in".
+    pub const NOT_A_VOTER: VarInt = VarInt::from_u32(0x1001);
 }
 
 /// Human-readable reason sent alongside [`close_code::NOT_A_MEMBER`].
 pub const NOT_A_MEMBER_REASON: &[u8] = b"not a member";
+
+/// Human-readable reason sent alongside [`close_code::NOT_A_VOTER`].
+pub const NOT_A_VOTER_REASON: &[u8] = b"not a voter";
 
 /// Refuses every connection to or from a non-member, and closes the ones an
 /// expulsion invalidates.

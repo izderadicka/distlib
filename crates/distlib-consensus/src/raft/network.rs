@@ -19,8 +19,10 @@
 // state_machine.rs make.
 #![allow(clippy::result_large_err)]
 
+use std::collections::BTreeSet;
+
 use distlib_core::{MemberId, RawMemberId};
-use distlib_net::{Connections, alpn};
+use distlib_net::{Connections, NOT_A_VOTER_REASON, alpn, close_code};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
     endpoint::Connection,
@@ -37,7 +39,10 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::raft::types::{NodeAddr, TypeConfig};
+use crate::raft::{
+    state_machine::StateMachineStore,
+    types::{NodeAddr, TypeConfig},
+};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -48,13 +53,6 @@ use crate::raft::types::{NodeAddr, TypeConfig};
 pub const MAX_RPC_BYTES: usize = 16 * 1024 * 1024;
 
 type NodeId = RawMemberId;
-
-/// Close code for a peer that is a member but not a Raft voter.
-///
-/// Distinct from the allowlist's own refusal so the two are told apart in a
-/// packet capture or a log: one is "you are not in this group", the other is
-/// "you are, but consensus is not yours to take part in".
-pub const NOT_A_VOTER: u32 = 2;
 
 /// What one node asks another.
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +81,15 @@ enum Response {
 #[derive(Clone)]
 pub struct RaftProtocol {
     raft: Raft<TypeConfig>,
+    /// The log-derived membership, for deciding when founding is over.
+    ///
+    /// Raft's own config cannot answer that: it is empty both for a node that
+    /// has not been initialised *yet* and for one that never will be.
+    state_machine: StateMachineStore,
+    /// The members this node was configured to found a group with.
+    ///
+    /// The only voters it will accept before Raft knows its own.
+    founding_core: BTreeSet<MemberId>,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it. There is
@@ -95,9 +102,22 @@ impl std::fmt::Debug for RaftProtocol {
 }
 
 impl RaftProtocol {
-    /// Serves `raft` to other members.
-    pub fn new(raft: Raft<TypeConfig>) -> Self {
-        Self { raft }
+    /// Serves `raft` to voters.
+    ///
+    /// `founding_core` is the configured founding core group — `[consensus]
+    /// core` — which is the only thing that can say who the voters are before
+    /// Raft has been initialised. Empty for a node that is not founding
+    /// anything, which is exactly right: it should serve consensus to nobody.
+    pub fn new(
+        raft: Raft<TypeConfig>,
+        state_machine: StateMachineStore,
+        founding_core: BTreeSet<MemberId>,
+    ) -> Self {
+        Self {
+            raft,
+            state_machine,
+            founding_core,
+        }
     }
 
     async fn answer(&self, request: Request) -> Response {
@@ -112,20 +132,47 @@ impl RaftProtocol {
         }
     }
 
-    /// Whether `peer` is currently one of this group's Raft voters.
+    /// Whether `peer` may take part in this node's consensus.
     ///
-    /// An empty voter set means this node has not been initialised or has not
-    /// yet received the founding entry. It cannot know who the voters are, so
-    /// it accepts from any member — which during that window is exactly the
-    /// configured core seed, since nobody else is in the allowlist yet. Without
-    /// this, founding could not happen: a founder sends `Vote` to peers whose
-    /// Raft membership is still empty, and they would refuse it.
-    fn is_voter(&self, peer: MemberId) -> bool {
-        let metrics = self.raft.metrics();
-        let membership = &metrics.borrow().membership_config;
-        let mut voters = membership.voter_ids().peekable();
-        voters.peek().is_none()
-            || voters.any(|voter| MemberId::try_from(voter).is_ok_and(|voter| voter == peer))
+    /// Once Raft knows its voters they are the whole answer. Before that — the
+    /// founding window — it does not, and something has to stand in, because a
+    /// founder sends `Vote` to peers whose Raft membership is still empty and
+    /// founding could never happen if they refused it.
+    ///
+    /// The stand-in is the *configured* founding core group, and it is narrow
+    /// on purpose. "Voter set is empty" was the first answer and it was wrong:
+    /// a node that is never initialised has an empty voter set for its whole
+    /// life, so it would serve consensus to every member in its allowlist
+    /// forever. That is not hypothetical — a member could send it a `Vote`, an
+    /// `AppendEntries` carrying a `GroupFounded` naming only themselves, and
+    /// the victim would apply it, rebuild its allowlist from that log and evict
+    /// the real group. Phase 1b makes it worse: every follower runs an
+    /// uninitialised Raft with the full membership in its allowlist.
+    ///
+    /// So the window is bounded twice over — by who (`founding_core`, not
+    /// "anyone we would talk to") and by when (only until the log says a group
+    /// exists, after which an empty voter set means this node is not a voter at
+    /// all and must not be talked into behaving like one).
+    ///
+    /// The second bound is deliberately ahead of its use, and unreachable
+    /// today: nothing in phase 1a can give a node a founded log *and* an empty
+    /// Raft config, so mutating that half of the condition away breaks no test.
+    /// It bites in 1b, where a member listed in a stale `[consensus] core` that
+    /// the group was founded without will hold the log through follower mode
+    /// while never being a voter — and would otherwise go on serving consensus
+    /// to whoever that stale config names.
+    fn may_speak_raft(&self, peer: MemberId) -> bool {
+        {
+            let metrics = self.raft.metrics();
+            let membership = &metrics.borrow().membership_config;
+            let mut voters = membership.voter_ids().peekable();
+            if voters.peek().is_some() {
+                return voters
+                    .any(|voter| MemberId::try_from(voter).is_ok_and(|voter| voter == peer));
+            }
+        }
+
+        self.state_machine.membership().group_id().is_none() && self.founding_core.contains(&peer)
     }
 }
 
@@ -134,16 +181,24 @@ impl ProtocolHandler for RaftProtocol {
         // Voters only. The allowlist got them this far, which proves they are
         // a member; being a member is not licence to take part in consensus.
         let peer = MemberId::from(connection.remote_id());
-        if !self.is_voter(peer) {
-            tracing::info!(%peer, "refused raft rpc from a non-voter");
-            connection.close(NOT_A_VOTER.into(), b"not a voter");
-            return Ok(());
-        }
 
         // One stream per RPC, and a connection carries many: a follower is
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
         loop {
+            // Re-checked every time rather than once at accept. The voter set
+            // changes under a long-lived connection — founding ends, and later
+            // a `CoreGroupChanged` demotes somebody — and a check made only at
+            // accept would keep serving whoever got in before it moved. §4.4
+            // makes the same argument for the allowlist: refusing the *next*
+            // connection is not enough when the current one is still open. One
+            // watch borrow per RPC is not worth optimising away.
+            if !self.may_speak_raft(peer) {
+                tracing::info!(%peer, "refused raft rpc from a non-voter");
+                connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                return Ok(());
+            }
+
             let (mut send, mut recv) = match connection.accept_bi().await {
                 Ok(streams) => streams,
                 // The peer closed the connection: the normal way this ends.

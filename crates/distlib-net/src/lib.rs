@@ -20,5 +20,5 @@ pub use allowlist::{Allowlist, AllowlistWriter, allowlist};
 pub use connections::Connections;
 pub use endpoint::build_endpoint;
 pub use error::{NetError, Result};
-pub use hooks::{AllowlistHooks, close_code};
+pub use hooks::{AllowlistHooks, NOT_A_VOTER_REASON, close_code};
 pub use node::Node;

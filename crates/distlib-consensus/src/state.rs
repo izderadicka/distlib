@@ -236,6 +236,12 @@ impl MembershipState {
             }
 
             MembershipEvent::CoreGroupChanged { core } => {
+                // Changes this projection and nothing else. §4.5 has core-group
+                // changes go through openraft's joint consensus, and no
+                // `change_membership` call exists yet — so a member promoted
+                // here does not become a Raft voter, and a demoted one keeps
+                // voting. Recorded as P1-23; wiring it is its own change,
+                // because joint consensus has failure modes of its own.
                 if core.is_empty() || !core.iter().all(|id| self.members.contains_key(id)) {
                     return Err(ConsensusError::InvalidCoreGroup);
                 }

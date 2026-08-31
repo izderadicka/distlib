@@ -27,6 +27,8 @@ use iroh::{
 use openraft::Raft;
 use serde::{Deserialize, Serialize};
 
+use std::time::Duration;
+
 use crate::{
     error::ConsensusError,
     raft::{
@@ -35,6 +37,22 @@ use crate::{
     },
     signed::SignedEvent,
 };
+
+/// How long a core node will wait for a proposal to commit before answering.
+///
+/// `client_write` waits for the entry to be committed, and a leader that has
+/// lost quorum waits for one that is not coming. Without a bound that parks
+/// this node's accept-loop task — it cannot even notice the peer hanging up —
+/// and every later proposal on the same connection queues behind it.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a proposer waits for the whole exchange.
+///
+/// Independent of [`COMMIT_TIMEOUT`] rather than derived from it: this bounds a
+/// peer that stops answering at all, which is the case the server-side bound
+/// cannot help with. Longer, so a peer that is merely slow gets to answer
+/// before this fires and reports it as unreachable.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// What a member asks a core node.
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,7 +130,17 @@ impl MemberlogProtocol {
     }
 
     async fn propose(&self, event: SignedEvent) -> ProposeOutcome {
-        match self.raft.client_write(event).await {
+        let written =
+            match tokio::time::timeout(COMMIT_TIMEOUT, self.raft.client_write(event)).await {
+                Ok(written) => written,
+                Err(_) => {
+                    return ProposeOutcome::NotCommitted(format!(
+                        "the entry did not commit within {COMMIT_TIMEOUT:?}"
+                    ));
+                }
+            };
+
+        match written {
             // The write reached the log; `data` is the state machine's verdict
             // on whether it then took effect.
             Ok(written) => match written.data {
@@ -186,11 +214,13 @@ impl MemberlogClient {
     ) -> Result<(), ProposeError> {
         let unreachable = |message: String| ProposeError::Unreachable { member, message };
 
-        match self
-            .exchange(member, addr, Request::Propose(Box::new(event)))
+        let exchange = self.exchange(member, addr, Request::Propose(Box::new(event)));
+        let answer = tokio::time::timeout(EXCHANGE_TIMEOUT, exchange)
             .await
-            .map_err(unreachable)?
-        {
+            .map_err(|_| unreachable(format!("no answer within {EXCHANGE_TIMEOUT:?}")))?
+            .map_err(unreachable)?;
+
+        match answer {
             Response::Proposed(ProposeOutcome::Applied) => Ok(()),
             Response::Proposed(ProposeOutcome::Rejected(error)) => {
                 Err(ProposeError::Rejected(error))
