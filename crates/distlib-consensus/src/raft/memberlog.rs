@@ -101,10 +101,17 @@ pub enum ProposeError {
     Rejected(ConsensusError),
 }
 
-/// Serves `distlib/memberlog/0`.
+/// The **answering** side of `distlib/memberlog/0`.
 ///
-/// Held by core nodes only. A follower has no Raft to commit with, so it does
-/// not advertise this ALPN — it is a client of it, not a server.
+/// Only this half needs a Raft, and that is the whole shape of the protocol:
+/// any member may *ask* — that is [`MemberlogClient`], which needs nothing but
+/// a connection — and only a core node can answer, because answering means
+/// committing through consensus.
+///
+/// It belongs on core nodes alone, and phase 1b's roles are what will put it
+/// there: until then [`crate::MembershipNode`] installs it on every node, and a
+/// node with no group of its own accepts a proposal only to fail it with
+/// [`ProposeOutcome::NotCommitted`] — harmless, but not the intended shape.
 #[derive(Clone)]
 pub struct MemberlogProtocol {
     raft: Raft<TypeConfig>,
