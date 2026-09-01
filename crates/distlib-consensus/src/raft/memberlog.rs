@@ -17,7 +17,7 @@
 //! Phase 1b adds the other half — fetching the log — on this same ALPN, which
 //! is where §4.2's non-core followers get their copy.
 
-use distlib_core::MemberId;
+use distlib_core::{MemberId, NodeAddr};
 use distlib_net::{Connections, alpn};
 use iroh::{
     Endpoint,
@@ -31,10 +31,7 @@ use std::time::Duration;
 
 use crate::{
     error::ConsensusError,
-    raft::{
-        network::MAX_RPC_BYTES,
-        types::{NodeAddr, TypeConfig},
-    },
+    raft::{network::MAX_RPC_BYTES, types::TypeConfig},
     signed::SignedEvent,
 };
 
@@ -55,6 +52,11 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// What a member asks a core node.
+///
+/// One variant so far, and an enum rather than a bare struct because postcard
+/// writes a variant discriminant: adding the log-fetch request in the next PR
+/// is then a new variant that leaves `Propose`'s encoding alone, where starting
+/// from a struct would make it a wire break.
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
     /// A membership event the sender wants committed.
@@ -62,7 +64,7 @@ enum Request {
     /// Only the leader can commit one, so a core node that is not the leader
     /// still has to hand it on — which it does through its own Raft, exactly as
     /// if the proposal had originated there.
-    Propose(Box<SignedEvent>),
+    Propose(SignedEvent),
 }
 
 /// What the core node answers.
@@ -132,7 +134,7 @@ impl MemberlogProtocol {
 
     async fn answer(&self, request: Request) -> Response {
         match request {
-            Request::Propose(event) => Response::Proposed(self.propose(*event).await),
+            Request::Propose(event) => Response::Proposed(self.propose(event).await),
         }
     }
 
@@ -221,7 +223,7 @@ impl MemberlogClient {
     ) -> Result<(), ProposeError> {
         let unreachable = |message: String| ProposeError::Unreachable { member, message };
 
-        let exchange = self.exchange(member, addr, Request::Propose(Box::new(event)));
+        let exchange = self.exchange(member, addr, Request::Propose(event));
         let answer = tokio::time::timeout(EXCHANGE_TIMEOUT, exchange)
             .await
             .map_err(|_| unreachable(format!("no answer within {EXCHANGE_TIMEOUT:?}")))?

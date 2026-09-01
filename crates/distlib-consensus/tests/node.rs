@@ -13,8 +13,8 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, NodeAddr};
-use distlib_core::MemberId;
+use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode};
+use distlib_core::{MemberId, NodeAddr};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
@@ -481,7 +481,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
         "this test is only meaningful while the bystander is not a voter"
     );
 
-    let founder_addr = distlib_consensus::NodeAddr {
+    let founder_addr = NodeAddr {
         relay: None,
         direct: founder.addr.direct.clone(),
     };
@@ -577,7 +577,7 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
         .await
         .unwrap();
 
-    let bystander_addr = distlib_consensus::NodeAddr {
+    let bystander_addr = NodeAddr {
         relay: None,
         direct: bystander.addr.direct.clone(),
     };

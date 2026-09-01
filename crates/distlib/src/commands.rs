@@ -4,10 +4,10 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use distlib_consensus::{
-    MemberRecord, MembershipNode, MembershipState, NodeAddr, RAFT_DB, StateMachineStore,
+    MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
 };
 use distlib_core::{
-    Config, CoreMember, DataDir, MemberId,
+    Config, CoreMember, DataDir, MemberId, NodeAddr,
     identity::{create_secret_key, load_or_create_secret_key, member_id},
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
@@ -463,10 +463,7 @@ fn founders(
             let addr = if member.member == me && member.addrs.is_empty() {
                 mine()
             } else {
-                NodeAddr {
-                    relay: member.relay.clone(),
-                    direct: member.addrs.iter().copied().collect(),
-                }
+                member.addr()
             };
             (record(member.member, member.name.clone()), addr)
         })

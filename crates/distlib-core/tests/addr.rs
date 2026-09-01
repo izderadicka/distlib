@@ -1,16 +1,17 @@
-//! Addressing carried in Raft membership.
+//! How a member's address compares and encodes.
 //!
-//! `NodeAddr` has to implement `Eq` — openraft's `Node` bound requires it — so
-//! the question is not whether it compares, but whether comparing means the
-//! right thing. These values are persisted in the Raft log and compared across
-//! nodes, so equality that depended on the order addresses happened to be
-//! listed in would report membership changes where nothing changed.
+//! `NodeAddr` has to implement `Eq` — openraft's `Node` bound requires it, since
+//! this is what Raft membership carries — so the question is not whether it
+//! compares, but whether comparing means the right thing. These values are
+//! persisted in the log and compared across nodes, so equality that depended on
+//! the order addresses happened to be listed in would report membership changes
+//! where nothing changed.
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::net::SocketAddr;
 
-use distlib_consensus::NodeAddr;
+use distlib_core::NodeAddr;
 
 fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{port}").parse().unwrap()

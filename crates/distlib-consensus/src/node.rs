@@ -8,7 +8,7 @@
 
 use std::{collections::BTreeMap, collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
-use distlib_core::{MemberId, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use openraft::{
@@ -22,8 +22,8 @@ use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
     raft::{
-        LogStore, MemberlogClient, MemberlogProtocol, NodeAddr, ProposeError,
-        RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
+        LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
+        RaftProtocol, StateMachineStore, TypeConfig,
     },
     signed::SignedEvent,
     state::MembershipState,

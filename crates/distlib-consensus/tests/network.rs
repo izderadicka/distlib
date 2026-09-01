@@ -20,9 +20,9 @@ use std::{
 };
 
 use distlib_consensus::{
-    LogStore, NodeAddr, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
+    LogStore, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
 };
-use distlib_core::{MemberId, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,

@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use distlib_core::{MemberId, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{Connections, NOT_A_VOTER_REASON, alpn, close_code};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
@@ -39,10 +39,7 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::raft::{
-    state_machine::StateMachineStore,
-    types::{NodeAddr, TypeConfig},
-};
+use crate::raft::{state_machine::StateMachineStore, types::TypeConfig};
 
 /// Largest encoded RPC accepted in either direction.
 ///

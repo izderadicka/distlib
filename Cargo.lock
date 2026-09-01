@@ -1017,6 +1017,7 @@ dependencies = [
  "directories",
  "figment",
  "iroh",
+ "postcard",
  "proptest",
  "serde",
  "tempfile",

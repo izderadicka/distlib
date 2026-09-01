@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use distlib_core::NodeAddr;
 use openraft::{
     EntryPayload, ErrorSubject, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
     StoredMembership, storage::RaftStateMachine,
@@ -38,7 +39,7 @@ use crate::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
             write_key, write_txn, writing,
         },
-        types::{NodeAddr, TypeConfig},
+        types::TypeConfig,
     },
     state::MembershipState,
 };
