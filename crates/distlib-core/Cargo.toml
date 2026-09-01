@@ -24,6 +24,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+# NodeAddr encoding canonically is a property the Raft log depends on, and the
+# test that pins it belongs with the type.
+postcard = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

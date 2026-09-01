@@ -1,13 +1,13 @@
 //! What each subcommand actually does.
 
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use distlib_consensus::{
-    MemberRecord, MembershipNode, MembershipState, NodeAddr, RAFT_DB, StateMachineStore,
+    MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
 };
 use distlib_core::{
-    Config, CoreMember, DataDir, MemberId,
+    Config, CoreMember, DataDir, MemberId, NodeAddr,
     identity::{create_secret_key, load_or_create_secret_key, member_id},
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
@@ -95,7 +95,29 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         tracing::info!(%addr, "listening");
     }
 
-    let node = MembershipNode::start(endpoint, hooks, writer, paths.data_dir.root()).await?;
+    // The founding core group this node belongs to, or nothing. A node whose
+    // config lists a core it is not part of is not founding a group — it is a
+    // follower of one — and must serve `distlib/raft/0` to nobody.
+    let founding_core: BTreeSet<MemberId> = config
+        .consensus
+        .core
+        .iter()
+        .map(|member| member.member)
+        .collect();
+    let founding_core = if founding_core.contains(&me) {
+        founding_core
+    } else {
+        BTreeSet::new()
+    };
+
+    let node = MembershipNode::start(
+        endpoint,
+        hooks,
+        writer,
+        paths.data_dir.root(),
+        founding_core,
+    )
+    .await?;
 
     if found_group {
         if let Err(error) = found(&node, &config, &secret, me).await {
@@ -441,10 +463,7 @@ fn founders(
             let addr = if member.member == me && member.addrs.is_empty() {
                 mine()
             } else {
-                NodeAddr {
-                    relay: member.relay.clone(),
-                    direct: member.addrs.iter().copied().collect(),
-                }
+                member.addr()
             };
             (record(member.member, member.name.clone()), addr)
         })

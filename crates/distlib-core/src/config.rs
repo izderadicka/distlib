@@ -19,6 +19,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    addr::NodeAddr,
     error::{CoreError, Result},
     id::MemberId,
 };
@@ -235,6 +236,19 @@ impl Config {
 }
 
 impl CoreMember {
+    /// Where to reach this member.
+    ///
+    /// The config file keeps `addrs` and `relay` as flat keys rather than
+    /// nesting a [`NodeAddr`], because this is a file people edit by hand and
+    /// `addrs = ["1.2.3.4:11204"]` reads better than a nested table. This is
+    /// the one place the two shapes meet.
+    pub fn addr(&self) -> NodeAddr {
+        NodeAddr {
+            relay: self.relay.clone(),
+            direct: self.addrs.iter().copied().collect(),
+        }
+    }
+
     /// This member as a TOML inline table, ready to paste into `[consensus] core`.
     ///
     /// Public so `distlib whoami` prints exactly what `init` writes: one

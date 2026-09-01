@@ -26,7 +26,11 @@ use crate::{
 /// pre-image includes `MemberId`s in their serde form (a string), so changing
 /// how a member id renders would change every signature; that is what bumping
 /// this tag is for.
-const SIGNING_DOMAIN: &[u8] = b"distlib.membership.v1";
+///
+/// v2 added `changed_at` to the pre-image. Without the bump an entry signed by
+/// a v1 build would fail with `BadSignature` — indistinguishable from
+/// tampering — rather than as the version mismatch it is.
+const SIGNING_DOMAIN: &[u8] = b"distlib.membership.v2";
 
 /// A membership event, with the member who proposed it and their signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,19 +38,33 @@ pub struct SignedEvent {
     event: MembershipEvent,
     proposer: MemberId,
     at: Timestamp,
+    /// The membership this was proposed against — see
+    /// [`crate::MembershipState::changed_at`].
+    ///
+    /// Signed along with the rest, so it is the proposer's own statement about
+    /// what they were looking at and cannot be rewritten in transit to make a
+    /// stale proposal look current.
+    changed_at: u64,
     signature: Signature,
 }
 
 impl SignedEvent {
-    /// Signs `event` as proposed by the holder of `secret_key`.
-    pub fn sign(secret_key: &SecretKey, event: MembershipEvent, at: Timestamp) -> Result<Self> {
+    /// Signs `event` as proposed by the holder of `secret_key`, against the
+    /// membership as of `changed_at`.
+    pub fn sign(
+        secret_key: &SecretKey,
+        event: MembershipEvent,
+        at: Timestamp,
+        changed_at: u64,
+    ) -> Result<Self> {
         let proposer = MemberId::from(secret_key.public());
-        let payload = signing_payload(&event, &proposer, at)?;
+        let payload = signing_payload(&event, &proposer, at, changed_at)?;
         Ok(Self {
             signature: secret_key.sign(&payload),
             event,
             proposer,
             at,
+            changed_at,
         })
     }
 
@@ -56,7 +74,7 @@ impl SignedEvent {
     /// worth rejecting before it is written down but nothing needs to look
     /// inside it yet.
     pub fn verify(&self) -> Result<()> {
-        let payload = signing_payload(&self.event, &self.proposer, self.at)?;
+        let payload = signing_payload(&self.event, &self.proposer, self.at, self.changed_at)?;
         self.proposer
             .as_public_key()
             .verify(&payload, &self.signature)
@@ -85,15 +103,28 @@ impl SignedEvent {
     pub fn at(&self) -> Timestamp {
         self.at
     }
+
+    /// The membership this was proposed against. Not advisory — enforced.
+    pub fn changed_at(&self) -> u64 {
+        self.changed_at
+    }
 }
 
 /// The exact bytes a signature covers.
 ///
 /// `SIGNING_DOMAIN` first, then a postcard encoding of everything the signature
-/// must bind: the event, who proposed it, and when. postcard is canonical for a
-/// given type, so signing and verifying agree without a separate normalisation
-/// step.
-fn signing_payload(event: &MembershipEvent, proposer: &MemberId, at: Timestamp) -> Result<Vec<u8>> {
+/// must bind: the event, who proposed it, when, and the membership it was
+/// proposed against. postcard is canonical for a given type, so signing and
+/// verifying agree without a separate normalisation step.
+fn signing_payload(
+    event: &MembershipEvent,
+    proposer: &MemberId,
+    at: Timestamp,
+    changed_at: u64,
+) -> Result<Vec<u8>> {
     let payload = SIGNING_DOMAIN.to_vec();
-    Ok(postcard::to_extend(&(event, proposer, at), payload)?)
+    Ok(postcard::to_extend(
+        &(event, proposer, at, changed_at),
+        payload,
+    )?)
 }

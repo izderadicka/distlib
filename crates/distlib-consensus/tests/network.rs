@@ -20,9 +20,9 @@ use std::{
 };
 
 use distlib_consensus::{
-    LogStore, NodeAddr, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
+    LogStore, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
 };
-use distlib_core::{MemberId, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
@@ -31,6 +31,7 @@ use iroh::{
 };
 use openraft::{Config, Raft};
 use redb::Database;
+use std::collections::BTreeSet;
 use tempfile::TempDir;
 
 /// One node: its Raft, the router serving it, and the files it lives in.
@@ -47,6 +48,11 @@ impl Node {
     async fn start(secret: SecretKey, peers: Vec<MemberId>) -> Self {
         let me = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
+        // These nodes drive Raft directly rather than founding through
+        // `MembershipNode`, so their voter set only arrives with `initialize`.
+        // Until it does they still have to answer each other, which is what
+        // naming the founding core group here is for.
+        let founding_core: BTreeSet<MemberId> = peers.iter().copied().chain([me]).collect();
 
         // Same endpoint wiring as production, including the allowlist hooks:
         // testing a configuration nothing ships would prove little.
@@ -71,6 +77,7 @@ impl Node {
         let db = Arc::new(Database::create(dir.path().join("raft.redb")).unwrap());
         let log = LogStore::from_database(Arc::clone(&db)).unwrap();
         let state_machine = StateMachineStore::from_database(db).unwrap();
+        let served = state_machine.clone();
 
         // Short timers: these tests wait for real elections, and the defaults
         // are tuned for real networks rather than loopback.
@@ -98,7 +105,10 @@ impl Node {
         // The router serves peers; the factory dials them. Both need the
         // endpoint, and the Raft has to exist before it can be served.
         let router = Router::builder(endpoint)
-            .accept(distlib_net::alpn::RAFT, RaftProtocol::new(raft.clone()))
+            .accept(
+                distlib_net::alpn::RAFT,
+                RaftProtocol::new(raft.clone(), served, founding_core),
+            )
             .spawn();
 
         Self {
@@ -265,6 +275,8 @@ fn sample_event() -> distlib_consensus::SignedEvent {
         &secret,
         MembershipEvent::found(vec![record], Timestamp::from_millis(1)).unwrap(),
         Timestamp::from_millis(1),
+        // Founding is always proposed against an empty membership.
+        0,
     )
     .unwrap()
 }

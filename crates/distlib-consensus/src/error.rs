@@ -61,6 +61,24 @@ pub enum ConsensusError {
     #[error("the core group must be a non-empty subset of the membership")]
     InvalidCoreGroup,
 
+    /// A member tried to set somebody else's pledge.
+    #[error("{proposer} cannot set the pledge of {member}; a pledge is the member's own")]
+    PledgeNotOwn {
+        proposer: MemberId,
+        member: MemberId,
+    },
+
+    /// A non-core member tried to change the voter set.
+    #[error("{proposer} is not a core member and cannot change the core group")]
+    NotCoreMember { proposer: MemberId },
+
+    /// The proposal was made against a membership that has since changed.
+    #[error(
+        "the group changed at index {current} but this was proposed against {seen}; \
+         the proposer's view is out of date"
+    )]
+    StaleProposal { seen: u64, current: u64 },
+
     /// Serialising an event failed.
     ///
     /// Carries the message rather than `postcard::Error`, because this type is

@@ -21,8 +21,8 @@ pub use error::{ConsensusError, Result};
 pub use event::{MemberRecord, MembershipEvent, Timestamp};
 pub use node::{MembershipNode, RAFT_DB, alpns};
 pub use raft::{
-    LogStore, NodeAddr, RaftClient, RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore,
-    TypeConfig,
+    LogStore, MemberlogClient, MemberlogProtocol, ProposeError, ProposeOutcome, RaftClient,
+    RaftNetworkFactoryImpl, RaftProtocol, StateMachineStore, TypeConfig,
 };
 pub use signed::SignedEvent;
 pub use state::MembershipState;

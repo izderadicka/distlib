@@ -4,12 +4,14 @@
 //! configuration model, the data directory layout and the core error type. It
 //! deliberately has no knowledge of transport, storage or consensus.
 
+pub mod addr;
 pub mod config;
 pub mod error;
 pub mod id;
 pub mod identity;
 pub mod paths;
 
+pub use addr::{BadRelayUrl, NodeAddr};
 pub use config::{Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;
 pub use id::{GroupId, ItemId, MemberId, RawMemberId};

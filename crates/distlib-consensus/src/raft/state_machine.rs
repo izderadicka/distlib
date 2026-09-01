@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use distlib_core::NodeAddr;
 use openraft::{
     EntryPayload, ErrorSubject, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
     StoredMembership, storage::RaftStateMachine,
@@ -38,7 +39,7 @@ use crate::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
             write_key, write_txn, writing,
         },
-        types::{NodeAddr, TypeConfig},
+        types::TypeConfig,
     },
     state::MembershipState,
 };
@@ -202,14 +203,17 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         let (encoded, derived) = {
             let mut applied = self.lock();
             for entry in entries {
+                let index = entry.log_id.index;
                 applied.last_applied = Some(entry.log_id);
 
                 match entry.payload {
                     // A no-op a new leader commits to establish its term.
+                    // Deliberately does not touch `changed_at`: a leader
+                    // election must not invalidate proposals in flight.
                     EntryPayload::Blank => responses.push(Ok(())),
 
                     EntryPayload::Normal(event) => {
-                        let verdict = applied.state.apply(&event);
+                        let verdict = applied.state.apply(index, &event);
                         if let Err(error) = &verdict {
                             // Raft has already committed this entry, so every
                             // node sees it and every node rejects it the same

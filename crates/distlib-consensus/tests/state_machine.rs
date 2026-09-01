@@ -43,8 +43,11 @@ impl Signer {
         }
     }
 
-    fn sign(&self, event: MembershipEvent) -> SignedEvent {
-        SignedEvent::sign(&self.secret, event, Timestamp::from_millis(1)).unwrap()
+    /// Signs `event` as proposed against the membership as of `changed_at` —
+    /// the log index of the last entry that changed it, which is what
+    /// `MembershipState::apply` checks the proposal against.
+    fn sign(&self, event: MembershipEvent, changed_at: u64) -> SignedEvent {
+        SignedEvent::sign(&self.secret, event, Timestamp::from_millis(1), changed_at).unwrap()
     }
 }
 
@@ -78,8 +81,47 @@ fn founding(founder: &Signer) -> Entry<TypeConfig> {
         founder.sign(
             MembershipEvent::found(vec![founder.record("founder")], Timestamp::from_millis(1))
                 .unwrap(),
+            0,
         ),
     )
+}
+
+#[tokio::test]
+async fn a_leader_election_does_not_invalidate_a_proposal_in_flight() {
+    // `changed_at` tracks the last entry that changed the *membership*, not the
+    // log head, and this is why. Raft commits a blank entry whenever a leader
+    // is established; if that moved the comparand, every proposal in flight
+    // during an election would be refused for a change that never happened.
+    let (mut store, _dir) = new_store();
+    let alice = Signer::generate();
+
+    // Alice reads the membership, then an election intervenes.
+    store.apply(vec![founding(&alice)]).await.unwrap();
+    let seen = store.membership().changed_at();
+    store
+        .apply(vec![Entry {
+            log_id: log_id(2),
+            payload: EntryPayload::Blank,
+        }])
+        .await
+        .unwrap();
+
+    let bob = Signer::generate();
+    let verdicts = store
+        .apply(vec![entry(
+            2,
+            alice.sign(
+                MembershipEvent::MemberAdded {
+                    member: bob.record("bob"),
+                },
+                seen,
+            ),
+        )])
+        .await
+        .unwrap();
+
+    assert_eq!(verdicts, vec![Ok(())], "the election changed no membership");
+    assert!(store.membership().is_member(&bob.id));
 }
 
 #[tokio::test]
@@ -137,9 +179,12 @@ async fn a_rejected_event_is_skipped_rather_than_fatal() {
     // A non-member proposing into a group they do not belong to.
     let rejected = entry(
         2,
-        stranger.sign(MembershipEvent::MemberAdded {
-            member: stranger.record("uninvited"),
-        }),
+        stranger.sign(
+            MembershipEvent::MemberAdded {
+                member: stranger.record("uninvited"),
+            },
+            1,
+        ),
     );
 
     let responses = store
@@ -230,9 +275,12 @@ async fn a_builder_is_unaffected_by_later_applies() {
     store
         .apply(vec![entry(
             2,
-            alice.sign(MembershipEvent::MemberAdded {
-                member: bob.record("bob"),
-            }),
+            alice.sign(
+                MembershipEvent::MemberAdded {
+                    member: bob.record("bob"),
+                },
+                1,
+            ),
         )])
         .await
         .unwrap();
@@ -313,9 +361,12 @@ async fn a_stale_builder_does_not_overwrite_a_newer_snapshot() {
     source
         .apply(vec![entry(
             5,
-            alice.sign(MembershipEvent::MemberAdded {
-                member: bob.record("bob"),
-            }),
+            alice.sign(
+                MembershipEvent::MemberAdded {
+                    member: bob.record("bob"),
+                },
+                1,
+            ),
         )])
         .await
         .unwrap();
@@ -395,9 +446,12 @@ async fn apply_reports_whether_an_event_took_effect() {
             founding(&alice),
             entry(
                 2,
-                stranger.sign(MembershipEvent::MemberAdded {
-                    member: stranger.record("uninvited"),
-                }),
+                stranger.sign(
+                    MembershipEvent::MemberAdded {
+                        member: stranger.record("uninvited"),
+                    },
+                    1,
+                ),
             ),
         ])
         .await

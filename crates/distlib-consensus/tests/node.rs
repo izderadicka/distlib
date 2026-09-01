@@ -8,14 +8,13 @@
 #![allow(clippy::result_large_err)] // openraft's error types, in its own signatures
 
 use std::{
+    collections::BTreeSet,
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
-use distlib_consensus::{
-    MemberRecord, MembershipEvent, MembershipNode, NodeAddr, SignedEvent, Timestamp,
-};
-use distlib_core::MemberId;
+use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode};
+use distlib_core::{MemberId, NodeAddr};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
@@ -37,7 +36,27 @@ struct Peer {
 
 impl Peer {
     /// Starts a node whose allowlist is seeded with `bootstrap`.
+    /// Starts a node seeded with `bootstrap` that will found with `bootstrap`.
+    ///
+    /// The common case: everyone this node talks to before there is a log is
+    /// somebody it is founding with.
     async fn start(secret: SecretKey, bootstrap: Vec<MemberId>) -> Self {
+        let id = MemberId::from(secret.public());
+        let founding_core = bootstrap.iter().copied().chain([id]).collect();
+        Self::start_with(secret, bootstrap, founding_core).await
+    }
+
+    /// Starts a node whose founding core group is stated separately.
+    ///
+    /// The two sets are not the same thing, and a node that conflates them
+    /// serves consensus to anyone it would talk to. A member with an empty
+    /// founding core is one that is not founding anything — it should speak
+    /// `distlib/raft/0` with nobody.
+    async fn start_with(
+        secret: SecretKey,
+        bootstrap: Vec<MemberId>,
+        founding_core: BTreeSet<MemberId>,
+    ) -> Self {
         let id = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
 
@@ -62,9 +81,10 @@ impl Peer {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
-        let node = MembershipNode::start(endpoint, hooks.clone(), writer, dir.path())
-            .await
-            .unwrap();
+        let node =
+            MembershipNode::start(endpoint, hooks.clone(), writer, dir.path(), founding_core)
+                .await
+                .unwrap();
 
         Self {
             secret,
@@ -82,10 +102,6 @@ impl Peer {
             display_name: name.to_owned(),
             pledge_bytes: 0,
         }
-    }
-
-    fn sign(&self, event: MembershipEvent) -> SignedEvent {
-        SignedEvent::sign(&self.secret, event, Timestamp::now()).unwrap()
     }
 }
 
@@ -165,13 +181,16 @@ async fn admitting_a_member_reaches_every_node() {
     let newcomer = MemberId::from(SecretKey::generate().public());
     first
         .node
-        .propose(first.sign(MembershipEvent::MemberAdded {
-            member: MemberRecord {
-                member_id: newcomer,
-                display_name: "newcomer".to_owned(),
-                pledge_bytes: 0,
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "newcomer".to_owned(),
+                    pledge_bytes: 0,
+                },
             },
-        }))
+            &first.secret,
+        )
         .await
         .unwrap();
 
@@ -295,13 +314,16 @@ async fn a_follower_can_propose() {
     let newcomer = MemberId::from(SecretKey::generate().public());
     second
         .node
-        .propose(second.sign(MembershipEvent::MemberAdded {
-            member: MemberRecord {
-                member_id: newcomer,
-                display_name: "admitted by a follower".to_owned(),
-                pledge_bytes: 0,
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "admitted by a follower".to_owned(),
+                    pledge_bytes: 0,
+                },
             },
-        }))
+            &second.secret,
+        )
         .await
         .expect("a follower must be able to propose");
 
@@ -341,10 +363,13 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
     let stranger = MemberId::from(SecretKey::generate().public());
     let error = founder
         .node
-        .propose(founder.sign(MembershipEvent::MemberExpelled {
-            member: stranger,
-            reason: "never joined".to_owned(),
-        }))
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: stranger,
+                reason: "never joined".to_owned(),
+            },
+            &founder.secret,
+        )
         .await
         .expect_err("a refused event must not be reported as success");
 
@@ -412,4 +437,171 @@ async fn three_founders_converge_on_one_group() {
     for peer in peers {
         peer.node.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
+    // The reason `distlib/raft/0` and `distlib/memberlog/0` are two protocols.
+    // Being in the allowlist proves you are a member; it is not licence to take
+    // part in consensus, because a `Vote` from a non-voter can disrupt a term.
+    // Proposing is the opposite: §4.3 and §4.4 open it to every member.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // A member of the group who was never made a voter.
+    let bystander =
+        Peer::start_with(SecretKey::generate(), vec![founder.id], BTreeSet::new()).await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: bystander.record("bystander"),
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the bystander to be admitted", |membership| {
+        membership.is_member(&bystander.id)
+    })
+    .await;
+    assert!(
+        !founder.node.membership().core().contains(&bystander.id),
+        "this test is only meaningful while the bystander is not a voter"
+    );
+
+    let founder_addr = NodeAddr {
+        relay: None,
+        direct: founder.addr.direct.clone(),
+    };
+
+    // Raft: refused. The ALPN is advertised, so the connection is established
+    // and then closed — which is the earliest point the peer's identity is
+    // proven and the voter set can be consulted.
+    let raft = bystander
+        .node
+        .endpoint()
+        .connect(
+            founder_addr.to_endpoint_addr(founder.id).unwrap(),
+            distlib_net::alpn::RAFT,
+        )
+        .await
+        .expect("a member may open the connection; it is the RPCs that are refused");
+    let closed = tokio::time::timeout(Duration::from_secs(10), raft.closed())
+        .await
+        .expect("the core node must close a raft connection from a non-voter");
+    assert!(
+        format!("{closed}").contains("not a voter"),
+        "closed for the wrong reason: {closed}"
+    );
+
+    // Memberlog: served. Same peer, same node, different conversation.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    let event = distlib_consensus::SignedEvent::sign(
+        &bystander.secret,
+        MembershipEvent::MemberAdded {
+            member: MemberRecord {
+                member_id: newcomer,
+                display_name: "invited by a non-voter".to_owned(),
+                pledge_bytes: 0,
+            },
+        },
+        distlib_consensus::Timestamp::now(),
+        founder.node.membership().changed_at(),
+    )
+    .unwrap();
+
+    distlib_consensus::MemberlogClient::new(
+        bystander.node.endpoint().clone(),
+        bystander.node.connections().clone(),
+    )
+    .propose(founder.id, &founder_addr, event)
+    .await
+    .expect("every member may propose, voter or not");
+
+    wait_for(&founder, "the proposal to be committed", |membership| {
+        membership.is_member(&newcomer)
+    })
+    .await;
+
+    founder.node.shutdown().await;
+    bystander.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
+    // The other direction of the gate, and the one that matters most. A node
+    // that is never initialised has an empty Raft voter set for its whole life,
+    // so "empty means we are founding" would leave it serving consensus to
+    // every member in its allowlist forever. A member could then send it a
+    // `Vote`, then an `AppendEntries` carrying a `GroupFounded` naming only
+    // themselves — validly signed, `changed_at` 0 against an empty state — and
+    // the victim would apply it, rebuild its allowlist from that log and evict
+    // the real group.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // A node that talks to the founder but founds nothing with anybody.
+    let bystander =
+        Peer::start_with(SecretKey::generate(), vec![founder.id], BTreeSet::new()).await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: bystander.record("bystander"),
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let bystander_addr = NodeAddr {
+        relay: None,
+        direct: bystander.addr.direct.clone(),
+    };
+
+    // Even the founder — a real voter of a real group, and the only member the
+    // bystander will talk to — gets nothing here. Being a voter somewhere else
+    // is not being a voter of a Raft this node does not run.
+    let raft = founder
+        .node
+        .endpoint()
+        .connect(
+            bystander_addr.to_endpoint_addr(bystander.id).unwrap(),
+            distlib_net::alpn::RAFT,
+        )
+        .await
+        .expect("the allowlist admits the connection; the RPCs are what is refused");
+    let closed = tokio::time::timeout(Duration::from_secs(10), raft.closed())
+        .await
+        .expect("a node that founds nothing must close a raft connection");
+    assert!(
+        format!("{closed}").contains("not a voter"),
+        "closed for the wrong reason: {closed}"
+    );
+
+    founder.node.shutdown().await;
+    bystander.node.shutdown().await;
 }
