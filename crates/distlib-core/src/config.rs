@@ -39,6 +39,8 @@ pub struct Config {
     pub net: NetConfig,
     /// The group this node belongs to.
     pub consensus: ConsensusConfig,
+    /// The local control API.
+    pub api: ApiConfig,
 }
 
 /// How this node talks to the network.
@@ -59,6 +61,31 @@ impl Default for NetConfig {
             bind_addr_v4: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
             relay_mode: RelayMode::default(),
             relay_urls: Vec::new(),
+        }
+    }
+}
+
+/// The local JSON-RPC API (§7.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiConfig {
+    /// Whether to serve it at all.
+    pub enabled: bool,
+
+    /// Where to listen.
+    ///
+    /// Loopback by default, and that is the security boundary rather than a
+    /// convenience: the token is the only other thing between a caller and
+    /// making this node propose membership changes as itself. Moving this off
+    /// `127.0.0.1` exposes that to the network, with no TLS in front of it.
+    pub bind_addr: SocketAddr,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11280)),
         }
     }
 }
@@ -220,10 +247,20 @@ impl Config {
              #     {{ member = \"<their id>\", name = \"alice\", addrs = [\"192.168.1.10:11204\"] }},\n\
              #     {{ member = \"<your id>\", name = \"bob\", addrs = [\"192.168.1.11:11204\"] }},\n\
              #   ]\n\
-             core = [{core}]\n",
+             core = [{core}]\n\
+             \n\
+             [api]\n\
+             # The local JSON-RPC API: what `distlib admit`, `distlib expel` and\n\
+             # the web UI talk to. Loopback only — the token in\n\
+             # <data-dir>/api.token is the only thing guarding it, and there is\n\
+             # no TLS, so do not move this off 127.0.0.1.\n\
+             enabled = {api_enabled}\n\
+             bind_addr = \"{api_bind}\"\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
+            api_enabled = self.api.enabled,
+            api_bind = self.api.bind_addr,
             core = self
                 .consensus
                 .core

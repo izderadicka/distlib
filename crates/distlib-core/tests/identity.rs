@@ -111,7 +111,7 @@ mod unix {
         let error = load_or_create_secret_key(&path).unwrap_err();
 
         assert!(
-            matches!(error, CoreError::KeyPermissions { mode: 0o644, .. }),
+            matches!(error, CoreError::NotPrivate { mode: 0o644, .. }),
             "a key other users can read must not be loaded silently; got {error:?}"
         );
     }

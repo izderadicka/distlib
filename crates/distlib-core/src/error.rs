@@ -40,9 +40,17 @@ pub enum CoreError {
     #[error("could not determine a default data directory; pass --data-dir")]
     NoDataDir,
 
-    /// The secret key file is readable by users other than the owner.
-    #[error("secret key {path} is accessible to other users (mode {mode:04o}); expected 0600")]
-    KeyPermissions { path: PathBuf, mode: u32 },
+    /// The API token file exists but holds nothing.
+    #[error("api token {path} is empty; delete it and restart to generate a new one")]
+    EmptyToken { path: PathBuf },
+
+    /// The operating system would not provide randomness.
+    #[error("could not generate a random token: {message}")]
+    Random { message: String },
+
+    /// A file that must be private is readable by other users.
+    #[error("{path} is accessible to other users (mode {mode:04o}); expected 0600")]
+    NotPrivate { path: PathBuf, mode: u32 },
 
     /// The secret key file is not a bare 32-byte ed25519 key.
     #[error("secret key {path} is {len} bytes; expected 32")]

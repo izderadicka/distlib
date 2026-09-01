@@ -16,6 +16,7 @@ path = "src/main.rs"
 distlib-core = { workspace = true }
 distlib-net = { workspace = true }
 distlib-consensus = { workspace = true }
+distlib-api = { workspace = true }
 iroh = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
