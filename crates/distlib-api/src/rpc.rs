@@ -59,12 +59,12 @@ impl Response {
 }
 
 /// A JSON-RPC error object.
-#[derive(Debug, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Serialize, thiserror::Error)]
 #[error("{message}")]
 pub struct Error {
     pub code: i32,
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
 

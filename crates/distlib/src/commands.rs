@@ -140,7 +140,12 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
 
     // The local API. Started after founding, so a caller that reaches it finds
     // a node that has finished deciding what it is.
-    let api = serve_api(paths, &config, Arc::clone(&node), secret.clone()).await?;
+    let api = if config.api.enabled {
+        Some(serve_api(paths, &config, Arc::clone(&node), secret.clone()).await?)
+    } else {
+        tracing::info!("the local api is disabled");
+        None
+    };
 
     // A running node holds the database exclusively, so nothing else can read
     // the membership while it is up. Logging every change is how the group is
@@ -481,7 +486,7 @@ fn founders(
         .collect())
 }
 
-/// Starts the local API, unless it is switched off.
+/// Starts the local API.
 ///
 /// The token is created on first run rather than at `init`, so a data
 /// directory made before this existed grows one when it is next started.
@@ -490,12 +495,7 @@ async fn serve_api(
     config: &Config,
     node: Arc<MembershipNode>,
     secret: SecretKey,
-) -> Result<Option<Server>> {
-    if !config.api.enabled {
-        tracing::info!("the local api is disabled");
-        return Ok(None);
-    }
-
+) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
@@ -509,10 +509,21 @@ async fn serve_api(
             )
         })?;
 
+    // Bound somewhere other than loopback, the token is the only thing between
+    // the network and this node's membership, and there is no TLS in front of
+    // it. Serving remotely is a legitimate thing to want — a node on a server
+    // or in a container — so this warns rather than refuses.
+    if !server.addr().ip().is_loopback() {
+        tracing::warn!(
+            addr = %server.addr(),
+            "the api is not on loopback and has no tls; put it behind a reverse proxy"
+        );
+    }
+
     // The address, never the token: it is a secret, and it is one command away
     // for anyone entitled to it.
     tracing::info!(addr = %server.addr(), token = %token_file.display(), "local api listening");
-    Ok(Some(server))
+    Ok(server)
 }
 
 /// This node's own dialable address.

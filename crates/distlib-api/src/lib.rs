@@ -7,14 +7,19 @@
 //! specified one arrives. This is the specified one, with the membership
 //! methods implemented and `library.*` and the SSE stream still to come.
 //!
-//! **Loopback and a bearer token, by default and on purpose.** Whoever can call
-//! this can make the node propose membership changes as itself. That is a
-//! narrower power than the node's key — it cannot sign anything the group's
-//! rules refuse, and every proposal is attributed — but it is not nothing, so
-//! the listener is `127.0.0.1` and every request must carry the token from
-//! `<data-dir>/api.token`.
+//! **A bearer token always; loopback by default.** Whoever can call this can
+//! make the node propose membership changes as itself. That is a narrower power
+//! than the node's key — it cannot sign anything the group's rules refuse, and
+//! every proposal is attributed — but it is not nothing, so every request must
+//! carry the token from `<data-dir>/api.token`.
+//!
+//! The default listener is `127.0.0.1`, which is a default rather than a
+//! promise: a node on a server or in a container has to be reachable from
+//! somewhere else. Nothing here refuses to bind elsewhere, and nothing here
+//! offers TLS either, so a non-loopback address wants a reverse proxy in front
+//! of it. TLS and whatever authentication belongs beside it are phase 3's, with
+//! the UI that needs them.
 
-pub mod client;
 pub mod methods;
 pub mod rpc;
 
@@ -32,7 +37,6 @@ use secrecy::SecretString;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-pub use client::{Client, ClientError};
 pub use methods::Api;
 use rpc::{Error, Request, Response};
 

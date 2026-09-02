@@ -13,10 +13,13 @@ use std::{
     sync::Arc,
 };
 
-use distlib_api::{Api, Client, ClientError, Server, serve};
+use distlib_api::{Api, Server, serve};
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{MemberId, NodeAddr};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
+use http_body_util::{BodyExt as _, Full};
+use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
+use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -30,7 +33,6 @@ struct Harness {
     node: Arc<MembershipNode>,
     server: Server,
     token: String,
-    client: Client,
     _dir: TempDir,
 }
 
@@ -90,49 +92,47 @@ impl Harness {
         )
         .await
         .unwrap();
-        let server_addr = server.addr();
-
         Self {
             node,
             server,
-            client: Client::new(server_addr, SecretString::from(token.clone())),
             token,
             _dir: dir,
         }
     }
 
-    /// A call carrying the right token.
+    /// A call carrying the right token. Returns its `result`.
     async fn call(&self, method: &str, params: Value) -> Value {
-        self.client.call(method, params).await.unwrap()
+        let (status, answer) = self.post(Some(&self.token), rpc(method, params)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        answer
+            .get("result")
+            .unwrap_or_else(|| panic!("expected a result; got {answer}"))
+            .clone()
     }
 
-    /// A call expected to be refused.
-    async fn refuse(&self, method: &str, params: Value) -> ClientError {
-        self.client
-            .call(method, params)
-            .await
-            .expect_err("this call should have been refused")
+    /// A call expected to be refused. Returns its `error`.
+    async fn refuse(&self, method: &str, params: Value) -> Value {
+        let (status, answer) = self.post(Some(&self.token), rpc(method, params)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        answer
+            .get("error")
+            .unwrap_or_else(|| panic!("expected an error; got {answer}"))
+            .clone()
     }
 
-    /// A client holding some other token.
-    fn as_stranger(&self) -> Client {
-        Client::new(self.server.addr(), SecretString::from("f".repeat(64)))
-    }
-
-    /// Posts a body the typed client would never produce.
+    /// Posts a body, returning the status and whatever came back.
     ///
-    /// The envelope rules — a batch, a wrong version — cannot be reached
-    /// through [`Client`], which always sends a well-formed single call. They
-    /// are still worth pinning: they are what a hand-written caller or a
-    /// browser will hit.
-    async fn post_raw(&self, body: Value) -> Value {
-        use http_body_util::{BodyExt as _, Full};
-        use hyper::{Request, body::Bytes, header::AUTHORIZATION};
-        use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
-
-        let request = Request::post(format!("http://{}/rpc", self.server.addr()))
-            .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header("content-type", "application/json")
+    /// Deliberately raw rather than a typed client: these tests are the only
+    /// caller until the CLI arrives, and the envelope rules — a batch, a wrong
+    /// version, a missing token — are exactly the ones a typed client would
+    /// make unreachable.
+    async fn post(&self, token: Option<&str>, body: Value) -> (StatusCode, Value) {
+        let mut request = Request::post(format!("http://{}/rpc", self.server.addr()))
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let request = request
             .body(Full::new(Bytes::from(body.to_string())))
             .unwrap();
 
@@ -141,8 +141,13 @@ impl Harness {
             .request(request)
             .await
             .unwrap();
+        let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&body).unwrap()
+
+        // A 401 carries plain text, not a JSON-RPC envelope.
+        let answer = serde_json::from_slice(&body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
+        (status, answer)
     }
 
     async fn shutdown(self) {
@@ -151,21 +156,25 @@ impl Harness {
     }
 }
 
-/// The JSON-RPC code behind a refusal.
-fn code(error: &ClientError) -> i32 {
-    match error {
-        ClientError::Failed(error) => error.code,
-        other => panic!("expected a json-rpc error; got {other}"),
-    }
+/// A well-formed single call.
+fn rpc(method: &str, params: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 }
 
-/// The JSON-RPC code in a raw response body.
-fn raw_code(response: &Value) -> i64 {
-    response
-        .get("error")
-        .unwrap_or_else(|| panic!("expected an error; got {response}"))["code"]
+/// The code out of a JSON-RPC error object.
+fn code(error: &Value) -> i64 {
+    error["code"]
         .as_i64()
-        .unwrap()
+        .unwrap_or_else(|| panic!("expected an error object; got {error}"))
+}
+
+/// The code out of a whole response body.
+fn raw_code(response: &Value) -> i64 {
+    code(
+        response
+            .get("error")
+            .unwrap_or_else(|| panic!("expected an error; got {response}")),
+    )
 }
 
 #[tokio::test]
@@ -174,14 +183,16 @@ async fn a_call_with_the_wrong_token_is_refused() {
     // call that gets past this can make the node propose as itself.
     let harness = Harness::start().await;
 
-    let refused = harness
-        .as_stranger()
-        .call("node.status", Value::Null)
-        .await
-        .expect_err("a stranger's token must not be accepted");
-    assert!(
-        matches!(refused, ClientError::Unauthorised(_)),
-        "expected an authorisation failure; got {refused}"
+    let (anonymous, _) = harness.post(None, rpc("node.status", Value::Null)).await;
+    assert_eq!(anonymous, StatusCode::UNAUTHORIZED, "no token at all");
+
+    let (stranger, _) = harness
+        .post(Some(&"f".repeat(64)), rpc("node.status", Value::Null))
+        .await;
+    assert_eq!(
+        stranger,
+        StatusCode::UNAUTHORIZED,
+        "a wrong token is no better than none"
     );
 
     // And the right token works, so this is not passing because the server is
@@ -252,13 +263,13 @@ async fn a_proposal_the_rules_refuse_comes_back_as_an_error() {
         )
         .await;
 
-    let ClientError::Failed(error) = &refused else {
-        panic!("expected a method failure; got {refused}");
-    };
-    assert_eq!(error.code, -32000);
+    assert_eq!(code(&refused), -32000);
     assert!(
-        error.message.contains(&stranger.to_string()),
-        "the caller should learn which member was refused: {error}"
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains(&stranger.to_string()),
+        "the caller should learn which member was refused: {refused}"
     );
 
     harness.shutdown().await;
@@ -311,13 +322,19 @@ async fn malformed_calls_are_reported_by_kind() {
     // Batches are deliberately not served — see the rpc module docs. An array
     // where an object belongs is an invalid request, which is the honest answer
     // rather than silently running its first element.
-    let batch = harness
-        .post_raw(json!([{"jsonrpc": "2.0", "id": 1, "method": "node.status"}]))
+    let (_, batch) = harness
+        .post(
+            Some(&harness.token),
+            json!([{"jsonrpc": "2.0", "id": 1, "method": "node.status"}]),
+        )
         .await;
     assert_eq!(raw_code(&batch), -32600);
 
-    let wrong_version = harness
-        .post_raw(json!({"jsonrpc": "1.0", "id": 1, "method": "node.status"}))
+    let (_, wrong_version) = harness
+        .post(
+            Some(&harness.token),
+            json!({"jsonrpc": "1.0", "id": 1, "method": "node.status"}),
+        )
         .await;
     assert_eq!(raw_code(&wrong_version), -32600);
 

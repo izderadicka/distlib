@@ -74,10 +74,13 @@ pub struct ApiConfig {
 
     /// Where to listen.
     ///
-    /// Loopback by default, and that is the security boundary rather than a
-    /// convenience: the token is the only other thing between a caller and
-    /// making this node propose membership changes as itself. Moving this off
-    /// `127.0.0.1` exposes that to the network, with no TLS in front of it.
+    /// Loopback by *default*, not by constraint: a node on a server or in a
+    /// container has to be reachable from somewhere else, and that is a
+    /// legitimate thing to configure. What loopback buys is that the default
+    /// exposes nothing — the token is then the only thing between a caller and
+    /// making this node propose membership changes as itself, and there is no
+    /// TLS yet, so a non-loopback address wants a reverse proxy in front of it
+    /// until there is.
     pub bind_addr: SocketAddr,
 }
 
@@ -251,9 +254,10 @@ impl Config {
              \n\
              [api]\n\
              # The local JSON-RPC API: what `distlib admit`, `distlib expel` and\n\
-             # the web UI talk to. Loopback only — the token in\n\
-             # <data-dir>/api.token is the only thing guarding it, and there is\n\
-             # no TLS, so do not move this off 127.0.0.1.\n\
+             # the web UI talk to. The token in <data-dir>/api.token is the only\n\
+             # thing guarding it, and there is no TLS yet — so if you move this\n\
+             # off 127.0.0.1, to reach a node on a server or in a container, put\n\
+             # a reverse proxy in front of it.\n\
              enabled = {api_enabled}\n\
              bind_addr = \"{api_bind}\"\n",
             bind = self.net.bind_addr_v4,

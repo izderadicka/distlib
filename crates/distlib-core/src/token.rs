@@ -55,14 +55,19 @@ pub fn create(path: &Path) -> Result<SecretString> {
 
 /// Whether `offered` is this token.
 ///
-/// Compares in constant time. The comparison is not the weak point here — an
-/// attacker who can time it can also read the file — but a token check that
-/// short-circuits on the first wrong byte is the kind of thing that gets copied
-/// somewhere it does matter.
+/// Compares in constant time rather than with `==`, which stops at the first
+/// differing byte and so takes measurably longer the more of a guess is right —
+/// enough to recover a token one byte at a time from a few thousand calls.
 ///
-/// No test guards this, and none can: `token == offered` is functionally
-/// identical and passes everything below. Constant time is a property of *how*
-/// it answers, not what it answers, so it is kept by reading the code.
+/// That is worth four lines here because the people who can call this API are
+/// not the people who can read the token file. A different local user reaches
+/// `127.0.0.1` but cannot read mode 0600, and `[api] bind_addr` may be set to a
+/// non-loopback address for a node on a server or in a container. Neither can
+/// see the file; both can time a reply.
+///
+/// No test guards this and none can: `==` is functionally identical and passes
+/// everything below. Constant time is a property of *how* it answers rather
+/// than what it answers, so it is kept by reading the code.
 pub fn matches(token: &SecretString, offered: &str) -> bool {
     let (token, offered) = (token.expose_secret().as_bytes(), offered.as_bytes());
     if token.len() != offered.len() {
