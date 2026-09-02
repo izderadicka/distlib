@@ -19,11 +19,12 @@ See [docs/distlib-plan.md](docs/distlib-plan.md) for the design, and
 [docs/plan-deltas.md](docs/plan-deltas.md) for where the implementation has
 deliberately diverged from it.
 
-> **Status: phase 1a.** Identity, transport, and the membership log work: a group can
-> be founded, members admitted and expelled, and every node derives what it will talk
-> to from the committed log. There is no catalogue, no content transfer and no UI yet.
-> Members who are not part of the core group cannot yet follow the log — that is
-> phase 1b — so for now every member is a founder.
+> **Status: phase 1b, in progress.** Identity, transport, and the membership log work:
+> a group can be founded, members admitted and expelled through the local API, and
+> every node derives what it will talk to from the committed log. There is no
+> catalogue, no content transfer and no UI yet. Members who are not part of the core
+> group cannot yet follow the log, so for now every member is a founder — follower
+> mode is the next piece of phase 1b.
 
 ## Build
 
@@ -64,7 +65,13 @@ address into the log, and an OS-chosen port is a different port after the next r
 [net]
 bind_addr_v4 = "127.0.0.1:11204"   # 11205 for B
 relay_mode   = "disabled"          # loopback needs no relay
+
+[api]
+bind_addr    = "127.0.0.1:11280"   # 11281 for B
 ```
+
+Two nodes on one machine need two of each port. The `[api]` one is the local
+control API — what `distlib` itself talks to, and what the web UI will use.
 
 **3. Ask each node who it is.** Founding needs every founder's id and address, and
 there is no group yet to ask — so this exchange happens out of band, once:
@@ -202,6 +209,36 @@ them hold for every protocol added later.
 | `distlib members` | List the group as this node's log has it. Needs the node stopped. |
 | `distlib status [--online]` | Identity, paths, relay mode, group and standing. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
+
+## The local API
+
+A running node serves JSON-RPC 2.0 on `127.0.0.1:11280`. It is how membership is
+changed while the node is up — the database is held exclusively by the running
+process, so nothing else can reach it — and it is the API the web UI will use.
+
+Every call needs the bearer token from `<data-dir>/api.token`, created on first run
+with mode `0600`:
+
+```sh
+curl -s http://127.0.0.1:11280/rpc \
+  -H "Authorization: Bearer $(cat /tmp/a/api.token)" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"node.status"}'
+```
+
+| Method | |
+|---|---|
+| `node.status` | Identity, group, whether this node votes, Raft state, current leader. |
+| `group.members` | The membership as this node's log has it. |
+| `group.propose_add` | `{member, name?}` — admit a member. |
+| `group.propose_expel` | `{member, reason}` — remove one. |
+| `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. |
+
+**Loopback and a token, deliberately.** Whoever can call this can make the node
+propose membership changes as itself. That is narrower than holding the node's key —
+nothing it proposes escapes the group's rules, and every proposal is signed and
+attributed — but it is not nothing, and there is no TLS in front of it. Set
+`enabled = false` under `[api]` to switch it off.
+
 
 Global flags: `--data-dir/-d`, `--config/-c`, `--verbose/-v` (repeat for more).
 

@@ -461,7 +461,11 @@ impl MembershipNode {
     }
 
     /// Stops consensus, the router and the background tasks.
-    pub async fn shutdown(self) {
+    /// Takes `&self` rather than `self` so the node can be shared.
+    ///
+    /// The local API serves from the same node this returns to, and an owning
+    /// shutdown would mean prising it back out of the `Arc` they share.
+    pub async fn shutdown(&self) {
         self.allowlist_updates.abort();
         self.evictions.abort();
         if let Err(error) = self.raft.shutdown().await {

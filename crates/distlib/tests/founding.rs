@@ -27,6 +27,11 @@ const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
 struct Friend {
     dir: TempDir,
     port: u16,
+    /// The local API's port.
+    ///
+    /// Its own, like the transport port: three nodes on one machine cannot
+    /// share either.
+    api_port: u16,
     id: String,
 }
 
@@ -38,13 +43,17 @@ impl Friend {
     fn introduce() -> Self {
         let dir = TempDir::new().unwrap();
         let port = a_free_port();
+        let api_port = a_free_port();
 
         // The port has to be pinned before `whoami`, because founding writes
         // this address into the log and an OS-chosen one would be gone by the
         // next restart.
         std::fs::write(
             dir.path().join("config.toml"),
-            format!("[net]\nbind_addr_v4 = \"127.0.0.1:{port}\"\nrelay_mode = \"disabled\"\n"),
+            format!(
+                "[net]\nbind_addr_v4 = \"127.0.0.1:{port}\"\nrelay_mode = \"disabled\"\n\n\
+                 [api]\nbind_addr = \"127.0.0.1:{api_port}\"\n"
+            ),
         )
         .unwrap();
 
@@ -68,7 +77,12 @@ impl Friend {
             "whoami prints a line to paste into [consensus] core; got:\n{stdout}"
         );
 
-        Self { dir, port, id }
+        Self {
+            dir,
+            port,
+            api_port,
+            id,
+        }
     }
 
     /// Writes the founding core group — the same list for everyone.
@@ -83,8 +97,9 @@ impl Friend {
             self.dir.path().join("config.toml"),
             format!(
                 "[net]\nbind_addr_v4 = \"127.0.0.1:{}\"\nrelay_mode = \"disabled\"\n\n\
+                 [api]\nbind_addr = \"127.0.0.1:{}\"\n\n\
                  [consensus]\ncore = [\n{core}]\n",
-                self.port
+                self.port, self.api_port
             ),
         )
         .unwrap();

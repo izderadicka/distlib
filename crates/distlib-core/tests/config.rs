@@ -175,6 +175,10 @@ fn the_starter_file_reloads_as_what_it_came_from() {
                 relay: Some("https://relay.example/".to_owned()),
             }],
         },
+        api: distlib_core::ApiConfig {
+            enabled: false,
+            bind_addr: "127.0.0.1:11999".parse().unwrap(),
+        },
     };
 
     let rendered = config.to_starter_toml();

@@ -1,14 +1,16 @@
 //! What each subcommand actually does.
 
-use std::{collections::BTreeSet, net::SocketAddr, path::Path, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use distlib_api::{Api, Server};
 use distlib_consensus::{
     MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
 };
 use distlib_core::{
     Config, CoreMember, DataDir, MemberId, NodeAddr,
     identity::{create_secret_key, load_or_create_secret_key, member_id},
+    token,
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
@@ -110,14 +112,16 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         BTreeSet::new()
     };
 
-    let node = MembershipNode::start(
-        endpoint,
-        hooks,
-        writer,
-        paths.data_dir.root(),
-        founding_core,
-    )
-    .await?;
+    let node = Arc::new(
+        MembershipNode::start(
+            endpoint,
+            hooks,
+            writer,
+            paths.data_dir.root(),
+            founding_core,
+        )
+        .await?,
+    );
 
     if found_group {
         if let Err(error) = found(&node, &config, &secret, me).await {
@@ -133,6 +137,15 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
              for a founder to admit it"
         );
     }
+
+    // The local API. Started after founding, so a caller that reaches it finds
+    // a node that has finished deciding what it is.
+    let api = if config.api.enabled {
+        Some(serve_api(paths, &config, Arc::clone(&node), secret.clone()).await?)
+    } else {
+        tracing::info!("the local api is disabled");
+        None
+    };
 
     // A running node holds the database exclusively, so nothing else can read
     // the membership while it is up. Logging every change is how the group is
@@ -156,6 +169,9 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     tracing::info!("shutting down");
     relay_task.abort();
     memberships.abort();
+    if let Some(api) = api {
+        api.shutdown();
+    }
     node.shutdown().await;
     Ok(())
 }
@@ -468,6 +484,46 @@ fn founders(
             (record(member.member, member.name.clone()), addr)
         })
         .collect())
+}
+
+/// Starts the local API.
+///
+/// The token is created on first run rather than at `init`, so a data
+/// directory made before this existed grows one when it is next started.
+async fn serve_api(
+    paths: &Paths,
+    config: &Config,
+    node: Arc<MembershipNode>,
+    secret: SecretKey,
+) -> Result<Server> {
+    let token_file = paths.data_dir.api_token_file();
+    let token = token::load_or_create(&token_file)?;
+
+    let server = distlib_api::serve(config.api.bind_addr, Api { node, secret }, token)
+        .await
+        .with_context(|| {
+            format!(
+                "could not serve the api on {}; a second node on this machine needs its own \
+                 `[api] bind_addr`, just as it needs its own `[net] bind_addr_v4`",
+                config.api.bind_addr
+            )
+        })?;
+
+    // Bound somewhere other than loopback, the token is the only thing between
+    // the network and this node's membership, and there is no TLS in front of
+    // it. Serving remotely is a legitimate thing to want — a node on a server
+    // or in a container — so this warns rather than refuses.
+    if !server.addr().ip().is_loopback() {
+        tracing::warn!(
+            addr = %server.addr(),
+            "the api is not on loopback and has no tls; put it behind a reverse proxy"
+        );
+    }
+
+    // The address, never the token: it is a secret, and it is one command away
+    // for anyone entitled to it.
+    tracing::info!(addr = %server.addr(), token = %token_file.display(), "local api listening");
+    Ok(server)
 }
 
 /// This node's own dialable address.
