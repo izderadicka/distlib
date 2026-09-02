@@ -31,7 +31,10 @@ use std::time::Duration;
 
 use crate::{
     error::ConsensusError,
-    raft::{network::MAX_RPC_BYTES, types::TypeConfig},
+    raft::{
+        log_store::LogStore, network::MAX_RPC_BYTES, state_machine::StateMachineStore,
+        types::TypeConfig,
+    },
     signed::SignedEvent,
 };
 
@@ -52,11 +55,6 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// What a member asks a core node.
-///
-/// One variant so far, and an enum rather than a bare struct because postcard
-/// writes a variant discriminant: adding the log-fetch request in the next PR
-/// is then a new variant that leaves `Propose`'s encoding alone, where starting
-/// from a struct would make it a wire break.
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
     /// A membership event the sender wants committed.
@@ -65,12 +63,64 @@ enum Request {
     /// still has to hand it on — which it does through its own Raft, exactly as
     /// if the proposal had originated there.
     Propose(SignedEvent),
+
+    /// Everything committed since `cursor`.
+    ///
+    /// §4.2's non-core members hold the whole log and derive from it; this is
+    /// how they get it. A cursor of zero asks for the group from its founding.
+    From { cursor: u64 },
 }
 
 /// What the core node answers.
 #[derive(Debug, Serialize, Deserialize)]
 enum Response {
     Proposed(ProposeOutcome),
+    Fetched(Fetched),
+}
+
+/// What came back from asking for the log.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Fetched {
+    /// Committed membership events, and how far they reach.
+    Entries {
+        /// The serving node's applied index — the caller's next cursor.
+        ///
+        /// Not the last event's index, because most entries carry no event: a
+        /// cursor taken from the last event would re-request the gap forever.
+        up_to: u64,
+        /// The events in `(cursor, up_to]`, each with its log index.
+        events: Vec<(u64, SignedEvent)>,
+        /// Where to ask next time.
+        source: Source,
+    },
+
+    /// The serving node has no group yet, so there is nothing to hand over.
+    NoGroup,
+
+    /// The cursor is below what this node's log still holds.
+    ///
+    /// Everything before `first_available` was purged after a snapshot. A
+    /// follower this far behind cannot be caught up from entries alone and
+    /// needs the state itself — which is phase 1b's next problem, not this
+    /// one, since the log is tiny and openraft snapshots at 5000 entries.
+    TooFarBehind { first_available: u64 },
+}
+
+/// Where a follower should ask next, and who is worth asking first.
+///
+/// Carried on every answer rather than configured: §4.5 has `CoreGroupChanged`
+/// tell followers where to fetch from, but the event carries member ids and no
+/// addresses, so the addresses have to travel with the log itself.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Source {
+    /// The current core group, with somewhere to reach each of them.
+    pub core: Vec<(MemberId, NodeAddr)>,
+
+    /// The leader, if this node knows of one.
+    ///
+    /// Worth preferring: Raft guarantees the leader holds every committed
+    /// entry, so reading from it is as current as a follower can get.
+    pub leader: Option<MemberId>,
 }
 
 /// What became of a forwarded proposal.
@@ -82,6 +132,17 @@ pub enum ProposeOutcome {
     Rejected(ConsensusError),
     /// Never made it into the log.
     NotCommitted(String),
+}
+
+/// Why asking for the log produced nothing.
+///
+/// One case, because the outcomes that are not failures — no group yet, purged
+/// past the cursor — are [`Fetched`] variants rather than errors.
+#[derive(Debug, thiserror::Error)]
+#[error("could not fetch the log from {member}: {message}")]
+pub struct FetchFailed {
+    pub member: MemberId,
+    pub message: String,
 }
 
 /// Why a forwarded proposal did not take effect.
@@ -117,6 +178,13 @@ pub enum ProposeError {
 #[derive(Clone)]
 pub struct MemberlogProtocol {
     raft: Raft<TypeConfig>,
+    /// A second handle on the same database openraft writes through.
+    ///
+    /// Reading it here rather than going through openraft is deliberate: redb
+    /// gives readers a consistent snapshot without blocking the writer, so
+    /// serving a follower cannot slow consensus down.
+    log: LogStore,
+    state_machine: StateMachineStore,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it.
@@ -128,13 +196,75 @@ impl std::fmt::Debug for MemberlogProtocol {
 
 impl MemberlogProtocol {
     /// Serves the log backed by `raft`.
-    pub fn new(raft: Raft<TypeConfig>) -> Self {
-        Self { raft }
+    pub fn new(raft: Raft<TypeConfig>, log: LogStore, state_machine: StateMachineStore) -> Self {
+        Self {
+            raft,
+            log,
+            state_machine,
+        }
     }
 
     async fn answer(&self, request: Request) -> Response {
         match request {
             Request::Propose(event) => Response::Proposed(self.propose(event).await),
+            Request::From { cursor } => Response::Fetched(self.fetch(cursor)),
+        }
+    }
+
+    /// Everything committed since `cursor`.
+    fn fetch(&self, cursor: u64) -> Fetched {
+        if self.state_machine.membership().group_id().is_none() {
+            return Fetched::NoGroup;
+        }
+
+        // Only what has been *applied*. Entries beyond it are committed but not
+        // yet part of anybody's membership, and serving them would hand over a
+        // decision the group has not finished making.
+        let up_to = self.state_machine.last_applied_index();
+
+        match self.log.first_available() {
+            Ok(first) if cursor.saturating_add(1) < first => {
+                return Fetched::TooFarBehind {
+                    first_available: first,
+                };
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not read the purge watermark");
+                return Fetched::NoGroup;
+            }
+        }
+
+        match self.log.events_after(cursor, up_to) {
+            Ok(events) => Fetched::Entries {
+                up_to,
+                events,
+                source: self.source(),
+            },
+            Err(error) => {
+                // Nothing to hand over rather than a protocol error: the caller
+                // will ask another core node, which is the right response to
+                // one node's storage misbehaving.
+                tracing::warn!(%error, "could not read the log for a follower");
+                Fetched::NoGroup
+            }
+        }
+    }
+
+    /// Who to ask next time, from Raft's own view of the group.
+    fn source(&self) -> Source {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+
+        Source {
+            core: metrics
+                .membership_config
+                .nodes()
+                .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+                .collect(),
+            leader: metrics
+                .current_leader
+                .and_then(|id| MemberId::try_from(id).ok()),
         }
     }
 
@@ -230,12 +360,41 @@ impl MemberlogClient {
             .map_err(unreachable)?;
 
         match answer {
+            Response::Fetched(_) => Err(ProposeError::NotCommitted(
+                "the peer answered a fetch to a proposal".to_owned(),
+            )),
             Response::Proposed(ProposeOutcome::Applied) => Ok(()),
             Response::Proposed(ProposeOutcome::Rejected(error)) => {
                 Err(ProposeError::Rejected(error))
             }
             Response::Proposed(ProposeOutcome::NotCommitted(error)) => {
                 Err(ProposeError::NotCommitted(error))
+            }
+        }
+    }
+
+    /// Asks `member` for everything committed since `cursor`.
+    ///
+    /// The answer is an outcome, not a success or a failure: a node with no
+    /// group and one that has purged past the cursor have both answered
+    /// correctly, and a follower does something different with each.
+    pub async fn fetch(
+        &self,
+        member: MemberId,
+        addr: &NodeAddr,
+        cursor: u64,
+    ) -> Result<Fetched, FetchFailed> {
+        let failed = |message: String| FetchFailed { member, message };
+        let exchange = self.exchange(member, addr, Request::From { cursor });
+
+        match tokio::time::timeout(EXCHANGE_TIMEOUT, exchange)
+            .await
+            .map_err(|_| failed(format!("no answer within {EXCHANGE_TIMEOUT:?}")))?
+            .map_err(failed)?
+        {
+            Response::Fetched(fetched) => Ok(fetched),
+            Response::Proposed(_) => {
+                Err(failed("the peer answered a proposal to a fetch".to_owned()))
             }
         }
     }

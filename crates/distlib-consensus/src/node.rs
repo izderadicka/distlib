@@ -188,6 +188,10 @@ impl MembershipNode {
         );
 
         let log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
+        // A second handle on the same database, for serving followers. openraft
+        // takes ownership of the one above, and redb readers see a consistent
+        // snapshot without blocking the writer — so this cannot slow consensus.
+        let served_log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
         let state_machine = StateMachineStore::from_database(db).map_err(raft_failed)?;
 
         // The node's connections, shared by everything it speaks: openraft's
@@ -217,7 +221,10 @@ impl MembershipNode {
                 alpn::RAFT,
                 RaftProtocol::new(raft.clone(), state_machine.clone(), founding_core),
             )
-            .accept(alpn::MEMBERLOG, MemberlogProtocol::new(raft.clone()))
+            .accept(
+                alpn::MEMBERLOG,
+                MemberlogProtocol::new(raft.clone(), served_log, state_machine.clone()),
+            )
             .spawn();
 
         let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
