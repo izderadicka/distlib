@@ -73,7 +73,7 @@ pub enum Command {
     /// a group without knowing who is in it.
     Whoami,
 
-    /// Admit a member (§4.3).
+    /// Admit a member.
     ///
     /// Any member may propose one; the group's rules decide whether it takes
     /// effect. Needs the node running — it holds the log.
@@ -86,7 +86,7 @@ pub enum Command {
         name: Option<String>,
     },
 
-    /// Expel a member (§4.4).
+    /// Expel a member.
     ///
     /// The reason is recorded in the log alongside who proposed it.
     Expel {
