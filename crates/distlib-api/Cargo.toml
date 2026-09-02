@@ -12,6 +12,9 @@ authors.workspace = true
 distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }
 axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,12 +25,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 distlib-net = { workspace = true }
-# The test client. hyper rather than reqwest: this only speaks HTTP to
-# 127.0.0.1, and reqwest's `rustls` feature pulls aws-lc-rs for a TLS stack
-# nothing here uses.
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-http-body-util = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

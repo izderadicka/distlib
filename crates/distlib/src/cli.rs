@@ -73,6 +73,40 @@ pub enum Command {
     /// a group without knowing who is in it.
     Whoami,
 
+    /// Admit a member (§4.3).
+    ///
+    /// Any member may propose one; the group's rules decide whether it takes
+    /// effect. Needs the node running — it holds the log.
+    Admit {
+        /// The member to admit. They print theirs with `distlib whoami`.
+        member: MemberId,
+
+        /// What to call them. Metadata, not identity.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Expel a member (§4.4).
+    ///
+    /// The reason is recorded in the log alongside who proposed it.
+    Expel {
+        /// The member to remove.
+        member: MemberId,
+
+        /// Why. Kept in the log as the record of the decision.
+        #[arg(long)]
+        reason: String,
+    },
+
+    /// Set this node's storage pledge.
+    ///
+    /// Only ever this node's: a pledge is a promise about the proposer's own
+    /// storage, so there is nobody else to set it for.
+    Pledge {
+        /// Bytes this node commits to providing.
+        bytes: u64,
+    },
+
     /// List the members of this node's group.
     ///
     /// Reads the local database, so it needs the node stopped: a running node

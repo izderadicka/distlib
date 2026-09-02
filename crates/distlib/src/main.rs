@@ -30,7 +30,10 @@ async fn main() -> Result<()> {
         Command::Init { force } => commands::init(&paths, force),
         Command::Run { found_group } => commands::run(&paths, found_group).await,
         Command::Whoami => commands::whoami(&paths).await,
-        Command::Members => commands::members(&paths),
+        Command::Admit { member, name } => commands::admit(&paths, member, name).await,
+        Command::Expel { member, reason } => commands::expel(&paths, member, reason).await,
+        Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
+        Command::Members => commands::members(&paths).await,
         Command::Status { online } => commands::status(&paths, online).await,
         Command::Ping {
             member,
