@@ -121,6 +121,19 @@ impl Friend {
         Running { child, log }
     }
 
+    /// Admits `member` through the CLI, against this node's running API.
+    fn admit(&self, member: &str) {
+        let output = distlib(self.dir.path())
+            .args(["admit", member, "--name", "newcomer"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "admit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn members(&self) -> String {
         let output = distlib(self.dir.path()).arg("members").output().unwrap();
         assert!(
@@ -168,7 +181,16 @@ impl Running {
     /// A kill rather than a signal: redb releases its lock when the process
     /// dies, and everything committed is already durable, so what `members`
     /// reads afterwards is exactly what replication delivered.
-    fn stop(mut self) {
+    fn stop(self) {
+        // The work is in `Drop`, so that a failing assertion above kills these
+        // too. Without that a panic leaves nodes running — holding ports and
+        // their databases — until somebody notices them in `ps` much later.
+        drop(self);
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -234,7 +256,25 @@ fn three_friends_found_a_group() {
         );
     }
 
-    // 5. Stopped, each of them can be asked who is in the group, and the answer
+    // 5. A fourth member is admitted from the command line, against a running
+    //    node. This is the part that cannot be done any other way: the node
+    //    holds its database exclusively, so the CLI has to go through its API.
+    let newcomer = Friend::introduce();
+    friends[0].admit(&newcomer.id);
+
+    for node in [&first, &second, &third] {
+        node.wait_for("members=4");
+    }
+
+    // ...and a node that was told nothing about it lists them, live, while
+    //    still running.
+    let listed = friends[2].members();
+    assert!(
+        listed.contains(&newcomer.id),
+        "a node that never heard the command should still list the newcomer; got:\n{listed}"
+    );
+
+    // 6. Stopped, each of them can be asked who is in the group, and the answer
     //    comes from its own copy of the log rather than from its config.
     for node in [first, second, third] {
         node.stop();
@@ -242,7 +282,7 @@ fn three_friends_found_a_group() {
     for friend in &friends {
         let listed = friend.members();
         assert!(listed.contains(&group), "every node names the same group");
-        for other in &friends {
+        for other in friends.iter().chain([&newcomer]) {
             assert!(
                 listed.contains(&other.id),
                 "{} should list {}; got:\n{listed}",

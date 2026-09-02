@@ -23,8 +23,8 @@ deliberately diverged from it.
 > a group can be founded, members admitted and expelled through the local API, and
 > every node derives what it will talk to from the committed log. There is no
 > catalogue, no content transfer and no UI yet. Members who are not part of the core
-> group cannot yet follow the log, so for now every member is a founder — follower
-> mode is the next piece of phase 1b.
+> group cannot yet follow the log, so a member admitted today cannot yet fetch it —
+> follower mode is the next piece of phase 1b.
 
 ## Build
 
@@ -141,7 +141,7 @@ at that level.
 
 Run `--found-group` on exactly one founder, once. The others just `run`.
 
-**7. Look at the group.** Stop a node and ask it who it thinks is in the group:
+**7. Look at the group**, running or not:
 
 ```sh
 distlib --data-dir /tmp/b members
@@ -154,9 +154,25 @@ members    2 (2 core)
   bob (d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84)  core
 ```
 
-It needs the node stopped: the database is held exclusively by the running process.
-While a node runs, it logs the membership on every change instead — the `INFO
-membership` line above is how you watch a group live.
+A running node answers through its API; a stopped one is read from its log. Only one
+of those can work at a time — the database is held exclusively while the node runs —
+so `members` and `status` try both.
+
+**8. Admit somebody.** They send you their id from `distlib whoami`, and you propose
+it to a node that is *running*, because the node holds the log:
+
+```sh
+distlib --data-dir /tmp/a admit <their id> --name carol
+```
+
+Every member may propose an admission or an expulsion, not just core nodes — §4.3
+chooses auditability over ceremony, and the proposer is recorded in the log either
+way. `distlib expel <id> --reason "..."` is the other direction, and
+`distlib pledge <bytes>` sets what *this* node commits to storing.
+
+> Admitted members cannot yet fetch the log for themselves — that is follower mode,
+> the next piece of phase 1b — so for now a new member is listed by the group but
+> cannot join it.
 
 ## Watching membership do its job
 
@@ -206,8 +222,11 @@ them hold for every protocol added later.
 | `distlib whoami` | Print this node's id as a line for a founder's `[consensus] core`. Creates the identity if there is not one. |
 | `distlib run` | Run the node until `Ctrl-C`. |
 | `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
-| `distlib members` | List the group as this node's log has it. Needs the node stopped. |
-| `distlib status [--online]` | Identity, paths, relay mode, group and standing. `--online` also binds and prints the dialable address. |
+| `distlib admit <member> [--name]` | Admit a member. Needs the node running. |
+| `distlib expel <member> --reason` | Remove one, recording why. Needs the node running. |
+| `distlib pledge <bytes>` | Set this node's storage pledge. Only ever this node's. |
+| `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
+| `distlib status [--online]` | Identity, paths, relay mode, group and standing — plus Raft state and leader while the node runs. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
 
 ## The local API

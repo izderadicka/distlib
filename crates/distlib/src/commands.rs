@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use distlib_api::{Api, Server};
+use distlib_api::{Api, Client, ClientError, Server};
 use distlib_consensus::{
     MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
 };
@@ -14,6 +14,7 @@ use distlib_core::{
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
+use serde_json::{Value, json};
 
 /// How long `status --online` waits to reach a relay before giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -263,22 +264,206 @@ pub async fn whoami(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// A client for this node's running API, if there is a token to use.
+fn api(paths: &Paths, config: &Config) -> Result<Client> {
+    let token_file = paths.data_dir.api_token_file();
+    if !token_file.exists() {
+        bail!(
+            "no api token at {}; the node writes one the first time it runs",
+            token_file.display()
+        );
+    }
+    Ok(Client::new(
+        config.api.bind_addr,
+        token::load_or_create(&token_file)?,
+    ))
+}
+
+/// Calls `method` on this node, turning the failures into advice.
+async fn ask(paths: &Paths, method: &str, params: Value) -> Result<Value> {
+    let config = load_config(&paths.config_file)?;
+    api(paths, &config)?
+        .call(method, params)
+        .await
+        .map_err(|error| match error {
+            ClientError::Unreachable { .. } => anyhow::anyhow!(
+                "{error}\n\nthe node holds its log while it runs, so changing membership \
+                 goes through it: start it with `distlib run`"
+            ),
+            other => anyhow::Error::from(other),
+        })
+}
+
+/// `distlib admit`
+pub async fn admit(paths: &Paths, member: MemberId, name: Option<String>) -> Result<()> {
+    let params = match name {
+        Some(name) => json!({ "member": member, "name": name }),
+        None => json!({ "member": member }),
+    };
+    ask(paths, "group.propose_add", params).await?;
+    println!("admitted   {member}");
+    Ok(())
+}
+
+/// `distlib expel`
+pub async fn expel(paths: &Paths, member: MemberId, reason: String) -> Result<()> {
+    ask(
+        paths,
+        "group.propose_expel",
+        json!({ "member": member, "reason": reason }),
+    )
+    .await?;
+    println!("expelled   {member}");
+    Ok(())
+}
+
+/// `distlib pledge`
+pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
+    ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
+    println!("pledged    {bytes} bytes");
+    Ok(())
+}
+
 /// `distlib members`
-pub fn members(paths: &Paths) -> Result<()> {
-    let membership = stored_membership(paths)?.unwrap_or_default();
-    if !print_group(&membership) {
+pub async fn members(paths: &Paths) -> Result<()> {
+    // The running node first, its database second. Only one of the two can
+    // answer at a time — the node holds the database exclusively — so this
+    // works whether or not it is up, which is the whole point of asking twice.
+    let listing = match live_members(paths).await {
+        Ok(listing) => listing,
+        Err(error) => {
+            tracing::debug!(?error, "the api did not answer; reading the database");
+            stored_members(paths)?
+        }
+    };
+
+    let Some(group) = &listing.group else {
         println!("no group yet — found one with `distlib run --found-group`");
         return Ok(());
-    }
-    for member in membership.members() {
-        let core = if membership.core().contains(&member.member_id) {
-            "  core"
-        } else {
-            ""
-        };
-        println!("  {}{core}", display(member));
+    };
+    println!("group      {group}");
+    println!(
+        "members    {} ({} core)",
+        listing.members.len(),
+        listing.members.iter().filter(|member| member.core).count()
+    );
+    for member in &listing.members {
+        println!(
+            "  {}{}",
+            member.name,
+            if member.core { "  core" } else { "" }
+        );
     }
     Ok(())
+}
+
+/// What a running node says about itself.
+fn print_live_status(live: &Value) {
+    match live["group"].as_str() {
+        Some(group) => println!("group      {group}"),
+        None => println!("group      none yet"),
+    }
+    println!(
+        "members    {} ({} core)",
+        live["members"].as_u64().unwrap_or(0),
+        live["core_group"].as_array().map_or(0, Vec::len)
+    );
+    println!(
+        "standing   {}",
+        if live["core"].as_bool().unwrap_or(false) {
+            "core member"
+        } else {
+            "member"
+        }
+    );
+    // Only a running node has these, which is the reason to have asked it.
+    println!("raft       {}", live["raft"].as_str().unwrap_or("unknown"));
+    if let Some(leader) = live["leader"].as_str() {
+        println!("leader     {leader}");
+    }
+    println!("node       running");
+}
+
+/// What this node's files say, when the node itself is not up to answer.
+fn print_stored_status(paths: &Paths, me: MemberId) {
+    match stored_membership(paths) {
+        Ok(membership) => {
+            let membership = membership.unwrap_or_default();
+            if print_group(&membership) {
+                let standing = if membership.core().contains(&me) {
+                    "core member"
+                } else if membership.is_member(&me) {
+                    "member"
+                } else {
+                    "not a member of this group"
+                };
+                println!("standing   {standing}");
+            } else {
+                println!("group      none yet");
+            }
+        }
+        Err(error) => {
+            // Reaching here means neither source answered: the api is down and
+            // the database will not open. Almost always a stale lock or a
+            // half-written directory, and the chain beneath says so three
+            // times, so keep the line readable and log the detail.
+            tracing::debug!(?error, "could not read the membership");
+            println!("group      unavailable — could not read the database");
+        }
+    }
+    println!("node       not running");
+}
+
+/// A membership, however it was obtained.
+///
+/// The two sources describe the same thing in different shapes; converting both
+/// to this is what keeps one renderer rather than two that drift.
+#[derive(Default)]
+struct Listing {
+    group: Option<String>,
+    members: Vec<Listed>,
+}
+
+struct Listed {
+    name: String,
+    core: bool,
+}
+
+/// The membership as the running node has it.
+async fn live_members(paths: &Paths) -> Result<Listing> {
+    let answer = ask(paths, "group.members", Value::Null).await?;
+    let members = answer["members"]
+        .as_array()
+        .context("the api did not return a member list")?
+        .iter()
+        .map(|member| Listed {
+            name: named(
+                member["member"].as_str().unwrap_or_default(),
+                member["name"].as_str().unwrap_or_default(),
+            ),
+            core: member["core"].as_bool().unwrap_or(false),
+        })
+        .collect();
+
+    Ok(Listing {
+        group: answer["group"].as_str().map(str::to_owned),
+        members,
+    })
+}
+
+/// The membership as this node's database has it.
+fn stored_members(paths: &Paths) -> Result<Listing> {
+    let membership = stored_membership(paths)?.unwrap_or_default();
+    Ok(Listing {
+        group: membership.group_id().map(|group| group.to_string()),
+        members: membership
+            .members()
+            .map(|member| Listed {
+                name: display(member),
+                core: membership.core().contains(&member.member_id),
+            })
+            .collect(),
+    })
 }
 
 /// `distlib status`
@@ -300,31 +485,14 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
     println!("relay mode {:?}", config.net.relay_mode);
     println!("core seed  {} member(s)", config.consensus.core.len());
 
-    // Degrades rather than fails: a locked database is the normal state while
-    // the node is running, and `status` is what people run when confused. It
-    // should still tell them where their data and identity are.
-    match stored_membership(paths) {
-        Ok(membership) => {
-            let membership = membership.unwrap_or_default();
-            if print_group(&membership) {
-                let standing = if membership.core().contains(&me) {
-                    "core member"
-                } else if membership.is_member(&me) {
-                    "member"
-                } else {
-                    "not a member of this group"
-                };
-                println!("standing   {standing}");
-            } else {
-                println!("group      none yet");
-            }
-        }
+    // The running node knows more than its database does — it can say which
+    // Raft state it is in and who the leader is — so ask it first and read the
+    // files only when nothing answers.
+    match ask(paths, "node.status", Value::Null).await {
+        Ok(live) => print_live_status(&live),
         Err(error) => {
-            // Almost always the lock rather than a broken file, and the chain
-            // beneath says so three times. Keep the line readable and put the
-            // detail where someone debugging a real failure will look.
-            tracing::debug!(?error, "could not read the membership");
-            println!("group      unavailable — the database is in use by a running node");
+            tracing::debug!(?error, "the api did not answer; reading the database");
+            print_stored_status(paths, me);
         }
     }
 
@@ -628,10 +796,15 @@ fn print_group(membership: &MembershipState) -> bool {
 
 /// One member, named if they have a name.
 fn display(member: &MemberRecord) -> String {
-    if member.display_name.is_empty() {
-        member.member_id.to_string()
+    named(&member.member_id.to_string(), &member.display_name)
+}
+
+/// `name (id)`, or just the id for a member with no name.
+fn named(id: &str, name: &str) -> String {
+    if name.is_empty() {
+        id.to_owned()
     } else {
-        format!("{} ({})", member.display_name, member.member_id)
+        format!("{name} ({id})")
     }
 }
 

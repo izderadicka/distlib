@@ -984,6 +984,7 @@ dependencies = [
  "distlib-core",
  "distlib-net",
  "iroh",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

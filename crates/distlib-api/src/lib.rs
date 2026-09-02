@@ -20,6 +20,7 @@
 //! of it. TLS and whatever authentication belongs beside it are phase 3's, with
 //! the UI that needs them.
 
+pub mod client;
 pub mod methods;
 pub mod rpc;
 
@@ -36,6 +37,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
+pub use client::{Client, ClientError};
 pub use methods::Api;
 use rpc::{Error, Request, Response};
 
