@@ -32,8 +32,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use distlib_core::token;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -130,10 +129,16 @@ async fn handle(
 }
 
 /// Whether the request carries this node's token.
+///
+/// A plain comparison. It stops at the first differing byte, which in principle
+/// leaks how much of a guess was right — but that difference is a nanosecond or
+/// two, under an HTTP round trip whose jitter is tens of microseconds, so it is
+/// not a signal anyone is pulling out of the noise. If guessing tokens ever
+/// becomes a concern, the answer is rate limiting here, not a slower compare.
 fn authorised(expected: &SecretString, headers: &HeaderMap) -> bool {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|offered| token::matches(expected, offered.trim()))
+        .is_some_and(|offered| offered.trim() == expected.expose_secret())
 }

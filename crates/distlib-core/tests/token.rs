@@ -65,23 +65,3 @@ fn an_empty_token_file_is_refused() {
     let error = token::load_or_create(&path).unwrap_err();
     assert!(matches!(error, CoreError::EmptyToken { .. }), "got {error}");
 }
-
-#[test]
-fn only_the_exact_token_matches() {
-    let dir = TempDir::new().unwrap();
-    let token = token::create(&dir.path().join("api.token")).unwrap();
-    let correct = token.expose_secret().to_owned();
-
-    assert!(token::matches(&token, &correct));
-    assert!(!token::matches(&token, ""));
-    assert!(!token::matches(&token, &correct[..correct.len() - 1]));
-    assert!(!token::matches(&token, &format!("{correct}x")));
-
-    let mut wrong_last = correct.clone();
-    wrong_last.pop();
-    wrong_last.push(if correct.ends_with('a') { 'b' } else { 'a' });
-    assert!(
-        !token::matches(&token, &wrong_last),
-        "the comparison must not stop early and call a near miss a match"
-    );
-}

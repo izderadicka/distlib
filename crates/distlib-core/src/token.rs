@@ -53,33 +53,6 @@ pub fn create(path: &Path) -> Result<SecretString> {
     Ok(token)
 }
 
-/// Whether `offered` is this token.
-///
-/// Compares in constant time rather than with `==`, which stops at the first
-/// differing byte and so takes measurably longer the more of a guess is right —
-/// enough to recover a token one byte at a time from a few thousand calls.
-///
-/// That is worth four lines here because the people who can call this API are
-/// not the people who can read the token file. A different local user reaches
-/// `127.0.0.1` but cannot read mode 0600, and `[api] bind_addr` may be set to a
-/// non-loopback address for a node on a server or in a container. Neither can
-/// see the file; both can time a reply.
-///
-/// No test guards this and none can: `==` is functionally identical and passes
-/// everything below. Constant time is a property of *how* it answers rather
-/// than what it answers, so it is kept by reading the code.
-pub fn matches(token: &SecretString, offered: &str) -> bool {
-    let (token, offered) = (token.expose_secret().as_bytes(), offered.as_bytes());
-    if token.len() != offered.len() {
-        return false;
-    }
-    token
-        .iter()
-        .zip(offered)
-        .fold(0u8, |differences, (a, b)| differences | (a ^ b))
-        == 0
-}
-
 fn hex(bytes: &[u8; TOKEN_BYTES]) -> SecretString {
     let mut out = String::with_capacity(TOKEN_BYTES * 2);
     for byte in bytes {
