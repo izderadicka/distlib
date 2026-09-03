@@ -54,6 +54,16 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// before this fires and reports it as unreachable.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// How long a follower waits for the log before asking somebody else.
+///
+/// Much shorter than [`EXCHANGE_TIMEOUT`], and for a different question. A
+/// proposal has one place to go and waiting is better than failing; a fetch has
+/// as many places to go as there are core nodes, and the log is small, so a
+/// source that has not answered in this long is one to move on from. Waiting
+/// the propose timeout here would leave a follower stuck on a dead source for
+/// most of a minute, still enforcing a membership it knows may have moved.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What a member asks a core node.
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
@@ -387,9 +397,9 @@ impl MemberlogClient {
         let failed = |message: String| FetchFailed { member, message };
         let exchange = self.exchange(member, addr, Request::From { cursor });
 
-        match tokio::time::timeout(EXCHANGE_TIMEOUT, exchange)
+        match tokio::time::timeout(FETCH_TIMEOUT, exchange)
             .await
-            .map_err(|_| failed(format!("no answer within {EXCHANGE_TIMEOUT:?}")))?
+            .map_err(|_| failed(format!("no answer within {FETCH_TIMEOUT:?}")))?
             .map_err(failed)?
         {
             Response::Fetched(fetched) => Ok(fetched),

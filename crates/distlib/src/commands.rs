@@ -1,6 +1,6 @@
 //! What each subcommand actually does.
 
-use std::{collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
@@ -85,11 +85,20 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     // replaces it with the log's membership and never reads this again.
     let (writer, allowed) = allowlist(me, config.consensus.core.iter().map(|core| core.member));
     let hooks = AllowlistHooks::new(allowed);
+    // What this node expects to serve. Decided from configuration because the
+    // endpoint is built before the log is opened, and the log gets the final
+    // say over the role inside `start` — but that mismatch cannot escape:
+    // iroh's router calls `set_alpns` with what it actually accepts, so a node
+    // the group was founded without stops advertising raft the moment its
+    // router comes up. This is the same answer arrived at earlier, which is
+    // what makes it worth stating.
+    let core = core_group(&config);
+    let is_core = core.iter().any(|(member, _)| *member == me);
     let endpoint = build_endpoint(
         secret.clone(),
         &config.net,
         hooks.clone(),
-        distlib_consensus::alpns(),
+        distlib_consensus::alpns(is_core),
     )
     .await?;
 
@@ -98,30 +107,8 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         tracing::info!(%addr, "listening");
     }
 
-    // The founding core group this node belongs to, or nothing. A node whose
-    // config lists a core it is not part of is not founding a group — it is a
-    // follower of one — and must serve `distlib/raft/0` to nobody.
-    let founding_core: BTreeSet<MemberId> = config
-        .consensus
-        .core
-        .iter()
-        .map(|member| member.member)
-        .collect();
-    let founding_core = if founding_core.contains(&me) {
-        founding_core
-    } else {
-        BTreeSet::new()
-    };
-
     let node = Arc::new(
-        MembershipNode::start(
-            endpoint,
-            hooks,
-            writer,
-            paths.data_dir.root(),
-            founding_core,
-        )
-        .await?,
+        MembershipNode::start(endpoint, hooks, writer, paths.data_dir.root(), core).await?,
     );
 
     if found_group {
@@ -502,7 +489,7 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
             secret,
             &config.net,
             AllowlistHooks::new(allowed),
-            distlib_consensus::alpns(),
+            distlib_consensus::alpns(false),
         )
         .await
         {
@@ -652,6 +639,20 @@ fn founders(
             (record(member.member, member.name.clone()), addr)
         })
         .collect())
+}
+
+/// The configured core group, with an address for each.
+///
+/// The whole list, not just this node's own entry: a follower needs the others'
+/// addresses to fetch the log from them, and a core node needs their ids to
+/// know who may speak Raft to it before there is a log to say.
+fn core_group(config: &Config) -> Vec<(MemberId, NodeAddr)> {
+    config
+        .consensus
+        .core
+        .iter()
+        .map(|member| (member.member, member.addr()))
+        .collect()
 }
 
 /// Starts the local API.

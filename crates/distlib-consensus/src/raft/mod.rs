@@ -3,6 +3,7 @@
 //! derives from.
 
 pub(crate) mod db;
+pub mod follower;
 pub mod log_store;
 pub mod memberlog;
 pub mod network;

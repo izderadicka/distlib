@@ -40,8 +40,23 @@ impl Api {
     fn status(&self) -> Result<Value, Error> {
         let membership = self.node.membership();
         let me = self.node.id();
-        let metrics = self.node.raft().metrics();
-        let metrics = metrics.borrow();
+
+        // Only a voter has a Raft to report on. A follower answers `null` for
+        // both rather than inventing a state, since "this node is following"
+        // is a different thing from "this node is a follower of a term".
+        let (raft, leader) = match self.node.raft() {
+            Some(raft) => {
+                let metrics = raft.metrics();
+                let metrics = metrics.borrow();
+                (
+                    Some(format!("{:?}", metrics.state)),
+                    metrics
+                        .current_leader
+                        .and_then(|id| MemberId::try_from(id).ok()),
+                )
+            }
+            None => (None, None),
+        };
 
         Ok(json!({
             "member": me,
@@ -54,8 +69,11 @@ impl Api {
             // checked against, so a caller can see whether it is looking at a
             // current view.
             "changed_at": membership.changed_at(),
-            "raft": format!("{:?}", metrics.state),
-            "leader": metrics.current_leader.and_then(|id| MemberId::try_from(id).ok()),
+            "raft": raft,
+            "leader": leader,
+            // How far a follower has read the log. Null on a voter, which gets
+            // the log pushed to it rather than fetching it.
+            "followed_upto": (!self.node.is_core()).then(|| self.node.followed_upto()),
         }))
     }
 
