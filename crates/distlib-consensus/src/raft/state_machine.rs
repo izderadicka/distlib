@@ -41,6 +41,7 @@ use crate::{
         },
         types::TypeConfig,
     },
+    signed::SignedEvent,
     state::MembershipState,
 };
 
@@ -61,6 +62,16 @@ struct Applied {
     last_applied: Option<LogId<NodeId>>,
     membership: StoredMembership<NodeId, NodeAddr>,
     state: MembershipState,
+    /// How far a *follower* has read the log it fetches.
+    ///
+    /// In here rather than under a key of its own for the reason the struct
+    /// exists: it is written in the same transaction as the state it
+    /// corresponds to, so a crash cannot leave a cursor claiming entries the
+    /// projection never folded.
+    ///
+    /// Zero on a core node, which follows nothing — it has openraft for that,
+    /// and `last_applied` above is its equivalent.
+    followed_upto: u64,
 }
 
 /// A snapshot as stored: its metadata and the bytes openraft streams.
@@ -145,6 +156,73 @@ impl StateMachineStore {
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
         self.lock().state.clone()
+    }
+
+    /// The last log index this node has applied.
+    ///
+    /// What a follower may be served up to: entries beyond it are in the log
+    /// but not yet part of anybody's membership, and serving them would hand
+    /// out a decision the group has not finished making.
+    pub fn last_applied_index(&self) -> u64 {
+        self.lock().last_applied.map_or(0, |log_id| log_id.index)
+    }
+
+    /// How far this node has followed a log it does not vote on.
+    pub fn followed_upto(&self) -> u64 {
+        self.lock().followed_upto
+    }
+
+    /// Folds fetched events in, and records how far they reached.
+    ///
+    /// The follower's counterpart to openraft's `apply`, and deliberately the
+    /// same fold: [`MembershipState::apply`] decides what a core node accepts,
+    /// so a follower running anything else could reach a membership no core
+    /// node agrees with.
+    ///
+    /// `up_to` is the serving node's applied index rather than the last event's
+    /// index, because most entries carry no membership event: a cursor taken
+    /// from the last event would re-request everything in between, forever.
+    ///
+    /// Refused events are skipped rather than fatal, for the reason they are on
+    /// a core node — every node reaches the same verdict, so skipping keeps
+    /// them in agreement.
+    pub async fn apply_followed(
+        &self,
+        up_to: u64,
+        events: &[(u64, SignedEvent)],
+    ) -> StorageResult<Vec<Result<(), ConsensusError>>> {
+        let mut verdicts = Vec::with_capacity(events.len());
+
+        // The lock covers in-memory mutation and encoding only; the commit
+        // happens after it is dropped, so no lock is held across an await.
+        let (encoded, derived) = {
+            let mut applied = self.lock();
+            for (index, event) in events {
+                let verdict = applied.state.apply(*index, event);
+                if let Err(error) = &verdict {
+                    tracing::error!(%index, %error, "a followed event was refused; skipping it");
+                }
+                verdicts.push(verdict);
+            }
+            applied.followed_upto = up_to;
+            let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
+            (encoded, applied.state.clone())
+        };
+
+        write_key(
+            &self.inner.db,
+            SM,
+            APPLIED,
+            encoded,
+            ErrorSubject::StateMachine,
+        )
+        .await?;
+
+        // After the commit, for the reason openraft's `apply` does the same: an
+        // observer told about a membership this node could still lose to a
+        // crash would be enforcing one that never happened.
+        self.announce(&derived);
+        Ok(verdicts)
     }
 
     /// Watches the membership, for whoever has to react to it changing.
