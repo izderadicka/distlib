@@ -128,7 +128,7 @@ three** — b and c were told nothing, they replicated it. A couple of openraft 
 lines around the election are normal.
 
 ```sh
-dl -d $DL/b status      # group, standing core member, raft state, leader
+dl -d $DL/b status      # group; role core member; Raft role; Raft leader
 ```
 
 ---
@@ -154,7 +154,7 @@ dl -v -d $DL/d run                 # terminal 4
 ```
 
 ```sh
-dl -d $DL/d status      # standing member; "follows the log to index N"; no raft line
+dl -d $DL/d status      # role member; "follows the log to index N"; no Raft lines
 dl -d $DL/d members     # 4 so far: 3 core + dave
 ```
 
@@ -211,7 +211,7 @@ line as consent, and e still allows a, since a is still in e's copy of the log.
 ## 5. Kill the leader — clause "kill one core node → group still admits members"
 
 ```sh
-dl -d $DL/a status      # the "leader" line names it
+dl -d $DL/a status      # the "Raft leader" line names it
 ```
 
 Ctrl-C that terminal, then **immediately**, from a surviving core node:

@@ -49,9 +49,9 @@ distlib --data-dir /tmp/b init
 Each prints a member id — the node's public key, and the only name it has:
 
 ```
-wrote      /tmp/a/config.toml
-identity   07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92 (new)
-data dir   /tmp/a
+wrote       /tmp/a/config.toml
+identity    07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92 (new)
+data dir    /tmp/a
 ```
 
 `init` is safe to run twice: it reports an existing identity rather than replacing it.
@@ -81,8 +81,8 @@ distlib --data-dir /tmp/b whoami
 ```
 
 ```
-identity   d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84
-data dir   /tmp/b
+identity    d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84
+data dir    /tmp/b
 
 Send this to whoever is founding the group, for their [consensus] core:
 
@@ -148,8 +148,8 @@ distlib --data-dir /tmp/b members
 ```
 
 ```
-group      a287e5e86a780cd49f6269e794faaaa2e3d3c28cc6f7c8d26d73bd50e9168529
-members    2 (2 core)
+group       a287e5e86a780cd49f6269e794faaaa2e3d3c28cc6f7c8d26d73bd50e9168529
+members     2 (2 core)
   alice (07238d74e704f99a52d4616ebea33e2f044d89271d355b2685c632af3bfefc92)  core
   bob (d7e1c2bc242366f2fd5a8221ac32bd5b252525aecd7b03b9d495356c37aa6d84)  core
 ```
@@ -254,7 +254,7 @@ them hold for every protocol added later.
 | `distlib expel <member> --reason` | Remove one, recording why. Needs the node running. |
 | `distlib pledge <bytes>` | Set this node's storage pledge. Only ever this node's. |
 | `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
-| `distlib status [--online]` | Identity, paths, relay mode, group and standing — plus Raft state and leader while the node runs. `--online` also binds and prints the dialable address. |
+| `distlib status [--online]` | Identity, paths, relay mode, group and role — plus Raft role and leader while the node runs. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
 
 ## The local API
