@@ -323,6 +323,10 @@ either given explicit addresses or pointed at an in-process relay, so the suite 
 deterministic and works offline. Engineering standards are in
 [CLAUDE.md](CLAUDE.md); changes go through pull requests.
 
+[docs/manual-check.md](docs/manual-check.md) is the same acceptance criteria driven by
+hand — five nodes in five terminals — for the part a test cannot check: whether a
+person can actually follow the procedure.
+
 ## Licence
 
 MIT or Apache-2.0, at your option.
