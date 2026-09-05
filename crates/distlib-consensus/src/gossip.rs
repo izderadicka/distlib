@@ -22,8 +22,6 @@
 //! each of them to keep a subscription open, or to poll briskly, does not
 //! survive that. Epidemic broadcast does, which is why the design names it.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use distlib_core::GroupId;
 use futures_lite::StreamExt as _;
@@ -32,9 +30,32 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::raft::state_machine::StateMachineStore;
+
+/// Why the follow loop should look at the log again.
+///
+/// Carries the index rather than only poking, so a follower that already holds
+/// what was announced can go back to waiting instead of spending a round trip
+/// finding out it was up to date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    /// Somebody says the log reaches this index.
+    ///
+    /// Their claim, not a fact — see the module docs. It is compared against
+    /// this node's own cursor and used for nothing else.
+    Reaches(u64),
+
+    /// Something happened that may have hidden announcements from this node.
+    ///
+    /// No index to compare, so the only safe reading is "go and look": there is
+    /// no way to tell what was missed while it could not hear.
+    MayHaveMissed,
+}
+
+/// The channel a follow loop waits on.
+pub type Hints = watch::Receiver<Hint>;
 
 /// What a core node says when its log advances.
 ///
@@ -83,6 +104,11 @@ pub async fn announce(state_machine: StateMachineStore, sender: GossipSender) {
         }
 
         if memberships.changed().await.is_err() {
+            // Unreachable while this task holds the state machine, which owns
+            // the sender — so getting here means something has gone wrong that
+            // this node cannot see. Loud, because the silent version of it is a
+            // group whose followers quietly stop being told anything.
+            tracing::error!("the membership channel closed; this node will announce nothing more");
             return;
         }
     }
@@ -93,40 +119,57 @@ pub async fn announce(state_machine: StateMachineStore, sender: GossipSender) {
 /// Runs on followers. Deliberately ignores what the announcement *says* beyond
 /// "there may be more": the follow loop knows its own cursor, and acting on a
 /// number a peer supplied would be trusting one.
-pub async fn listen(mut receiver: GossipReceiver, wake: Arc<Notify>) {
+pub async fn listen(mut receiver: GossipReceiver, hints: watch::Sender<Hint>) {
     while let Some(event) = receiver.next().await {
-        match event {
+        let hint = match event {
             Ok(Event::Received(message)) => {
                 match postcard::from_bytes::<Announcement>(&message.content) {
                     Ok(Announcement::Applied { up_to }) => {
                         tracing::debug!(up_to, from = %message.delivered_from, "heard an announcement");
-                        wake.notify_one();
+                        Hint::Reaches(up_to)
                     }
                     // A member running something else, or a future version.
-                    // Neither is worth more than a line in the log.
+                    // Worth a line: a group where this happens constantly is
+                    // one running two versions of the protocol.
                     Err(error) => {
-                        tracing::debug!(%error, "ignoring an announcement that did not decode");
+                        tracing::warn!(
+                            %error,
+                            from = %message.delivered_from,
+                            "ignoring an announcement that did not decode"
+                        );
+                        continue;
                     }
                 }
             }
 
-            // The receiver fell behind. Whatever was missed was a hint, and the
-            // right response to having missed hints is to go and look.
-            Ok(Event::Lagged) => wake.notify_one(),
+            // Messages were dropped before this node read them, and gossip does
+            // not replay. There is no index to compare, so the only safe
+            // reading is that something may have been missed.
+            Ok(Event::Lagged) => {
+                tracing::warn!("fell behind on gossip; fetching rather than guessing");
+                Hint::MayHaveMissed
+            }
 
-            // A new neighbour is a reason to look: anything announced before
-            // this node could hear it was missed, and gossip does not replay.
-            // Narrows the window between joining a topic and being reachable on
-            // it — it does not close it, which is what the follow loop's own
-            // timer is for.
-            Ok(Event::NeighborUp(_)) => wake.notify_one(),
+            // The first moment this node can hear a given peer. Anything
+            // announced before now went past it, and there is no way to know
+            // what — so look. Narrows the window between joining a topic and
+            // being reachable on it, which the loop's own timer otherwise
+            // covers at thirty seconds.
+            Ok(Event::NeighborUp(_)) => Hint::MayHaveMissed,
 
-            Ok(Event::NeighborDown(_)) => {}
+            Ok(Event::NeighborDown(_)) => continue,
 
             Err(error) => {
-                tracing::debug!(%error, "gossip stream failed; the poll still stands");
+                // This node has just lost its prompt updates and is back to the
+                // timer. Not fatal, but not routine either.
+                tracing::warn!(%error, "gossip stream failed; falling back to the poll");
                 return;
             }
+        };
+
+        if hints.send(hint).is_err() {
+            tracing::debug!("nothing is following the log any more; stopping");
+            return;
         }
     }
 }

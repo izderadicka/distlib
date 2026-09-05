@@ -22,7 +22,7 @@ use openraft::{
     error::{ClientWriteError, RaftError},
 };
 use redb::Database;
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
     error::ConsensusError,
@@ -264,9 +264,10 @@ impl MembershipNode {
         // Gossip is spawned before the router, because the router has to serve
         // it: a node that announced but did not accept would talk to nobody.
         let swarm = Gossip::builder().spawn(endpoint.clone());
-        // Shared by the gossip listener, which fires it, and the follow loop,
-        // which waits on it. The node itself never touches it.
-        let wake = Arc::new(Notify::new());
+        // The gossip listener sends on this and the follow loop waits on it.
+        // Seeded with `MayHaveMissed` because that is true at startup: this
+        // node has heard nothing yet and has no idea how far the log reaches.
+        let (hints, listens) = watch::channel(gossip::Hint::MayHaveMissed);
 
         let (role, router) = if is_core {
             // Forwarding does not go through this factory: a proposal travels
@@ -314,7 +315,7 @@ impl MembershipNode {
                 state_machine.clone(),
                 memberlog.clone(),
                 Arc::clone(&sources),
-                Arc::clone(&wake),
+                listens,
             ));
 
             (Role::Follower { follow, sources }, router)
@@ -324,13 +325,7 @@ impl MembershipNode {
         // group. A founder has none for the moment before it founds one, and a
         // new follower has none until its first fetch — so the task waits for
         // one rather than the caller having to order any of that.
-        let gossip = tokio::spawn(join_topic(
-            swarm,
-            state_machine.clone(),
-            id,
-            is_core,
-            Arc::clone(&wake),
-        ));
+        let gossip = tokio::spawn(join_topic(swarm, state_machine.clone(), id, is_core, hints));
 
         let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
         let evictions = tokio::spawn(hooks.evict_expelled());
@@ -687,7 +682,7 @@ async fn join_topic(
     state_machine: StateMachineStore,
     me: MemberId,
     is_core: bool,
-    wake: Arc<Notify>,
+    hints: watch::Sender<gossip::Hint>,
 ) {
     let mut memberships = state_machine.subscribe();
     let group = loop {
@@ -734,7 +729,7 @@ async fn join_topic(
         // A follower never broadcasts. It only listens, and acts on its own
         // cursor rather than on anything an announcement claims.
         drop(sender);
-        gossip::listen(receiver, wake).await;
+        gossip::listen(receiver, hints).await;
     }
 }
 
