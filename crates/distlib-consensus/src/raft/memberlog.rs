@@ -54,6 +54,21 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// before this fires and reports it as unreachable.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// How long to spend establishing a connection before giving up on a peer.
+///
+/// Separate from [`EXCHANGE_TIMEOUT`], and much shorter, because the two answer
+/// different questions. Waiting for a peer to *reply* means waiting for a
+/// commit, which can legitimately take most of [`COMMIT_TIMEOUT`]. Waiting to
+/// *reach* it does not: a peer that cannot be connected to in a few seconds is
+/// one that has gone, and every second spent on it is a second not spent asking
+/// somebody who is there.
+///
+/// This is what makes forwarding to a leader that has died recoverable. The
+/// retry loop in `MembershipNode::propose` exists to re-ask who the leader is
+/// after a stale hint, and the whole point of it is lost if each attempt spends
+/// forty-five seconds discovering that the last leader is not answering.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long a follower waits for the log before asking somebody else.
 ///
 /// Much shorter than [`EXCHANGE_TIMEOUT`], and for a different question. A
@@ -441,10 +456,12 @@ impl MemberlogClient {
         let addr = addr
             .to_endpoint_addr(member)
             .map_err(|error| error.to_string())?;
-        let connection = self
-            .connections
-            .get_or_connect(&self.endpoint, member, addr, alpn::MEMBERLOG)
+        let connecting =
+            self.connections
+                .get_or_connect(&self.endpoint, member, addr, alpn::MEMBERLOG);
+        let connection = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
             .await
+            .map_err(|_| format!("connecting: no answer within {CONNECT_TIMEOUT:?}"))?
             .map_err(failed("connecting"))?;
 
         let (mut send, mut recv) = connection
