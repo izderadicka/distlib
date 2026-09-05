@@ -16,7 +16,7 @@ use distlib_consensus::{
     Fetched, MemberRecord, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
 };
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AllowlistHooks, Connections, allowlist, endpoint::configure};
+use distlib_net::{AddressBook, AllowlistHooks, Connections, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -114,7 +114,10 @@ impl Group {
         .await
         .unwrap();
 
-        (id, MemberlogClient::new(endpoint, Connections::new()))
+        (
+            id,
+            MemberlogClient::new(endpoint, Connections::new(), AddressBook::default()),
+        )
     }
 }
 
@@ -281,7 +284,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
     .await
     .unwrap();
 
-    let fetched = MemberlogClient::new(asking, Connections::new())
+    let fetched = MemberlogClient::new(asking, Connections::new(), AddressBook::default())
         .fetch(id, &addr, 0)
         .await
         .unwrap();

@@ -62,15 +62,15 @@ pub fn init(paths: &Paths, force: bool) -> Result<()> {
     if !paths.config_file.exists() {
         std::fs::write(&paths.config_file, Config::default().to_starter_toml())
             .with_context(|| format!("could not write {}", paths.config_file.display()))?;
-        println!("wrote      {}", paths.config_file.display());
+        println!("wrote       {}", paths.config_file.display());
     }
 
     println!(
-        "identity   {} ({})",
+        "identity    {} ({})",
         member_id(&secret),
         if existed && !force { "existing" } else { "new" }
     );
-    println!("data dir   {}", paths.data_dir.root().display());
+    println!("data dir    {}", paths.data_dir.root().display());
     Ok(())
 }
 
@@ -175,8 +175,8 @@ pub async fn whoami(paths: &Paths) -> Result<()> {
     let secret = load_or_create_secret_key(&paths.secret_key_file())?;
     let me = member_id(&secret);
 
-    println!("identity   {me}");
-    println!("data dir   {}", paths.data_dir.root().display());
+    println!("identity    {me}");
+    println!("data dir    {}", paths.data_dir.root().display());
 
     // Only ever this node's own entry, so the name is left for whoever pastes
     // it: they are the one who has to recognise it in `distlib members`.
@@ -288,7 +288,7 @@ pub async fn admit(paths: &Paths, member: MemberId, name: Option<String>) -> Res
         None => json!({ "member": member }),
     };
     ask(paths, "group.propose_add", params).await?;
-    println!("admitted   {member}");
+    println!("admitted    {member}");
     Ok(())
 }
 
@@ -300,14 +300,14 @@ pub async fn expel(paths: &Paths, member: MemberId, reason: String) -> Result<()
         json!({ "member": member, "reason": reason }),
     )
     .await?;
-    println!("expelled   {member}");
+    println!("expelled    {member}");
     Ok(())
 }
 
 /// `distlib pledge`
 pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
     ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
-    println!("pledged    {bytes} bytes");
+    println!("pledged     {bytes} bytes");
     Ok(())
 }
 
@@ -370,9 +370,9 @@ pub fn join(paths: &Paths, ticket: &str) -> Result<()> {
     std::fs::write(&paths.config_file, config.to_starter_toml())
         .with_context(|| format!("could not write {}", paths.config_file.display()))?;
 
-    println!("group      {}", ticket.group);
-    println!("core       {} node(s)", config.consensus.core.len());
-    println!("wrote      {}", paths.config_file.display());
+    println!("group       {}", ticket.group);
+    println!("core        {} node(s)", config.consensus.core.len());
+    println!("wrote       {}", paths.config_file.display());
     println!();
     println!("Start the node with `distlib run` and it will fetch the log.");
     Ok(())
@@ -395,9 +395,9 @@ pub async fn members(paths: &Paths) -> Result<()> {
         println!("no group yet — found one with `distlib run --found-group`");
         return Ok(());
     };
-    println!("group      {group}");
+    println!("group       {group}");
     println!(
-        "members    {} ({} core)",
+        "members     {} ({} core)",
         listing.members.len(),
         listing.members.iter().filter(|member| member.core).count()
     );
@@ -414,16 +414,16 @@ pub async fn members(paths: &Paths) -> Result<()> {
 /// What a running node says about itself.
 fn print_live_status(live: &Value) {
     match live["group"].as_str() {
-        Some(group) => println!("group      {group}"),
-        None => println!("group      none yet"),
+        Some(group) => println!("group       {group}"),
+        None => println!("group       none yet"),
     }
     println!(
-        "members    {} ({} core)",
+        "members     {} ({} core)",
         live["members"].as_u64().unwrap_or(0),
         live["core_group"].as_array().map_or(0, Vec::len)
     );
     println!(
-        "standing   {}",
+        "role        {}",
         if live["core"].as_bool().unwrap_or(false) {
             "core member"
         } else {
@@ -435,17 +435,17 @@ fn print_live_status(live: &Value) {
     // far it has read instead of pretending to a term it has no part in.
     match live["raft"].as_str() {
         Some(state) => {
-            println!("raft       {state}");
+            println!("Raft role   {state}");
             if let Some(leader) = live["leader"].as_str() {
-                println!("leader     {leader}");
+                println!("Raft leader {leader}");
             }
         }
         None => println!(
-            "follows    the log to index {}",
+            "follows     the log to index {}",
             live["followed_upto"].as_u64().unwrap_or(0)
         ),
     }
-    println!("node       running");
+    println!("node        running");
 }
 
 /// What this node's files say, when the node itself is not up to answer.
@@ -454,16 +454,16 @@ fn print_stored_status(paths: &Paths, me: MemberId) {
         Ok(membership) => {
             let membership = membership.unwrap_or_default();
             if print_group(&membership) {
-                let standing = if membership.core().contains(&me) {
+                let role = if membership.core().contains(&me) {
                     "core member"
                 } else if membership.is_member(&me) {
                     "member"
                 } else {
                     "not a member of this group"
                 };
-                println!("standing   {standing}");
+                println!("role        {role}");
             } else {
-                println!("group      none yet");
+                println!("group       none yet");
             }
         }
         Err(error) => {
@@ -472,10 +472,10 @@ fn print_stored_status(paths: &Paths, me: MemberId) {
             // half-written directory, and the chain beneath says so three
             // times, so keep the line readable and log the detail.
             tracing::debug!(?error, "could not read the membership");
-            println!("group      unavailable — could not read the database");
+            println!("group       unavailable — could not read the database");
         }
     }
-    println!("node       not running");
+    println!("node        not running");
 }
 
 /// A membership, however it was obtained.
@@ -532,12 +532,12 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
 
 /// `distlib status`
 pub async fn status(paths: &Paths, online: bool) -> Result<()> {
-    println!("data dir   {}", paths.data_dir.root().display());
-    println!("config     {}", display_path(&paths.config_file));
+    println!("data dir    {}", paths.data_dir.root().display());
+    println!("config      {}", display_path(&paths.config_file));
 
     let key_file = paths.secret_key_file();
     if !key_file.exists() {
-        println!("identity   not initialised — run `distlib init`");
+        println!("identity    not initialised — run `distlib init`");
         return Ok(());
     }
 
@@ -545,9 +545,9 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
     let secret = load_or_create_secret_key(&key_file)?;
     let me = member_id(&secret);
 
-    println!("identity   {me}");
-    println!("relay mode {:?}", config.net.relay_mode);
-    println!("core seed  {} member(s)", config.consensus.core.len());
+    println!("identity    {me}");
+    println!("relay mode  {:?}", config.net.relay_mode);
+    println!("core seed   {} member(s)", config.consensus.core.len());
 
     // The running node knows more than its database does — it can say which
     // Raft state it is in and who the leader is — so ask it first and read the
@@ -590,11 +590,11 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
             .await
             .is_err()
         {
-            println!("address    (no relay reached; direct addresses only)");
+            println!("address     (no relay reached; direct addresses only)");
         }
         let addr = endpoint.addr();
         for transport in &addr.addrs {
-            println!("address    {transport:?}");
+            println!("address     {transport:?}");
         }
         endpoint.close().await;
     }
@@ -868,9 +868,9 @@ fn print_group(membership: &MembershipState) -> bool {
     let Some(group) = membership.group_id() else {
         return false;
     };
-    println!("group      {group}");
+    println!("group       {group}");
     println!(
-        "members    {} ({} core)",
+        "members     {} ({} core)",
         membership.len(),
         membership.core().len()
     );
