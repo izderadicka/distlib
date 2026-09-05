@@ -21,6 +21,6 @@ pub use addresses::AddressBook;
 pub use allowlist::{Allowlist, AllowlistWriter, allowlist};
 pub use connections::Connections;
 pub use endpoint::build_endpoint;
-pub use error::{NetError, Result};
+pub use error::{IsRejection, NetError, Result};
 pub use hooks::{AllowlistHooks, NOT_A_VOTER_REASON, close_code};
 pub use node::Node;

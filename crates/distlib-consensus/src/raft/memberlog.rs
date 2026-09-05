@@ -18,7 +18,7 @@
 //! is where §4.2's non-core followers get their copy.
 
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AddressBook, Connections, alpn};
+use distlib_net::{AddressBook, Connections, IsRejection, NetError, alpn};
 use iroh::{
     Endpoint,
     endpoint::Connection,
@@ -168,6 +168,14 @@ pub enum ProposeOutcome {
 pub struct FetchFailed {
     pub member: MemberId,
     pub message: String,
+
+    /// The peer refused us at the allowlist rather than failing to answer.
+    ///
+    /// The difference is the whole difference to a follower. Unreachable means
+    /// try somebody else; refused means that node's copy of the log does not
+    /// have this one in the group, and no amount of retrying will change its
+    /// mind — only being re-admitted will.
+    pub refused: bool,
 }
 
 /// Why a forwarded proposal did not take effect.
@@ -389,7 +397,7 @@ impl MemberlogClient {
         let answer = tokio::time::timeout(EXCHANGE_TIMEOUT, exchange)
             .await
             .map_err(|_| unreachable(format!("no answer within {EXCHANGE_TIMEOUT:?}")))?
-            .map_err(unreachable)?;
+            .map_err(|rebuffed| unreachable(rebuffed.message))?;
 
         match answer {
             Response::Fetched(_) => Err(ProposeError::NotCommitted(
@@ -416,14 +424,21 @@ impl MemberlogClient {
         addr: &NodeAddr,
         cursor: u64,
     ) -> Result<Fetched, FetchFailed> {
-        let failed = |message: String| FetchFailed { member, message };
+        let failed = |message: String| FetchFailed {
+            member,
+            message,
+            refused: false,
+        };
         let exchange = self.exchange(member, addr, Request::From { cursor });
 
         match tokio::time::timeout(FETCH_TIMEOUT, exchange)
             .await
             .map_err(|_| failed(format!("no answer within {FETCH_TIMEOUT:?}")))?
-            .map_err(failed)?
-        {
+            .map_err(|rebuffed| FetchFailed {
+                member,
+                message: rebuffed.message,
+                refused: rebuffed.refused,
+            })? {
             Response::Fetched(fetched) => {
                 // Every answer names the current core group with addresses, so
                 // learn them here rather than at each caller: this is where they
@@ -450,7 +465,7 @@ impl MemberlogClient {
         member: MemberId,
         addr: &NodeAddr,
         request: Request,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, Rebuffed> {
         match self.try_exchange(member, addr, request).await {
             Ok(response) => Ok(response),
             Err(error) => {
@@ -468,7 +483,7 @@ impl MemberlogClient {
         member: MemberId,
         addr: &NodeAddr,
         request: Request,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, Rebuffed> {
         let encoded = postcard::to_stdvec(&request).map_err(failed("encoding the request"))?;
         let addr = addr
             .to_endpoint_addr(member)
@@ -479,20 +494,72 @@ impl MemberlogClient {
         let connection = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
             .await
             .map_err(|_| format!("connecting: no answer within {CONNECT_TIMEOUT:?}"))?
-            .map_err(failed("connecting"))?;
+            .map_err(|error| Rebuffed {
+                refused: matches!(error, NetError::Rejected { .. }),
+                message: format!("connecting: {error}"),
+            })?;
 
         let (mut send, mut recv) = connection
             .open_bi()
             .await
-            .map_err(failed("opening a stream"))?;
-        send.write_all(&encoded).await.map_err(failed("sending"))?;
+            .map_err(Rebuffed::from_peer(member, "opening a stream"))?;
+        send.write_all(&encoded)
+            .await
+            .map_err(Rebuffed::from_peer(member, "sending"))?;
         send.finish().map_err(failed("sending"))?;
 
         let encoded = recv
             .read_to_end(MAX_RPC_BYTES)
             .await
-            .map_err(failed("reading the answer"))?;
-        postcard::from_bytes(&encoded).map_err(failed("decoding the answer"))
+            .map_err(Rebuffed::from_peer(member, "reading the answer"))?;
+        Ok(postcard::from_bytes(&encoded).map_err(failed("decoding the answer"))?)
+    }
+}
+
+/// Why an exchange failed, and whether the peer refused us outright.
+///
+/// Everything but a refusal is one thing — "we could not complete this" — and
+/// the caller cannot act differently on which step it was. A refusal is
+/// different in kind: it is an answer, and the answer is that this node is not
+/// in the group as far as that peer's log is concerned.
+struct Rebuffed {
+    message: String,
+    refused: bool,
+}
+
+impl Rebuffed {
+    /// A failure that says nothing about membership.
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            refused: false,
+        }
+    }
+
+    /// A failure from talking to a peer, which may be either.
+    ///
+    /// Every step of an exchange goes through here, not just the dial. A
+    /// remote's `after_handshake` hook refuses *after* the connection looks
+    /// established, so the initiator often sees `connect` succeed and the first
+    /// stream operation fail instead — classifying only the dial would miss the
+    /// common shape of the very thing this is for.
+    fn from_peer<E>(member: MemberId, what: &'static str) -> impl FnOnce(E) -> Self
+    where
+        E: IsRejection + std::error::Error + Send + Sync + 'static,
+    {
+        move |error| {
+            let error = NetError::peer(member, error);
+            Self {
+                refused: matches!(error, NetError::Rejected { .. }),
+                message: format!("{what}: {error}"),
+            }
+        }
+    }
+}
+
+impl From<String> for Rebuffed {
+    fn from(message: String) -> Self {
+        Self::new(message)
     }
 }
 
