@@ -14,7 +14,7 @@ use std::{
 
 use distlib_api::{Api, Server, serve};
 use distlib_consensus::{MemberRecord, MembershipNode};
-use distlib_core::{MemberId, NodeAddr};
+use distlib_core::{MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
@@ -92,6 +92,7 @@ impl Harness {
             Api {
                 node: Arc::clone(&node),
                 secret,
+                net: distlib_core::NetConfig::default(),
             },
             SecretString::from(token.clone()),
         )
@@ -342,6 +343,32 @@ async fn malformed_calls_are_reported_by_kind() {
         )
         .await;
     assert_eq!(raw_code(&wrong_version), -32600);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_ticket_carries_directions_to_this_group() {
+    // §4.3 step 4. Not a credential — anyone who can call the API can ask for
+    // one, and holding it grants nothing until a `MemberAdded` is committed.
+    let harness = Harness::start().await;
+
+    let answer = harness.call("group.ticket", Value::Null).await;
+    let ticket: Ticket = answer["ticket"].as_str().unwrap().parse().unwrap();
+
+    assert_eq!(
+        ticket.group,
+        harness.node.membership().group_id().unwrap(),
+        "the ticket names the group it came from"
+    );
+    assert!(
+        ticket
+            .core
+            .iter()
+            .any(|(member, addr)| *member == harness.node.id() && !addr.direct.is_empty()),
+        "a joiner has to be able to reach a core node: {:?}",
+        ticket.core
+    );
 
     harness.shutdown().await;
 }

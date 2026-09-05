@@ -40,6 +40,10 @@ pub enum CoreError {
     #[error("could not determine a default data directory; pass --data-dir")]
     NoDataDir,
 
+    /// A string that was meant to be a join ticket is not one.
+    #[error("that is not a valid join ticket: {reason}")]
+    MalformedTicket { reason: String },
+
     /// The API token file exists but holds nothing.
     #[error("api token {path} is empty; delete it and restart to generate a new one")]
     EmptyToken { path: PathBuf },

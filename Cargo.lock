@@ -1043,6 +1043,7 @@ name = "distlib-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "data-encoding",
  "directories",
  "figment",
  "getrandom 0.3.4",

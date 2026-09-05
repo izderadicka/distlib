@@ -75,6 +75,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 serde_json = "=1.0.151"
 getrandom = "=0.3.4"
+data-encoding = "=2.11.1"
 secrecy = "=0.10.3"
 # The client for the local API. hyper rather than reqwest: this only ever talks
 # HTTP to 127.0.0.1, and reqwest's `rustls` feature would pull aws-lc-rs — a C

@@ -33,6 +33,8 @@ async fn main() -> Result<()> {
         Command::Admit { member, name } => commands::admit(&paths, member, name).await,
         Command::Expel { member, reason } => commands::expel(&paths, member, reason).await,
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
+        Command::Ticket => commands::ticket(&paths).await,
+        Command::Join { ticket } => commands::join(&paths, &ticket),
         Command::Members => commands::members(&paths).await,
         Command::Status { online } => commands::status(&paths, online).await,
         Command::Ping {

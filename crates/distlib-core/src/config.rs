@@ -146,7 +146,7 @@ pub struct CoreMember {
 }
 
 /// Relay selection.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayMode {
     /// The n0-operated default relays.
@@ -237,10 +237,14 @@ impl Config {
              relay_urls = [{relay_urls}]\n\
              \n\
              [consensus]\n\
-             # The founding core group, this node included — the members who vote\n\
-             # on the membership log. Everything else about membership comes from\n\
-             # the log itself; this is the one thing that cannot, because reaching\n\
-             # the log means connecting to these nodes first.\n\
+             # The core group: the members who vote on the membership log. If this\n\
+             # node is one of them it votes; if not, it follows them. Everything\n\
+             # else about membership comes from the log itself — this is the one\n\
+             # thing that cannot, because reaching the log means connecting to\n\
+             # these nodes first.\n\
+             #\n\
+             # `distlib join <ticket>` fills this in for a node joining a group\n\
+             # that already exists.\n\
              #\n\
              # Run `distlib whoami` on each founder; it prints the line to put\n\
              # here. Every founder needs the same list.\n\

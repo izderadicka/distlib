@@ -8,7 +8,7 @@ use distlib_consensus::{
     MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
 };
 use distlib_core::{
-    Config, CoreMember, DataDir, MemberId, NodeAddr,
+    Config, CoreMember, DataDir, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, member_id},
     token,
 };
@@ -311,6 +311,73 @@ pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
     Ok(())
 }
 
+/// `distlib ticket`
+pub async fn ticket(paths: &Paths) -> Result<()> {
+    let answer = ask(paths, "group.ticket", Value::Null).await?;
+    let ticket = answer["ticket"]
+        .as_str()
+        .context("the api did not return a ticket")?;
+
+    println!("{ticket}");
+    println!();
+    println!("Send this to somebody you have already admitted with `distlib admit`.");
+    println!("It says where the group is, not who may join it — until their");
+    println!("`MemberAdded` is committed, a ticket gets them nowhere.");
+    Ok(())
+}
+
+/// `distlib join`
+///
+/// Writes the ticket's directions into this node's configuration and stops
+/// there. Starting the node is a separate step on purpose: `join` is a
+/// configuration change, and a command that silently began serving would be a
+/// surprising thing to have run.
+pub fn join(paths: &Paths, ticket: &str) -> Result<()> {
+    let ticket: Ticket = ticket.parse()?;
+    let mut config = load_config(&paths.config_file)?;
+
+    // Refuse rather than overwrite: this node already follows a log, and
+    // replacing its bootstrap set with another group's would leave it enforcing
+    // one membership while fetching another.
+    if let Some(existing) = stored_membership(paths)?.and_then(|m| m.group_id())
+        && existing != ticket.group
+    {
+        bail!(
+            "this node already belongs to group {existing}; joining {} would mean starting \
+             over, so delete {} first if that is what you want",
+            ticket.group,
+            paths.data_dir.root().display()
+        );
+    }
+
+    config.net.relay_mode = ticket.relay_mode;
+    config.net.relay_urls = ticket.relay_urls;
+    config.consensus.core = ticket
+        .core
+        .iter()
+        .map(|(member, addr)| CoreMember {
+            member: *member,
+            // The log carries the names; this list only has to be reachable.
+            name: String::new(),
+            addrs: addr.direct.iter().copied().collect(),
+            relay: addr.relay.clone(),
+        })
+        .collect();
+
+    // Rendered rather than patched. The starter renderer is the one place that
+    // knows how to write every field with its explanation, and patching a
+    // section into a file by hand is how the two shapes drift apart.
+    std::fs::write(&paths.config_file, config.to_starter_toml())
+        .with_context(|| format!("could not write {}", paths.config_file.display()))?;
+
+    println!("group      {}", ticket.group);
+    println!("core       {} node(s)", config.consensus.core.len());
+    println!("wrote      {}", paths.config_file.display());
+    println!();
+    println!("Start the node with `distlib run` and it will fetch the log.");
+    Ok(())
+}
+
 /// `distlib members`
 pub async fn members(paths: &Paths) -> Result<()> {
     // The running node first, its database second. Only one of the two can
@@ -363,10 +430,20 @@ fn print_live_status(live: &Value) {
             "member"
         }
     );
-    // Only a running node has these, which is the reason to have asked it.
-    println!("raft       {}", live["raft"].as_str().unwrap_or("unknown"));
-    if let Some(leader) = live["leader"].as_str() {
-        println!("leader     {leader}");
+    // Only a running node has these, which is the reason to have asked it. A
+    // follower has no Raft state to report — it does not vote — so it says how
+    // far it has read instead of pretending to a term it has no part in.
+    match live["raft"].as_str() {
+        Some(state) => {
+            println!("raft       {state}");
+            if let Some(leader) = live["leader"].as_str() {
+                println!("leader     {leader}");
+            }
+        }
+        None => println!(
+            "follows    the log to index {}",
+            live["followed_upto"].as_u64().unwrap_or(0)
+        ),
     }
     println!("node       running");
 }
@@ -668,7 +745,12 @@ async fn serve_api(
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
-    let server = distlib_api::serve(config.api.bind_addr, Api { node, secret }, token)
+    let api = Api {
+        node,
+        secret,
+        net: config.net.clone(),
+    };
+    let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await
         .with_context(|| {
             format!(

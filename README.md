@@ -174,8 +174,31 @@ the same allowlist, but fetching it from the core nodes rather than voting. Noth
 configures that: a node not in the list follows, and once the group exists the log
 decides rather than the config.
 
-So a fourth friend needs only your node's id and address in their own
-`[consensus] core`, and to be admitted by somebody. They will catch up on their own.
+**9. Hand them a ticket** instead of talking them through the config. Admitting
+somebody puts them in the log; a ticket tells them where the group is:
+
+```sh
+distlib --data-dir /tmp/a ticket
+```
+
+```
+distlib1IBSWEN3GMQ4TENLDHA4DSOJXGAZGCNRQG44GMMRXG4YDKMTDGRRWKYRXHE4DOM3DGQZTENTG
+```
+
+They paste it into their own node and start it:
+
+```sh
+distlib --data-dir /tmp/c join distlib1IBSWEN3G…
+distlib --data-dir /tmp/c run
+```
+
+It fetches the log, derives the same membership everybody else has, and enforces it —
+without ever being told what is in it.
+
+A ticket is **directions, not a credential**. Anyone who can reach a node's API can
+ask for one, and holding it grants nothing: until a `MemberAdded` for that member is
+committed, every node refuses them at the allowlist. Admission is the log's decision;
+the ticket only says where to find it.
 
 ## Watching membership do its job
 

@@ -11,6 +11,7 @@ pub mod id;
 pub mod identity;
 pub mod paths;
 pub mod private_file;
+pub mod ticket;
 pub mod token;
 
 pub use addr::{BadRelayUrl, NodeAddr};
@@ -18,3 +19,4 @@ pub use config::{ApiConfig, Config, ConsensusConfig, CoreMember, NetConfig, Rela
 pub use error::CoreError;
 pub use id::{GroupId, ItemId, MemberId, RawMemberId};
 pub use paths::DataDir;
+pub use ticket::Ticket;
