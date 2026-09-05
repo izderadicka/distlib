@@ -384,19 +384,19 @@ Config: single TOML file + env overrides (`DISTLIB_*`). Data dir: `~/.local/shar
 Each phase ends runnable and demo-able. Suggested Claude Code session granularity = one checklist block.
 
 ### Phase 0 — Skeleton & transport (foundation)
-- [x] Workspace, CI (fmt, clippy, test), pinned deps
-- [x] `distlib-core`: ids (MemberId, ItemId, GroupId), config loading, error types
-- [x] `distlib-net`: iroh endpoint with persistent keypair; ALPN registry; **allowlist hook at connection accept** (allowlist source stubbed as static config for now)
-- [x] `distlib-daemon`: `init` (keygen), `run`, `status` (prints NodeId)
-- [x] Two nodes connect (direct + via relay), ping over custom ALPN
+- [ ] Workspace, CI (fmt, clippy, test), pinned deps
+- [ ] `distlib-core`: ids (MemberId, ItemId, GroupId), config loading, error types
+- [ ] `distlib-net`: iroh endpoint with persistent keypair; ALPN registry; **allowlist hook at connection accept** (allowlist source stubbed as static config for now)
+- [ ] `distlib-daemon`: `init` (keygen), `run`, `status` (prints NodeId)
+- [ ] Two nodes connect (direct + via relay), ping over custom ALPN
 - **Acceptance:** two containers on separate networks establish a connection and exchange a message; unknown NodeId is refused.
 
 ### Phase 1 — Membership log (Raft core)
-- [x] `distlib-consensus`: openraft type config; redb log+state storage; iroh RPC network
-- [x] MembershipEvent state machine; allowlist now derived from committed log
-- [x] Log-follower mode for non-core nodes (fetch + verify + apply, gossip-notified)
-- [x] `GroupFounded` bootstrap flow: `distlib init-group --core <ids...>`; join tickets
-- [x] `propose_add` / `propose_expel` / `pledge_set` RPCs end-to-end
+- [ ] `distlib-consensus`: openraft type config; redb log+state storage; iroh RPC network
+- [ ] MembershipEvent state machine; allowlist now derived from committed log
+- [ ] Log-follower mode for non-core nodes (fetch + verify + apply, gossip-notified)
+- [ ] `GroupFounded` bootstrap flow: `distlib init-group --core <ids...>`; join tickets
+- [ ] `propose_add` / `propose_expel` / `pledge_set` RPCs end-to-end
 - **Acceptance:** 3-core-node cluster + 2 follower nodes; add a member → it can connect; expel it → open connection drops, reconnect refused; kill one core node → group still admits members.
 
 ### Phase 2 — Catalogue & library basics
