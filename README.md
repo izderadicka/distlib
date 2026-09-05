@@ -19,10 +19,12 @@ See [docs/distlib-plan.md](docs/distlib-plan.md) for the design, and
 [docs/plan-deltas.md](docs/plan-deltas.md) for where the implementation has
 deliberately diverged from it.
 
-> **Status: phase 1b, in progress.** Identity, transport, and the membership log work:
-> a group can be founded, members admitted and expelled through the local API, and
-> every node — voting or not — derives what it will talk to from the committed log.
-> There is no catalogue, no content transfer and no UI yet.
+> **Status: phase 1 complete.** Identity, transport and the membership log work. A
+> group can be founded, members admitted, expelled and handed a join ticket, and every
+> node — voting or not — derives what it will talk to from the committed log. §9's
+> acceptance criteria run as a test on every commit: three voters and two followers,
+> admission, expulsion closing a live connection, and the group surviving the loss of
+> its leader. There is no catalogue, no content transfer and no UI yet.
 
 ## Build
 

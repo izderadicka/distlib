@@ -56,23 +56,20 @@ Three consequences that outlive Phase 0:
 
 ### Carried forward to Phase 1
 
-- **Outgoing connections are gated by the same allowlist** (consequence 2 of C1). The join
-  flow in §4.3 has a joiner connecting to a core node that is not yet in the joiner's log, and the
-  joiner is not yet in the core node's log either. This needs a designed bootstrap exemption —
-  scoped to the join ALPN and the addresses carried in the join ticket — rather than a workaround
-  discovered while debugging. `crates/distlib-net/tests/allowlist.rs::outgoing_to_unknown_refused`
-  pins the current behaviour so the exemption is a deliberate change.
-
-  Note the exemption has to be made in **two** places, not one: `before_connect` refuses to dial a
-  non-member before any packet is sent, and `after_handshake` refuses the verified peer. The join
-  ALPN must be admitted by both.
+- ~~**Outgoing connections are gated by the same allowlist** (consequence 2 of C1), so the join
+  flow needs a bootstrap exemption scoped to the join ALPN.~~ **Discharged, and no exemption was
+  needed.** The problem dissolved rather than being solved: `distlib join` writes the ticket's core
+  nodes into `[consensus] core`, which *is* the joiner's bootstrap allowlist seed — so the joiner
+  may dial them, and they admit the joiner because the group already committed a `MemberAdded` for
+  it. Neither side is talking to a stranger. Worth recording because the anticipated fix would have
+  punched a hole in the allowlist that turned out to be unnecessary.
 - ~~Expulsion must close connections that are already open (§4.4).~~ **Discharged.**
   `Allowlist::changed()` is exposed and `AllowlistHooks::evict_expelled` consumes it, closing live
   connections to removed members with the same `NOT_A_MEMBER` code a refused handshake gets. The
   hooks keep a `WeakConnectionHandle` per peer, which is what the `EndpointHooks` docs prescribe
   for looking a connection up later without disabling close-on-drop.
-- **openraft version choice** (P0-5).
-- **Windows and macOS are unverified** (P0-6). §2 claims all three platforms, but CI exercises
+- ~~**openraft version choice** (P0-5).~~ **Discharged** — `=0.9.25` with `storage-v2`, see P1-4.
+- **Windows and macOS are unverified** (P0-6) — still open, and now carried into Phase 2. §2 claims all three platforms, but CI exercises
   only Linux. The first code that actually diverges is the `0600` key-file handling in
   `distlib-core::identity` — `cfg(unix)` permissions with a Windows fallback — so that fallback
   compiles and runs untested for now. Widen `.github/workflows/ci.yml`'s `test` matrix before
@@ -81,6 +78,11 @@ Three consequences that outlive Phase 0:
 ---
 
 ## Phase 1 — Membership log (Raft core)
+
+**Complete.** The rows below are the record of where the implementation differs from the plan and
+why — kept because §4 and §9 still describe the original, and a reader comparing the two needs the
+answer. What is *not* finished is in [Carried forward to Phase 2](#carried-forward-to-phase-2) at
+the end of this chapter.
 
 | # | §  | Doc says | We do | Why |
 |---|---|---|---|---|
@@ -101,7 +103,6 @@ Three consequences that outlive Phase 0:
 | P1-15 | §3, §5.1 | — | **connections are pooled per (peer, protocol) in `distlib-net`, not per peer** | ALPN is negotiated once in the TLS handshake: `Connection::alpn()` reads it from handshake data, and iroh's router resolves a handler once and gives it the whole connection. Streams multiplex within a protocol, never across, so raft and the phase 1b log protocol each hold their own connection to a peer. That is iroh's model rather than a choice — avoiding it would mean multiplexing our protocols under one ALPN with our own dispatch. The cost is bounded: iroh keeps address lookup, hole punching and path selection per *remote*, so a second connection to a known peer is a handshake over an established path. `ping` deliberately does not pool — a liveness probe over a cached connection answers the wrong question. |
 | P1-16 | §3, §4.3 | `net.allowlist` configures who a node talks to | **`net.allowlist` is gone; `[consensus] core` replaces it** | The allowlist is now derived from the log, so configuring it would be configuring a cache. What configuration still has to supply is the *founding* core group, and only until a group exists: founders cannot replicate the first entry without reaching each other, and cannot reach each other without an allowlist. So `[consensus] core` is read once, before `GroupFounded` applies, and never again. Unlike anything else that names a member it carries addresses, because the log that would otherwise supply them is exactly what those addresses are needed to fetch. No migration handling for the old key: nothing was ever released with it, so `deny_unknown_fields` refusing it is enough. |
 | P1-17 | §9.1 | `distlib init-group` founds a group | **`distlib run --found-group` founds it instead** | Two constraints rule out a standalone command. redb takes an exclusive file lock, so a second process cannot open the node's database while it runs — `init-group` would have to be run with the node stopped. And the founder must stay up afterwards to replicate what it wrote, which a command that founds and exits cannot do. As a flag on `run` both fall away: the founder starts, founds, and serves. The other founders just `run`. |
-| P1-18 | §9.1 | `distlib members` lists the group | **Superseded by P1-27.** For one release `members` needed the node stopped, because a running node holds the database exclusively. | The lock was real; treating it as the end of the story was not. Kept as a row rather than deleted, because the reasoning is what motivated bringing §7.1's API forward. |
 | P1-19 | §9.1 | — | **`distlib whoami` added** | Founding needs every founder's id and address before any group exists to ask, so the exchange happens out of band — and nothing printed them in a form that could be pasted. `whoami` creates the identity if there is none and prints the `[consensus] core` line, rendered by the same code that writes the starter config so the two cannot drift. It prints no address when `bind_addr_v4` has no fixed port: an OS-chosen port is gone after the next restart, and a line the founder pastes has to keep working. It never prints the secret key. |
 | P1-20 | §4.2, §4.3, §4.4 | membership events are committed by the core group; the only stated rule is that admission is invitation-only | **Per-event proposer rules, enforced in `MembershipState::apply`**: a `PledgeChanged` may only be proposed by the member whose pledge it is, and a `CoreGroupChanged` only by a current core member. `MemberAdded` and `MemberExpelled` stay open to any member, as §4.3 and §4.4 say. | Being a member was the only check, which left two holes. A pledge is a promise about the proposer's *own* storage and §5.5 makes custodian assignment depend on it, so anyone rewriting anyone else's could move everybody's data. The core group is the set of Raft voters, so a non-voter rewriting it could remove every voter but themselves. The rules live in `apply` because that is the one place every node runs identically — a check at the API or in a protocol handler would be a second opinion only that node holds, and two nodes disagreeing about whether an entry applied is a split membership. |
 | P1-21 | §4.2 | — | **Every proposal carries the membership it was made against**: `MembershipState` tracks `changed_at`, the log index of the last entry that changed it; the signing envelope carries the value its proposer saw, and `apply` refuses a mismatch. | Raft's guarantee stops at the voters. §4.2's non-core followers *pull* the log, so a follower is eventually consistent and can act on a group that has moved on. This makes that self-announcing: a stale node finds out when it tries to propose, rather than silently proposing against a membership that no longer exists. The log's own index rather than a counter of our own, so there is one monotonic number and an error can name an index that `members` also reports. The last *membership change* rather than the log head, because Raft commits a blank entry at every leader election and comparing heads would invalidate every proposal in flight during one. |
@@ -110,7 +111,7 @@ Three consequences that outlive Phase 0:
 | P1-24 | §9, §7.1 | `distlib-api` (axum: JSON-RPC + SSE + embedded UI) is phase 3 | **The JSON-RPC half arrives in phase 1b**, with the `group.*` and `node.status` methods from §7.1. SSE, `library.*` and the embedded UI stay in phase 3. | Phase 1 needs a way to commit a `MemberAdded` from outside a test: the running node holds the redb lock and the Raft, so no second process can reach them, and "stop the node to add a member" is not a group anyone can run. The alternative was a throwaway control channel — a Unix socket was considered and rejected — which would have been a second thing to discard the moment §7.1 arrived. Method names are §7.1's verbatim, so phase 3 extends this rather than renaming it. |
 | P1-25 | §7.1 | "localhost by default" | **A bearer token always; loopback by default.** The token lives in `<data-dir>/api.token` at mode 0600, held in `secrecy::SecretString` and never logged. `[api] enabled` switches the listener off, and `[api] bind_addr` may be set to anything — binding off loopback warns rather than refuses. | Whoever can call this makes the node propose as itself. Narrower than holding the node's key — nothing proposed escapes the group's rules, and every proposal is signed and attributed — but not nothing. Loopback alone would trust every process on the machine, so the token is unconditional. The reverse does not hold: a node on a server or in a container has to be reachable from elsewhere, so loopback is the default and not a constraint. **There is no TLS**, so a remote listener wants a reverse proxy until there is; TLS and whatever authentication belongs beside it come with phase 3's UI. Also: a second node on one host needs its own `[api] bind_addr`, exactly as it needs its own `[net] bind_addr_v4`. |
 | P1-26 | §3 | — | **hyper, not reqwest, wherever this API is called** | reqwest's `rustls` feature pulls `aws-lc-rs` — a C toolchain — to satisfy a TLS stack that a loopback HTTP call never uses, and feature unification with iroh's copy makes the no-provider build panic on the first request. hyper and hyper-util are already in the tree via axum, so this costs zero new packages. The caller lives in the tests until the CLI needs one: a client in the crate with no consumer is public surface committed to before anything asks for it. |
-| P1-27 | §9.1, §7.1 | `group.members` / `group.propose_add` / `group.propose_expel` / `group.pledge_set` are API methods | **`distlib admit`, `distlib expel` and `distlib pledge` on the command line**, and `members` and `status` ask the running node before reading its database. | A group that could be founded and never changed was not usable by hand. Verbs rather than `member add` and `member expel`, so there is no `member`/`members` pair a tired typist can confuse. Asking twice is what retires P1-18: only one of the two sources can answer at a time — the node holds the database exclusively while it runs — so trying the API first and the files second works whether or not it is up, and `status` gains the Raft state and current leader, which only a running node knows. |
+| P1-27 | §9.1, §7.1 | `group.members` / `group.propose_add` / `group.propose_expel` / `group.pledge_set` are API methods | **`distlib admit`, `distlib expel` and `distlib pledge` on the command line**, and `members` and `status` ask the running node before reading its database. | A group that could be founded and never changed was not usable by hand. Verbs rather than `member add` and `member expel`, so there is no `member`/`members` pair a tired typist can confuse. Asking twice is what retires the old "stop the node first" rule: only one of the two sources can answer at a time — the node holds the database exclusively while it runs — so trying the API first and the files second works whether or not it is up, and `status` gains the Raft state and current leader, which only a running node knows. |
 | P1-28 | §4.2, §4.5 | "peers fetch missing suffix from any core node over a dedicated ALPN" | **`distlib/memberlog/0` gains `From { cursor }`**, answering with the events in `(cursor, up_to]` *and their log indices*, where `up_to` is the serving node's **applied** index rather than the last event's. Every answer also carries the current core group **with addresses**, and the leader if known. | Three things the sketch leaves open. Indices travel because `MembershipState::apply` needs one — the freshness check (P1-21) is against a log index, so a follower folding without them could not compute it. `up_to` is the applied index because most entries carry no membership event: a cursor taken from the last event would re-request the gap between them forever, and only entries the state machine has applied may be served at all, since anything beyond is committed but not yet part of anybody's membership. Addresses travel because §4.5 says `CoreGroupChanged` tells followers where to fetch from, and our variant carries member ids and none — so a follower could learn *who* to ask and still have no way to reach them. |
 | P1-29 | §4.5 | "Snapshots: trivial (state = the full membership table; it's small)" | **A follower whose cursor predates the purge watermark is told `TooFarBehind`, not sent a snapshot.** | Serving the state itself is a second transfer path, a second thing for a follower to verify, and a second way for the two to disagree — for a case that needs 5,000 membership events first, since that is openraft's snapshot threshold and nothing purges before one. Told plainly rather than left to fail obscurely, so when a group does get there the error names the problem. **Known gap, not a decision to leave it there**: a follower in this state stays stuck, and the only way out today is to delete its data directory and rejoin. Serving the membership state — §4.5 says it is small — is the fix, and it belongs with whatever else needs snapshot transfer rather than being bolted onto the entry path. |
 | P1-30 | §4.2, §9.1 | "All other members are *followers of the log*" — how a node knows which it is, is not stated | **The role is inferred, never configured**: a node listed in `[consensus] core` votes, and every other member follows. Before a group exists that reading comes from config; once `GroupFounded` is applied it comes from the log, so a node the group was founded without is a follower whatever its config claims. | The same rule the allowlist already follows, and for the same reason — a node cannot read a log it has no way to reach, so configuration bootstraps and the log then wins. A `role = ` key would be a third thing to keep in step with the other two, and the first thing to go stale. The role is fixed at startup: promotion by `CoreGroupChanged` needs a restart, which costs nothing today because that event does not move Raft's voters anyway (P1-23). |
@@ -121,18 +122,33 @@ Three consequences that outlive Phase 0:
 | P1-35 | §4.2 | — | **Known: two mechanisms follow the log where one should.** Gossip announces, and a timer polls every 30s regardless. The polling is the guarantee behind a best-effort broadcast, but it keeps a standing load on core nodes that gossip was meant to remove. | The direction, not built here: catch up once at startup, then rely on announcements; treat a failed operation — a proposal refused as stale — as its own signal to refresh and retry, which `propose` already does; and make the safety poll optional with a period carried in the log itself, so every member agrees on it and it can be hours or days rather than seconds. Recorded now because the 30s timer looks deliberate and is really a placeholder for that. |
 | P1-36 | §4.3 | "New member receives a **join ticket** (group ID + core node addresses + relay config), connects, fetches the log, starts syncing" | **`distlib ticket` and `distlib join <ticket>`**, one pasteable base32 line. `join` writes the directions into the config and stops there; `distlib run` is what starts following. | Two commands rather than one because they are two different acts: `join` changes configuration, and a command that silently began serving a group would be a surprising thing to have run. The ticket is **not a credential** — anyone who can reach a node's API can ask for one, and holding it grants nothing, since admission is a committed `MemberAdded` and until then the allowlist refuses the holder like anybody else. It is directions, which is why it can be pasted into a chat window. A prefix marks it so a later format fails as the wrong version rather than as corrupt data. |
 | P1-37 | §4.3 | — | **`join` refuses a ticket for a different group than the one this node already follows.** | Replacing the bootstrap set would leave the node enforcing one membership while fetching another. Starting over is a legitimate thing to want, so the error names the data directory to delete rather than silently doing it. |
+| P1-38 | §4.5 | — | **Reaching a peer is bounded separately from waiting for its answer**: three seconds to connect, against forty-five for the whole exchange. | Found by the Phase 1 acceptance test, not by reasoning. Killing the leader and immediately proposing hung for the full exchange timeout: the proposer's Raft still named the dead node, the forward tried to connect to it, and each of the three attempts spent forty-five seconds discovering it was gone. The retry loop exists precisely to re-ask who the leader is after a stale hint, and a connect timeout sized for a commit defeats it. The two waits answer different questions — a live leader may legitimately take most of `COMMIT_TIMEOUT` to reply, but a peer that cannot be *reached* in a few seconds has gone. The same distinction P1-31 drew for fetching, which should have been drawn here at the same time. |
 
-### Still to come in Phase 1
+### Carried forward to Phase 2
 
-- The Raft network layer and the wiring that makes the allowlist come from the log — PRs 4 and 5.
-  The Phase 0 carry-forwards below stay open until then.
-- ~~openraft's `testing::Suite` has not run yet.~~ **Discharged.** It runs in the state-machine
-  PR, covering the log store retroactively: 34 conformance cases against both stores sharing one
-  database, as a real node runs them.
+Phase 1 is complete against §9's acceptance criteria, which run as a test on every commit
+(`crates/distlib-consensus/tests/acceptance.rs`). Four things it deliberately did not finish:
+
+- **`CoreGroupChanged` moves nobody** (P1-23). The event commits, the projection updates, and
+  Raft's voter set does not change — no `raft.change_membership` call exists. **A group's voters
+  are its founders**, and promotion or demotion needs joint consensus wiring. Nothing in Phase 1
+  needed it; the first thing that will is a group outliving one of its founding machines.
+- **A follower too far behind cannot recover** (P1-29). Purging past its cursor leaves it
+  `TooFarBehind` with no way back but deleting its data directory and rejoining. It takes 5,000
+  membership events to reach, since nothing purges before openraft snapshots — a real gap with a
+  long fuse. The fix is serving the membership state itself, which belongs with whatever else
+  needs snapshot transfer rather than bolted onto the entry path.
+- **Two mechanisms follow the log where one should** (P1-35). Gossip announces and a 30-second
+  timer polls regardless. The timer is the guarantee behind a best-effort broadcast, but it keeps
+  a standing load on core nodes that gossip was meant to remove. The direction: catch up once at
+  startup, rely on announcements, treat a failed operation as its own signal to refresh, and make
+  the safety poll optional with a period carried in the log so every member agrees on it.
+- **Windows and macOS are still unverified** (P0-6), unchanged since Phase 0.
 
 ## Phase 2 — Catalogue & library basics
 
-*Not started.*
+*Not started.* Four items carry into it from Phase 1 — see
+[Carried forward to Phase 2](#carried-forward-to-phase-2) above.
 
 ## Phase 3 — API + UI
 
