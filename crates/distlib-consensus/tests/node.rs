@@ -8,7 +8,6 @@
 #![allow(clippy::result_large_err)] // openraft's error types, in its own signatures
 
 use std::{
-    collections::BTreeSet,
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -42,8 +41,15 @@ impl Peer {
     /// somebody it is founding with.
     async fn start(secret: SecretKey, bootstrap: Vec<MemberId>) -> Self {
         let id = MemberId::from(secret.public());
-        let founding_core = bootstrap.iter().copied().chain([id]).collect();
-        Self::start_with(secret, bootstrap, founding_core).await
+        // Addresses are empty because a core node never dials from this list —
+        // Raft carries its own addressing, and only a follower fetches from it.
+        let core = bootstrap
+            .iter()
+            .copied()
+            .chain([id])
+            .map(|member| (member, NodeAddr::default()))
+            .collect();
+        Self::start_with(secret, bootstrap, core).await
     }
 
     /// Starts a node whose founding core group is stated separately.
@@ -55,7 +61,7 @@ impl Peer {
     async fn start_with(
         secret: SecretKey,
         bootstrap: Vec<MemberId>,
-        founding_core: BTreeSet<MemberId>,
+        core: Vec<(MemberId, NodeAddr)>,
     ) -> Self {
         let id = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
@@ -69,7 +75,7 @@ impl Peer {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            distlib_consensus::alpns(),
+            distlib_consensus::alpns(true),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
@@ -81,10 +87,9 @@ impl Peer {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
-        let node =
-            MembershipNode::start(endpoint, hooks.clone(), writer, dir.path(), founding_core)
-                .await
-                .unwrap();
+        let node = MembershipNode::start(endpoint, hooks.clone(), writer, dir.path(), core)
+            .await
+            .unwrap();
 
         Self {
             secret,
@@ -303,7 +308,13 @@ async fn a_follower_can_propose() {
     .await;
 
     assert_ne!(
-        second.node.raft().metrics().borrow().current_leader,
+        second
+            .node
+            .raft()
+            .unwrap()
+            .metrics()
+            .borrow()
+            .current_leader,
         Some(distlib_core::RawMemberId::from(second.id)),
         "this test is only meaningful while `second` is a follower"
     );
@@ -460,8 +471,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     .await;
 
     // A member of the group who was never made a voter.
-    let bystander =
-        Peer::start_with(SecretKey::generate(), vec![founder.id], BTreeSet::new()).await;
+    let bystander = Peer::start_with(SecretKey::generate(), vec![founder.id], Vec::new()).await;
     founder
         .node
         .propose(
@@ -564,8 +574,7 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
     .await;
 
     // A node that talks to the founder but founds nothing with anybody.
-    let bystander =
-        Peer::start_with(SecretKey::generate(), vec![founder.id], BTreeSet::new()).await;
+    let bystander = Peer::start_with(SecretKey::generate(), vec![founder.id], Vec::new()).await;
     founder
         .node
         .propose(
@@ -585,7 +594,14 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
     // Even the founder — a real voter of a real group, and the only member the
     // bystander will talk to — gets nothing here. Being a voter somewhere else
     // is not being a voter of a Raft this node does not run.
-    let raft = founder
+    //
+    // Refused during the handshake rather than after it: a node that follows
+    // rather than votes serves ping and nothing else, and iroh's router is what
+    // an endpoint advertises, so the ALPN is not on offer in the first place.
+    // Stronger than the connect-then-close the voter gate gives, and the reason
+    // both are worth having — a core node has to advertise raft, so its
+    // refusals happen a step later.
+    let refused = founder
         .node
         .endpoint()
         .connect(
@@ -593,15 +609,248 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
             distlib_net::alpn::RAFT,
         )
         .await
-        .expect("the allowlist admits the connection; the RPCs are what is refused");
-    let closed = tokio::time::timeout(Duration::from_secs(10), raft.closed())
-        .await
-        .expect("a node that founds nothing must close a raft connection");
+        .expect_err("a node that founds nothing must not serve raft at all");
     assert!(
-        format!("{closed}").contains("not a voter"),
-        "closed for the wrong reason: {closed}"
+        format!("{refused}").contains("known protocol"),
+        "refused for the wrong reason: {refused}"
     );
 
     founder.node.shutdown().await;
     bystander.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
+    // The claim of follower mode: a member who votes on nothing still ends up
+    // enforcing exactly what the group decided, by fetching it.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // Not in the core group, so it follows rather than votes. It is given the
+    // founder's address because it has no log yet to find one in.
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "follower".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        follower_key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    assert!(!follower.node.is_core(), "not in the core group");
+    assert!(follower.node.raft().is_none(), "and so runs no raft");
+
+    wait_for(&follower, "the group to arrive", |membership| {
+        membership.group_id() == founder.node.membership().group_id()
+    })
+    .await;
+    assert_eq!(
+        follower.node.membership(),
+        founder.node.membership(),
+        "a follower must reach exactly the membership the group decided"
+    );
+
+    // And it keeps up: a change made after it caught up reaches it too.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "later".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    wait_for(&follower, "a later change to arrive", |membership| {
+        membership.is_member(&newcomer)
+    })
+    .await;
+
+    // And what it *enforces* follows from that, which is the point of holding
+    // the log at all. The bridge from the projection to the allowlist is its
+    // own task, so this is waited for rather than asserted outright.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !follower.hooks.allowlist().is_allowed(&newcomer) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a follower must admit whoever the log says is a member");
+
+    follower.node.shutdown().await;
+    founder.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_follower_proposes_through_a_core_node() {
+    // §4.3 opens proposing to any member, and a follower has no Raft to commit
+    // with — so it hands the event to a core node, which commits it as if the
+    // proposal had originated there.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "follower".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        follower_key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    wait_for(&follower, "the group to arrive", |membership| {
+        membership.is_member(&follower.id)
+    })
+    .await;
+
+    // A pledge, because that is the one thing only its owner may propose — so
+    // this could not have been committed by anybody else on its behalf.
+    follower
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: follower.id,
+                pledge_bytes: 4096,
+            },
+            &follower.secret,
+        )
+        .await
+        .expect("a follower must be able to propose");
+
+    wait_for(&founder, "the follower's pledge to commit", |membership| {
+        membership
+            .member(&follower.id)
+            .is_some_and(|record| record.pledge_bytes == 4096)
+    })
+    .await;
+
+    follower.node.shutdown().await;
+    founder.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
+    // A follower that gave up on the first core node it could not reach would
+    // sit frozen at whatever it last saw — still enforcing it. So an
+    // unreachable source is a reason to ask somebody else, not to stop.
+    //
+    // The dead source is first in the list and stays dead, which makes this
+    // deterministic: the same rotation runs when a live source is killed
+    // mid-follow, but that would need an election to finish before the group
+    // could move again.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    let absent = MemberId::from(SecretKey::generate().public());
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "follower".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        follower_key,
+        vec![founder.id, absent],
+        vec![
+            // Nothing is listening here, and nothing ever will be.
+            (
+                absent,
+                NodeAddr {
+                    relay: None,
+                    direct: [SocketAddr::from((Ipv4Addr::LOCALHOST, 1))]
+                        .into_iter()
+                        .collect(),
+                },
+            ),
+            (founder.id, founder.addr.clone()),
+        ],
+    )
+    .await;
+
+    wait_for(&follower, "the log to arrive from the second source", |m| {
+        m.group_id() == founder.node.membership().group_id()
+    })
+    .await;
+    assert_eq!(follower.node.membership(), founder.node.membership());
+
+    follower.node.shutdown().await;
+    founder.node.shutdown().await;
 }

@@ -8,7 +8,6 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    collections::BTreeSet,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
 };
@@ -49,7 +48,7 @@ impl Harness {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            distlib_consensus::alpns(),
+            distlib_consensus::alpns(true),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
@@ -62,9 +61,15 @@ impl Harness {
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
         let node = Arc::new(
-            MembershipNode::start(endpoint, hooks, writer, dir.path(), BTreeSet::from([id]))
-                .await
-                .unwrap(),
+            MembershipNode::start(
+                endpoint,
+                hooks,
+                writer,
+                dir.path(),
+                vec![(id, NodeAddr::default())],
+            )
+            .await
+            .unwrap(),
         );
 
         node.init_group(

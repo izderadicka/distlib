@@ -6,7 +6,12 @@
 //! state machine to the allowlist, and one closes connections the change
 //! invalidates (§4.4).
 
-use std::{collections::BTreeMap, collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
@@ -24,6 +29,7 @@ use crate::{
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
         RaftProtocol, StateMachineStore, TypeConfig,
+        follower::{self, SharedSources, Sources},
     },
     signed::SignedEvent,
     state::MembershipState,
@@ -37,12 +43,20 @@ pub const RAFT_DB: &str = "raft.redb";
 /// What the endpoint must advertise, since an endpoint offering a protocol its
 /// router cannot handle negotiates it and then refuses every stream. Wider than
 /// [`alpn::registered`], which covers only what `distlib-net` can serve alone.
-pub fn alpns() -> Vec<Vec<u8>> {
-    vec![
-        alpn::PING.to_vec(),
-        alpn::RAFT.to_vec(),
-        alpn::MEMBERLOG.to_vec(),
-    ]
+/// Belt and braces rather than the mechanism: iroh's `Router` calls
+/// `set_alpns` with whatever it accepts, so what a node *serves* is what it
+/// ends up advertising either way. This keeps the endpoint honest in the window
+/// before the router is up, and says in one place what each kind of node
+/// answers.
+pub fn alpns(core: bool) -> Vec<Vec<u8>> {
+    let mut alpns = vec![alpn::PING.to_vec()];
+    if core {
+        // Only a core node can answer either: consensus is between voters, and
+        // answering a proposal or serving the log needs a Raft to do it with.
+        alpns.push(alpn::RAFT.to_vec());
+        alpns.push(alpn::MEMBERLOG.to_vec());
+    }
+    alpns
 }
 
 /// How many times a proposal re-checks who the leader is before giving up.
@@ -99,6 +113,10 @@ pub enum NodeError {
     #[error("no leader is available to commit the proposal")]
     NoLeader,
 
+    /// A voters-only operation was asked of a node that does not vote.
+    #[error("this node is not part of the core group")]
+    NotCore,
+
     /// This node could not catch up to the membership the group is at.
     ///
     /// Distinct from [`NodeError::NoLeader`]: a leader exists and answered —
@@ -115,14 +133,36 @@ fn raft_failed(source: impl std::error::Error + Send + Sync + 'static) -> NodeEr
     NodeError::Raft(Box::new(source))
 }
 
+/// How this node takes part in the group.
+///
+/// Not a configuration switch but a reading of it: a node in the core group
+/// votes, and everyone else follows. Everything either kind does with the log —
+/// the projection, the allowlist it derives, the eviction task, the connections
+/// — is identical, so this is a difference in how the log *arrives*, and
+/// nothing else.
+enum Role {
+    /// A voter. Receives the log through Raft and can commit to it.
+    Core { raft: Raft<TypeConfig> },
+
+    /// Everyone else. Pulls the log over `distlib/memberlog/0` (§4.2).
+    Follower {
+        /// Held, not detached: dropping it would leave the node frozen at
+        /// whatever membership it last fetched, still enforcing it.
+        follow: JoinHandle<()>,
+        /// Where to fetch from, kept current by the task above.
+        sources: SharedSources,
+    },
+}
+
 /// A running consensus node.
 ///
-/// Owns the Raft, the router serving its peers, and the tasks that keep the
-/// allowlist in step with the log. Dropping it does not stop those; call
+/// Owns the router serving its peers, the tasks that keep the allowlist in step
+/// with the log, and — depending on whether it votes — either a Raft or the
+/// task that follows one. Dropping it does not stop those; call
 /// [`Self::shutdown`].
 pub struct MembershipNode {
     id: MemberId,
-    raft: Raft<TypeConfig>,
+    role: Role,
     state_machine: StateMachineStore,
     router: Router,
     /// Held, not detached: it is the only thing keeping the allowlist writable,
@@ -164,19 +204,21 @@ impl MembershipNode {
     /// once. From the moment a `GroupFounded` is applied, the log wins and the
     /// seed is never consulted again.
     ///
-    /// `founding_core` is the configured founding core group — `[consensus]
-    /// core`, this node included. It is the only thing that can say who the
-    /// Raft voters are before Raft has been initialised, and so decides who
-    /// this node will speak `distlib/raft/0` with during founding. Pass an
-    /// empty set for a node that is not founding a group: it will then serve
-    /// consensus to nobody, which is what a node with no Raft of its own
-    /// should do.
+    /// `core` is the configured core group — `[consensus] core` — with an
+    /// address for each. It decides two things, and only until the log can
+    /// decide them instead: whether this node is a voter, and who it will
+    /// speak to before it has a log of its own. A node not listed there is a
+    /// follower, and fetches the log from the ones that are.
+    ///
+    /// Once a `GroupFounded` has been applied the log wins, here as everywhere:
+    /// a node the group was founded without is a follower whatever its config
+    /// says.
     pub async fn start(
         endpoint: Endpoint,
         hooks: AllowlistHooks,
         allowlist: AllowlistWriter,
         data_dir: &Path,
-        founding_core: BTreeSet<MemberId>,
+        core: Vec<(MemberId, NodeAddr)>,
     ) -> Result<Self> {
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
@@ -195,44 +237,76 @@ impl MembershipNode {
         let state_machine = StateMachineStore::from_database(db).map_err(raft_failed)?;
 
         // The node's connections, shared by everything it speaks: openraft's
-        // replication, forwarded proposals, and whatever protocols come later.
-        // One factory, cloned into Raft, so all of them draw on the same set.
+        // replication, forwarded proposals, following the log, and whatever
+        // protocols come later. All of them draw on the same set.
         let connections = Connections::new();
-        // Forwarding no longer goes through this factory: a proposal travels
-        // over `distlib/memberlog/0`, which every member may speak, while the
-        // factory serves Raft's own replication between voters.
-        let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
         let memberlog = MemberlogClient::new(endpoint.clone(), connections.clone());
-        let raft = Raft::new(
-            RawMemberId::from(id),
-            Arc::new(Config::default().validate().map_err(raft_failed)?),
-            network,
-            log,
-            state_machine.clone(),
-        )
-        .await
-        .map_err(raft_failed)?;
 
-        // Exactly `alpns()`, which is what the endpoint must have been told to
-        // advertise.
-        let router = Router::builder(endpoint)
-            .accept(alpn::PING, PingProtocol)
-            .accept(
-                alpn::RAFT,
-                RaftProtocol::new(raft.clone(), state_machine.clone(), founding_core),
+        // The log decides, once there is one. Before that, configuration does —
+        // the same rule the allowlist follows, and for the same reason: a node
+        // cannot read a log it has no way to reach.
+        let membership = state_machine.membership();
+        let is_core = if membership.group_id().is_some() {
+            membership.core().contains(&id)
+        } else {
+            core.iter().any(|(member, _)| *member == id)
+        };
+
+        let (role, router) = if is_core {
+            // Forwarding does not go through this factory: a proposal travels
+            // over `distlib/memberlog/0`, which every member may speak, while
+            // the factory serves Raft's own replication between voters.
+            let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
+            let raft = Raft::new(
+                RawMemberId::from(id),
+                Arc::new(Config::default().validate().map_err(raft_failed)?),
+                network,
+                log,
+                state_machine.clone(),
             )
-            .accept(
-                alpn::MEMBERLOG,
-                MemberlogProtocol::new(raft.clone(), served_log, state_machine.clone()),
-            )
-            .spawn();
+            .await
+            .map_err(raft_failed)?;
+
+            let founding_core = core.iter().map(|(member, _)| *member).collect();
+            let router = Router::builder(endpoint)
+                .accept(alpn::PING, PingProtocol)
+                .accept(
+                    alpn::RAFT,
+                    RaftProtocol::new(raft.clone(), state_machine.clone(), founding_core),
+                )
+                .accept(
+                    alpn::MEMBERLOG,
+                    MemberlogProtocol::new(raft.clone(), served_log, state_machine.clone()),
+                )
+                .spawn();
+
+            (Role::Core { raft }, router)
+        } else {
+            // Ping and nothing else. A follower has no Raft to answer
+            // consensus with and none to commit a proposal into, so
+            // advertising either would mean negotiating a protocol and then
+            // refusing every stream on it.
+            let router = Router::builder(endpoint)
+                .accept(alpn::PING, PingProtocol)
+                .spawn();
+
+            let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
+            let follow = tokio::spawn(follower::follow(
+                id,
+                state_machine.clone(),
+                memberlog.clone(),
+                Arc::clone(&sources),
+            ));
+
+            (Role::Follower { follow, sources }, router)
+        };
 
         let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
         Ok(Self {
             id,
-            raft,
+            role,
             state_machine,
             router,
             allowlist_updates,
@@ -271,9 +345,33 @@ impl MembershipNode {
         self.state_machine.subscribe()
     }
 
-    /// The Raft, for callers that need to propose or inspect it.
-    pub fn raft(&self) -> &Raft<TypeConfig> {
-        &self.raft
+    /// The Raft, for callers that need to inspect it.
+    ///
+    /// `None` on a follower, which has none: it holds the same log but takes no
+    /// part in deciding it.
+    pub fn raft(&self) -> Option<&Raft<TypeConfig>> {
+        match &self.role {
+            Role::Core { raft } => Some(raft),
+            Role::Follower { .. } => None,
+        }
+    }
+
+    /// Whether this node votes on the log it holds.
+    pub fn is_core(&self) -> bool {
+        matches!(self.role, Role::Core { .. })
+    }
+
+    /// How far this node has followed a log it does not vote on.
+    ///
+    /// Zero on a voter, which has the log pushed to it and tracks its position
+    /// through Raft instead.
+    pub fn followed_upto(&self) -> u64 {
+        self.state_machine.followed_upto()
+    }
+
+    /// The Raft, or an error naming what this node is instead.
+    fn as_core(&self) -> Result<&Raft<TypeConfig>> {
+        self.raft().ok_or(NodeError::NotCore)
     }
 
     /// Founds a group with `founders`, of whom this node must be one.
@@ -294,15 +392,15 @@ impl MembershipNode {
 
         // Raft's voters first, then the event: `client_write` needs a leader,
         // and there is none until the cluster is initialised.
-        self.raft.initialize(voters).await.map_err(raft_failed)?;
+        let raft = self.as_core()?;
+        raft.initialize(voters).await.map_err(raft_failed)?;
 
         // `initialize` returns before an election has happened. With a single
         // founder that is instant, but with several the write below would be
         // refused with `ForwardToLeader { leader_id: None }` — there is simply
         // nobody to forward to yet. Wait for this node to become leader, since
         // it is the one holding the event to propose.
-        self.raft
-            .wait(Some(LEADERSHIP_TIMEOUT))
+        raft.wait(Some(LEADERSHIP_TIMEOUT))
             .state(ServerState::Leader, "founding node becomes leader")
             .await
             .map_err(raft_failed)?;
@@ -381,10 +479,55 @@ impl MembershipNode {
             Timestamp::now(),
             self.membership().changed_at(),
         )?;
+
+        match &self.role {
+            Role::Core { raft } => self.commit_as_core(raft, event).await,
+            Role::Follower { sources, .. } => self.commit_as_follower(sources, event).await,
+        }
+    }
+
+    /// A follower's way to commit: hand it to a core node and let them.
+    ///
+    /// No leader hint to work from — a follower does not run Raft and so has no
+    /// `ForwardToLeader` to be told — so it asks the core nodes it knows of,
+    /// leader first, until one commits it. A node that is not the leader
+    /// forwards through its own Raft, so any of them will do.
+    async fn commit_as_follower(&self, sources: &SharedSources, event: SignedEvent) -> Result<()> {
+        let candidates = follower::read(sources).candidates(self.id);
+        if candidates.is_empty() {
+            return Err(NodeError::NoLeader);
+        }
+
+        let mut unreached = None;
+        for (member, addr) in candidates {
+            match self.memberlog.propose(member, &addr, event.clone()).await {
+                Ok(()) => return Ok(()),
+                // The rules refused it. Every node reaches that verdict
+                // identically, so asking somebody else cannot change it.
+                Err(ProposeError::Rejected(error)) => return Err(NodeError::Event(error)),
+                Err(error) => {
+                    tracing::debug!(%member, %error, "a core node did not commit; trying another");
+                    unreached = Some((member, error));
+                }
+            }
+        }
+
+        match unreached {
+            Some((member, source)) => Err(NodeError::Forward {
+                leader: member.into(),
+                source,
+            }),
+            None => Err(NodeError::NoLeader),
+        }
+    }
+
+    /// A voter's way to commit: through its own Raft, forwarding if it is not
+    /// the leader.
+    async fn commit_as_core(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> Result<()> {
         let mut unreached = None;
 
         for _ in 0..PROPOSE_ATTEMPTS {
-            let forward = match self.raft.client_write(event.clone()).await {
+            let forward = match raft.client_write(event.clone()).await {
                 // The write reached the log; `data` carries the state machine's
                 // verdict on whether the event then took effect. A committed
                 // event whose rules do not hold is skipped rather than fatal
@@ -424,8 +567,7 @@ impl MembershipNode {
                 // and try again rather than failing a proposal that is only
                 // momentarily unroutable.
                 _ => {
-                    self.raft
-                        .wait(Some(LEADERSHIP_TIMEOUT))
+                    raft.wait(Some(LEADERSHIP_TIMEOUT))
                         .metrics(
                             |metrics| metrics.current_leader.is_some(),
                             "a leader to emerge",
@@ -475,8 +617,21 @@ impl MembershipNode {
     pub async fn shutdown(&self) {
         self.allowlist_updates.abort();
         self.evictions.abort();
-        if let Err(error) = self.raft.shutdown().await {
-            tracing::warn!(%error, "raft did not shut down cleanly");
+        match &self.role {
+            Role::Core { raft } => {
+                if let Err(error) = raft.shutdown().await {
+                    tracing::warn!(%error, "raft did not shut down cleanly");
+                }
+            }
+            // Abort rather than a graceful stop, and safe to be: the only
+            // durable thing the loop does is `apply_followed`, whose commit
+            // runs inside `spawn_blocking` — which tokio does *not* cancel, so
+            // a redb transaction either never starts or runs to completion.
+            // Aborting between the in-memory fold and that commit leaves the
+            // projection ahead of the database, and the node is going away, so
+            // the database is what the next start reads. There is nothing here
+            // a shutdown signal would let it finish more tidily.
+            Role::Follower { follow, .. } => follow.abort(),
         }
         if let Err(error) = self.router.shutdown().await {
             tracing::warn!(%error, "router did not shut down cleanly");

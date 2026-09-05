@@ -21,10 +21,8 @@ deliberately diverged from it.
 
 > **Status: phase 1b, in progress.** Identity, transport, and the membership log work:
 > a group can be founded, members admitted and expelled through the local API, and
-> every node derives what it will talk to from the committed log. There is no
-> catalogue, no content transfer and no UI yet. Members who are not part of the core
-> group cannot yet follow the log, so a member admitted today cannot yet fetch it —
-> follower mode is the next piece of phase 1b.
+> every node — voting or not — derives what it will talk to from the committed log.
+> There is no catalogue, no content transfer and no UI yet.
 
 ## Build
 
@@ -170,9 +168,14 @@ chooses auditability over ceremony, and the proposer is recorded in the log eith
 way. `distlib expel <id> --reason "..."` is the other direction, and
 `distlib pledge <bytes>` sets what *this* node commits to storing.
 
-> Admitted members cannot yet fetch the log for themselves — that is follower mode,
-> the next piece of phase 1b — so for now a new member is listed by the group but
-> cannot join it.
+Whoever you admit does not need to be in `[consensus] core`. A node listed there
+votes on the log; every other member **follows** it — holding the same log, deriving
+the same allowlist, but fetching it from the core nodes rather than voting. Nothing
+configures that: a node not in the list follows, and once the group exists the log
+decides rather than the config.
+
+So a fourth friend needs only your node's id and address in their own
+`[consensus] core`, and to be admitted by somebody. They will catch up on their own.
 
 ## Watching membership do its job
 
