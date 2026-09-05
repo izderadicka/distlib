@@ -150,9 +150,17 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         }
     });
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("could not listen for ctrl-c")?;
+    // Two ways to stop: the operator, or the group. A node that has been
+    // expelled cannot fetch the log and is refused by every core node, so
+    // there is nothing left for it to do but say so and go — carrying on would
+    // mean asking nodes that will not answer, roughly once a second, forever.
+    let expelled = tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.context("could not listen for ctrl-c")?;
+            false
+        }
+        () = node.expelled() => true,
+    };
 
     tracing::info!("shutting down");
     relay_task.abort();
@@ -161,6 +169,12 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         api.shutdown();
     }
     node.shutdown().await;
+
+    if expelled {
+        bail!(
+            "this node has been expelled from its group and is no longer a member; its data              directory can be deleted, or kept and rejoined with a new ticket after somebody              admits it again"
+        );
+    }
     Ok(())
 }
 

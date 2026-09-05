@@ -192,6 +192,13 @@ pub struct MembershipNode {
     /// Started only once a group exists, since the topic is the group's id.
     /// Held so shutdown can stop it.
     gossip: JoinHandle<()>,
+
+    /// Whether this node has been expelled from its group.
+    ///
+    /// Only a follower can find this out — it is told by being refused — and it
+    /// is a fact about the group rather than about this task, so it lives on
+    /// the node rather than inside the follow loop.
+    expelled: watch::Sender<bool>,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -285,6 +292,11 @@ impl MembershipNode {
         // node has heard nothing yet and has no idea how far the log reaches.
         let (hints, listens) = watch::channel(gossip::Hint::MayHaveMissed);
 
+        // Set only by a follower that finds every core node refusing it. Held
+        // here for the life of the node so that `expelled` never observes a
+        // closed channel and mistakes it for an answer.
+        let (expelled, _) = watch::channel(false);
+
         let (role, router) = if is_core {
             // Forwarding does not go through this factory: a proposal travels
             // over `distlib/memberlog/0`, which every member may speak, while
@@ -327,10 +339,13 @@ impl MembershipNode {
 
             let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
             let follow = tokio::spawn(follower::follow(
-                id,
-                state_machine.clone(),
-                memberlog.clone(),
-                Arc::clone(&sources),
+                follower::Following {
+                    me: id,
+                    state_machine: state_machine.clone(),
+                    client: memberlog.clone(),
+                    sources: Arc::clone(&sources),
+                    expelled: expelled.clone(),
+                },
                 listens,
             ));
 
@@ -360,6 +375,7 @@ impl MembershipNode {
             memberlog,
             connections,
             gossip,
+            expelled,
         })
     }
 
@@ -413,6 +429,31 @@ impl MembershipNode {
     /// Whether this node votes on the log it holds.
     pub fn is_core(&self) -> bool {
         matches!(self.role, Role::Core { .. })
+    }
+
+    /// Resolves if this node discovers it has been expelled from its group.
+    ///
+    /// Never, on a core node: it holds the log itself, so there is nobody to
+    /// refuse it. A follower learns it the only way it can — every core node
+    /// that answers turns it away — and stops following at that point, because
+    /// a node outside the group has nothing to fetch and no business asking.
+    ///
+    /// Callers are expected to shut down. That is a decision for whoever
+    /// started the node rather than for the node, which is why this reports
+    /// rather than exits.
+    pub async fn expelled(&self) {
+        let mut watcher = self.expelled.subscribe();
+        loop {
+            if *watcher.borrow_and_update() {
+                return;
+            }
+            if watcher.changed().await.is_err() {
+                // Unreachable while this node holds the sender, and a closed
+                // channel is not an expulsion — so wait forever rather than
+                // reporting one.
+                std::future::pending::<()>().await;
+            }
+        }
     }
 
     /// How far this node has followed a log it does not vote on.
