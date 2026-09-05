@@ -623,6 +623,14 @@ impl MembershipNode {
                     tracing::warn!(%error, "raft did not shut down cleanly");
                 }
             }
+            // Abort rather than a graceful stop, and safe to be: the only
+            // durable thing the loop does is `apply_followed`, whose commit
+            // runs inside `spawn_blocking` — which tokio does *not* cancel, so
+            // a redb transaction either never starts or runs to completion.
+            // Aborting between the in-memory fold and that commit leaves the
+            // projection ahead of the database, and the node is going away, so
+            // the database is what the next start reads. There is nothing here
+            // a shutdown signal would let it finish more tidily.
             Role::Follower { follow, .. } => follow.abort(),
         }
         if let Err(error) = self.router.shutdown().await {

@@ -56,6 +56,14 @@ const IDLE_POLL: Duration = Duration::from_secs(5);
 /// leaving quickly, where having nothing new to fetch is not.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// How long to wait when catching up is impossible.
+///
+/// Long, because nothing this loop does will change the answer: the entries
+/// this node needs have been purged everywhere, and it stays stuck until it can
+/// be given the state itself. Retrying at [`RETRY_DELAY`] would fill the log
+/// with a message that is already as loud as it needs to be.
+const STRANDED_BACKOFF: Duration = Duration::from_secs(60);
+
 /// Where a follower asks for the log, and who it prefers.
 #[derive(Debug, Clone, Default)]
 pub struct Sources {
@@ -117,23 +125,61 @@ pub async fn follow(
 ) {
     loop {
         let delay = match ask_around(me, &state_machine, &client, &sources).await {
-            // Something arrived, so there may be more behind it.
-            Progress::Fetched => continue,
-            Progress::UpToDate => IDLE_POLL,
-            Progress::NobodyAnswered => RETRY_DELAY,
+            // A source hands over everything it has applied in one answer, so
+            // there is nothing waiting behind a successful fetch. Asking again
+            // at once would buy an empty round trip per change.
+            Progress::Fetched | Progress::UpToDate => IDLE_POLL,
+
+            // Somebody else may be reachable, or this one may come back.
+            Progress::Unreachable => RETRY_DELAY,
+
+            // The source was fine; this node's storage was not. Asking a
+            // different one cannot help, so try the same thing again shortly.
+            Progress::NotStored => RETRY_DELAY,
+
+            // Nothing this loop does will fix either of these.
+            Progress::NoSources => IDLE_POLL,
+            Progress::Stranded => STRANDED_BACKOFF,
         };
         tokio::time::sleep(delay).await;
     }
 }
 
 /// What one pass over the known sources achieved.
+///
+/// Named for what actually happened rather than lumped into a single failure,
+/// because the right thing to do next differs for each: retry soon, retry
+/// slowly, or accept that retrying will not help.
 enum Progress {
-    /// Entries applied. Ask again at once — there may be more.
+    /// Entries arrived and were applied.
     Fetched,
-    /// Somebody answered and had nothing new.
+
+    /// A source answered and had nothing this node has not already got.
     UpToDate,
-    /// Every source failed, or there were none to try.
-    NobodyAnswered,
+
+    /// Every known source failed to answer.
+    Unreachable,
+
+    /// A source answered, and this node could not store what it sent.
+    ///
+    /// Its own case because it says nothing about the source: rotating away
+    /// from a node that is behaving perfectly would be the wrong response to
+    /// local storage failing.
+    NotStored,
+
+    /// This node is behind what the log still holds.
+    ///
+    /// Nothing here recovers from this — see [`Fetched::TooFarBehind`]. It
+    /// needs the state itself, which no protocol serves yet.
+    ///
+    /// [`Fetched::TooFarBehind`]: crate::Fetched::TooFarBehind
+    Stranded,
+
+    /// There is nowhere to ask.
+    ///
+    /// Configuration, not the network: `[consensus] core` named nobody
+    /// reachable, or named only this node.
+    NoSources,
 }
 
 /// Tries each known source until one answers.
@@ -154,7 +200,7 @@ async fn ask_around(
 
     if candidates.is_empty() {
         tracing::warn!("no core node to follow; check `[consensus] core`");
-        return Progress::NobodyAnswered;
+        return Progress::NoSources;
     }
 
     for (member, addr) in candidates {
@@ -175,10 +221,8 @@ async fn ask_around(
                     return Progress::UpToDate;
                 }
                 if let Err(error) = state_machine.apply_followed(up_to, &events).await {
-                    // Storage, not the network: asking somebody else cannot
-                    // help, so wait and try the same thing again.
                     tracing::error!(%error, "could not store followed entries");
-                    return Progress::NobodyAnswered;
+                    return Progress::NotStored;
                 }
                 tracing::debug!(count = events.len(), up_to, from = %member, "followed the log");
                 return Progress::Fetched;
@@ -191,16 +235,17 @@ async fn ask_around(
             }
 
             // Unrecoverable from entries alone, and asking another core node
-            // will not help — they purge at the same watermark. Said loudly
-            // because the node is now stuck until it is given the state itself.
+            // will not help — they purge at the same watermark.
             Ok(Fetched::TooFarBehind { first_available }) => {
                 tracing::error!(
                     cursor,
                     first_available,
                     from = %member,
-                    "this node is behind what the log still holds and cannot catch up"
+                    "this node is behind what the log still holds; it needs the membership \
+                     state itself, which nothing serves yet — delete this node's data \
+                     directory and rejoin, or wait for snapshot transfer"
                 );
-                return Progress::NobodyAnswered;
+                return Progress::Stranded;
             }
 
             Err(error) => {
@@ -209,5 +254,8 @@ async fn ask_around(
         }
     }
 
-    Progress::NobodyAnswered
+    // Every candidate was tried. `NoGroup` answers land here too: a core node
+    // that has not yet received the founding entry has nothing to give, and
+    // waiting is the only thing to do about it.
+    Progress::Unreachable
 }
