@@ -16,16 +16,18 @@ use std::{
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
 use iroh::{Endpoint, SecretKey, protocol::Router};
+use iroh_gossip::{net::GOSSIP_ALPN, net::Gossip};
 use openraft::{
     Config, Raft, ServerState,
     error::{ClientWriteError, RaftError},
 };
 use redb::Database;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
     error::ConsensusError,
     event::{MemberRecord, MembershipEvent, Timestamp},
+    gossip,
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
         RaftProtocol, StateMachineStore, TypeConfig,
@@ -49,7 +51,9 @@ pub const RAFT_DB: &str = "raft.redb";
 /// before the router is up, and says in one place what each kind of node
 /// answers.
 pub fn alpns(core: bool) -> Vec<Vec<u8>> {
-    let mut alpns = vec![alpn::PING.to_vec()];
+    // Gossip on both: a core node announces on the topic and a follower listens
+    // on it, and you have to be joined to a topic to broadcast on it at all.
+    let mut alpns = vec![alpn::PING.to_vec(), GOSSIP_ALPN.to_vec()];
     if core {
         // Only a core node can answer either: consensus is between voters, and
         // answering a proposal or serving the log needs a Raft to do it with.
@@ -177,6 +181,11 @@ pub struct MembershipNode {
     memberlog: MemberlogClient,
     /// Every connection this node holds, across protocols.
     connections: Connections,
+    /// Announcing the log, or listening for announcements of it.
+    ///
+    /// Started only once a group exists, since the topic is the group's id.
+    /// Held so shutdown can stop it.
+    gossip: JoinHandle<()>,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -252,6 +261,14 @@ impl MembershipNode {
             core.iter().any(|(member, _)| *member == id)
         };
 
+        // Gossip is spawned before the router, because the router has to serve
+        // it: a node that announced but did not accept would talk to nobody.
+        let swarm = Gossip::builder().spawn(endpoint.clone());
+        // The gossip listener sends on this and the follow loop waits on it.
+        // Seeded with `MayHaveMissed` because that is true at startup: this
+        // node has heard nothing yet and has no idea how far the log reaches.
+        let (hints, listens) = watch::channel(gossip::Hint::MayHaveMissed);
+
         let (role, router) = if is_core {
             // Forwarding does not go through this factory: a proposal travels
             // over `distlib/memberlog/0`, which every member may speak, while
@@ -278,6 +295,7 @@ impl MembershipNode {
                     alpn::MEMBERLOG,
                     MemberlogProtocol::new(raft.clone(), served_log, state_machine.clone()),
                 )
+                .accept(GOSSIP_ALPN, swarm.clone())
                 .spawn();
 
             (Role::Core { raft }, router)
@@ -288,6 +306,7 @@ impl MembershipNode {
             // refusing every stream on it.
             let router = Router::builder(endpoint)
                 .accept(alpn::PING, PingProtocol)
+                .accept(GOSSIP_ALPN, swarm.clone())
                 .spawn();
 
             let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
@@ -296,10 +315,17 @@ impl MembershipNode {
                 state_machine.clone(),
                 memberlog.clone(),
                 Arc::clone(&sources),
+                listens,
             ));
 
             (Role::Follower { follow, sources }, router)
         };
+
+        // The topic is the group's id, so this cannot join until there is a
+        // group. A founder has none for the moment before it founds one, and a
+        // new follower has none until its first fetch — so the task waits for
+        // one rather than the caller having to order any of that.
+        let gossip = tokio::spawn(join_topic(swarm, state_machine.clone(), id, is_core, hints));
 
         let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
         let evictions = tokio::spawn(hooks.evict_expelled());
@@ -313,6 +339,7 @@ impl MembershipNode {
             evictions,
             memberlog,
             connections,
+            gossip,
         })
     }
 
@@ -633,9 +660,76 @@ impl MembershipNode {
             // a shutdown signal would let it finish more tidily.
             Role::Follower { follow, .. } => follow.abort(),
         }
+        self.gossip.abort();
         if let Err(error) = self.router.shutdown().await {
             tracing::warn!(%error, "router did not shut down cleanly");
         }
+    }
+}
+
+/// Joins the group's gossip topic once there is a group, and stays on it.
+///
+/// A core node announces its applied index on every membership change; a
+/// follower listens and pokes its follow loop. Both have to *join* — you
+/// broadcast on a topic you are subscribed to — so the two differ only in which
+/// half of the conversation they take part in.
+///
+/// Bootstrapping is the interesting part: gossip needs somebody to talk to
+/// before it can find anybody else. The members this node already knows of come
+/// from the log it has just folded, which is why this waits for one.
+async fn join_topic(
+    swarm: Gossip,
+    state_machine: StateMachineStore,
+    me: MemberId,
+    is_core: bool,
+    hints: watch::Sender<gossip::Hint>,
+) {
+    let mut memberships = state_machine.subscribe();
+    let group = loop {
+        if let Some(group) = memberships.borrow_and_update().group_id() {
+            break group;
+        }
+        if memberships.changed().await.is_err() {
+            return;
+        }
+    };
+
+    // Everyone else in the group. Gossip finds its own way from there — this is
+    // only the first handful of introductions.
+    let bootstrap: Vec<_> = state_machine
+        .membership()
+        .allowlist()
+        .filter(|member| *member != me)
+        .map(|member| member.endpoint_id())
+        .collect();
+
+    let topic = match swarm.subscribe(gossip::topic_for(group), bootstrap).await {
+        Ok(topic) => topic,
+        Err(error) => {
+            // The poll still stands, so this is a lost optimisation rather
+            // than a lost node.
+            tracing::warn!(%error, "could not join the group's gossip topic");
+            return;
+        }
+    };
+    tracing::debug!(%group, "joined the group's gossip topic");
+
+    // Each role drops the half it does not use. Safe either way round: the
+    // topic stays subscribed while *either* half is held — iroh-gossip
+    // unsubscribes only once publishers and subscribers are both gone — so a
+    // core node keeping the sender and a follower keeping the receiver each
+    // hold their own subscription open.
+    let (sender, receiver) = topic.split();
+    if is_core {
+        // A core node learns the log through Raft; the events say nothing it
+        // does not already know.
+        drop(receiver);
+        gossip::announce(state_machine, sender).await;
+    } else {
+        // A follower never broadcasts. It only listens, and acts on its own
+        // cursor rather than on anything an announcement claims.
+        drop(sender);
+        gossip::listen(receiver, hints).await;
     }
 }
 

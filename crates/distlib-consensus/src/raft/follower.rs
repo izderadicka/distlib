@@ -34,21 +34,26 @@ use std::{
     time::Duration,
 };
 
+use tokio::time::Instant;
+
 use distlib_core::{MemberId, NodeAddr};
 
-use crate::raft::{
-    memberlog::{Fetched, MemberlogClient},
-    state_machine::StateMachineStore,
+use crate::{
+    gossip::{Hint, Hints},
+    raft::{
+        memberlog::{Fetched, MemberlogClient},
+        state_machine::StateMachineStore,
+    },
 };
 
 /// How long to wait before asking again when nothing has changed.
 ///
-/// A backstop rather than the main mechanism: phase 1b's gossip announces each
-/// advance, and this is what catches a follower that missed the announcement.
-/// Short enough that a group of friends notices a change while somebody is
-/// still looking at the screen, long enough that thousands of members do not
-/// make a poll storm out of it.
-const IDLE_POLL: Duration = Duration::from_secs(5);
+/// A backstop rather than the main mechanism: [`crate::gossip`] announces each
+/// advance and wakes this loop, and the timer is what catches a follower that
+/// missed the announcement. Long, because that is the point — thousands of
+/// members polling briskly at three to seven core nodes is the thing gossip
+/// exists to avoid.
+const IDLE_POLL: Duration = Duration::from_secs(30);
 
 /// How long to wait after every known source has failed.
 ///
@@ -122,6 +127,7 @@ pub async fn follow(
     state_machine: StateMachineStore,
     client: MemberlogClient,
     sources: SharedSources,
+    mut hints: Hints,
 ) {
     loop {
         let delay = match ask_around(me, &state_machine, &client, &sources).await {
@@ -141,7 +147,39 @@ pub async fn follow(
             Progress::NoSources => IDLE_POLL,
             Progress::Stranded => STRANDED_BACKOFF,
         };
-        tokio::time::sleep(delay).await;
+        wait_for_a_reason(delay, &mut hints, state_machine.followed_upto()).await;
+    }
+}
+
+/// Waits until there is something worth asking about.
+///
+/// The timer is the guarantee — gossip is best-effort, and a node that missed
+/// an announcement must not wait for the next change. An announcement is what
+/// makes the common case prompt, and it carries an index: one that this node
+/// has already reached is not a reason to do anything, so it goes back to
+/// waiting rather than spending a round trip to be told it is up to date.
+async fn wait_for_a_reason(delay: Duration, hints: &mut Hints, cursor: u64) {
+    // A deadline rather than a fresh sleep each time round, so a stream of
+    // announcements this node already has cannot hold the timer off forever.
+    let deadline = Instant::now() + delay;
+
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => return,
+            changed = hints.changed() => {
+                if changed.is_err() {
+                    // Nothing will announce anything again — the listener is
+                    // gone, or this node never had one. The timer is all that
+                    // is left, so wait it out rather than spinning.
+                    tokio::time::sleep_until(deadline).await;
+                    return;
+                }
+                match *hints.borrow_and_update() {
+                    Hint::Reaches(up_to) if up_to <= cursor => {}
+                    Hint::Reaches(_) | Hint::MayHaveMissed => return,
+                }
+            }
+        }
     }
 }
 
@@ -258,4 +296,101 @@ async fn ask_around(
     // that has not yet received the founding entry has nothing to give, and
     // waiting is the only thing to do about it.
     Progress::Unreachable
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use super::*;
+
+    /// How long a test waits before calling something "did not return".
+    ///
+    /// Far below the timer it is distinguishing from, so a pass means the hint
+    /// decided it rather than the clock.
+    const PROMPTLY: Duration = Duration::from_millis(200);
+    const A_LONG_TIMER: Duration = Duration::from_secs(30);
+
+    #[tokio::test]
+    async fn an_announcement_this_node_already_has_costs_nothing() {
+        // The reason the hint carries an index at all. A core node announcing
+        // index 5 to a follower that has read to 10 is telling it nothing, and
+        // a round trip to discover that is a round trip per announcement per
+        // follower — which is the load gossip was brought in to remove.
+        let (hints, mut listens) = tokio::sync::watch::channel(Hint::MayHaveMissed);
+        listens.borrow_and_update();
+
+        hints.send(Hint::Reaches(5)).unwrap();
+        let waited =
+            tokio::time::timeout(PROMPTLY, wait_for_a_reason(A_LONG_TIMER, &mut listens, 10)).await;
+
+        assert!(
+            waited.is_err(),
+            "an index already reached must not wake the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_announcement_beyond_this_node_wakes_it() {
+        let (hints, mut listens) = tokio::sync::watch::channel(Hint::MayHaveMissed);
+        listens.borrow_and_update();
+
+        hints.send(Hint::Reaches(11)).unwrap();
+        tokio::time::timeout(PROMPTLY, wait_for_a_reason(A_LONG_TIMER, &mut listens, 10))
+            .await
+            .expect("a longer log must wake the loop rather than waiting for the timer");
+    }
+
+    #[tokio::test]
+    async fn a_gap_this_node_cannot_measure_wakes_it() {
+        // No index to compare, so the only safe reading is to go and look.
+        let (hints, mut listens) = tokio::sync::watch::channel(Hint::Reaches(0));
+        listens.borrow_and_update();
+
+        hints.send(Hint::MayHaveMissed).unwrap();
+        tokio::time::timeout(PROMPTLY, wait_for_a_reason(A_LONG_TIMER, &mut listens, 10))
+            .await
+            .expect("a possible gap must wake the loop");
+    }
+
+    #[tokio::test]
+    async fn the_timer_still_fires_when_nothing_announces() {
+        // The guarantee behind the optimisation: gossip is best-effort, so a
+        // follower that hears nothing must still look.
+        let (_hints, mut listens) = tokio::sync::watch::channel(Hint::Reaches(0));
+        listens.borrow_and_update();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_a_reason(Duration::from_millis(50), &mut listens, 10),
+        )
+        .await
+        .expect("the timer must fire even with nothing to hear");
+    }
+
+    #[tokio::test]
+    async fn a_stream_of_stale_announcements_cannot_hold_the_timer_off() {
+        // The deadline is fixed rather than restarted per hint, so a peer
+        // announcing an index this node already has — over and over — cannot
+        // keep it from its scheduled look.
+        let (hints, mut listens) = tokio::sync::watch::channel(Hint::MayHaveMissed);
+        listens.borrow_and_update();
+
+        let chatter = tokio::spawn(async move {
+            loop {
+                if hints.send(Hint::Reaches(1)).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_a_reason(Duration::from_millis(100), &mut listens, 10),
+        )
+        .await
+        .expect("the deadline must survive a chatty peer");
+        chatter.abort();
+    }
 }

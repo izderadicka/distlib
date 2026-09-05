@@ -189,3 +189,17 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         Ok(())
     });
 }
+
+#[test]
+fn the_log_filter_is_not_configuration() {
+    // `DISTLIB_LOG` is documented as the log filter and read by the binary
+    // before configuration is loaded. Sharing the prefix made
+    // `deny_unknown_fields` reject it as a key called `log`, so setting the
+    // documented variable stopped the node starting.
+    Jail::expect_with(|jail| {
+        jail.set_env("DISTLIB_LOG", "debug");
+        let config = Config::load(Path::new(CONFIG)).unwrap();
+        assert_eq!(config, Config::default());
+        Ok(())
+    });
+}
