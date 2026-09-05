@@ -34,6 +34,8 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::Notify;
+
 use distlib_core::{MemberId, NodeAddr};
 
 use crate::raft::{
@@ -43,12 +45,12 @@ use crate::raft::{
 
 /// How long to wait before asking again when nothing has changed.
 ///
-/// A backstop rather than the main mechanism: phase 1b's gossip announces each
-/// advance, and this is what catches a follower that missed the announcement.
-/// Short enough that a group of friends notices a change while somebody is
-/// still looking at the screen, long enough that thousands of members do not
-/// make a poll storm out of it.
-const IDLE_POLL: Duration = Duration::from_secs(5);
+/// A backstop rather than the main mechanism: [`crate::gossip`] announces each
+/// advance and wakes this loop, and the timer is what catches a follower that
+/// missed the announcement. Long, because that is the point — thousands of
+/// members polling briskly at three to seven core nodes is the thing gossip
+/// exists to avoid.
+const IDLE_POLL: Duration = Duration::from_secs(30);
 
 /// How long to wait after every known source has failed.
 ///
@@ -122,6 +124,7 @@ pub async fn follow(
     state_machine: StateMachineStore,
     client: MemberlogClient,
     sources: SharedSources,
+    wake: Arc<Notify>,
 ) {
     loop {
         let delay = match ask_around(me, &state_machine, &client, &sources).await {
@@ -141,7 +144,14 @@ pub async fn follow(
             Progress::NoSources => IDLE_POLL,
             Progress::Stranded => STRANDED_BACKOFF,
         };
-        tokio::time::sleep(delay).await;
+        // Whichever comes first: the timer, or somebody announcing that the log
+        // has moved. The timer is the guarantee — gossip is best-effort, and a
+        // node that missed an announcement must not wait for the next change —
+        // and the announcement is what makes the common case prompt.
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = wake.notified() => {}
+        }
     }
 }
 

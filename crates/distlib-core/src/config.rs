@@ -30,6 +30,13 @@ const ENV_PREFIX: &str = "DISTLIB_";
 const ENV_NESTED_SEPARATOR: &str = "__";
 /// The one key resolved before configuration is read, and so forbidden in it.
 const DATA_DIR_KEY: &str = "data_dir";
+/// The log filter, which shares this prefix but is not configuration.
+///
+/// `DISTLIB_LOG` is documented as the way to set the log filter, and the
+/// binary reads it before any of this runs. Without excluding it here,
+/// `deny_unknown_fields` rejects it as an unknown key called `log` — so setting
+/// the documented variable stopped the node from starting at all.
+const LOG_KEY: &str = "log";
 
 /// The whole configuration of a node.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -191,7 +198,7 @@ impl Config {
     /// `deny_unknown_fields` reject a variable that is documented to work.
     fn env() -> Env {
         Env::prefixed(ENV_PREFIX)
-            .ignore(&[DATA_DIR_KEY])
+            .ignore(&[DATA_DIR_KEY, LOG_KEY])
             .split(ENV_NESTED_SEPARATOR)
     }
 

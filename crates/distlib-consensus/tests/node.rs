@@ -854,3 +854,92 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
     follower.node.shutdown().await;
     founder.node.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
+    // What gossip buys. The follow loop's idle timer is 30 seconds — long on
+    // purpose, since thousands of members polling three to seven core nodes is
+    // what gossip exists to avoid — so a change that arrives in a second or two
+    // cannot have come from the timer.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "follower".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        follower_key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    wait_for(&follower, "the first catch-up", |membership| {
+        membership.is_member(&follower.id)
+    })
+    .await;
+
+    // Let the gossip swarm form before making the change. Catching up says the
+    // follow loop works, not that the topic is connected — and an announcement
+    // made before this node can hear it is simply lost, since gossip is
+    // best-effort and does not replay. That is by design, and it is what the
+    // 30-second timer covers; without this pause the test would be asserting
+    // promptness across a window where the design promises none.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Caught up and now idle, so its next scheduled fetch is 30 seconds away.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    let announced = std::time::Instant::now();
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "newcomer".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    wait_for(&follower, "the change to be announced and fetched", |m| {
+        m.is_member(&newcomer)
+    })
+    .await;
+
+    let took = announced.elapsed();
+    assert!(
+        took < Duration::from_secs(10),
+        "the timer is 30s, so {took:?} means this waited for it rather than being told"
+    );
+
+    follower.node.shutdown().await;
+    founder.node.shutdown().await;
+}

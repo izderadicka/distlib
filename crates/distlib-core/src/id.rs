@@ -221,6 +221,18 @@ impl TryFrom<RawMemberId> for MemberId {
 #[serde(transparent)]
 pub struct GroupId(#[serde(with = "hex32")] [u8; 32]);
 
+impl GroupId {
+    /// The raw 32 bytes.
+    ///
+    /// Matches [`ItemId::as_bytes`] and [`RawMemberId::as_bytes`]. Used where a
+    /// group needs a name in somebody else's namespace — the gossip topic is
+    /// the group id, since it is already the group's name and deriving a second
+    /// one would be a second thing to agree on.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Identifies one catalogue item by the set of content files it was born with.
 ///
 /// Computed once at creation and then frozen: adding a missing chapter or a

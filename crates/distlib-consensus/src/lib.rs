@@ -12,6 +12,7 @@
 
 pub mod error;
 pub mod event;
+pub mod gossip;
 pub mod node;
 pub mod raft;
 pub mod signed;
