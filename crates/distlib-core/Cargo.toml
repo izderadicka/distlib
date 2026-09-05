@@ -16,6 +16,8 @@ testing = []
 [dependencies]
 iroh = { workspace = true }
 getrandom = { workspace = true }
+data-encoding = { workspace = true }
+postcard = { workspace = true }
 secrecy = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true }

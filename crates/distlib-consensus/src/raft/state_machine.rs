@@ -23,7 +23,7 @@ use std::{
     },
 };
 
-use distlib_core::NodeAddr;
+use distlib_core::{MemberId, NodeAddr};
 use openraft::{
     EntryPayload, ErrorSubject, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
     StoredMembership, storage::RaftStateMachine,
@@ -223,6 +223,20 @@ impl StateMachineStore {
         // crash would be enforcing one that never happened.
         self.announce(&derived);
         Ok(verdicts)
+    }
+
+    /// The core group with an address for each, as Raft has it.
+    ///
+    /// [`MembershipState::core`] gives the same members and no addresses — the
+    /// log records who votes, and Raft's own configuration records where they
+    /// are. Anything that has to *reach* a core node needs this one: serving a
+    /// follower, and handing out a join ticket.
+    pub fn core_addresses(&self) -> Vec<(MemberId, NodeAddr)> {
+        self.lock()
+            .membership
+            .nodes()
+            .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+            .collect()
     }
 
     /// Watches the membership, for whoever has to react to it changing.

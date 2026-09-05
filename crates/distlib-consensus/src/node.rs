@@ -358,6 +358,13 @@ impl MembershipNode {
         &self.connections
     }
 
+    /// The core group with an address for each.
+    ///
+    /// What a join ticket is made of, and what a follower rotates around.
+    pub fn core_addresses(&self) -> Vec<(MemberId, NodeAddr)> {
+        self.state_machine.core_addresses()
+    }
+
     /// The membership derived from the log so far.
     pub fn membership(&self) -> MembershipState {
         self.state_machine.membership()

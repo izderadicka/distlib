@@ -134,6 +134,36 @@ impl Friend {
         );
     }
 
+    /// Asks this node for a join ticket.
+    fn ticket(&self) -> String {
+        let output = distlib(self.dir.path()).arg("ticket").output().unwrap();
+        assert!(
+            output.status.success(),
+            "ticket failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .expect("the ticket is the first line")
+            .trim()
+            .to_owned()
+    }
+
+    /// Takes a ticket and writes the group into this node's configuration.
+    fn join(&self, ticket: &str) {
+        let output = distlib(self.dir.path())
+            .args(["join", ticket])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "join failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn members(&self) -> String {
         let output = distlib(self.dir.path()).arg("members").output().unwrap();
         assert!(
@@ -274,7 +304,35 @@ fn three_friends_found_a_group() {
         "a node that never heard the command should still list the newcomer; got:\n{listed}"
     );
 
-    // 6. Stopped, each of them can be asked who is in the group, and the answer
+    // 6. The newcomer joins for real: it takes a ticket, writes the group into
+    //    its own configuration, and follows the log without ever having been
+    //    told what is in it. §4.3 end to end.
+    newcomer.join(&friends[1].ticket());
+    let joined = newcomer.run(false);
+    joined.wait_for("members=4");
+
+    let listed = newcomer.members();
+    for friend in &friends {
+        assert!(
+            listed.contains(&friend.id),
+            "a joiner must derive the whole group from the log; got:\n{listed}"
+        );
+    }
+    let own_line = listed
+        .lines()
+        .find(|line| line.contains(&newcomer.id))
+        .expect("the joiner lists itself");
+    assert!(
+        !own_line.contains("core"),
+        "a joiner follows rather than votes; got: {own_line}"
+    );
+    assert!(
+        listed.contains("(3 core)"),
+        "the three founders still vote; got:\n{listed}"
+    );
+    joined.stop();
+
+    // 7. Stopped, each of them can be asked who is in the group, and the answer
     //    comes from its own copy of the log rather than from its config.
     for node in [first, second, third] {
         node.stop();

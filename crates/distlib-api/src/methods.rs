@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode};
-use distlib_core::MemberId;
+use distlib_core::{MemberId, NetConfig, Ticket};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +21,11 @@ use crate::rpc::Error;
 pub struct Api {
     pub node: Arc<MembershipNode>,
     pub secret: SecretKey,
+    /// How this node reaches the network.
+    ///
+    /// Needed for `group.ticket`: a joiner has to reach the group the way this
+    /// node does, so the directions have to carry it.
+    pub net: NetConfig,
 }
 
 impl Api {
@@ -32,6 +37,7 @@ impl Api {
             "group.propose_add" => self.propose_add(parse(params)?).await,
             "group.propose_expel" => self.propose_expel(parse(params)?).await,
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
+            "group.ticket" => self.ticket(),
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -75,6 +81,32 @@ impl Api {
             // the log pushed to it rather than fetching it.
             "followed_upto": (!self.node.is_core()).then(|| self.node.followed_upto()),
         }))
+    }
+
+    /// `group.ticket` — directions for somebody who has been admitted (§4.3).
+    ///
+    /// Built here rather than by the caller because the addresses come from
+    /// Raft's own membership, which only a running node holds. The relay
+    /// settings come from this node's configuration: a joiner has to reach the
+    /// group the same way this node does.
+    ///
+    /// Not a credential. Anyone may ask for one, and holding it grants nothing
+    /// — admission is a committed `MemberAdded`, and until that exists a
+    /// ticket-holder is refused at the allowlist like anybody else.
+    fn ticket(&self) -> Result<Value, Error> {
+        let membership = self.node.membership();
+        let group = membership
+            .group_id()
+            .ok_or_else(|| Error::failed("this node is in no group yet"))?;
+
+        let ticket = Ticket {
+            group,
+            core: self.node.core_addresses(),
+            relay_mode: self.net.relay_mode,
+            relay_urls: self.net.relay_urls.clone(),
+        };
+
+        Ok(json!({ "ticket": ticket.to_string(), "group": group }))
     }
 
     /// `group.members` — the membership as this node has it.

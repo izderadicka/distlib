@@ -107,6 +107,22 @@ pub enum Command {
         bytes: u64,
     },
 
+    /// Print a join ticket for somebody who has been admitted.
+    ///
+    /// Directions, not a credential: it says which group and how to reach its
+    /// core nodes. Whoever holds it still has to have been admitted — see
+    /// `distlib admit` — before anything will talk to them.
+    Ticket,
+
+    /// Join a group from a ticket somebody sent you.
+    ///
+    /// Writes the group's core nodes and relay settings into this node's
+    /// configuration. Start the node afterwards and it fetches the log.
+    Join {
+        /// The ticket, as printed by `distlib ticket` on a member's node.
+        ticket: String,
+    },
+
     /// List the members of this node's group.
     ///
     /// Reads the local database, so it needs the node stopped: a running node
