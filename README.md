@@ -15,9 +15,10 @@ a signed, replicated log that every node folds into the same answer, and each no
 enforces *its own copy* of that answer. There is no administrator and no config file
 to edit.
 
-See [docs/distlib-plan.md](docs/distlib-plan.md) for the design, and
+See [docs/distlib-plan.md](docs/distlib-plan.md) for the design,
 [docs/plan-deltas.md](docs/plan-deltas.md) for where the implementation has
-deliberately diverged from it.
+deliberately diverged from it, and [docs/plan-phases/](docs/plan-phases/) for the
+sequencing plan of the phase currently being built.
 
 > **Status: phase 1 complete.** Identity, transport and the membership log work. A
 > group can be founded, members admitted, expelled and handed a join ticket, and every

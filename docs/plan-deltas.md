@@ -153,8 +153,14 @@ Phase 1 is complete against §9's acceptance criteria, which run as a test on ev
 
 ## Phase 2 — Catalogue & library basics
 
-*Not started.* Four items carry into it from Phase 1 — see
-[Carried forward to Phase 2](#carried-forward-to-phase-2) above.
+*Planned, not started.* The sequencing plan — sub-phases, PR boundaries, per-PR acceptance, and
+which carried-forward items it takes — is [`plan-phases/phase-2-catalogue.md`](plan-phases/phase-2-catalogue.md).
+That document is sequencing only: **deviations from the design still land here**, in the PR that
+causes them.
+
+Four items carry in from Phase 1 — see
+[Carried forward to Phase 2](#carried-forward-to-phase-2) above. The phase-2 plan says explicitly
+which are taken (P1-23) and which are deferred, and why.
 
 ## Phase 3 — API + UI
 
