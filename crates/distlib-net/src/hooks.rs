@@ -278,7 +278,7 @@ impl EndpointHooks for AllowlistHooks {
                 since,
                 "rejected a connection from a non-member, and {since} more since the last line",
             ),
-            None => tracing::debug!(peer = %peer, "rejected a connection from a non-member"),
+            None => tracing::trace!(peer = %peer, "rejected a connection from a non-member"),
         }
         AfterHandshakeOutcome::Reject {
             error_code: close_code::NOT_A_MEMBER,

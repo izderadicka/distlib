@@ -522,6 +522,11 @@ impl MemberlogClient {
 /// the caller cannot act differently on which step it was. A refusal is
 /// different in kind: it is an answer, and the answer is that this node is not
 /// in the group as far as that peer's log is concerned.
+///
+/// The message is already written for a reader — each constructor names the
+/// step it failed at — so the `Display` is that message and nothing else.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 struct Rebuffed {
     message: String,
     refused: bool,
