@@ -330,8 +330,8 @@ there are two lanes, both defined in `.cargo/config.toml`:
 
 | | | |
 |---|---|---|
-| `cargo test-fast` | 161 tests, ~4s | everything except the slow four |
-| `cargo test-all` | 171 tests, ~17s | all of it — what CI runs |
+| `cargo test-fast` | ~4s | everything except the slow four |
+| `cargo test-all` | ~17s | all of it — what CI runs |
 
 nextest runs the test binaries concurrently rather than one after another, which
 is where the 43 seconds go. The fast lane is for the edit-compile-test loop; run

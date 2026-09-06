@@ -13,8 +13,8 @@
 # Plain `cargo test` still works and still runs everything, for anyone who has
 # not installed it.
 [alias]
-# ~4s, 161 tests. Everything except real elections, openraft's storage suite,
-# the property tests and the tests that spawn processes or wait out timeouts.
+# ~4s. Everything except real elections, openraft's storage suite, the property
+# tests and the tests that spawn processes or wait out timeouts.
 test-fast = "nextest run --workspace --no-default-features"
-# ~17s, 171 tests. What CI runs.
+# ~17s. What CI runs.
 test-all = "nextest run --workspace --all-features"
