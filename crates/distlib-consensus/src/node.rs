@@ -818,16 +818,22 @@ async fn follow_membership(
         let membership = memberships.borrow_and_update().clone();
 
         if membership.group_id().is_some() {
-            let members: Vec<MemberId> = membership.allowlist().collect();
-            tracing::debug!(count = members.len(), "allowlist derived from the log");
-            writer.replace(members);
-
             // Where the voters are, from the same source that decides who they
             // are. Empty on a follower, which holds no `StoredMembership` of
             // its own — it learns the same addresses from the core nodes that
             // serve it the log.
+            //
+            // Before the allowlist, deliberately: publishing *who* this node
+            // will talk to while it still cannot say *where* they are leaves a
+            // window in which anything reacting to the allowlist dials an id
+            // that resolves to nothing. Doing it in this order means one
+            // observable event — the allowlist changing — implies both.
             let core = state_machine.core_addresses();
             addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
+
+            let members: Vec<MemberId> = membership.allowlist().collect();
+            tracing::debug!(count = members.len(), "allowlist derived from the log");
+            writer.replace(members);
         } else {
             // No `GroupFounded` yet, so the log has nothing to say about who
             // belongs. Publishing its empty membership here would wipe the

@@ -167,7 +167,11 @@ All code you write MUST be fully optimized.
 
 # Use standard Rust tooling
 
-Cargo build, check, test, clippy
+Cargo build, check, clippy
+
+For testing use nextest -  two lanes are defined for nextest:
+- `cargo test-all` - this one must past at end of each task
+- `cargo test-fast` - runs only fast tests - ca be used during development
 
 
 # Quality Assurance

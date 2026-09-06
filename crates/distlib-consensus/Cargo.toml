@@ -8,6 +8,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# The tests that take seconds rather than milliseconds: real elections, real
+# timeouts, openraft's storage suite, and the property tests. On by default, so
+# `cargo test` proves what it always did — turn it off for a quick lane with
+# `--no-default-features`, or `cargo test-fast`.
+default = ["slow-tests"]
+slow-tests = []
+
 [dependencies]
 distlib-core = { workspace = true }
 distlib-net = { workspace = true }

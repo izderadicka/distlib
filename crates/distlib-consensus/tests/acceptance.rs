@@ -17,6 +17,10 @@
 //! `distlib` crate, which covers the part a library test cannot: the procedure
 //! a human follows.
 
+// Thirteen seconds: five nodes, a real election, and a leader killed in the
+// middle of one. Skipped by `--no-default-features`; see the `slow-tests`
+// feature in Cargo.toml.
+#![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 #![allow(clippy::result_large_err)] // openraft's error types, in its own signatures
 
@@ -27,7 +31,7 @@ use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{Peer, wait_for};
+use common::{Peer, until, wait_for};
 
 /// How long to wait for something that should happen without prompting.
 const SOON: Duration = Duration::from_secs(15);
@@ -91,7 +95,19 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
 
     // "It can connect" means what it says: a real connection, not just an entry
     // in somebody's table. Ping is the smallest thing that proves one.
+    //
+    // The wait is on the node being asked. The loop above waits on the
+    // *follower* seeing itself admitted, and this asks a *core node* to accept
+    // it — a node whose allowlist is published by a task of its own, so on a
+    // loaded machine it lags, and this failed exactly that way under a parallel
+    // test runner. Waiting on the allowlist itself, rather than retrying the
+    // ping, keeps the ping a single attempt that has to work.
     for follower in &followers {
+        until("a core node to enforce the admission", || {
+            core[1].hooks.allowlist().is_allowed(&follower.id)
+        })
+        .await;
+
         let echo = distlib_net::ping::ping(
             follower.node.endpoint(),
             core[1].addr.to_endpoint_addr(core[1].id).unwrap(),

@@ -7,6 +7,8 @@ use distlib_consensus::{
 };
 use distlib_core::{GroupId, MemberId};
 use iroh::SecretKey;
+// The property tests, and only they, are generated.
+#[cfg(feature = "slow-tests")]
 use proptest::prelude::*;
 
 /// A member we can sign as.
@@ -22,6 +24,9 @@ impl Signer {
 
     /// A signer with a fixed key, so a scenario replayed twice uses the same
     /// members and the two runs are actually comparable.
+    ///
+    /// Only the property tests replay anything, so this goes with them.
+    #[cfg(feature = "slow-tests")]
     fn seeded(seed: u8) -> Self {
         Self::from_secret(SecretKey::from_bytes(&[seed.wrapping_add(1); 32]))
     }
@@ -642,11 +647,18 @@ fn founding_is_proposed_against_the_empty_membership() {
 }
 
 // --- properties -------------------------------------------------------------
+//
+// Six seconds, which is the whole of this binary's runtime: sixty-four cases
+// across five properties, each signing a dozen events. Everything from here to
+// the end of the file is behind `slow-tests`, helpers included — they exist
+// only to run these — so `--no-default-features` leaves this file at
+// milliseconds. See the feature in Cargo.toml.
 
 /// A founded group plus a sequence of events over a small pool of members.
 ///
 /// Generated as *indices* into the pool so the events refer to each other
 /// coherently; keys are made once, since generating them is the slow part.
+#[cfg(feature = "slow-tests")]
 fn scenario() -> impl Strategy<Value = (usize, Vec<(usize, usize, u64)>)> {
     (
         1usize..4,
@@ -654,6 +666,7 @@ fn scenario() -> impl Strategy<Value = (usize, Vec<(usize, usize, u64)>)> {
     )
 }
 
+#[cfg(feature = "slow-tests")]
 proptest! {
     // Every case signs a dozen events, and ed25519 signing dominates the
     // runtime. The reachable state space here is small — four members, three
@@ -706,12 +719,14 @@ proptest! {
 
 /// The fixed cast a generated scenario draws from. Seeded rather than random so
 /// two runs of the same scenario involve the same members.
+#[cfg(feature = "slow-tests")]
 fn pool() -> Vec<Signer> {
     (0..4).map(Signer::seeded).collect()
 }
 
 /// Runs a generated scenario, ignoring events the rules refuse — the point is
 /// the state that results, not which operations happened to be legal.
+#[cfg(feature = "slow-tests")]
 fn fold(founders: usize, ops: &[(usize, usize, u64)]) -> MembershipState {
     let pool = pool();
     let mut state = MembershipState::new();
@@ -719,6 +734,7 @@ fn fold(founders: usize, ops: &[(usize, usize, u64)]) -> MembershipState {
     state
 }
 
+#[cfg(feature = "slow-tests")]
 fn fold_in_two(founders: usize, ops: &[(usize, usize, u64)], split: usize) -> MembershipState {
     let pool = pool();
     let mut state = MembershipState::new();
@@ -727,6 +743,7 @@ fn fold_in_two(founders: usize, ops: &[(usize, usize, u64)], split: usize) -> Me
     state
 }
 
+#[cfg(feature = "slow-tests")]
 fn apply_scenario(
     state: &mut MembershipState,
     pool: &[Signer],

@@ -99,7 +99,11 @@ proptest = "=1.11.0"
 # --- internal --------------------------------------------------------------
 distlib-core = { path = "crates/distlib-core" }
 distlib-net = { path = "crates/distlib-net" }
-distlib-consensus = { path = "crates/distlib-consensus" }
+# `default-features = false` keeps `slow-tests` off this edge. The feature
+# gates that crate's own test binaries and nothing else, so a dependency
+# asking for defaults would unify it back on and `--no-default-features`
+# would silently do nothing.
+distlib-consensus = { path = "crates/distlib-consensus", default-features = false }
 distlib-api = { path = "crates/distlib-api" }
 
 [workspace.lints.rust]

@@ -122,3 +122,25 @@ pub async fn wait_for(peer: &Peer, what: &str, predicate: impl Fn(&MembershipSta
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
+
+/// Waits until `condition` holds, or gives up and says what it was waiting for.
+///
+/// For the things a test cannot see through the membership: each node derives
+/// what it will talk to in a task of its own, subscribed to the same watch a
+/// test waits on, so "node A applied the entry" does not yet mean "node B will
+/// accept a connection". Waiting on the thing itself is the difference between
+/// a test that is deterministic and one that passes when the machine is idle.
+///
+/// Retrying the *assertion* would be the other way to write this, and it is
+/// worse: it lets a second mechanism satisfy the test while the one under test
+/// does nothing — which is exactly what happened here, gossip supplying an
+/// address the address book had failed to learn.
+pub async fn until(what: &str, condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}

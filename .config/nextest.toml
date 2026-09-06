@@ -1,0 +1,10 @@
+[profile.default]
+# Our tests are clusters of nodes with real timers, not CPU kernels. A dozen at
+# once makes `network`'s 300–600ms election timeouts thrash, and the failure
+# then looks like the code's fault rather than the runner's — which is exactly
+# the confusion this suite is meant to be free of.
+#
+# Four still overlaps the slow binaries, which is where the speed comes from,
+# without oversubscribing a machine that is also building something. It matches
+# what a CI runner has anyway.
+test-threads = 4
