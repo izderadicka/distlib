@@ -69,14 +69,24 @@ async fn main() -> Result<()> {
 /// consensus, and noise thick enough at the default level to bury this node's
 /// own output. `DISTLIB_LOG` and `RUST_LOG` are left exactly as written:
 /// someone who sets one has said what they want to see.
+/// The default filter, and why each part of it is turned down.
+///
+/// `iroh::protocol` logs a warning for every connection its router fails to
+/// accept, and a refused non-member is exactly that — so a peer this node has
+/// expelled decides how much this node writes, one line per attempt. Our own
+/// refusal line is the one worth keeping and is summarised per peer
+/// (`AllowlistHooks::note_refusal`); this one carries nothing that line does
+/// not. `-vv` puts it back for anyone debugging the router itself.
+const DEFAULT_FILTER: &str = "info,openraft=warn,iroh::protocol=error";
+
 fn init_tracing(verbose: u8) {
     let filter = match verbose {
         0 => EnvFilter::try_from_env("DISTLIB_LOG")
             .or_else(|_| EnvFilter::try_from_default_env())
-            .unwrap_or_else(|_| EnvFilter::new("info,openraft=warn")),
+            .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER)),
         1 => EnvFilter::new(
             "info,distlib=debug,distlib_net=debug,distlib_core=debug,\
-             distlib_consensus=debug,openraft=info",
+             distlib_consensus=debug,openraft=info,iroh::protocol=error",
         ),
         _ => EnvFilter::new(
             "debug,distlib=trace,distlib_net=trace,distlib_core=trace,\

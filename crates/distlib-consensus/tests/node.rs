@@ -991,3 +991,83 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
         peer.node.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn an_expelled_follower_stops_asking_and_says_so() {
+    // §4.4 from the outside. An expelled member is refused by every core node,
+    // so it never receives the entry expelling it — the only way it can find
+    // out is by being turned away. Before this it kept asking about once a
+    // second for the life of the process, filling every core node's log with
+    // refusals, which is a denial of service against the group by a node that
+    // is no longer in it.
+    let core_key = SecretKey::generate();
+    let core_id = MemberId::from(core_key.public());
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+
+    let core = Peer::start(core_key, vec![follower_id]).await;
+    core.node
+        .init_group(vec![(core.record("core"), core.addr.clone())], &core.secret)
+        .await
+        .unwrap();
+    core.node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "for now".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &core.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        follower_key,
+        vec![core_id],
+        vec![(core.id, core.addr.clone())],
+    )
+    .await;
+    wait_for(&follower, "the log to reach the follower", |m| {
+        m.is_member(&follower_id)
+    })
+    .await;
+
+    // Let the gossip swarm form before taking it away. Joining the topic
+    // happens after the first fetch, so without this the expulsion can land
+    // while the follower has no neighbour to lose — which is a slower path
+    // rather than a broken one, and not the one being measured here.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    core.node
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: follower_id,
+                reason: "the test says so".to_owned(),
+            },
+            &core.secret,
+        )
+        .await
+        .unwrap();
+
+    // Generous, because two mechanisms can deliver this and only one is quick:
+    // a core node closing its connections shows up as a gossip neighbour going
+    // away, which wakes the loop at once, and failing that its own timer comes
+    // round within thirty seconds. What is being asserted is that it works out
+    // it has been expelled at all — before this it never did.
+    tokio::time::timeout(Duration::from_secs(45), follower.node.expelled())
+        .await
+        .expect("an expelled follower must work out that it has been expelled");
+
+    // And it still holds the log it had: expulsion is not amnesia, and §4.4 is
+    // explicit that an expelled member keeps what it already has.
+    assert!(
+        follower.node.membership().group_id().is_some(),
+        "the node knows which group threw it out"
+    );
+
+    follower.node.shutdown().await;
+    core.node.shutdown().await;
+}

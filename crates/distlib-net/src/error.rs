@@ -82,7 +82,7 @@ impl NetError {
     /// The single point where a transport error becomes a `NetError`, so the
     /// "was this a policy refusal?" question is asked once rather than at every
     /// call site.
-    pub(crate) fn peer<E>(peer: MemberId, source: E) -> Self
+    pub fn peer<E>(peer: MemberId, source: E) -> Self
     where
         E: IsRejection + std::error::Error + Send + Sync + 'static,
     {
@@ -109,7 +109,7 @@ impl NetError {
 /// `Error` chain, so that a change in iroh's error shape breaks the build
 /// instead of silently ceasing to recognise rejections — a failure that would
 /// leave enforcement working while its reporting quietly degraded.
-pub(crate) trait IsRejection {
+pub trait IsRejection {
     fn is_rejection(&self) -> bool;
 }
 
