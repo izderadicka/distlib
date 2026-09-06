@@ -17,15 +17,35 @@ use crate::{
 /// Length of a raw ed25519 secret key.
 const KEY_LEN: usize = 32;
 
-/// Loads the secret key at `path`, generating and storing one if absent.
-pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
+/// Loads the secret key at `path`, refusing to create one.
+///
+/// The right call for anything that is *using* an identity rather than
+/// establishing one. `distlib run` is the case that matters: pointed at an
+/// empty directory it would otherwise mint a key and start a node that is
+/// nobody — in no group, listening on a port nobody was told about — and the
+/// only symptom is a member id the operator has never seen before. The
+/// directory being wrong is the fact worth reporting, and this is the call
+/// that can report it.
+pub fn load_secret_key(path: &Path) -> Result<SecretKey> {
     match fs::read(path) {
         Ok(bytes) => {
             private_file::check_permissions(path)?;
             decode(path, &bytes)
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => create_secret_key(path, false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(CoreError::NoIdentity {
+            path: path.to_path_buf(),
+        }),
         Err(err) => Err(CoreError::io("read secret key", path)(err)),
+    }
+}
+
+/// Loads the secret key at `path`, generating and storing one if absent.
+///
+/// For the commands whose job is to establish an identity — `init`, `whoami`.
+pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
+    match load_secret_key(path) {
+        Err(CoreError::NoIdentity { .. }) => create_secret_key(path, false),
+        loaded => loaded,
     }
 }
 

@@ -5,7 +5,7 @@
 #
 # Both use cargo-nextest, which runs test binaries concurrently rather than one
 # after another. That matters here because the suite is a handful of slow
-# binaries and a long tail of instant ones: `cargo test` takes the sum, ~38s,
+# binaries and a long tail of instant ones: `cargo test` takes the sum, ~43s,
 # where nextest takes about the length of its slowest test.
 #
 #   cargo install cargo-nextest --locked
@@ -13,8 +13,8 @@
 # Plain `cargo test` still works and still runs everything, for anyone who has
 # not installed it.
 [alias]
-# ~4s, 155 tests. Everything except real elections, openraft's storage suite,
+# ~4s, 157 tests. Everything except real elections, openraft's storage suite,
 # the property tests and the tests that spawn processes or wait out timeouts.
 test-fast = "nextest run --workspace --no-default-features"
-# ~13s, 164 tests. What CI runs.
+# ~17s, 167 tests. What CI runs.
 test-all = "nextest run --workspace --all-features"

@@ -153,7 +153,7 @@ Phase 1 is complete against §9's acceptance criteria, which run as a test on ev
 
 ## Phase 2 — Catalogue & library basics
 
-*Planned, not started.* The sequencing plan — sub-phases, PR boundaries, per-PR acceptance, and
+*In progress.* The sequencing plan — sub-phases, PR boundaries, per-PR acceptance, and
 which carried-forward items it takes — is [`plan-phases/phase-2-catalogue.md`](plan-phases/phase-2-catalogue.md).
 That document is sequencing only: **deviations from the design still land here**, in the PR that
 causes them.
@@ -161,6 +161,10 @@ causes them.
 Four items carry in from Phase 1 — see
 [Carried forward to Phase 2](#carried-forward-to-phase-2) above. The phase-2 plan says explicitly
 which are taken (P1-23) and which are deferred, and why.
+
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P2-1 | §9 | Phase 0 gives the binary `init` (keygen), `run` and `status`; nothing says which of them may create an identity | **`run` refuses a data directory that holds no identity**, and its first log line names the data directory and the config file it resolved — `(absent, using defaults)` when there is none. `init` and `whoami` still create one; `distlib-core` gains `identity::load_secret_key` beside `load_or_create_secret_key`, and the split is the whole fix. | Found by running the acceptance criteria by hand. A mistyped `--data-dir` produced a node that started perfectly: `run` minted a key in the empty directory, read defaults because the config file was not there either, and came up listening on an OS-chosen port with relays enabled under a member id nobody recognised. Nothing in the log said which directory or config file it had used, so the only way to notice was to recognise the *shape* of the symptom. Both halves are needed and neither is sufficient: refusing without the log line still leaves a healthy-looking node when the directory exists but the config file does not, and logging without refusing leaves the operator to spot one line among the startup noise. **Consequence for phase 3's container work:** an image starting from an empty volume must run `distlib init` (or `join`) before `run` — a fresh volume is no longer enough, deliberately, because a container that silently regenerates its identity on an empty mount has silently left the group. |
 
 ## Phase 3 — API + UI
 

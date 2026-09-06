@@ -37,12 +37,20 @@ export BIN=$PWD/target/debug/distlib
 dl() { $BIN "$@"; }
 ```
 
-`run` creates an identity in a directory that has none and reads defaults when there is
-no config file, so a mistyped `--data-dir` does not fail — it silently starts a brand
-new node. The symptom is unmistakable once you know it: `listening addr=0.0.0.0:<random>`,
-a relay in `relay_mode = "disabled"`, `local api listening addr=127.0.0.1:11280`, and a
-member id that is not the one you expect. If a node looks like that, it is reading no
-config, and the data directory is the first thing to check.
+A mistyped `--data-dir` used to be silent: `run` would mint an identity in the empty
+directory, read defaults because there was no config file, and start a brand new node
+that looked perfectly healthy. It no longer can — `run` refuses a directory with no
+identity, and its first log line names both the data directory and the config file it
+loaded:
+
+```text
+INFO starting data_dir=/home/you/tmp/dl/b config=/home/you/tmp/dl/b/config.toml
+```
+
+`config=... (absent, using defaults)` means the config file is not where the node
+looked. That, plus `listening addr=0.0.0.0:<random>` under `relay_mode = "disabled"`
+and an api on 11280, is the shape of a node reading no configuration — check the data
+directory first.
 
 ---
 

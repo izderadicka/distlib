@@ -4,7 +4,7 @@
 
 use distlib_core::{
     CoreError,
-    identity::{create_secret_key, load_or_create_secret_key, member_id},
+    identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
 };
 use tempfile::TempDir;
 
@@ -26,6 +26,38 @@ fn a_key_is_created_once_and_reloaded_thereafter() {
         "identity must survive a restart — it is the group membership"
     );
     assert!(path.exists());
+}
+
+#[test]
+fn a_missing_key_is_refused_rather_than_invented() {
+    let dir = TempDir::new().unwrap();
+    let path = key_path(&dir);
+
+    let error = load_secret_key(&path).unwrap_err();
+
+    assert!(
+        matches!(error, CoreError::NoIdentity { .. }),
+        "expected NoIdentity, got {error:?}"
+    );
+    assert!(
+        !path.exists(),
+        "refusing must not leave a key behind — a later run would then start as a stranger"
+    );
+    assert!(
+        error.to_string().contains("distlib init"),
+        "the error has to say how to fix it, got {error}"
+    );
+}
+
+#[test]
+fn an_existing_key_is_loaded_by_both_loaders_alike() {
+    let dir = TempDir::new().unwrap();
+    let path = key_path(&dir);
+    let created = load_or_create_secret_key(&path).unwrap();
+
+    let loaded = load_secret_key(&path).unwrap();
+
+    assert_eq!(member_id(&created), member_id(&loaded));
 }
 
 #[test]
