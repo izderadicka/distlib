@@ -157,7 +157,13 @@ pub async fn listen(mut receiver: GossipReceiver, hints: watch::Sender<Hint>) {
             // covers at thirty seconds.
             Ok(Event::NeighborUp(_)) => Hint::MayHaveMissed,
 
-            Ok(Event::NeighborDown(_)) => continue,
+            // A neighbour has gone. Whatever it would have relayed goes
+            // unheard, so this is the same "look" as any other gap — and it is
+            // what an expelled member sees first, since the group closing its
+            // connections is how it finds out at all. Waiting out the timer
+            // instead would leave it asking refused questions for half a
+            // minute before noticing.
+            Ok(Event::NeighborDown(_)) => Hint::MayHaveMissed,
 
             Err(error) => {
                 // This node has just lost its prompt updates and is back to the

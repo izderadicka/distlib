@@ -248,7 +248,7 @@ them hold for every protocol added later.
 |---|---|
 | `distlib init [--force]` | Create the data directory, generate the identity, write a starter config. `--force` replaces an existing identity — which is how a node leaves its group. |
 | `distlib whoami` | Print this node's id as a line for a founder's `[consensus] core`. Creates the identity if there is not one. |
-| `distlib run` | Run the node until `Ctrl-C`. |
+| `distlib run` | Run the node until `Ctrl-C` — or until the group expels it, which a non-voting member finds out by being refused, and which it reports before exiting. |
 | `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
 | `distlib admit <member> [--name]` | Admit a member. Needs the node running. |
 | `distlib expel <member> --reason` | Remove one, recording why. Needs the node running. |

@@ -34,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::time::Instant;
+use tokio::{sync::watch, time::Instant};
 
 use distlib_core::{MemberId, NodeAddr};
 
@@ -69,6 +69,13 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// with a message that is already as loud as it needs to be.
 const STRANDED_BACKOFF: Duration = Duration::from_secs(60);
 
+/// How long to wait after being refused by everyone who answered.
+///
+/// Only reached by a node that has never held the log — one waiting to be
+/// admitted. What it is waiting for is a person proposing it, so a brisk retry
+/// buys nothing and costs every core node a refused connection to log.
+const REFUSED_BACKOFF: Duration = Duration::from_secs(60);
+
 /// Where a follower asks for the log, and who it prefers.
 #[derive(Debug, Clone, Default)]
 pub struct Sources {
@@ -102,6 +109,26 @@ impl Sources {
     }
 }
 
+/// Everything the follow loop needs to keep this node's copy of the log fresh.
+///
+/// A struct rather than five arguments, and it earns its place: the loop is one
+/// job — ask somebody for the log — and these are the parts of the node it does
+/// it with.
+pub struct Following {
+    /// This node, so it does not ask itself.
+    pub me: MemberId,
+    pub state_machine: StateMachineStore,
+    pub client: MemberlogClient,
+    pub sources: SharedSources,
+
+    /// Set once, if this node discovers it has been expelled.
+    ///
+    /// The loop stops there, and whoever started the node decides what to do
+    /// about it — there is nothing useful left for a node outside the group to
+    /// do, and plenty of harm in carrying on asking.
+    pub expelled: watch::Sender<bool>,
+}
+
 /// Sources shared between the follow task and whoever forwards a proposal.
 pub type SharedSources = Arc<Mutex<Sources>>;
 
@@ -122,13 +149,15 @@ pub fn read(sources: &SharedSources) -> Sources {
 /// Runs until aborted. Every failure is a reason to ask somebody else rather
 /// than to stop: a follower that gave up on an unreachable core node would stay
 /// frozen at whatever it last saw, still enforcing it.
-pub async fn follow(
-    me: MemberId,
-    state_machine: StateMachineStore,
-    client: MemberlogClient,
-    sources: SharedSources,
-    mut hints: Hints,
-) {
+pub async fn follow(following: Following, mut hints: Hints) {
+    let Following {
+        me,
+        state_machine,
+        client,
+        sources,
+        expelled,
+    } = following;
+
     loop {
         let delay = match ask_around(me, &state_machine, &client, &sources).await {
             // A source hands over everything it has applied in one answer, so
@@ -146,6 +175,33 @@ pub async fn follow(
             // Nothing this loop does will fix either of these.
             Progress::NoSources => IDLE_POLL,
             Progress::Stranded => STRANDED_BACKOFF,
+
+            // Every core node that answered says this node is not in the
+            // group. Which of the two things that means depends on whether
+            // this node has ever held the log.
+            Progress::Refused => {
+                if state_machine.membership().group_id().is_some() {
+                    // It has. So it was in the group and is not now: §4.4,
+                    // from the outside. Stopping is the point — a loop that
+                    // kept asking would hammer every core node roughly once a
+                    // second for as long as the process lived, filling their
+                    // logs with refusals and doing itself no good.
+                    tracing::error!(
+                        "this node has been expelled from the group; it will stop following"
+                    );
+                    let _ = expelled.send(true);
+                    return;
+                }
+
+                // It has not, so this is a node whose admission has not been
+                // committed yet — or was never proposed. Waiting is right, but
+                // not briskly: the answer changes when somebody admits it,
+                // which is not a thing that happens within a second.
+                tracing::warn!(
+                    "no core node will talk to this node yet; it has to be admitted first                      with `distlib admit`"
+                );
+                REFUSED_BACKOFF
+            }
         };
         wait_for_a_reason(delay, &mut hints, state_machine.followed_upto()).await;
     }
@@ -195,6 +251,12 @@ enum Progress {
     /// A source answered and had nothing this node has not already got.
     UpToDate,
 
+    /// Every source that answered refused us at the allowlist.
+    ///
+    /// Separate from [`Progress::Unreachable`] because it is an answer rather
+    /// than a silence, and the answer does not change by asking again.
+    Refused,
+
     /// Every known source failed to answer.
     Unreachable,
 
@@ -241,6 +303,12 @@ async fn ask_around(
         return Progress::NoSources;
     }
 
+    // Refusals are counted rather than acted on one at a time: one core node
+    // refusing could be one core node that is wrong, and the useful question is
+    // whether *everybody who answered* refused.
+    let mut refusals = 0usize;
+    let mut answered_otherwise = 0usize;
+
     for (member, addr) in candidates {
         match client.fetch(member, &addr, cursor).await {
             Ok(Fetched::Entries {
@@ -269,6 +337,7 @@ async fn ask_around(
             // Reachable, but with nothing to give: a core node that has not
             // itself received the founding entry yet. Somebody else may have.
             Ok(Fetched::NoGroup) => {
+                answered_otherwise += 1;
                 tracing::debug!(from = %member, "asked a node that has no group yet");
             }
 
@@ -286,10 +355,22 @@ async fn ask_around(
                 return Progress::Stranded;
             }
 
+            Err(error) if error.refused => {
+                refusals += 1;
+                tracing::debug!(%error, from = %member, "a core node will not talk to this node");
+            }
+
             Err(error) => {
                 tracing::debug!(%error, "could not reach a core node; trying another");
             }
         }
+    }
+
+    // Unreachable nodes get no vote: a core node that is down says nothing
+    // about who belongs, so one that is down while the others refuse must not
+    // keep this node asking forever.
+    if refusals > 0 && answered_otherwise == 0 {
+        return Progress::Refused;
     }
 
     // Every candidate was tried. `NoGroup` answers land here too: a core node
