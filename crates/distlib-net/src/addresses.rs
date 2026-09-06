@@ -14,6 +14,27 @@
 //! membership, from what a core node says when it serves the log — is written
 //! here, and iroh resolves against it.
 //!
+//! **Nothing here is ever read by this crate.** [`AddressBook::install`] hands
+//! the book to the endpoint, and iroh consults it on any dial whose caller
+//! supplied no address. We write; iroh reads. That indirection is the point —
+//! we cannot reach into how a protocol we did not write dials, but we can
+//! change what its endpoint is able to resolve.
+//!
+//! **It holds core nodes only, and that is enough.** Those are the only
+//! addresses the system records anywhere: a `MemberRecord` carries an id, a name
+//! and a pledge, and Raft's node map — which does carry addresses — holds only
+//! voters. A follower's address is written nowhere. It does not need to be:
+//! iroh-gossip installs a lookup of its own and fills it from the `PeerData`
+//! peers exchange in-band, so once a node is *in* the swarm the swarm supplies
+//! the rest, followers included. A follower dials a core node, the connection is
+//! bidirectional, and the core node broadcasts back down it without ever needing
+//! to dial one.
+//!
+//! So this is bootstrap, and only bootstrap: the first contact, which can only
+//! be a core node, before anybody has told this node anything. That is exactly
+//! what was deadlocked — a node could not join the swarm without resolving an
+//! id, and could not learn an address without joining the swarm.
+//!
 //! Not a security boundary, and it does not need to be. Being resolvable is not
 //! being admitted: [`crate::hooks::AllowlistHooks`] refuses a peer that is not a
 //! member in both directions, and it reads the log rather than this. The worst a
