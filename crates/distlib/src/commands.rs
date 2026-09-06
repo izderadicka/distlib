@@ -9,7 +9,7 @@ use distlib_consensus::{
 };
 use distlib_core::{
     Config, CoreMember, DataDir, MemberId, NodeAddr, Ticket,
-    identity::{create_secret_key, load_or_create_secret_key, member_id},
+    identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
@@ -76,8 +76,21 @@ pub fn init(paths: &Paths, force: bool) -> Result<()> {
 
 /// `distlib run`
 pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
+    // Said before anything is read: every line below it is only meaningful once
+    // you know which directory and which config file produced it. Refusing an
+    // empty directory closes the worst case, but pointing at *another node's*
+    // directory still starts a perfectly healthy node — just not the one meant.
+    tracing::info!(
+        data_dir = %paths.data_dir.root().display(),
+        config = %display_path(&paths.config_file),
+        "starting"
+    );
+
     let config = load_config(&paths.config_file)?;
-    let secret = load_or_create_secret_key(&paths.secret_key_file())?;
+    // Refuses an empty data directory rather than minting an identity in it —
+    // see `load_secret_key`. `init` and `whoami` are how a node comes to have
+    // one; `run` only ever uses it.
+    let secret = load_secret_key(&paths.secret_key_file())?;
     let me = member_id(&secret);
 
     // The bootstrap seed, and the last time configuration has anything to say
@@ -556,7 +569,7 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
     }
 
     let config = load_config(&paths.config_file)?;
-    let secret = load_or_create_secret_key(&key_file)?;
+    let secret = load_secret_key(&key_file)?;
     let me = member_id(&secret);
 
     println!("identity    {me}");

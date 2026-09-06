@@ -46,7 +46,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # Every test, slow ones included: `--all-features` turns on `slow-tests`,
       # which is what the fast local lane leaves out. nextest runs the test
-      # binaries concurrently, which takes this from ~38s to ~18s, and
+      # binaries concurrently, which takes this from ~43s to ~17s, and
       # `.config/nextest.toml` caps how many run at once so a busy runner does
       # not make the election timers thrash.
       - run: cargo nextest run --workspace --all-features

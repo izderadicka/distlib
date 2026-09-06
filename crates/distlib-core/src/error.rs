@@ -63,6 +63,14 @@ pub enum CoreError {
     /// A secret key file already exists and overwriting was not requested.
     #[error("secret key {path} already exists; pass --force to replace it")]
     KeyExists { path: PathBuf },
+
+    /// A command that must not invent an identity was pointed at a data
+    /// directory that holds none.
+    #[error(
+        "no identity in {path}; run `distlib init` first \
+         (`distlib whoami` also creates one)"
+    )]
+    NoIdentity { path: PathBuf },
 }
 
 impl CoreError {

@@ -248,6 +248,59 @@ fn a_free_port() -> u16 {
         .port()
 }
 
+/// Waits for a process that is expected to give up on its own.
+///
+/// `Command::output` would be shorter and would hang forever the day the
+/// refusal stops working — which is precisely the day this test has to fail.
+fn wait_for_exit(mut child: Child, what: &str) -> std::process::Output {
+    let deadline = Instant::now() + REFUSAL_TIMEOUT;
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    panic!("{what} did not exit within {REFUSAL_TIMEOUT:?}");
+}
+
+/// A refusal happens before any network work, so it is immediate or it is broken.
+const REFUSAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[test]
+fn run_refuses_a_data_directory_with_no_identity() {
+    // The failure this prevents: `distlib run` pointed at the wrong directory
+    // used to mint a fresh key and start a node that was nobody, with the only
+    // symptom a member id nobody recognised and a port nobody was told about.
+    let dir = TempDir::new().unwrap();
+
+    let child = distlib(dir.path())
+        .arg("run")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = wait_for_exit(child, "`distlib run` on an empty data directory");
+
+    assert!(
+        !output.status.success(),
+        "an empty data directory must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no identity"),
+        "the error must name the problem, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("distlib init"),
+        "the error must name the way out, got:\n{stderr}"
+    );
+    assert!(
+        !dir.path().join("keys").join("node.key").exists(),
+        "refusing must leave no identity behind"
+    );
+}
+
 #[test]
 fn three_friends_found_a_group() {
     // 1. Each of them runs `whoami` and sends the founder the line it prints.
