@@ -12,6 +12,12 @@ authors.workspace = true
 name = "distlib"
 path = "src/main.rs"
 
+[features]
+# See `distlib-consensus`: here it gates the founding test, which builds and
+# runs real `distlib` processes.
+default = ["slow-tests"]
+slow-tests = []
+
 [dependencies]
 distlib-core = { workspace = true }
 distlib-net = { workspace = true }

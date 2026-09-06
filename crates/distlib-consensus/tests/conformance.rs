@@ -11,6 +11,9 @@
 //! `RaftLogStorage` and a `RaftStateMachine` together, and the state machine
 //! did not exist yet.
 
+// Ten seconds for 34 cases against real redb files. Skipped by
+// `--no-default-features`; see the `slow-tests` feature in Cargo.toml.
+#![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 #![allow(clippy::result_large_err)] // openraft's StorageError, in its own signatures
 

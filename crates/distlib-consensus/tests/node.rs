@@ -7,17 +7,18 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 #![allow(clippy::result_large_err)] // openraft's error types, in its own signatures
 
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::time::Duration;
+
+// Only the dead-source test binds an address of its own.
+#[cfg(feature = "slow-tests")]
+use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{MemberRecord, MembershipEvent};
 use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{Peer, wait_for};
+use common::{Peer, until, wait_for};
 
 #[tokio::test]
 async fn a_founded_group_derives_its_membership_from_the_log() {
@@ -676,6 +677,9 @@ async fn a_follower_proposes_through_a_core_node() {
     founder.node.shutdown().await;
 }
 
+// Six seconds, and on its own the reason this binary took six: it waits out a
+// connect timeout against a source that is deliberately dead.
+#[cfg(feature = "slow-tests")]
 #[tokio::test]
 async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
     // A follower that gave up on the first core node it could not reach would
@@ -851,15 +855,26 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
         .map(|key| MemberId::from(key.public()))
         .collect();
 
+    // Seeded into every allowlist and into no founding set, so it is admitted
+    // before the group exists and never after. That makes it a barrier: the
+    // moment a node stops allowing it, that node's log-derived membership has
+    // been published — and with it, in the same pass and just before, the
+    // addresses of the core group. Without something to wait on, this test
+    // dials while the task that fills the address book has not run, which is
+    // how it came to fail one run in three under load.
+    let stale = MemberId::from(SecretKey::generate().public());
+    let core: Vec<(MemberId, NodeAddr)> = ids.iter().map(|id| (*id, NodeAddr::default())).collect();
+
     let mut peers = Vec::new();
     for (index, key) in keys.iter().enumerate() {
-        let others = ids
+        let bootstrap = ids
             .iter()
             .enumerate()
             .filter(|(other, _)| *other != index)
             .map(|(_, id)| *id)
+            .chain([stale])
             .collect();
-        peers.push(Peer::start(key.clone(), others).await);
+        peers.push(Peer::start_with(key.clone(), bootstrap, core.clone()).await);
     }
 
     let founders = peers
@@ -896,6 +911,16 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
         .split_first()
         .map(|(first, rest)| (*first, rest[0]))
         .expect("three voters leave two that do not lead");
+
+    // Wait for the address book to have been filled, then dial *once*. Retrying
+    // the dial instead would pass without it: given a few seconds, gossip
+    // distributes peer addresses of its own accord, so a retry loop here
+    // quietly stopped testing the thing it names — removing the address book's
+    // only writer left it passing.
+    until("the log-derived membership to be published", || {
+        !dialling.hooks.allowlist().is_allowed(&stale)
+    })
+    .await;
 
     // The id and nothing else — no address, no relay, exactly what gossip has.
     let echo = distlib_net::ping::ping(
@@ -977,6 +1002,10 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
     })
     .await;
 
+    // Not retried, unlike the test above, and the difference is the point: a
+    // follower's addresses arrive inside `MemberlogClient::fetch`, *before* the
+    // entries it fetched are applied — so by the time the membership shows the
+    // joiner, the address book has already been told. Nothing to wait for.
     let echo = distlib_net::ping::ping(
         follower.node.endpoint(),
         iroh::EndpointAddr::new(core[1].id.endpoint_id()),
@@ -992,6 +1021,8 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
     }
 }
 
+// Two seconds, most of it letting the gossip swarm form before taking it away.
+#[cfg(feature = "slow-tests")]
 #[tokio::test]
 async fn an_expelled_follower_stops_asking_and_says_so() {
     // §4.4 from the outside. An expelled member is refused by every core node,

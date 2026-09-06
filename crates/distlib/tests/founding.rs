@@ -6,6 +6,10 @@
 //! exchange happens outside the program. A library test cannot get it wrong, so
 //! it cannot catch it being wrong either.
 
+// Builds the binary and runs three of it, so it costs seconds and varies with
+// the machine. Skipped by `--no-default-features`; see the `slow-tests` feature
+// in Cargo.toml.
+#![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{

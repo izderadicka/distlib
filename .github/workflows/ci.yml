@@ -43,4 +43,12 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - uses: taiki-e/install-action@nextest
+      # Every test, slow ones included: `--all-features` turns on `slow-tests`,
+      # which is what the fast local lane leaves out. nextest runs the test
+      # binaries concurrently, which takes this from ~38s to ~18s, and
+      # `.config/nextest.toml` caps how many run at once so a busy runner does
+      # not make the election timers thrash.
+      - run: cargo nextest run --workspace --all-features
+      # nextest does not run doctests, so they need their own pass.
+      - run: cargo test --workspace --all-features --doc
