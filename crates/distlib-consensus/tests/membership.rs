@@ -5,7 +5,9 @@
 use distlib_consensus::{
     ConsensusError, MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp,
 };
-use distlib_core::{GroupId, MemberId};
+use std::net::{Ipv4Addr, SocketAddr};
+
+use distlib_core::{GroupId, MemberId, NodeAddr};
 use iroh::SecretKey;
 // The property tests, and only they, are generated.
 #[cfg(feature = "slow-tests")]
@@ -42,6 +44,26 @@ impl Signer {
             display_name: name.to_owned(),
             pledge_bytes: 0,
         }
+    }
+
+    /// The founder entry for this signer: its record, and where it is reachable.
+    ///
+    /// A distinct address per signer, derived from the id, because the point of
+    /// the log carrying addresses is that they are not interchangeable — a test
+    /// that gave every founder the same one could not tell a lost address from
+    /// a kept one.
+    fn founder(&self, name: &str) -> (MemberRecord, NodeAddr) {
+        (self.record(name), self.addr(0))
+    }
+
+    /// A recognisable address for this signer, `port` distinguishing successive
+    /// addresses of the same one.
+    fn addr(&self, port: u16) -> NodeAddr {
+        let octet = self.id.as_bytes()[0];
+        NodeAddr::default().with_direct(SocketAddr::from((
+            Ipv4Addr::new(127, 0, 0, octet),
+            11204 + port,
+        )))
     }
 
     fn sign(&self, event: MembershipEvent, changed_at: u64) -> SignedEvent {
@@ -81,10 +103,23 @@ fn founded() -> (MembershipState, Signer) {
     propose(
         &mut state,
         &alice,
-        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(1)).unwrap(),
     )
     .unwrap();
     (state, alice)
+}
+
+/// The core group as `CoreGroupChanged` wants it: each member at its own address.
+fn core_group(signers: &[&Signer]) -> Vec<(MemberId, NodeAddr)> {
+    signers
+        .iter()
+        .map(|signer| (signer.id, signer.addr(0)))
+        .collect()
+}
+
+/// Just the ids of the current voters, for the assertions that only care who.
+fn voters(state: &MembershipState) -> Vec<MemberId> {
+    state.core().keys().copied().collect()
 }
 
 fn allowlist(state: &MembershipState) -> Vec<MemberId> {
@@ -99,10 +134,7 @@ fn founding_seeds_members_and_core() {
 
     assert!(state.group_id().is_some());
     assert_eq!(allowlist(&state), vec![alice.id]);
-    assert!(
-        state.core().contains(&alice.id),
-        "founders are the initial voters"
-    );
+    assert!(state.is_core(&alice.id), "founders are the initial voters");
 }
 
 #[test]
@@ -110,7 +142,7 @@ fn a_group_is_founded_only_once() {
     let (mut state, alice) = founded();
 
     let again = alice.sign(
-        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(2)).unwrap(),
+        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(2)).unwrap(),
         state.changed_at(),
     );
 
@@ -146,7 +178,7 @@ fn a_founder_must_be_in_their_own_founding_set() {
     let mut state = MembershipState::new();
 
     let event = alice.sign(
-        MembershipEvent::found(vec![bob.record("bob")], Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(vec![bob.founder("bob")], Timestamp::from_millis(1)).unwrap(),
         state.changed_at(),
     );
 
@@ -161,7 +193,7 @@ fn a_repeated_founder_is_refused_when_building_the_event() {
     let alice = Signer::generate();
 
     let built = MembershipEvent::found(
-        vec![alice.record("alice"), alice.record("alice again")],
+        vec![alice.founder("alice"), alice.founder("alice again")],
         Timestamp::from_millis(1),
     );
 
@@ -187,9 +219,9 @@ fn a_repeated_founder_is_refused_on_apply() {
         MembershipEvent::GroupFounded {
             group_id: GroupId::from_bytes([7; 32]),
             founders: vec![
-                alice.record("alice"),
-                bob.record("bob"),
-                alice.record("dup"),
+                alice.founder("alice"),
+                bob.founder("bob"),
+                alice.founder("dup"),
             ],
         },
         state.changed_at(),
@@ -215,8 +247,8 @@ fn the_group_id_does_not_depend_on_founder_order() {
     let bob = Signer::generate();
     let at = Timestamp::from_millis(7);
 
-    let one = MembershipEvent::found(vec![alice.record("a"), bob.record("b")], at).unwrap();
-    let other = MembershipEvent::found(vec![bob.record("b"), alice.record("a")], at).unwrap();
+    let one = MembershipEvent::found(vec![alice.founder("a"), bob.founder("b")], at).unwrap();
+    let other = MembershipEvent::found(vec![bob.founder("b"), alice.founder("a")], at).unwrap();
 
     let (
         MembershipEvent::GroupFounded {
@@ -358,11 +390,11 @@ fn expulsion_removes_from_the_allowlist_and_the_core() {
         &mut state,
         &alice,
         MembershipEvent::CoreGroupChanged {
-            core: vec![alice.id, bob.id],
+            core: core_group(&[&alice, &bob]),
         },
     )
     .unwrap();
-    assert!(state.core().contains(&bob.id));
+    assert!(state.is_core(&bob.id));
 
     propose(
         &mut state,
@@ -376,7 +408,7 @@ fn expulsion_removes_from_the_allowlist_and_the_core() {
 
     assert!(!allowlist(&state).contains(&bob.id));
     assert!(
-        !state.core().contains(&bob.id),
+        !state.is_core(&bob.id),
         "a non-member must not remain a voter; raft would wait on a vote that cannot come"
     );
 }
@@ -429,13 +461,85 @@ fn expelling_a_non_member_is_refused() {
 // --- core group -------------------------------------------------------------
 
 #[test]
+fn founding_records_where_each_founder_is() {
+    let alice = Signer::generate();
+    let bob = Signer::generate();
+    let mut state = MembershipState::new();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::found(
+            vec![alice.founder("alice"), bob.founder("bob")],
+            Timestamp::from_millis(1),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        state.core().get(&alice.id),
+        Some(&alice.addr(0)),
+        "the log is where a node with no log yet learns to dial the core group"
+    );
+    assert_eq!(state.core().get(&bob.id), Some(&bob.addr(0)));
+}
+
+#[test]
+fn a_voter_can_be_given_a_new_address() {
+    // The failure this exists for: with `relay_mode = "disabled"` the recorded
+    // socket is the only way to reach a core node, so one that changes IP or
+    // port is out of its own group permanently (P1-23). Submitting a changed
+    // address is the same event as adding or removing a voter.
+    let (mut state, alice) = founded();
+    assert_eq!(state.core().get(&alice.id), Some(&alice.addr(0)));
+
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::CoreGroupChanged {
+            core: vec![(alice.id, alice.addr(1))],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        state.core().get(&alice.id),
+        Some(&alice.addr(1)),
+        "the group must be able to say a core node moved"
+    );
+    assert_eq!(voters(&state), vec![alice.id], "and only its address moved");
+}
+
+#[test]
+fn a_voter_named_twice_is_refused_rather_than_folded() {
+    // Two addresses for one member has no single answer, and collecting into a
+    // map would silently keep whichever came last.
+    let (mut state, alice) = founded();
+
+    let refused = propose(
+        &mut state,
+        &alice,
+        MembershipEvent::CoreGroupChanged {
+            core: vec![(alice.id, alice.addr(1)), (alice.id, alice.addr(2))],
+        },
+    );
+
+    assert_eq!(refused, Err(ConsensusError::InvalidCoreGroup));
+    assert_eq!(
+        state.core().get(&alice.id),
+        Some(&alice.addr(0)),
+        "a refused event must leave the address it failed to change"
+    );
+}
+
+#[test]
 fn the_core_group_must_be_members() {
     let (mut state, alice) = founded();
     let outsider = Signer::generate();
 
     let event = alice.sign(
         MembershipEvent::CoreGroupChanged {
-            core: vec![alice.id, outsider.id],
+            core: core_group(&[&alice, &outsider]),
         },
         state.changed_at(),
     );
@@ -535,12 +639,14 @@ fn a_non_core_member_cannot_change_the_core_group() {
         },
     )
     .unwrap();
-    assert!(!state.core().contains(&bob.id), "bob joined after founding");
+    assert!(!state.is_core(&bob.id), "bob joined after founding");
 
     let refused = propose(
         &mut state,
         &bob,
-        MembershipEvent::CoreGroupChanged { core: vec![bob.id] },
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[&bob]),
+        },
     );
 
     assert_eq!(
@@ -548,7 +654,7 @@ fn a_non_core_member_cannot_change_the_core_group() {
         Err(ConsensusError::NotCoreMember { proposer: bob.id })
     );
     assert_eq!(
-        state.core().iter().copied().collect::<Vec<_>>(),
+        voters(&state),
         vec![alice.id],
         "the voter set must be untouched"
     );
@@ -572,12 +678,12 @@ fn a_core_member_can_change_the_core_group() {
         &mut state,
         &alice,
         MembershipEvent::CoreGroupChanged {
-            core: vec![alice.id, bob.id],
+            core: core_group(&[&alice, &bob]),
         },
     )
     .unwrap();
 
-    assert!(state.core().contains(&bob.id));
+    assert!(state.is_core(&bob.id));
 }
 
 #[test]
@@ -630,7 +736,7 @@ fn founding_is_proposed_against_the_empty_membership() {
     let alice = Signer::generate();
     let mut state = MembershipState::new();
     let founding =
-        MembershipEvent::found(vec![alice.record("alice")], Timestamp::from_millis(1)).unwrap();
+        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(1)).unwrap();
 
     let invented = alice.sign(founding.clone(), 9);
     assert_eq!(
@@ -711,7 +817,7 @@ proptest! {
     #[test]
     fn the_core_group_is_always_a_subset_of_the_membership((founders, ops) in scenario()) {
         let state = fold(founders, &ops);
-        for id in state.core() {
+        for id in state.core().keys() {
             prop_assert!(state.is_member(id));
         }
     }
@@ -754,7 +860,7 @@ fn apply_scenario(
     if range.start == 0 {
         let records = pool[..founders]
             .iter()
-            .map(|s| s.record("founder"))
+            .map(|s| s.founder("founder"))
             .collect();
         let signed = pool[0].sign(
             MembershipEvent::found(records, Timestamp::from_millis(1)).unwrap(),
@@ -773,7 +879,7 @@ fn apply_scenario(
                 reason: "generated".to_owned(),
             },
             _ => MembershipEvent::CoreGroupChanged {
-                core: vec![actor.id, subject.id],
+                core: core_group(&[actor, subject]),
             },
         };
         // Refused events are expected and are exactly what the rules are for.

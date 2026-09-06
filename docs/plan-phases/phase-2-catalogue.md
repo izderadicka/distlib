@@ -212,14 +212,57 @@ directory and never said which config it had loaded, which cost an evening on no
 
 **Acceptance:** [`manual-check.md`](../manual-check.md)'s node-b step cannot go wrong the way it did.
 
-### 2.1 — The core group can move (2 PRs) — closes P1-23
+### 2.1 — The core group can move (3 PRs) — closes P1-23
+
+> **Revised while building it.** The plan had 2.1-1 wire `change_membership` and 2.1-2 add the
+> address case. Two facts moved the boundary. First, enacting a change means handing openraft a
+> node map, and the log had nowhere to put one — so the address had to come *first*, not second,
+> or the intermediate state would add voters with no address, which under `relay_mode =
+> "disabled"` is a voter nothing can reach. Second, openraft requires a node in a proposed config
+> to already be a learner, and a promoted node is still `Role::Follower` at runtime: it advertises
+> no `distlib/raft/0` and its router has no `RaftProtocol`, so enacting a promotion creates a voter
+> that counts toward quorum and can never answer. P1-30 justified "promotion needs a restart" with
+> "it costs nothing today because that event does not move Raft's voters anyway" — that
+> justification expires here, so promotion becomes its own PR rather than a footnote in this one.
 
 Not catalogue work, but it is the carried-forward item with a live failure mode: a core node that
 changes IP or port in a `relay_mode = "disabled"` group is out of its own group permanently, with
 refounding the only way back.
 
-- **2.1-1** — wire `CoreGroupChanged` to `raft.change_membership`. The event already commits, is
-  authorised (P1-20) and projects; what is missing is the consensus half.
+- **2.1-1** — **the log becomes the source of truth for core addressing.** `GroupFounded` and
+  `CoreGroupChanged` carry an address per core node; `MembershipState` holds the core group as a
+  map; `core_addresses()` reads that projection rather than openraft's `StoredMembership`, which
+  also fixes a follower answering "no core nodes" about the group it follows. No
+  `change_membership` yet. Delta P2-2.
+
+- **2.1-2** — wire `CoreGroupChanged` to `raft.change_membership`, for **address changes and
+  removals only**. The event already commits, is authorised (P1-20) and projects; what is missing
+  is the consensus half.
+
+  A promotion is refused at apply time until 2.1-3 lands, so the projection and Raft can never
+  disagree about who votes: an addition simply never commits.
+
+  Enactment is a reconciliation loop on the leader — diff Raft's voters and nodes against the
+  projection, emit `SetNodes` for moved addresses and `RemoveVoters` (`retain: false`, since P1-22
+  refuses `distlib/raft/0` to non-voters) for departures. It must wake on **both** the membership
+  watch and `Raft::metrics()`: a node that becomes leader *after* the event applied never sees the
+  membership watch fire again, and without that the "retry on the next opportunity, including
+  after a restart" recovery path does not exist. Being a diff rather than a command is what makes
+  it restart-safe with nothing extra persisted — and it also fixes a latent bug, since
+  `MemberExpelled` already drops a voter from the projection while leaving it a Raft voter for
+  ever.
+
+  **On `SetNodes`:** openraft's own docs say "do not use unless you know what you are doing",
+  because updating an address can point at a different node and elect two leaders. That hazard
+  does not exist here, and the reason belongs in the delta: `RaftClient::endpoint_addr` builds
+  `EndpointAddr::new(member.endpoint_id())`, so the socket is a hint the QUIC handshake overrides
+  — dialling a wrong address reaches nobody rather than the wrong somebody. That is exactly the
+  "ensure connection to the correct node is the `RaftNetwork`'s responsibility" clause in the same
+  openraft doc, discharged structurally.
+
+- **2.1-3** — **promotion**, which needs a node to be able to start voting without a restart:
+  advertising `distlib/raft/0`, gaining a `RaftProtocol`, and openraft's learner-before-voter
+  requirement. Closes the half of P1-30 that 2.1-2 leaves open.
 
   **The claim that must hold, and the one with real openraft risk:** a `CoreGroupChanged` that
   commits but whose `change_membership` then fails must not leave the projection and Raft's voter
@@ -233,11 +276,10 @@ refounding the only way back.
   Failure modes to test: a change proposed during an election, a change that would remove the
   proposer, a node restarting mid-change.
 
-- **2.1-2** — **the address half, which is the point.** The submitted node map must accept a
-  *changed address for an existing voter*, not only added and removed ids. Same openraft call, same
-  map. CLI: `distlib core set <member> [--addr ...] [--relay ...]` and `distlib core remove
-  <member>`; API method `group.propose_core`. `AddressBook` and the memberlog's core-group answer
-  follow automatically since both already read the projection.
+  The CLI and API surface — `distlib core set <member> [--addr ...] [--relay ...]`, `distlib core
+  remove <member>`, `group.propose_core` — lands with whichever of 2.1-2/2.1-3 makes it usable.
+  `AddressBook` and the memberlog's core-group answer follow automatically, since both already
+  read the projection.
 
 **Acceptance:** a three-node group; restart one core node on a different port with
 `relay_mode = "disabled"`; submit its new address; the group converges and the moved node is

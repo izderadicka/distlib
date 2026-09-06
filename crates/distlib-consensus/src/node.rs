@@ -279,7 +279,7 @@ impl MembershipNode {
         // cannot read a log it has no way to reach.
         let membership = state_machine.membership();
         let is_core = if membership.group_id().is_some() {
-            membership.core().contains(&id)
+            membership.is_core(&id)
         } else {
             core.iter().any(|(member, _)| *member == id)
         };
@@ -483,7 +483,6 @@ impl MembershipNode {
             .iter()
             .map(|(record, addr)| (RawMemberId::from(record.member_id), addr.clone()))
             .collect();
-        let records: Vec<MemberRecord> = founders.into_iter().map(|(record, _)| record).collect();
 
         // Raft's voters first, then the event: `client_write` needs a leader,
         // and there is none until the cluster is initialised.
@@ -500,8 +499,10 @@ impl MembershipNode {
             .await
             .map_err(raft_failed)?;
 
+        // The same pairs Raft was initialised with, so the log records the
+        // addressing rather than leaving `raft.initialize` as its only home.
         self.propose(
-            MembershipEvent::found(records, Timestamp::now())?,
+            MembershipEvent::found(founders, Timestamp::now())?,
             secret_key,
         )
         .await

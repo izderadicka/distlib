@@ -4,7 +4,7 @@
 //! the only Raft state in the system (§4.2); the catalogue and everything else
 //! sync by other means.
 
-use distlib_core::{GroupId, MemberId};
+use distlib_core::{GroupId, MemberId, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConsensusError, Result};
@@ -82,9 +82,16 @@ pub struct MemberRecord {
 pub enum MembershipEvent {
     /// The first entry in every log. Establishes the group and its founders,
     /// who become both the initial members and the initial core group.
+    ///
+    /// Each founder is paired with the address it is reachable at. This is the
+    /// only place the log records an address, and it is not decoration: every
+    /// other member is found by id, because gossip and the address book supply
+    /// the rest (P1-39) — but the core group is what a node holding no log yet
+    /// has to dial in order to *get* one, so those addresses cannot come from
+    /// the log's own contents by any other route.
     GroupFounded {
         group_id: GroupId,
-        founders: Vec<MemberRecord>,
+        founders: Vec<(MemberRecord, NodeAddr)>,
     },
 
     /// A new member joins.
@@ -100,8 +107,13 @@ pub enum MembershipEvent {
     /// A member revises their storage commitment.
     PledgeChanged { member: MemberId, pledge_bytes: u64 },
 
-    /// The set of Raft voters changes.
-    CoreGroupChanged { core: Vec<MemberId> },
+    /// The set of Raft voters changes, or one of them moves.
+    ///
+    /// The whole desired core group, addresses included — not a delta. A core
+    /// node that changes IP or port is submitted the same way one is added or
+    /// removed, because it is the same map either way, and machines get
+    /// renumbered far more often than founders get replaced (P1-23).
+    CoreGroupChanged { core: Vec<(MemberId, NodeAddr)> },
 }
 
 impl MembershipEvent {
@@ -119,12 +131,15 @@ impl MembershipEvent {
     /// into a map, so `[a, a, b]` yields two members but an id derived from
     /// three entries. Two different events would then describe the same group
     /// under different ids.
-    pub fn found(founders: Vec<MemberRecord>, at: Timestamp) -> Result<Self> {
+    pub fn found(founders: Vec<(MemberRecord, NodeAddr)>, at: Timestamp) -> Result<Self> {
         check_founders(&founders)?;
 
+        // Ids only. An address is not identity: a group re-founded on a
+        // different port is the same group, and hashing the address in would
+        // say otherwise.
         let mut ids: Vec<[u8; 32]> = founders
             .iter()
-            .map(|record| *record.member_id.as_bytes())
+            .map(|(record, _)| *record.member_id.as_bytes())
             .collect();
         ids.sort_unstable();
 
@@ -148,12 +163,15 @@ impl MembershipEvent {
 /// Checked in two places on purpose — [`MembershipEvent::found`] so a locally
 /// built event cannot be malformed, and again on apply, because an event
 /// arriving from another node is not ours to trust.
-pub(crate) fn check_founders(founders: &[MemberRecord]) -> Result<()> {
+pub(crate) fn check_founders(founders: &[(MemberRecord, NodeAddr)]) -> Result<()> {
     if founders.is_empty() {
         return Err(ConsensusError::NoFounders);
     }
 
-    let mut ids: Vec<MemberId> = founders.iter().map(|record| record.member_id).collect();
+    let mut ids: Vec<MemberId> = founders
+        .iter()
+        .map(|(record, _)| record.member_id)
+        .collect();
     ids.sort_unstable();
     if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
         return Err(ConsensusError::DuplicateFounder { member: pair[0] });
