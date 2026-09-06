@@ -426,6 +426,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     distlib_consensus::MemberlogClient::new(
         bystander.node.endpoint().clone(),
         bystander.node.connections().clone(),
+        distlib_net::AddressBook::default(),
     )
     .propose(founder.id, &founder_addr, event)
     .await
@@ -833,4 +834,160 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
 
     follower.node.shutdown().await;
     founder.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
+    // What iroh-gossip needs and cannot ask for. It subscribes with bare
+    // endpoint ids, so a member is reachable to it only if the endpoint can
+    // resolve one — and with no relay and no address lookup, the only ids that
+    // resolve are those of peers already spoken to. Raft connects the leader to
+    // each voter and never one voter to another, so without an address book two
+    // non-leading voters can never become gossip neighbours, and the mesh
+    // collapses to a star centred on the leader.
+    let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
+    let ids: Vec<MemberId> = keys
+        .iter()
+        .map(|key| MemberId::from(key.public()))
+        .collect();
+
+    let mut peers = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let others = ids
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, id)| *id)
+            .collect();
+        peers.push(Peer::start(key.clone(), others).await);
+    }
+
+    let founders = peers
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| (peer.record(&format!("voter-{index}")), peer.addr.clone()))
+        .collect();
+    peers[0]
+        .node
+        .init_group(founders, &peers[0].secret)
+        .await
+        .unwrap();
+    for peer in &peers {
+        wait_for(peer, "the group to be founded", |m| m.group_id().is_some()).await;
+    }
+
+    // Two voters that are not the leader, so neither has any reason to have
+    // dialled the other: Raft replicates leader to voter, never voter to voter.
+    let leader = peers
+        .iter()
+        .position(|peer| {
+            peer.node
+                .raft()
+                .and_then(|raft| raft.metrics().borrow().current_leader)
+                .is_some_and(|id| MemberId::try_from(id).is_ok_and(|id| id == peer.id))
+        })
+        .expect("a founded group has a leader");
+    let (dialling, target) = peers
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != leader)
+        .map(|(_, peer)| peer)
+        .collect::<Vec<_>>()
+        .split_first()
+        .map(|(first, rest)| (*first, rest[0]))
+        .expect("three voters leave two that do not lead");
+
+    // The id and nothing else — no address, no relay, exactly what gossip has.
+    let echo = distlib_net::ping::ping(
+        dialling.node.endpoint(),
+        iroh::EndpointAddr::new(target.id.endpoint_id()),
+        b"by id alone",
+    )
+    .await
+    .expect("a voter must be reachable by id, or gossip cannot reach it either");
+    assert_eq!(echo, b"by id alone");
+
+    for peer in &peers {
+        peer.node.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
+    // A follower holds no `StoredMembership`, so the core group it is told
+    // about when it fetches is its whole picture of where the group lives. Here
+    // it starts knowing one address — a ticket naming a single node, or the
+    // only one still at the address it was founded with — and has to end up
+    // able to reach the others, which is what rotating off a dead source and
+    // joining the gossip mesh both need.
+    let keys: Vec<SecretKey> = (0..2).map(|_| SecretKey::generate()).collect();
+    let ids: Vec<MemberId> = keys
+        .iter()
+        .map(|key| MemberId::from(key.public()))
+        .collect();
+
+    let mut core = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let others = ids
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, id)| *id)
+            .collect();
+        core.push(Peer::start(key.clone(), others).await);
+    }
+
+    let founders = core
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| (peer.record(&format!("voter-{index}")), peer.addr.clone()))
+        .collect();
+    core[0]
+        .node
+        .init_group(founders, &core[0].secret)
+        .await
+        .unwrap();
+    for peer in &core {
+        wait_for(peer, "the group to be founded", |m| m.group_id().is_some()).await;
+    }
+
+    let key = SecretKey::generate();
+    let joiner = MemberId::from(key.public());
+    core[0]
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: joiner,
+                    display_name: "late arrival".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &core[0].secret,
+        )
+        .await
+        .unwrap();
+
+    // One address, not two: everything else has to come from the log's own
+    // answers.
+    let follower =
+        Peer::start_with(key, ids.clone(), vec![(core[0].id, core[0].addr.clone())]).await;
+    wait_for(&follower, "the log to reach the follower", |m| {
+        m.is_member(&joiner)
+    })
+    .await;
+
+    let echo = distlib_net::ping::ping(
+        follower.node.endpoint(),
+        iroh::EndpointAddr::new(core[1].id.endpoint_id()),
+        b"never introduced",
+    )
+    .await
+    .expect("a follower must learn where the other core nodes are from the ones it asks");
+    assert_eq!(echo, b"never introduced");
+
+    follower.node.shutdown().await;
+    for peer in &core {
+        peer.node.shutdown().await;
+    }
 }

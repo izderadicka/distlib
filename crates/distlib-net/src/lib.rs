@@ -7,6 +7,7 @@
 //! handlers this crate does not author (iroh-blobs, iroh-docs, iroh-gossip),
 //! and a check inside any single handler would not cover them.
 
+pub mod addresses;
 pub mod allowlist;
 pub mod alpn;
 pub mod connections;
@@ -16,6 +17,7 @@ pub mod hooks;
 pub mod node;
 pub mod ping;
 
+pub use addresses::AddressBook;
 pub use allowlist::{Allowlist, AllowlistWriter, allowlist};
 pub use connections::Connections;
 pub use endpoint::build_endpoint;

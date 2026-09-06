@@ -14,7 +14,9 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use distlib_net::{AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol};
+use distlib_net::{
+    AddressBook, AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol,
+};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_gossip::{net::GOSSIP_ALPN, net::Gossip};
 use openraft::{
@@ -120,6 +122,10 @@ pub enum NodeError {
     /// A voters-only operation was asked of a node that does not vote.
     #[error("this node is not part of the core group")]
     NotCore,
+
+    /// The endpoint was closed before the node could be set up.
+    #[error("the endpoint is closed")]
+    EndpointClosed,
 
     /// This node could not catch up to the membership the group is at.
     ///
@@ -249,7 +255,17 @@ impl MembershipNode {
         // replication, forwarded proposals, following the log, and whatever
         // protocols come later. All of them draw on the same set.
         let connections = Connections::new();
-        let memberlog = MemberlogClient::new(endpoint.clone(), connections.clone());
+
+        // Where the group is, for anything that dials by id alone. Our own
+        // protocols carry a `NodeAddr` beside every member and never need it;
+        // iroh-gossip subscribes with bare ids and cannot. Seeded from the
+        // configured core group — which is also a ticket's core group — and
+        // added to as the log and the core nodes say more.
+        let addresses = AddressBook::install(&endpoint).map_err(|_| NodeError::EndpointClosed)?;
+        addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
+
+        let memberlog =
+            MemberlogClient::new(endpoint.clone(), connections.clone(), addresses.clone());
 
         // The log decides, once there is one. Before that, configuration does —
         // the same rule the allowlist follows, and for the same reason: a node
@@ -327,7 +343,11 @@ impl MembershipNode {
         // one rather than the caller having to order any of that.
         let gossip = tokio::spawn(join_topic(swarm, state_machine.clone(), id, is_core, hints));
 
-        let allowlist_updates = tokio::spawn(follow_membership(state_machine.clone(), allowlist));
+        let allowlist_updates = tokio::spawn(follow_membership(
+            state_machine.clone(),
+            allowlist,
+            addresses,
+        ));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
         Ok(Self {
@@ -744,7 +764,11 @@ async fn join_topic(
 ///
 /// The one place where consensus and the transport meet. It runs until the
 /// state machine is dropped, which only happens when the node shuts down.
-async fn follow_membership(state_machine: StateMachineStore, writer: AllowlistWriter) {
+async fn follow_membership(
+    state_machine: StateMachineStore,
+    writer: AllowlistWriter,
+    addresses: AddressBook,
+) {
     let mut memberships = state_machine.subscribe();
     loop {
         // Read before waiting, so a node that applied entries before this task
@@ -756,6 +780,13 @@ async fn follow_membership(state_machine: StateMachineStore, writer: AllowlistWr
             let members: Vec<MemberId> = membership.allowlist().collect();
             tracing::debug!(count = members.len(), "allowlist derived from the log");
             writer.replace(members);
+
+            // Where the voters are, from the same source that decides who they
+            // are. Empty on a follower, which holds no `StoredMembership` of
+            // its own — it learns the same addresses from the core nodes that
+            // serve it the log.
+            let core = state_machine.core_addresses();
+            addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
         } else {
             // No `GroupFounded` yet, so the log has nothing to say about who
             // belongs. Publishing its empty membership here would wipe the

@@ -54,6 +54,10 @@ pub enum NetError {
     #[error("payload is {len} bytes; the maximum is {max}")]
     PayloadTooLarge { len: usize, max: usize },
 
+    /// The endpoint was closed before it could be set up.
+    #[error("the endpoint is closed")]
+    EndpointClosed,
+
     /// A relay URL in the configuration could not be parsed.
     #[error("invalid relay url {url}")]
     InvalidRelayUrl { url: String },

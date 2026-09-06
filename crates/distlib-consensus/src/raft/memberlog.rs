@@ -18,7 +18,7 @@
 //! is where §4.2's non-core followers get their copy.
 
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{Connections, alpn};
+use distlib_net::{AddressBook, Connections, alpn};
 use iroh::{
     Endpoint,
     endpoint::Connection,
@@ -358,14 +358,21 @@ impl ProtocolHandler for MemberlogProtocol {
 pub struct MemberlogClient {
     endpoint: Endpoint,
     connections: Connections,
+    /// Where the core nodes are, kept current by what they answer with.
+    ///
+    /// This is the only place a follower learns addresses at all: it holds no
+    /// `StoredMembership`, so the core group it is told about in every reply is
+    /// its whole picture of where the group lives.
+    addresses: AddressBook,
 }
 
 impl MemberlogClient {
     /// Dials core nodes from `endpoint`, reusing the node's connections.
-    pub fn new(endpoint: Endpoint, connections: Connections) -> Self {
+    pub fn new(endpoint: Endpoint, connections: Connections, addresses: AddressBook) -> Self {
         Self {
             endpoint,
             connections,
+            addresses,
         }
     }
 
@@ -417,7 +424,17 @@ impl MemberlogClient {
             .map_err(|_| failed(format!("no answer within {FETCH_TIMEOUT:?}")))?
             .map_err(failed)?
         {
-            Response::Fetched(fetched) => Ok(fetched),
+            Response::Fetched(fetched) => {
+                // Every answer names the current core group with addresses, so
+                // learn them here rather than at each caller: this is where they
+                // arrive, and a caller that forgot would leave the group
+                // unreachable by id for no visible reason.
+                if let Fetched::Entries { source, .. } = &fetched {
+                    self.addresses
+                        .learn_all(source.core.iter().map(|(member, addr)| (*member, addr)));
+                }
+                Ok(fetched)
+            }
             Response::Proposed(_) => {
                 Err(failed("the peer answered a proposal to a fetch".to_owned()))
             }
