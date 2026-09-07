@@ -57,9 +57,21 @@ pub enum ConsensusError {
     #[error("{member} is not a member")]
     UnknownMember { member: MemberId },
 
-    /// A core group was proposed containing a non-member, or nobody at all.
-    #[error("the core group must be a non-empty subset of the membership")]
+    /// A core group was proposed containing a non-member, nobody at all, or the
+    /// same member twice.
+    #[error("the core group must be a non-empty subset of the membership, naming each member once")]
     InvalidCoreGroup,
+
+    /// A core group was proposed that adds a voter.
+    ///
+    /// Temporary, and the rule is here rather than at the API so that every
+    /// node reaches the same verdict about the same entry — the P1-20 siting
+    /// argument. It goes when a node can begin voting without restarting.
+    #[error(
+        "{member} cannot join the core group yet: a node only serves consensus from startup, \
+         so promoting it now would add a voter that counts toward quorum and cannot answer"
+    )]
+    PromotionUnsupported { member: MemberId },
 
     /// A member tried to set somebody else's pledge.
     #[error("{proposer} cannot set the pledge of {member}; a pledge is the member's own")]

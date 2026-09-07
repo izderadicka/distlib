@@ -270,6 +270,16 @@ impl MembershipState {
                 if folded.len() != core.len() {
                     return Err(ConsensusError::InvalidCoreGroup);
                 }
+                // Removals and address changes only, for now. Raft's voter set
+                // is put into step with this projection by
+                // [`crate::raft::core_group`], and it cannot promote: a node
+                // serves `distlib/raft/0` only if it started as a voter
+                // (P1-30), so a promoted one would count toward quorum and
+                // never answer. Refusing the event is what keeps the two from
+                // disagreeing — an addition simply never commits.
+                if let Some(member) = folded.keys().find(|id| !self.core.contains_key(id)) {
+                    return Err(ConsensusError::PromotionUnsupported { member: *member });
+                }
                 self.core = folded;
                 Ok(())
             }

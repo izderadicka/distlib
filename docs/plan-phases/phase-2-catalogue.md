@@ -229,14 +229,14 @@ Not catalogue work, but it is the carried-forward item with a live failure mode:
 changes IP or port in a `relay_mode = "disabled"` group is out of its own group permanently, with
 refounding the only way back.
 
-- **2.1-1** — **the log becomes the source of truth for core addressing.** `GroupFounded` and
+- **2.1-1** *(done, delta P2-2)* — **the log becomes the source of truth for core addressing.** `GroupFounded` and
   `CoreGroupChanged` carry an address per core node; `MembershipState` holds the core group as a
   map; `core_addresses()` reads that projection rather than openraft's `StoredMembership`, which
   also fixes a follower answering "no core nodes" about the group it follows. No
   `change_membership` yet. Delta P2-2.
 
-- **2.1-2** — wire `CoreGroupChanged` to `raft.change_membership`, for **address changes and
-  removals only**. The event already commits, is authorised (P1-20) and projects; what is missing
+- **2.1-2** *(done, delta P2-3)* — wire `CoreGroupChanged` to `raft.change_membership`, for
+  **address changes and removals only**. The event already commits, is authorised (P1-20) and projects; what is missing
   is the consensus half.
 
   A promotion is refused at apply time until 2.1-3 lands, so the projection and Raft can never
@@ -283,7 +283,9 @@ refounding the only way back.
 
 **Acceptance:** a three-node group; restart one core node on a different port with
 `relay_mode = "disabled"`; submit its new address; the group converges and the moved node is
-dialable again — as a slow-lane test, plus a paragraph in `manual-check.md`.
+dialable again — plus a paragraph in `manual-check.md`. **Still owed by 2.1-3**: 2.1-2 pins the
+mechanism (openraft's own membership takes the new address, and drops a departed voter) but not
+the end-to-end restart, which needs the CLI verb to submit one by hand.
 
 ### 2a — The catalogue converges (4 PRs)
 

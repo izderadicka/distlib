@@ -2,6 +2,7 @@
 //! is stored, and how committed entries become the membership everything else
 //! derives from.
 
+pub(crate) mod core_group;
 pub(crate) mod db;
 pub mod follower;
 pub mod log_store;
