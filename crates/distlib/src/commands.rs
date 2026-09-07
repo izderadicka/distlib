@@ -481,7 +481,7 @@ fn print_stored_status(paths: &Paths, me: MemberId) {
         Ok(membership) => {
             let membership = membership.unwrap_or_default();
             if print_group(&membership) {
-                let role = if membership.core().contains(&me) {
+                let role = if membership.is_core(&me) {
                     "core member"
                 } else if membership.is_member(&me) {
                     "member"
@@ -551,7 +551,7 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
             .members()
             .map(|member| Listed {
                 name: display(member),
-                core: membership.core().contains(&member.member_id),
+                core: membership.is_core(&member.member_id),
             })
             .collect(),
     })

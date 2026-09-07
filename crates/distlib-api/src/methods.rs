@@ -68,9 +68,9 @@ impl Api {
             "member": me,
             "group": membership.group_id(),
             // Derived, not configured — the log decides who votes.
-            "core": membership.core().contains(&me),
+            "core": membership.is_core(&me),
             "members": membership.len(),
-            "core_group": membership.core().iter().collect::<Vec<_>>(),
+            "core_group": membership.core().keys().collect::<Vec<_>>(),
             // The log index this membership last changed at: what a proposal is
             // checked against, so a caller can see whether it is looking at a
             // current view.
@@ -119,7 +119,7 @@ impl Api {
                     "member": record.member_id,
                     "name": record.display_name,
                     "pledge_bytes": record.pledge_bytes,
-                    "core": membership.core().contains(&record.member_id),
+                    "core": membership.is_core(&record.member_id),
                 })
             })
             .collect();

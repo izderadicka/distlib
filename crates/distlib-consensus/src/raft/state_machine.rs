@@ -232,10 +232,15 @@ impl StateMachineStore {
     /// are. Anything that has to *reach* a core node needs this one: serving a
     /// follower, and handing out a join ticket.
     pub fn core_addresses(&self) -> Vec<(MemberId, NodeAddr)> {
+        // The projection, not openraft's `StoredMembership`. Both hold this
+        // once they agree, but only the projection is built from the log, and
+        // a follower runs no Raft at all — reading openraft's copy meant a
+        // follower answered "no core nodes" about the group it was following.
         self.lock()
-            .membership
-            .nodes()
-            .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+            .state
+            .core()
+            .iter()
+            .map(|(member, addr)| (*member, addr.clone()))
             .collect()
     }
 

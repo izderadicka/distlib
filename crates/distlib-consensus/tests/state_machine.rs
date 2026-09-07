@@ -14,7 +14,7 @@ use std::sync::Arc;
 use distlib_consensus::{
     MemberRecord, MembershipEvent, SignedEvent, StateMachineStore, Timestamp, TypeConfig,
 };
-use distlib_core::{MemberId, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use iroh::SecretKey;
 use openraft::{
     CommittedLeaderId, Entry, EntryPayload, LogId, RaftSnapshotBuilder, storage::RaftStateMachine,
@@ -79,8 +79,11 @@ fn founding(founder: &Signer) -> Entry<TypeConfig> {
     entry(
         1,
         founder.sign(
-            MembershipEvent::found(vec![founder.record("founder")], Timestamp::from_millis(1))
-                .unwrap(),
+            MembershipEvent::found(
+                vec![(founder.record("founder"), NodeAddr::default())],
+                Timestamp::from_millis(1),
+            )
+            .unwrap(),
             0,
         ),
     )

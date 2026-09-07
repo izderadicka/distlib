@@ -9,9 +9,9 @@
 //! this gets snapshotted and compared across nodes, so `BTreeMap`/`BTreeSet`
 //! rather than the hashed equivalents.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use distlib_core::{GroupId, MemberId};
+use distlib_core::{GroupId, MemberId, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -25,7 +25,13 @@ use crate::{
 pub struct MembershipState {
     group: Option<GroupId>,
     members: BTreeMap<MemberId, MemberRecord>,
-    core: BTreeSet<MemberId>,
+    /// The Raft voters, each with the address the group records for it.
+    ///
+    /// A map rather than a set because the address belongs *to* the voter and
+    /// nothing else in the log carries it. Keeping the two apart would be two
+    /// values that have to agree, and the one thing this projection exists to
+    /// prevent is two answers to the same question.
+    core: BTreeMap<MemberId, NodeAddr>,
     /// Log index of the last entry that changed this state.
     ///
     /// The log's own index rather than a counter of our own: one monotonic
@@ -116,7 +122,7 @@ impl MembershipState {
                     member: *member,
                 })
             }
-            MembershipEvent::CoreGroupChanged { .. } if !self.core.contains(&proposer) => {
+            MembershipEvent::CoreGroupChanged { .. } if !self.core.contains_key(&proposer) => {
                 Err(ConsensusError::NotCoreMember { proposer })
             }
             _ => Ok(()),
@@ -135,9 +141,14 @@ impl MembershipState {
         self.group
     }
 
-    /// The current Raft voters.
-    pub fn core(&self) -> &BTreeSet<MemberId> {
+    /// The current Raft voters, each with the address the group records for it.
+    pub fn core(&self) -> &BTreeMap<MemberId, NodeAddr> {
         &self.core
+    }
+
+    /// Whether `member` is currently a Raft voter.
+    pub fn is_core(&self, member: &MemberId) -> bool {
+        self.core.contains_key(member)
     }
 
     /// The log index this membership last changed at.
@@ -176,7 +187,7 @@ impl MembershipState {
     fn found(
         &mut self,
         group_id: GroupId,
-        founders: &[MemberRecord],
+        founders: &[(MemberRecord, NodeAddr)],
         proposer: MemberId,
     ) -> Result<()> {
         if self.group.is_some() {
@@ -187,17 +198,24 @@ impl MembershipState {
         check_founders(founders)?;
         // A founder who is not in their own founding set would create a group
         // they are not a member of, and could never propose anything to it.
-        if !founders.iter().any(|founder| founder.member_id == proposer) {
+        if !founders
+            .iter()
+            .any(|(founder, _)| founder.member_id == proposer)
+        {
             return Err(ConsensusError::FounderNotIncluded { proposer });
         }
 
         self.group = Some(group_id);
         self.members = founders
             .iter()
-            .map(|founder| (founder.member_id, founder.clone()))
+            .map(|(founder, _)| (founder.member_id, founder.clone()))
             .collect();
-        // Founders are the initial voters; `CoreGroupChanged` moves it from here.
-        self.core = self.members.keys().copied().collect();
+        // Founders are the initial voters, at the addresses they founded with;
+        // `CoreGroupChanged` moves it from here.
+        self.core = founders
+            .iter()
+            .map(|(founder, addr)| (founder.member_id, addr.clone()))
+            .collect();
         Ok(())
     }
 
@@ -239,13 +257,20 @@ impl MembershipState {
                 // Changes this projection and nothing else. §4.5 has core-group
                 // changes go through openraft's joint consensus, and no
                 // `change_membership` call exists yet — so a member promoted
-                // here does not become a Raft voter, and a demoted one keeps
-                // voting. Recorded as P1-23; wiring it is its own change,
-                // because joint consensus has failure modes of its own.
-                if core.is_empty() || !core.iter().all(|id| self.members.contains_key(id)) {
+                // here does not become a Raft voter, a demoted one keeps
+                // voting, and a moved one is still dialled at its old address.
+                // Recorded as P1-23; enacting it is the next change, and it
+                // needs this event to carry addresses before it can.
+                if core.is_empty() || !core.iter().all(|(id, _)| self.members.contains_key(id)) {
                     return Err(ConsensusError::InvalidCoreGroup);
                 }
-                self.core = core.iter().copied().collect();
+                // A member named twice with two addresses has no single answer,
+                // and folding into a map would silently pick one of them.
+                let folded: BTreeMap<MemberId, NodeAddr> = core.iter().cloned().collect();
+                if folded.len() != core.len() {
+                    return Err(ConsensusError::InvalidCoreGroup);
+                }
+                self.core = folded;
                 Ok(())
             }
         }

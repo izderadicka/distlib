@@ -41,7 +41,7 @@ async fn a_founded_group_derives_its_membership_from_the_log() {
     let membership = founder.node.membership();
     assert!(membership.is_member(&founder.id));
     assert!(
-        membership.core().contains(&founder.id),
+        membership.is_core(&founder.id),
         "founders are the initial voters"
     );
     founder.node.shutdown().await;
@@ -379,7 +379,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     })
     .await;
     assert!(
-        !founder.node.membership().core().contains(&bystander.id),
+        !founder.node.membership().is_core(&bystander.id),
         "this test is only meaningful while the bystander is not a voter"
     );
 
@@ -939,8 +939,10 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
 
 #[tokio::test]
 async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
-    // A follower holds no `StoredMembership`, so the core group it is told
-    // about when it fetches is its whole picture of where the group lives. Here
+    // A follower holds no `StoredMembership`. It learns the founding addresses
+    // from the log itself — see the test below — but a node that joined the
+    // core group later is not in `GroupFounded`, and the addresses it is told
+    // about when it fetches are what fill that in. Here
     // it starts knowing one address — a ticket naming a single node, or the
     // only one still at the address it was founded with — and has to end up
     // able to reach the others, which is what rotating off a dead source and
@@ -1019,6 +1021,69 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
     for peer in &core {
         peer.node.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn a_follower_reports_where_the_core_group_is() {
+    // `core_addresses` is what a join ticket is made of and what a follower
+    // rotates around, and it used to read openraft's `StoredMembership` — which
+    // a follower never has, running no Raft at all. So a follower answered "no
+    // core nodes" about the group it was following, and could hand out a ticket
+    // naming nobody. It reads the projection now, which is built from the log,
+    // and the log carries the founding addresses.
+    let founder_key = SecretKey::generate();
+    let founder_id = MemberId::from(founder_key.public());
+    let joiner_key = SecretKey::generate();
+    let joiner = MemberId::from(joiner_key.public());
+
+    let founder = Peer::start(founder_key, vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("the founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the group to be founded", |m| {
+        m.group_id().is_some()
+    })
+    .await;
+
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: joiner,
+                    display_name: "a follower".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let follower = Peer::start_with(
+        joiner_key,
+        vec![founder_id],
+        vec![(founder_id, founder.addr.clone())],
+    )
+    .await;
+    wait_for(&follower, "the log to reach the follower", |m| {
+        m.is_member(&joiner)
+    })
+    .await;
+
+    assert_eq!(
+        follower.node.core_addresses(),
+        vec![(founder_id, founder.addr.clone())],
+        "a follower must be able to say where the group's core nodes are"
+    );
+
+    follower.node.shutdown().await;
+    founder.node.shutdown().await;
 }
 
 // Two seconds, most of it letting the gossip swarm form before taking it away.

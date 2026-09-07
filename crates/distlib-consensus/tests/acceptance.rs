@@ -119,10 +119,23 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     }
 
     // Every node agrees who is in the group: three voters and two who are not.
+    //
+    // Waited for, not asserted outright. Nothing above makes every node current:
+    // the loop waits for each *follower* to see *itself* admitted, and the ping
+    // waits for `core[1]`'s allowlist — so `core[2]` is never waited on at all,
+    // and neither is follower-0 learning about follower-1, which reaches it by
+    // gossip or by its own timer. Asserting a count against that is asserting
+    // that replication has already happened, and under a parallel test runner it
+    // sometimes had not: `left: 4, right: 5`. Agreement is the claim §9 makes,
+    // so waiting for it is the test; the bound turns a node that never converges
+    // into a failure that says which one.
     for peer in core.iter().chain(&followers) {
-        let membership = peer.node.membership();
-        assert_eq!(membership.len(), 5, "three core plus two followers");
-        assert_eq!(membership.core().len(), 3, "only the founders vote");
+        wait_for(peer, "every node to see the whole group", |m| m.len() == 5).await;
+        assert_eq!(
+            peer.node.membership().core().len(),
+            3,
+            "only the founders vote"
+        );
     }
     assert!(
         !followers[0].node.is_core() && followers[0].node.raft().is_none(),
