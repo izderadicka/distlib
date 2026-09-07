@@ -132,22 +132,17 @@ impl MembershipEvent {
     /// three entries. Two different events would then describe the same group
     /// under different ids.
     pub fn found(founders: Vec<(MemberRecord, NodeAddr)>, at: Timestamp) -> Result<Self> {
-        check_founders(&founders)?;
-
-        // Ids only. An address is not identity: a group re-founded on a
-        // different port is the same group, and hashing the address in would
-        // say otherwise.
-        let mut ids: Vec<[u8; 32]> = founders
-            .iter()
-            .map(|(record, _)| *record.member_id.as_bytes())
-            .collect();
-        ids.sort_unstable();
+        // Checking and sorting are the same pass, and this needs both.
+        let ids = checked_ids(&founders)?;
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(GROUP_ID_TAG);
         hasher.update(&(ids.len() as u64).to_le_bytes());
         for id in &ids {
-            hasher.update(id);
+            // Ids only. An address is not identity: a group re-founded on a
+            // different port is the same group, and hashing the address in
+            // would say otherwise.
+            hasher.update(id.as_bytes());
         }
         hasher.update(&at.as_millis().to_le_bytes());
 
@@ -158,12 +153,18 @@ impl MembershipEvent {
     }
 }
 
-/// The rule a founder set must satisfy: non-empty, and no member twice.
+/// The founders' ids, sorted — if the set is a valid one: non-empty, and no
+/// member twice.
 ///
-/// Checked in two places on purpose — [`MembershipEvent::found`] so a locally
-/// built event cannot be malformed, and again on apply, because an event
-/// arriving from another node is not ours to trust.
-pub(crate) fn check_founders(founders: &[(MemberRecord, NodeAddr)]) -> Result<()> {
+/// One function for both because they are one pass, and because the two callers
+/// want the same list for related reasons. [`MembershipEvent::found`] hashes it,
+/// so the order is part of the group id; the duplicate rule is a scan of
+/// adjacent pairs, which only means anything on a sorted list.
+///
+/// Sorting `MemberId` sorts by the key's bytes — `iroh::PublicKey` compares
+/// `as_bytes()`, and the newtype's derived `Ord` delegates to it — which is what
+/// lets one list serve a byte-oriented hash and an equality scan alike.
+fn checked_ids(founders: &[(MemberRecord, NodeAddr)]) -> Result<Vec<MemberId>> {
     if founders.is_empty() {
         return Err(ConsensusError::NoFounders);
     }
@@ -176,5 +177,15 @@ pub(crate) fn check_founders(founders: &[(MemberRecord, NodeAddr)]) -> Result<()
     if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
         return Err(ConsensusError::DuplicateFounder { member: pair[0] });
     }
-    Ok(())
+    Ok(ids)
+}
+
+/// The rule a founder set must satisfy, for the caller that wants only the
+/// verdict.
+///
+/// Checked in two places on purpose — [`MembershipEvent::found`] so a locally
+/// built event cannot be malformed, and again on apply, because an event
+/// arriving from another node is not ours to trust.
+pub(crate) fn check_founders(founders: &[(MemberRecord, NodeAddr)]) -> Result<()> {
+    checked_ids(founders).map(|_| ())
 }

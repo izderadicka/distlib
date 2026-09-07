@@ -242,6 +242,33 @@ fn a_group_cannot_be_founded_empty() {
 }
 
 #[test]
+fn the_group_id_derivation_is_fixed() {
+    // A golden value, because this is a wire fact: two nodes computing it
+    // differently would disagree about which group they are in, and nothing
+    // would say so. It pins the tag, the count, the timestamp encoding and the
+    // sort together — the sort in particular, which is over `MemberId` and has
+    // to stay its key bytes' own order.
+    let founders: Vec<(MemberRecord, NodeAddr)> = [3u8, 1, 2]
+        .into_iter()
+        .map(|seed| {
+            let signer = Signer::from_secret(SecretKey::from_bytes(&[seed; 32]));
+            signer.founder("founder")
+        })
+        .collect();
+
+    let MembershipEvent::GroupFounded { group_id, .. } =
+        MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap()
+    else {
+        panic!("found() builds a GroupFounded");
+    };
+
+    assert_eq!(
+        group_id.to_string(),
+        "5dfd2ec7199b5fa93b50ff9e6eb68e981ac46e2c2624000601eaccabb8e840c1"
+    );
+}
+
+#[test]
 fn the_group_id_does_not_depend_on_founder_order() {
     let alice = Signer::generate();
     let bob = Signer::generate();
