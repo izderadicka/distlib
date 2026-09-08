@@ -197,8 +197,8 @@ separately by the download flow. This keeps docs' automatic value-download from 
 
 ## Sub-phases
 
-Ten PRs. Each ends compiling, tested, and — from 2a-4 on — demo-able by hand. One PR at a time,
-review before the next.
+Thirteen PRs. Each ends compiling, tested, and — from 2a-4 on — demo-able by hand. One PR at a
+time, review before the next.
 
 ### 2.0 — Groundwork (1 PR)
 
@@ -212,7 +212,7 @@ directory and never said which config it had loaded, which cost an evening on no
 
 **Acceptance:** [`manual-check.md`](../manual-check.md)'s node-b step cannot go wrong the way it did.
 
-### 2.1 — The core group can move (3 PRs) — closes P1-23
+### 2.1 — The core group can move (2 PRs, done)
 
 > **Revised while building it.** The plan had 2.1-1 wire `change_membership` and 2.1-2 add the
 > address case. Two facts moved the boundary. First, enacting a change means handing openraft a
@@ -223,7 +223,9 @@ directory and never said which config it had loaded, which cost an evening on no
 > no `distlib/raft/0` and its router has no `RaftProtocol`, so enacting a promotion creates a voter
 > that counts toward quorum and can never answer. P1-30 justified "promotion needs a restart" with
 > "it costs nothing today because that event does not move Raft's voters anyway" — that
-> justification expires here, so promotion becomes its own PR rather than a footnote in this one.
+> justification expires here, so promotion becomes its own PR — now [2.3](#23--promotion-1-pr),
+> after the approval rules in 2.2, because promotion is itself a change to who votes and should be
+> governed by the same rule from the moment it becomes possible rather than being retrofitted.
 
 Not catalogue work, but it is the carried-forward item with a live failure mode: a core node that
 changes IP or port in a `relay_mode = "disabled"` group is out of its own group permanently, with
@@ -239,7 +241,7 @@ refounding the only way back.
   **address changes and removals only**. The event already commits, is authorised (P1-20) and projects; what is missing
   is the consensus half.
 
-  A promotion is refused at apply time until 2.1-3 lands, so the projection and Raft can never
+  A promotion is refused at apply time until 2.3 lands, so the projection and Raft can never
   disagree about who votes: an addition simply never commits.
 
   Enactment is a reconciliation loop on the leader — diff Raft's voters and nodes against the
@@ -260,9 +262,138 @@ refounding the only way back.
   "ensure connection to the correct node is the `RaftNetwork`'s responsibility" clause in the same
   openraft doc, discharged structurally.
 
-- **2.1-3** — **promotion**, which needs a node to be able to start voting without a restart:
-  advertising `distlib/raft/0`, gaining a `RaftProtocol`, and openraft's learner-before-voter
-  requirement. Closes the half of P1-30 that 2.1-2 leaves open.
+**Acceptance:** 2.1-2 pins the mechanism — openraft's own membership takes a new address, and
+drops a departed voter — with both halves mutation-checked. The end-to-end version (restart a core
+node on a different port under `relay_mode = "disabled"`, submit its new address by hand, watch the
+group converge) needs a CLI verb to submit one, and lands with 2.3.
+
+### 2.2 — Approval before a membership change takes effect (2 PRs)
+
+Found while reviewing 2.1-2, and worth doing next because 2.1-2 is what gave it teeth.
+
+**Today any member can expel anyone, including every core member, on a single signed proposal.**
+`MembershipState::authorise` constrains exactly two events — `PledgeChanged` to the member's own
+pledge, and `CoreGroupChanged` to a core proposer. `MemberExpelled` is open to every member against
+every member. §4.4 step 2 says otherwise: *"requires acknowledgment by a configurable quorum of core
+nodes (default: majority) before commit"*. That was never implemented, and P1-20 records
+`MemberExpelled` as "open to any member, **as §4.3 and §4.4 say**" — true of §4.4's step 1, which
+says any member may *submit*, and silent about step 2, which says a core quorum *commits*. So it is
+an undocumented deviation rather than a decision.
+
+Two things make it urgent rather than tidy-up:
+
+1. **2.1-2 gave it consequences.** Expelling a core member now genuinely removes them from
+   openraft's voter set, so a sequence of single proposals shrinks the group's ability to commit
+   anything.
+2. **The empty-core guard is bypassable, and the 2.1-2 loop then spins.** `CoreGroupChanged` refuses
+   to empty the core group and has a test saying so; `MemberExpelled` walks straight past it —
+   `self.core.remove(member)` with no floor. Verified by probe, not by reading: expelling the last
+   voter returns `Ok(())` and leaves zero voters. The reconciliation loop then submits
+   `RemoveVoters` for the last one, openraft refuses with `EmptyMembership`, and it retries every
+   two seconds for ever. **This is a bug in 2.1-2's loop and 2.2-1 is where it gets fixed.**
+
+Note where this sits relative to §2's threat model, which assumes members do not attack the
+protocol: the case this really guards is not an attacker but a **foot-gun**. A mistyped id in
+`distlib expel` removes a voter today, and nothing asks.
+
+#### The rule
+
+> **Changing who votes takes a majority of voters. Everything else takes one.**
+
+| | approvals |
+|---|---|
+| add a member | 1 |
+| expel a follower | 1 |
+| change a core node's address | 1 |
+| **expel a core member** | **majority of the current core** |
+| **demote a core member** | **majority of the current core** |
+| **promote a follower** (2.3) | **majority of the current core** |
+| change your own pledge | none — it is the member's own (P1-20) |
+
+Expelling a core member and demoting one are the same decision reached by two routes, so they must
+cost the same or the ceremony is bypassable in two cheap steps. Once a majority has demoted somebody
+the person left is a follower, and expelling them for one approval is right: the decision that
+mattered already happened.
+
+```rust
+fn approvals_needed(&self, event: &MembershipEvent) -> usize {
+    if self.changes_the_voters(event) {
+        self.core.len() / 2 + 1
+    } else {
+        1
+    }
+}
+
+fn changes_the_voters(&self, event: &MembershipEvent) -> bool {
+    match event {
+        MemberExpelled { member, .. } => self.is_core(member),
+        // Any difference either way. Additions cannot commit until 2.3, but the
+        // rule that governs them should not arrive with them.
+        CoreGroupChanged { core } => !names_exactly(core, self.core.keys()),
+        _ => false,
+    }
+}
+```
+
+**The path to the core group is follower → core member, and that is structural rather than a
+convention.** `MemberAdded` cannot make a voter — it does not touch `core` — which is precisely why
+admission stays at one approval: it can never be a governance decision. Promotion is always a
+separate `CoreGroupChanged`. Founders are the exception, and they are a different event.
+
+#### Design, with the calls made
+
+- **`MemberAdded` and `MemberExpelled` become proposals.** Applying one records it as pending rather
+  than changing the membership. The change happens in the fold when the last approval applies — no
+  node "notices" a threshold and proposes a follow-up, because two nodes would both do it and the
+  log is the only thing that should decide.
+- **`Approved { proposal: u64 }` names the log index of the proposal**, not its subject. Two pending
+  proposals about the same person stay unambiguous, and the log index is already the currency here
+  (`changed_at`). The CLI reads `12  expel  core-1  (1 of 2)` and then `distlib approve 12`.
+- **A core proposer's own proposal counts as their approval.** This is what keeps today's behaviour:
+  `distlib admit` and `distlib expel` run against a core node still take effect in one step, so the
+  existing acceptance test and the by-hand runbook are unchanged. What changes is a *follower*
+  proposing, and a core member being expelled.
+- **The target's own approval is refused.** Nobody votes on their own expulsion.
+- **An approver must be core at the moment the approval applies**, and the threshold is evaluated
+  then, against the core as it stands then — not as it stood when the proposal was made. Promoting a
+  fourth voter into a group of three needs 2 approvals, not 3. Joint consensus makes it easy to
+  argue either way, so it is written down.
+- **Every rule is re-checked when the last approval lands**, not only when the proposal was made.
+  The group can move in between, and that gap is where this kind of thing goes wrong.
+- **An expulsion that would empty the core is refused at apply time** — the bug above. Still needed
+  even with the majority rule, since a core majority could otherwise expel every core member.
+- **Majority is computed, not configured.** §4.4 says "configurable", and it cannot be a config file
+  key: the fold must reach the same verdict on every node, so a per-node setting could split the
+  membership. Configurable means *in the log*, which needs a policy event we do not have. §5.5 needs
+  exactly the same machinery for its weight cap, so it gets built once, there. Deviation recorded.
+- **No expiry, but a withdrawal event.** Timestamps are not authoritative (P1-3), so any expiry
+  would have to be counted in log entries, which is arbitrary. Pending entries clear when the member
+  is expelled or re-admitted; what is left is bounded by how many people are genuinely under
+  discussion. A known gap, stated rather than pretended away.
+
+#### The two PRs
+
+- **2.2-1 — the state machine only.** The two events, the pending state in `MembershipState`, the
+  thresholds, the approval rules, the empty-core floor, and `changes_the_voters` written
+  symmetrically so 2.3 inherits it. Fast-lane tests throughout. Nothing user-visible changes for a
+  core operator, which is what keeps it reviewable.
+- **2.2-2 — the surface.** `distlib pending` and `distlib approve <index>`; `group.propose_expel`
+  keeps its §7.1 name and gains `group.approve`; pending proposals appear in `node.status`. The
+  acceptance test and `manual-check.md` grow a genuine two-operator core expulsion.
+
+**Acceptance:** a three-node group; a follower proposes expelling a core member; one approval is not
+enough; a second core approval applies it, and 2.1-2's reconciliation loop drops the voter from
+openraft. Plus the same by hand in `manual-check.md`, which is the first time the runbook has needed
+two operators to agree on anything.
+
+### 2.3 — Promotion (1 PR)
+
+Closes P1-23 and the half of P1-30 that 2.1-2 leaves open. **After 2.2**, so a promotion is governed
+by the majority rule from the moment it becomes possible.
+
+- **Promotion** needs a node to be able to start voting without a restart: advertising
+  `distlib/raft/0`, gaining a `RaftProtocol`, and satisfying openraft's learner-before-voter
+  requirement. `ConsensusError::PromotionUnsupported` goes away in the same change.
 
   **The claim that must hold, and the one with real openraft risk:** a `CoreGroupChanged` that
   commits but whose `change_membership` then fails must not leave the projection and Raft's voter
@@ -276,16 +407,16 @@ refounding the only way back.
   Failure modes to test: a change proposed during an election, a change that would remove the
   proposer, a node restarting mid-change.
 
-  The CLI and API surface — `distlib core set <member> [--addr ...] [--relay ...]`, `distlib core
-  remove <member>`, `group.propose_core` — lands with whichever of 2.1-2/2.1-3 makes it usable.
-  `AddressBook` and the memberlog's core-group answer follow automatically, since both already
-  read the projection.
+- **The CLI and API surface for the core group** — `distlib core set <member> [--addr ...]
+  [--relay ...]`, `distlib core remove <member>`, `group.propose_core` — lands here, because this
+  is the first sub-phase where a core-group change is something an operator can usefully submit by
+  hand. Each of them is a proposal that 2.2's rules then govern. `AddressBook` and the memberlog's
+  core-group answer need no work: both already read the projection.
 
-**Acceptance:** a three-node group; restart one core node on a different port with
-`relay_mode = "disabled"`; submit its new address; the group converges and the moved node is
-dialable again — plus a paragraph in `manual-check.md`. **Still owed by 2.1-3**: 2.1-2 pins the
-mechanism (openraft's own membership takes the new address, and drops a departed voter) but not
-the end-to-end restart, which needs the CLI verb to submit one by hand.
+**Acceptance:** the end-to-end version 2.1 could not do. A three-node group; restart one core node
+on a different port under `relay_mode = "disabled"`; submit its new address by hand; the group
+converges and the moved node is dialable again. Then promote a follower and watch it start voting
+without a restart. Plus a paragraph in `manual-check.md` for both.
 
 ### 2a — The catalogue converges (4 PRs)
 
@@ -363,9 +494,10 @@ the end-to-end restart, which needs the CLI verb to submit one by hand.
 
 | Item | Phase 2 |
 |---|---|
-| **P1-23** — `CoreGroupChanged` moves nobody; no address can change | **Taken**, sub-phase 2.1 |
+| **P1-23** — `CoreGroupChanged` moves nobody; no address can change | **Taken**, sub-phases 2.1 (addressing, enactment) and 2.3 (promotion) |
 | **P1-29** — a follower too far behind cannot recover (`TooFarBehind`) | **Deferred.** The fix is serving the membership state itself, i.e. snapshot transfer, and it needs 5,000 membership events to reach. It belongs with whatever else needs snapshot transfer, not bolted onto the entry path. Re-state it in Phase 2's carry-forward. |
 | **P1-35** — gossip announces *and* a 30 s timer polls | **Deferred.** Phase 2 adds a second gossip consumer (docs), which is new evidence about what the load actually looks like. Revisit once there is a catalogue generating traffic, rather than tuning it blind now. |
+| **§4.4's core-quorum policy** — never implemented; any member can expel anyone on one proposal | **Taken**, sub-phase 2.2. Not a Phase 1 carry-forward but a Phase 1 omission, found while reviewing 2.1-2: P1-20 recorded `MemberExpelled` as open to any member "as §4.3 and §4.4 say", which is true of §4.4's step 1 and silent about step 2. |
 | **P0-6** — Windows and macOS unverified | **Deferred, and getting worse.** Phase 2 adds three new on-disk stores. The CI matrix is a one-element list precisely so widening it is a one-line change; it should be widened before anything user-facing claims cross-platform support. Not a Phase 2 blocker, but say so in the carry-forward rather than letting it go quiet for a third phase. |
 
 ---
