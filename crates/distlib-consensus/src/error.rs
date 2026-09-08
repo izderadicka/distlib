@@ -84,6 +84,44 @@ pub enum ConsensusError {
     #[error("{proposer} is not a core member and cannot change the core group")]
     NotCoreMember { proposer: MemberId },
 
+    /// An approval named a proposal that is not waiting for one.
+    ///
+    /// Either it was never made, or it has already been decided — approvals do
+    /// not accumulate against an applied proposal.
+    #[error("there is no proposal at index {proposal} waiting for approval")]
+    UnknownProposal { proposal: u64 },
+
+    /// Somebody outside the core group tried to approve a proposal.
+    ///
+    /// §4.4 gives the decision to a quorum of core nodes; any member may
+    /// *submit* one, which is [`MembershipEvent::MemberAdded`] and
+    /// [`MembershipEvent::MemberExpelled`]'s own rule.
+    ///
+    /// [`MembershipEvent::MemberAdded`]: crate::MembershipEvent::MemberAdded
+    /// [`MembershipEvent::MemberExpelled`]: crate::MembershipEvent::MemberExpelled
+    #[error("{approver} is not a core member and cannot approve proposals")]
+    ApproverNotCore { approver: MemberId },
+
+    /// Somebody tried to approve their own expulsion.
+    ///
+    /// The threshold is a majority of the core group *including* the member
+    /// being removed, so letting them supply the deciding vote would mean a
+    /// core of four could expel one of its own on the agreement of two other
+    /// people rather than three.
+    #[error("{member} cannot approve a proposal to expel them")]
+    SelfApproval { member: MemberId },
+
+    /// An approval reached the path that applies membership changes.
+    ///
+    /// Unreachable: [`MembershipState::apply`] dispatches approvals before that
+    /// point, and an approval never itself becomes a pending proposal. Spelled
+    /// out rather than swallowed, so a future routing mistake surfaces as a
+    /// refused entry instead of a silent no-op.
+    ///
+    /// [`MembershipState::apply`]: crate::MembershipState::apply
+    #[error("an approval is not itself a membership change")]
+    ApprovalIsNotAChange,
+
     /// The proposal was made against a membership that has since changed.
     #[error(
         "the group changed at index {current} but this was proposed against {seen}; \
