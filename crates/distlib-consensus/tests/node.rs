@@ -432,10 +432,19 @@ async fn a_core_node_that_moves_is_dialled_at_its_new_address() {
 
     // The projection is what the log says; openraft's membership is what
     // consensus dials. Before this, only the first of the two ever moved.
-    until("raft to be told the new address", || {
-        raft_voters(&peers[0]).contains(&(peers[2].id, moved.clone()))
-    })
-    .await;
+    //
+    // Every voter, not just the leader. Only the leader can *submit* a
+    // membership change — it is a write — but openraft carries it as log
+    // entries, so the others receive it by ordinary replication rather than by
+    // doing anything themselves. That is the whole reason the reconciliation
+    // loop does nothing on a non-leader, so it is worth a test rather than a
+    // comment.
+    for peer in &peers {
+        until("every voter's raft to be told the new address", || {
+            raft_voters(peer).contains(&(peers[2].id, moved.clone()))
+        })
+        .await;
+    }
 
     for peer in &peers {
         wait_for(peer, "every node to record the new address", |m| {
@@ -470,11 +479,19 @@ async fn a_core_node_the_log_drops_stops_voting() {
         .await
         .unwrap();
 
-    until("raft to stop counting the expelled node", || {
-        let voters = raft_voters(&peers[0]);
-        voters.len() == 2 && !voters.iter().any(|(member, _)| *member == peers[2].id)
-    })
-    .await;
+    // Both survivors, for the same reason: the change replicates, it is not
+    // re-derived independently. The expelled node is not asked — the group has
+    // stopped talking to it, which is the point of expelling it.
+    for peer in &peers[..2] {
+        until(
+            "every surviving voter to stop counting the expelled node",
+            || {
+                let voters = raft_voters(peer);
+                voters.len() == 2 && !voters.iter().any(|(member, _)| *member == peers[2].id)
+            },
+        )
+        .await;
+    }
 
     for peer in peers {
         peer.node.shutdown().await;

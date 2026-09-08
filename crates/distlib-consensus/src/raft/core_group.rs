@@ -48,6 +48,18 @@ const RETRY: Duration = Duration::from_secs(2);
 enum Pass {
     /// Raft already agrees with the log.
     Converged,
+
+    /// This node is not the leader, so any difference is not its to close.
+    ///
+    /// A separate answer from [`Self::Converged`] even though the loop waits
+    /// after either, because they are different facts and conflating them reads
+    /// as though the other voters are being skipped. They are not: openraft
+    /// writes a membership change as log entries, so every voter receives it by
+    /// ordinary replication. There is nothing for a non-leader to *do* here,
+    /// and nothing it *could* do — `change_membership` is a write, and a
+    /// non-leader gets `ForwardToLeader` for its trouble.
+    NotOurs,
+
     /// Something was submitted; look again, in case there is more.
     Changed,
 }
@@ -71,7 +83,7 @@ pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineSto
             // and address changes are separate joint-consensus rounds, so more
             // than one pass is the ordinary case rather than an error path.
             Ok(Pass::Changed) => continue,
-            Ok(Pass::Converged) => {}
+            Ok(Pass::Converged | Pass::NotOurs) => {}
             Err(error) => {
                 tracing::warn!(%error, "could not put the core group into effect; will retry");
                 tokio::time::sleep(RETRY).await;
@@ -210,7 +222,7 @@ async fn pass(
 ) -> Result<Pass, Box<dyn std::error::Error + Send + Sync>> {
     let server = raft.server_metrics().borrow().clone();
     if server.state != ServerState::Leader {
-        return Ok(Pass::Converged);
+        return Ok(Pass::NotOurs);
     }
 
     let Some(voters) = current_voters(server.membership_config.membership()) else {
