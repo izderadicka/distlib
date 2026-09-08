@@ -109,9 +109,35 @@ impl Peer {
     }
 }
 
+/// The default bound: long enough for anything gossip or Raft does promptly.
+///
+/// Deliberately *shorter* than [`PATIENTLY`], so a test that waits on something
+/// prompt fails quickly when it breaks.
+const SOON: Duration = Duration::from_secs(15);
+
+/// For waiting on something whose guarantee is the follower's own timer.
+///
+/// Gossip announcements are best-effort (P1-33) — one made before a follower's
+/// subscription is live is simply lost — and the guarantee behind them is
+/// `follower::IDLE_POLL`, which is thirty seconds. Anything a follower has to
+/// learn *without being told directly* must therefore be bounded above that, or
+/// the test is asserting a promptness the design does not offer. That is not
+/// hypothetical: it is why the acceptance test failed under a parallel runner.
+pub const PATIENTLY: Duration = Duration::from_secs(45);
+
 /// Waits for a node's derived membership to satisfy `predicate`.
 pub async fn wait_for(peer: &Peer, what: &str, predicate: impl Fn(&MembershipState) -> bool) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    wait_for_upto(peer, SOON, what, predicate).await;
+}
+
+/// [`wait_for`] with the bound named, for waits that outlast [`SOON`].
+pub async fn wait_for_upto(
+    peer: &Peer,
+    bound: Duration,
+    what: &str,
+    predicate: impl Fn(&MembershipState) -> bool,
+) {
+    tokio::time::timeout(bound, async {
         loop {
             if predicate(&peer.node.membership()) {
                 return;
@@ -120,7 +146,14 @@ pub async fn wait_for(peer: &Peer, what: &str, predicate: impl Fn(&MembershipSta
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    // Naming the node matters: every failure of this so far has been one node
+    // out of five, and a message that does not say which one costs a rerun.
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out after {bound:?} waiting for {what}, on {}",
+            peer.id.fmt_short()
+        )
+    });
 }
 
 /// Waits until `condition` holds, or gives up and says what it was waiting for.
@@ -136,7 +169,7 @@ pub async fn wait_for(peer: &Peer, what: &str, predicate: impl Fn(&MembershipSta
 /// does nothing — which is exactly what happened here, gossip supplying an
 /// address the address book had failed to learn.
 pub async fn until(what: &str, condition: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(SOON, async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

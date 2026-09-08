@@ -26,7 +26,10 @@
 //! such an event outright, so this never sees one; the loud log below is a
 //! backstop for the day that rule changes without this one.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use openraft::{ChangeMembers, Raft, ServerState};
@@ -107,13 +110,100 @@ pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineSto
     }
 }
 
-/// Compares once, and submits at most one change.
+/// The one change to submit next, or `None` when Raft already agrees.
+#[derive(Debug, PartialEq, Eq)]
+enum Change {
+    /// Voters whose recorded address the log has moved.
+    Readdress(BTreeMap<RawMemberId, NodeAddr>),
+    /// Voters the log no longer lists.
+    Remove(BTreeSet<RawMemberId>),
+    /// The log names voters Raft does not have. Not a change — nothing here can
+    /// promote — so this is something to say rather than something to do.
+    CannotPromote(Vec<MemberId>),
+}
+
+/// What one comparison says to do, given what the log wants and what Raft has.
 ///
-/// One change per pass because [`ChangeMembers`] describes one kind of change
-/// and each call is its own joint-consensus round. Addresses first: a node being
-/// removed does not need its address corrected, and doing the harmless half
-/// first means a failure partway leaves the group with the *right* addressing
-/// and a stale voter, rather than the reverse.
+/// Pure, and separated from [`pass`] for exactly the reason this module is easy
+/// to get wrong: the interesting part is a set comparison, and a set comparison
+/// that needs a three-node cluster to exercise is one nobody will argue with.
+/// The tests at the bottom of this file are the argument.
+///
+/// **One change, not a plan.** [`ChangeMembers`] describes a single kind of
+/// change and each call is its own joint-consensus round, so a pass that finds
+/// two things to do submits the first and is called again. Addresses come
+/// before removals: a departing voter is not in `wanted`, so its address is
+/// never in `Readdress` anyway, and taking the half that cannot reduce the
+/// voter set first means a failure in between leaves a group that is fully
+/// addressable rather than one short.
+fn next_change(
+    wanted: &BTreeMap<MemberId, NodeAddr>,
+    voters: &BTreeMap<MemberId, NodeAddr>,
+) -> Option<Change> {
+    // An empty `wanted` is not "remove every voter". It means either that no
+    // group has been founded, or that expulsions have emptied the projection's
+    // core group — which they can, today, because `MemberExpelled` drops a
+    // member from `core` with no floor beneath it. Neither is an instruction:
+    // openraft refuses an empty membership outright, and a group with no voters
+    // could never commit the event that would restore them. So this leaves Raft
+    // alone and the group keeps whatever voters it had. That is a bad state to
+    // be in, but a stable one, and the fix belongs where the hole is — in the
+    // rule that let the core group be emptied.
+    if wanted.is_empty() {
+        return None;
+    }
+
+    let moved: BTreeMap<RawMemberId, NodeAddr> = wanted
+        .iter()
+        .filter(|(member, addr)| voters.get(member).is_some_and(|current| current != *addr))
+        .map(|(member, addr)| (RawMemberId::from(*member), addr.clone()))
+        .collect();
+    if !moved.is_empty() {
+        return Some(Change::Readdress(moved));
+    }
+
+    let departed: BTreeSet<RawMemberId> = voters
+        .keys()
+        .filter(|member| !wanted.contains_key(member))
+        .map(|member| RawMemberId::from(*member))
+        .collect();
+    if !departed.is_empty() {
+        return Some(Change::Remove(departed));
+    }
+
+    let promoted: Vec<MemberId> = wanted
+        .keys()
+        .filter(|member| !voters.contains_key(member))
+        .copied()
+        .collect();
+    if !promoted.is_empty() {
+        return Some(Change::CannotPromote(promoted));
+    }
+
+    None
+}
+
+/// The voters openraft currently has, each with the address it would dial.
+///
+/// `None` if that picture cannot be read — every id here was written by this
+/// codebase from a [`MemberId`], and every voter is guaranteed a node entry by
+/// openraft's own validity check, so either failing is an invariant violation.
+/// Refusing to act on a partial picture is the point: a voter dropped quietly
+/// here would be one this module could never remove and never notice.
+fn current_voters(
+    membership: &openraft::Membership<RawMemberId, NodeAddr>,
+) -> Option<BTreeMap<MemberId, NodeAddr>> {
+    membership
+        .voter_ids()
+        .map(|id| {
+            let member = MemberId::try_from(id).ok()?;
+            let addr = membership.get_node(&id)?;
+            Some((member, addr.clone()))
+        })
+        .collect()
+}
+
+/// Compares once, and submits at most one change.
 async fn pass(
     raft: &Raft<TypeConfig>,
     state_machine: &StateMachineStore,
@@ -123,80 +213,171 @@ async fn pass(
         return Ok(Pass::Converged);
     }
 
-    let wanted = state_machine.membership();
-    let wanted = wanted.core();
-    if wanted.is_empty() {
-        // Before founding. Raft has no membership to reconcile against either.
-        return Ok(Pass::Converged);
-    }
-
-    let voters: BTreeMap<MemberId, NodeAddr> = server
-        .membership_config
-        .nodes()
-        .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
-        .filter(|(member, _)| {
-            server
-                .membership_config
-                .voter_ids()
-                .any(|voter| MemberId::try_from(voter).is_ok_and(|voter| voter == *member))
-        })
-        .collect();
-
-    // Addresses that moved, for voters that stay.
-    let moved: BTreeMap<RawMemberId, NodeAddr> = wanted
-        .iter()
-        .filter(|(member, addr)| voters.get(member).is_some_and(|current| current != *addr))
-        .map(|(member, addr)| (RawMemberId::from(*member), addr.clone()))
-        .collect();
-    if !moved.is_empty() {
-        tracing::info!(
-            count = moved.len(),
-            "the log gives a core node a new address"
-        );
-        // `SetNodes` carries a warning in openraft's own documentation, because
-        // pointing a voter's address at a different node lets two quorums form.
-        // That cannot happen here: `RaftClient` dials
-        // `EndpointAddr::new(member.endpoint_id())`, so the address is a hint
-        // the QUIC handshake overrides — a wrong one reaches nobody rather than
-        // the wrong somebody. openraft names that as the `RaftNetwork`'s
-        // responsibility in the same document, and iroh discharges it.
-        raft.change_membership(ChangeMembers::SetNodes(moved), false)
-            .await?;
-        return Ok(Pass::Changed);
-    }
-
-    // Voters the log no longer lists.
-    let departed: std::collections::BTreeSet<RawMemberId> = voters
-        .keys()
-        .filter(|member| !wanted.contains_key(member))
-        .map(|member| RawMemberId::from(*member))
-        .collect();
-    if !departed.is_empty() {
-        tracing::info!(count = departed.len(), "the log drops a core node");
-        // `retain: false` — not kept on as learners. P1-22 refuses
-        // `distlib/raft/0` to anyone who is not a current voter, so retaining
-        // them would mean replicating to a node this group also refuses to talk
-        // to, which is a standing failure rather than a graceful demotion.
-        raft.change_membership(ChangeMembers::RemoveVoters(departed), false)
-            .await?;
-        return Ok(Pass::Changed);
-    }
-
-    // Anything the log lists that does not vote yet. Unreachable while the state
-    // machine refuses a promoting `CoreGroupChanged`, and loud rather than
-    // silent because the two rules have to move together.
-    let promoted: Vec<MemberId> = wanted
-        .keys()
-        .filter(|member| !voters.contains_key(member))
-        .copied()
-        .collect();
-    if !promoted.is_empty() {
+    let Some(voters) = current_voters(server.membership_config.membership()) else {
         tracing::error!(
-            ?promoted,
-            "the log names core nodes that do not vote, and promotion is not implemented; \
-             they will not take part in consensus"
+            membership = ?server.membership_config,
+            "raft's voter set cannot be read as member ids; not reconciling it"
+        );
+        return Ok(Pass::Converged);
+    };
+
+    let published = state_machine.membership();
+    let Some(change) = next_change(published.core(), &voters) else {
+        return Ok(Pass::Converged);
+    };
+
+    match change {
+        Change::Readdress(moved) => {
+            tracing::info!(
+                count = moved.len(),
+                "the log gives a core node a new address"
+            );
+            // `SetNodes` carries a warning in openraft's own documentation,
+            // because pointing a voter's address at a different node lets two
+            // quorums form. That cannot happen here: `RaftClient` dials
+            // `EndpointAddr::new(member.endpoint_id())`, so the address is a
+            // hint the QUIC handshake overrides — a wrong one reaches nobody
+            // rather than the wrong somebody. openraft names that as the
+            // `RaftNetwork`'s responsibility in the same document, and iroh
+            // discharges it.
+            raft.change_membership(ChangeMembers::SetNodes(moved), false)
+                .await?;
+            Ok(Pass::Changed)
+        }
+        Change::Remove(departed) => {
+            tracing::info!(count = departed.len(), "the log drops a core node");
+            // `retain: false` — not kept on as learners. P1-22 refuses
+            // `distlib/raft/0` to anyone who is not a current voter, so
+            // retaining them would mean replicating to a node this group also
+            // refuses to talk to: a standing failure rather than a graceful
+            // demotion.
+            raft.change_membership(ChangeMembers::RemoveVoters(departed), false)
+                .await?;
+            Ok(Pass::Changed)
+        }
+        Change::CannotPromote(promoted) => {
+            tracing::error!(
+                ?promoted,
+                "the log names core nodes that do not vote, and promotion is not implemented; \
+                 they will not take part in consensus"
+            );
+            Ok(Pass::Converged)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use super::*;
+
+    fn member(seed: u8) -> MemberId {
+        MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public())
+    }
+
+    fn at(port: u16) -> NodeAddr {
+        NodeAddr::default().with_direct(([127, 0, 0, 1], port).into())
+    }
+
+    /// The core group as the log and as Raft, from the same shorthand.
+    fn view(entries: &[(u8, u16)]) -> BTreeMap<MemberId, NodeAddr> {
+        entries
+            .iter()
+            .map(|(seed, port)| (member(*seed), at(*port)))
+            .collect()
+    }
+
+    fn raw(seed: u8) -> RawMemberId {
+        RawMemberId::from(member(seed))
+    }
+
+    #[test]
+    fn agreement_asks_for_nothing() {
+        let both = view(&[(1, 11), (2, 12), (3, 13)]);
+        assert_eq!(next_change(&both, &both), None);
+    }
+
+    #[test]
+    fn a_moved_address_is_set_and_only_for_the_one_that_moved() {
+        let wanted = view(&[(1, 11), (2, 12), (3, 99)]);
+        let voters = view(&[(1, 11), (2, 12), (3, 13)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::Readdress(BTreeMap::from([(raw(3), at(99))])))
         );
     }
 
-    Ok(Pass::Converged)
+    #[test]
+    fn a_voter_the_log_no_longer_lists_is_removed() {
+        let wanted = view(&[(1, 11), (2, 12)]);
+        let voters = view(&[(1, 11), (2, 12), (3, 13)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::Remove(BTreeSet::from([raw(3)])))
+        );
+    }
+
+    #[test]
+    fn addressing_is_done_before_removing() {
+        // Both are outstanding. One change per pass, and this is the order:
+        // a failure in between leaves a group that is fully addressable rather
+        // than one voter short.
+        let wanted = view(&[(1, 11), (2, 99)]);
+        let voters = view(&[(1, 11), (2, 12), (3, 13)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::Readdress(BTreeMap::from([(raw(2), at(99))])))
+        );
+
+        // The pass after the addresses have landed.
+        let voters = view(&[(1, 11), (2, 99), (3, 13)]);
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::Remove(BTreeSet::from([raw(3)])))
+        );
+        assert_eq!(next_change(&wanted, &wanted), None, "and then it is done");
+    }
+
+    #[test]
+    fn a_departing_voter_is_never_readdressed_on_the_way_out() {
+        // It is not in `wanted`, so it cannot be in `Readdress` — which is what
+        // makes the ordering above cost nothing.
+        let wanted = view(&[(1, 11)]);
+        let voters = view(&[(1, 11), (2, 12)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::Remove(BTreeSet::from([raw(2)])))
+        );
+    }
+
+    #[test]
+    fn a_voter_the_log_has_gained_is_reported_not_added() {
+        // Promotion is refused by the state machine, so this is unreachable —
+        // and says so loudly rather than quietly doing nothing, because the two
+        // rules have to move together.
+        let wanted = view(&[(1, 11), (2, 12)]);
+        let voters = view(&[(1, 11)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters),
+            Some(Change::CannotPromote(vec![member(2)]))
+        );
+    }
+
+    #[test]
+    fn an_empty_core_group_is_not_an_instruction_to_remove_everyone() {
+        // Two ways to get here: no group founded yet, or expulsions have emptied
+        // the projection's core — which they can, since `MemberExpelled` drops a
+        // member from `core` with no floor. Neither means "remove every voter":
+        // openraft refuses an empty membership, and a group with no voters could
+        // never commit the event that would restore them.
+        let voters = view(&[(1, 11), (2, 12)]);
+
+        assert_eq!(next_change(&BTreeMap::new(), &voters), None);
+    }
 }

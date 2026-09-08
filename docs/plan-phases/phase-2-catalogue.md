@@ -285,12 +285,19 @@ Two things make it urgent rather than tidy-up:
 1. **2.1-2 gave it consequences.** Expelling a core member now genuinely removes them from
    openraft's voter set, so a sequence of single proposals shrinks the group's ability to commit
    anything.
-2. **The empty-core guard is bypassable, and the 2.1-2 loop then spins.** `CoreGroupChanged` refuses
-   to empty the core group and has a test saying so; `MemberExpelled` walks straight past it —
-   `self.core.remove(member)` with no floor. Verified by probe, not by reading: expelling the last
-   voter returns `Ok(())` and leaves zero voters. The reconciliation loop then submits
-   `RemoveVoters` for the last one, openraft refuses with `EmptyMembership`, and it retries every
-   two seconds for ever. **This is a bug in 2.1-2's loop and 2.2-1 is where it gets fixed.**
+2. **The empty-core guard is bypassable, and the result is a group that can never change again.**
+   `CoreGroupChanged` refuses to empty the core group and has a test saying so; `MemberExpelled`
+   walks straight past it — `self.core.remove(member)` with no floor. Verified by probe rather than
+   by reading: expelling the last voter returns `Ok(())` and leaves zero voters.
+
+   2.1-2's reconciliation loop does *not* make this worse — it treats an empty core group as "no
+   instruction" rather than as "remove every voter", and there is a unit test saying so, because
+   openraft refuses an empty membership and a group with no voters could never commit the event
+   that would restore them. What actually happens is quieter and worse: Raft keeps the voters it
+   had, those voters are no longer members, so the allowlist refuses their connections, replication
+   stops, and nothing can ever be committed again — including the re-admission that would fix it.
+   `CoreGroupChanged` cannot restore the core group either, since it requires a core proposer and
+   there are none. **The hole is in the expulsion rule, and 2.2-1 is where a floor goes.**
 
 Note where this sits relative to §2's threat model, which assumes members do not attack the
 protocol: the case this really guards is not an attacker but a **foot-gun**. A mistyped id in
