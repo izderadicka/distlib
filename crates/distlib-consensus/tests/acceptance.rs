@@ -31,10 +31,20 @@ use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{Peer, until, wait_for};
+use common::{PATIENTLY, Peer, until, wait_for, wait_for_upto};
 
 /// How long to wait for something that should happen without prompting.
 const SOON: Duration = Duration::from_secs(15);
+
+/// What a proposal can cost when the leader has just been killed.
+///
+/// Arithmetic rather than a guess. `propose` makes `PROPOSE_ATTEMPTS` = 3
+/// attempts; an attempt that forwards to the dead leader spends
+/// `CONNECT_TIMEOUT` = 3s discovering it is gone, with `FORWARD_RETRY_DELAY`
+/// between them — about 9.5 seconds before an election has been decided, never
+/// mind a commit replicated. `SOON` left no room for either half, which is how
+/// this clause failed under a parallel runner.
+const AFTER_A_DEATH: Duration = Duration::from_secs(45);
 
 #[tokio::test]
 async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
@@ -130,7 +140,17 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     // so waiting for it is the test; the bound turns a node that never converges
     // into a failure that says which one.
     for peer in core.iter().chain(&followers) {
-        wait_for(peer, "every node to see the whole group", |m| m.len() == 5).await;
+        // Patiently, because of *what* is being waited on rather than how slow
+        // the machine is. follower-0 was admitted before follower-1 existed, so
+        // it learns about follower-1 either from a gossip announcement — which
+        // is best-effort, and lost outright if it arrives before the
+        // subscription is live (P1-33) — or from its own thirty-second timer.
+        // A fifteen-second bound is below the guarantee, and failed exactly
+        // that way under a parallel runner.
+        wait_for_upto(peer, PATIENTLY, "every node to see the whole group", |m| {
+            m.len() == 5
+        })
+        .await;
         assert_eq!(
             peer.node.membership().core().len(),
             3,
@@ -213,9 +233,12 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     // leads it. That is the realistic shape of losing a leader, and it is what
     // exposed a forward to the dead one blocking for forty-five seconds.
     let newcomer = MemberId::from(SecretKey::generate().public());
-    tokio::time::timeout(SOON, admit(&core[0], newcomer, "after the funeral"))
-        .await
-        .expect("two of three voters are a quorum; the group must still commit");
+    tokio::time::timeout(
+        AFTER_A_DEATH,
+        admit(&core[0], newcomer, "after the funeral"),
+    )
+    .await
+    .expect("two of three voters are a quorum; the group must still commit");
 
     for peer in core.iter().chain(&followers[..1]) {
         wait_for(peer, "the group to keep working without its leader", |m| {

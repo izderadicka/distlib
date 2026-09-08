@@ -96,6 +96,28 @@ fn apply_next(state: &mut MembershipState, signed: &SignedEvent) -> Result<(), C
     state.apply(index, signed)
 }
 
+/// A founded group with `alice` and `bob` as founders, so both already vote.
+///
+/// Promotion is refused until a node can start voting without restarting — see
+/// `the_core_group_cannot_grow_yet` — so a test that needs a second voter founds
+/// with one rather than adding one.
+fn founded_by_two() -> (MembershipState, Signer, Signer) {
+    let alice = Signer::generate();
+    let bob = Signer::generate();
+    let mut state = MembershipState::new();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::found(
+            vec![alice.founder("alice"), bob.founder("bob")],
+            Timestamp::from_millis(1),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    (state, alice, bob)
+}
+
 /// A founded group with `alice` as its single founder.
 fn founded() -> (MembershipState, Signer) {
     let alice = Signer::generate();
@@ -403,24 +425,7 @@ fn a_signature_from_the_wrong_key_is_refused() {
 
 #[test]
 fn expulsion_removes_from_the_allowlist_and_the_core() {
-    let (mut state, alice) = founded();
-    let bob = Signer::generate();
-    propose(
-        &mut state,
-        &alice,
-        MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
-        },
-    )
-    .unwrap();
-    propose(
-        &mut state,
-        &alice,
-        MembershipEvent::CoreGroupChanged {
-            core: core_group(&[&alice, &bob]),
-        },
-    )
-    .unwrap();
+    let (mut state, alice, bob) = founded_by_two();
     assert!(state.is_core(&bob.id));
 
     propose(
@@ -535,6 +540,42 @@ fn a_voter_can_be_given_a_new_address() {
         "the group must be able to say a core node moved"
     );
     assert_eq!(voters(&state), vec![alice.id], "and only its address moved");
+}
+
+#[test]
+fn the_core_group_cannot_grow_yet() {
+    // Removals and address changes are enacted in Raft; promotion is not, and
+    // cannot be until a node can begin voting without restarting. Refusing the
+    // event is what keeps the projection and Raft's voter set from disagreeing
+    // — an addition never commits, so there is nothing to disagree about.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    let refused = propose(
+        &mut state,
+        &alice,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[&alice, &bob]),
+        },
+    );
+
+    assert_eq!(
+        refused,
+        Err(ConsensusError::PromotionUnsupported { member: bob.id })
+    );
+    assert_eq!(
+        voters(&state),
+        vec![alice.id],
+        "the voter set must not move"
+    );
 }
 
 #[test]
@@ -690,27 +731,18 @@ fn a_non_core_member_cannot_change_the_core_group() {
 #[test]
 fn a_core_member_can_change_the_core_group() {
     // The other half of the rule: the check must not refuse everybody.
-    let (mut state, alice) = founded();
-    let bob = Signer::generate();
-    propose(
-        &mut state,
-        &alice,
-        MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
-        },
-    )
-    .unwrap();
-
+    let (mut state, alice, bob) = founded_by_two();
     propose(
         &mut state,
         &alice,
         MembershipEvent::CoreGroupChanged {
-            core: core_group(&[&alice, &bob]),
+            core: core_group(&[&alice]),
         },
     )
     .unwrap();
 
-    assert!(state.is_core(&bob.id));
+    assert!(!state.is_core(&bob.id), "a core member may drop another");
+    assert_eq!(voters(&state), vec![alice.id]);
 }
 
 #[test]

@@ -9,8 +9,6 @@
 
 use std::time::Duration;
 
-// Only the dead-source test binds an address of its own.
-#[cfg(feature = "slow-tests")]
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{MemberRecord, MembershipEvent};
@@ -335,6 +333,164 @@ async fn three_founders_converge_on_one_group() {
         for id in &ids {
             assert!(membership.is_member(id));
         }
+    }
+
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}
+
+/// Three founders, all voters, with the group founded and settled.
+async fn a_founded_trio() -> Vec<Peer> {
+    let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
+    let ids: Vec<MemberId> = keys
+        .iter()
+        .map(|key| MemberId::from(key.public()))
+        .collect();
+
+    let mut peers = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let others = ids
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, id)| *id)
+            .collect();
+        peers.push(Peer::start(key.clone(), others).await);
+    }
+
+    let founders = peers
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| (peer.record(&format!("founder-{index}")), peer.addr.clone()))
+        .collect();
+    peers[0]
+        .node
+        .init_group(founders, &peers[0].secret)
+        .await
+        .unwrap();
+    for peer in &peers {
+        wait_for(peer, "the group to be founded", |m| m.group_id().is_some()).await;
+    }
+    peers
+}
+
+/// What openraft — not the projection — currently holds for `peer`.
+///
+/// The distinction is the whole point of these two tests: the projection is
+/// what the log says, and openraft's membership is what consensus actually
+/// uses. P1-23 was that the second never moved.
+fn raft_voters(peer: &Peer) -> Vec<(MemberId, NodeAddr)> {
+    let raft = peer.node.raft().expect("a voter has a raft");
+    let metrics = raft.server_metrics();
+    let membership = metrics.borrow().membership_config.clone();
+    let voters: Vec<_> = membership.voter_ids().collect();
+    membership
+        .nodes()
+        .filter(|(id, _)| voters.contains(id))
+        .map(|(id, addr)| {
+            (
+                MemberId::try_from(*id).expect("a voter id is a member id"),
+                addr.clone(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_core_node_that_moves_is_dialled_at_its_new_address() {
+    // P1-23, the half that bites first: `raft.initialize` writes the voter map
+    // once and nothing rewrote it, so with `relay_mode = "disabled"` a core node
+    // that changed IP or port was out of its own group for good. Machines get
+    // renumbered far more often than founders get replaced.
+    let peers = a_founded_trio().await;
+
+    // A second address for the third node, keeping the one that works — the
+    // realistic shape of a machine gaining an interface, and it leaves the
+    // cluster able to carry on while the change commits.
+    let mut moved = peers[2].addr.clone();
+    moved
+        .direct
+        .insert(SocketAddr::from((Ipv4Addr::LOCALHOST, 11299)));
+
+    let core: Vec<(MemberId, NodeAddr)> = peers
+        .iter()
+        .map(|peer| {
+            if peer.id == peers[2].id {
+                (peer.id, moved.clone())
+            } else {
+                (peer.id, peer.addr.clone())
+            }
+        })
+        .collect();
+
+    peers[0]
+        .node
+        .propose(MembershipEvent::CoreGroupChanged { core }, &peers[0].secret)
+        .await
+        .unwrap();
+
+    // The projection is what the log says; openraft's membership is what
+    // consensus dials. Before this, only the first of the two ever moved.
+    //
+    // Every voter, not just the leader. Only the leader can *submit* a
+    // membership change — it is a write — but openraft carries it as log
+    // entries, so the others receive it by ordinary replication rather than by
+    // doing anything themselves. That is the whole reason the reconciliation
+    // loop does nothing on a non-leader, so it is worth a test rather than a
+    // comment.
+    for peer in &peers {
+        until("every voter's raft to be told the new address", || {
+            raft_voters(peer).contains(&(peers[2].id, moved.clone()))
+        })
+        .await;
+    }
+
+    for peer in &peers {
+        wait_for(peer, "every node to record the new address", |m| {
+            m.core().get(&peers[2].id) == Some(&moved)
+        })
+        .await;
+    }
+
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_core_node_the_log_drops_stops_voting() {
+    // Also the fix for a bug that was quietly there all along: expulsion
+    // already removed a member from the projection's core group, and openraft
+    // kept counting them as a voter — a vote the group could never collect, so
+    // expelling core members silently ate the fault tolerance they provided.
+    let peers = a_founded_trio().await;
+    assert_eq!(raft_voters(&peers[0]).len(), 3, "all three founders vote");
+
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: peers[2].id,
+                reason: "went away".to_owned(),
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+
+    // Both survivors, for the same reason: the change replicates, it is not
+    // re-derived independently. The expelled node is not asked — the group has
+    // stopped talking to it, which is the point of expelling it.
+    for peer in &peers[..2] {
+        until(
+            "every surviving voter to stop counting the expelled node",
+            || {
+                let voters = raft_voters(peer);
+                voters.len() == 2 && !voters.iter().any(|(member, _)| *member == peers[2].id)
+            },
+        )
+        .await;
     }
 
     for peer in peers {

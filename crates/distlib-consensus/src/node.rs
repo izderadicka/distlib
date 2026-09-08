@@ -32,7 +32,7 @@ use crate::{
     gossip,
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
-        RaftProtocol, StateMachineStore, TypeConfig,
+        RaftProtocol, StateMachineStore, TypeConfig, core_group,
         follower::{self, SharedSources, Sources},
     },
     signed::SignedEvent,
@@ -192,6 +192,10 @@ pub struct MembershipNode {
     /// Started only once a group exists, since the topic is the group's id.
     /// Held so shutdown can stop it.
     gossip: JoinHandle<()>,
+
+    /// Putting the log's core group into effect in Raft. `None` on a follower,
+    /// which has no Raft to change.
+    core_group: Option<JoinHandle<()>>,
 
     /// Whether this node has been expelled from its group.
     ///
@@ -365,6 +369,18 @@ impl MembershipNode {
         ));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
+        // What makes `CoreGroupChanged` mean anything to Raft. Only a voter has
+        // a Raft to change, and only the leader may change it — the task sorts
+        // that out for itself rather than being started and stopped as
+        // leadership moves.
+        let core_group = match &role {
+            Role::Core { raft } => Some(tokio::spawn(core_group::enact(
+                raft.clone(),
+                state_machine.clone(),
+            ))),
+            Role::Follower { .. } => None,
+        };
+
         Ok(Self {
             id,
             role,
@@ -375,6 +391,7 @@ impl MembershipNode {
             memberlog,
             connections,
             gossip,
+            core_group,
             expelled,
         })
     }
@@ -713,6 +730,11 @@ impl MembershipNode {
     pub async fn shutdown(&self) {
         self.allowlist_updates.abort();
         self.evictions.abort();
+        // Before Raft stops, so a change in flight is abandoned rather than
+        // outliving the thing it was changing.
+        if let Some(core_group) = &self.core_group {
+            core_group.abort();
+        }
         match &self.role {
             Role::Core { raft } => {
                 if let Err(error) = raft.shutdown().await {
