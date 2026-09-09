@@ -383,19 +383,27 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   approving it — a shrinking core lowers the threshold under one already sitting there — and nothing
   re-examines a pending proposal on its own, since deciding several at once on one membership change
   would be a surprising cascade. An existing approver saying so again is what makes it reachable.
-- **A duplicate proposal is accepted, not refused.** Two members expelling the same peer split their
-  approvals and neither reaches its threshold — a wart, but a self-healing one, since one more
-  approval on either decides it. Refusing would leave a stuck slot nothing can clear, and clearing
-  it needs the withdrawal event below.
+- **A duplicate proposal is accepted, not refused — until 2.2-3.** Two members expelling the same
+  peer split their approvals and neither reaches its threshold. This was taken as a self-healing
+  wart, since one more approval on either decides it, and refusing would have left a stuck slot
+  nothing could clear. That is right as far as it goes and **understates the case for the same
+  subject being proposed repeatedly**: a member who keeps asking manufactures a new pending entry
+  each time, spreading approvals thinner the more they ask. 2.2-3 makes it one per subject.
 - **Majority is computed, not configured.** §4.4 says "configurable", and it cannot be a config file
   key: the fold must reach the same verdict on every node, so a per-node setting could split the
   membership. Configurable means *in the log*, which needs a policy event we do not have. §5.5 needs
   exactly the same machinery for its weight cap, so it gets built once, there. Deviation recorded.
-- **No expiry, but a withdrawal event — in 2.2-2, with its surface.** Timestamps are not
-  authoritative (P1-3), so any expiry would have to be counted in log entries, which is arbitrary.
-  Pending entries clear when the member they are about is expelled or re-admitted; what is left is
-  bounded by how many people are genuinely under discussion. A known gap, stated rather than
-  pretended away.
+- **~~No expiry.~~ Wrong, and 2.2-3 is the correction.** The reasoning was that timestamps are not
+  authoritative (P1-3), so any expiry would have to be counted in log entries, which is arbitrary —
+  and that what remained was "bounded by how many people are genuinely under discussion". **The
+  first half stands; the second is false.** `subject()` is `None` for `CoreGroupChanged`, so the
+  prune that clears a proposal when its member is expelled or re-admitted never touches one: a
+  stalled demotion — and, once 2.3 lands, a stalled *promotion* — sits in the map for the life of
+  the group with nothing able to remove it. "Arbitrary constant" was also the wrong objection.
+  Determinism is the property that matters, because every node must fold to the same map, and a
+  count of log entries has it while a clock does not.
+- **A withdrawal event, in 2.2-2 with its surface.** The deliberate way out, as against 2.2-3's
+  automatic one.
 - **A two-voter core group can no longer remove one of its voters.** A majority is two and the one
   being removed does not get a say. This is a real behaviour change, not a pre-existing condition:
   two healthy voters commit normally and simply cannot shrink. It is the price of "one member cannot
@@ -404,7 +412,7 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   same reason a core member cannot propose their own expulsion, so a graceful exit is
   demote-then-expel.
 
-#### The two PRs
+#### The three PRs
 
 - **2.2-1 — the state machine only (done).** `Approved`, the pending state in `MembershipState`,
   the thresholds, the approval rules, and `changes_the_voters` written symmetrically so 2.3 inherits
@@ -420,6 +428,50 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   saying so, and the joiner holding the ticket cannot connect until somebody approves it. The
   acceptance test and `manual-check.md` grow a genuine two-operator core expulsion.
 
+- **2.2-3 — bounding the pending set.** Three findings from reviewing 2.2-1, with one combined
+  answer. **They are one change because each one alone is worse than all three together**: expiry
+  without one-per-subject still lets duplicates pile up inside the window; one-per-subject without
+  expiry re-creates the stuck slot that made duplicates acceptable in the first place; and
+  withdrawal alone (2.2-2) does nothing about a proposer who has gone away.
+
+  1. **A pending proposal can stay forever.** Nothing removes one that never reaches its threshold
+     unless the member it is about is expelled or re-admitted — and for `CoreGroupChanged` not even
+     then, because `subject()` is `None`. Two costs, and the second is the serious one. It is
+     unbounded state that `MembershipState` re-encodes into redb on *every* apply, so it is write
+     amplification on the hot path rather than only memory. And **a stale proposal stays live**: one
+     made against a five-voter core group can be approved into effect a year later by people who
+     never saw the discussion. The rules are re-checked, so it is not unsound — but "somebody once
+     proposed this" is not the same as "the group is deciding this now".
+  2. **The same action proposed repeatedly makes a new pending entry each time**, splitting the
+     approvals it needs. The worst case is exactly the one that is never pruned: a member who keeps
+     asking to join the core group.
+  3. **Compaction.** Verified rather than assumed: the map holds the *event*, not a reference into
+     the log, and `MembershipState` is what gets snapshotted, so a pending proposal survives
+     compaction correctly and an index is never reused. What compaction costs is the **audit
+     lookup** — after the log is trimmed there is no way back to the original signed envelope for
+     entry 47, only to the projection's copy of it. Consequences: `distlib pending` must show
+     everything a decision needs (proposer, event, approvals, index) so nobody has to go to the log
+     for it, and this is the argument for expiry counted in **log-index distance** rather than
+     anything else, since `changed_at` advances monotonically and compaction neither renumbers nor
+     reuses.
+
+  So: **at most one pending proposal per subject** — widened so the core group is a subject of its
+  own — with a second refused naming the existing one rather than superseding it, because
+  superseding would let anyone reset accumulated approvals by re-proposing. Plus **expiry after a
+  fixed number of committed entries**, evaluated in the fold, which bounds the map, unsticks a slot
+  whose proposer has vanished, and stops a decision being carried by a proposal nobody remembers.
+  The constant lives in code, not config, for the same reason the majority does — and joins §5.5's
+  policy event when that lands.
+
+  **Test gap to close while here:** the restart path carries pending proposals
+  (`a_proposal_still_waiting_for_approvals_survives_a_restart`), but the **snapshot-install** path is
+  different code and nothing asserts a node that installs a snapshot inherits pending proposals it
+  can still approve.
+
+**Ordering.** After 2.2-2, because expiry that silently drops a proposal is only tolerable once
+`distlib pending` exists to show what is waiting and why. Before 2.3, because promotion is the case
+that is both unprunable and duplicable, so the bound should exist before promotion can pend at all.
+
 **Acceptance:** a three-node group; a follower proposes expelling a core member; one approval is not
 enough; a second core approval applies it, and 2.1-2's reconciliation loop drops the voter from
 openraft. Plus the same by hand in `manual-check.md`, which is the first time the runbook has needed
@@ -427,8 +479,10 @@ two operators to agree on anything.
 
 ### 2.3 — Promotion (1 PR)
 
-Closes P1-23 and the half of P1-30 that 2.1-2 leaves open. **After 2.2**, so a promotion is governed
-by the majority rule from the moment it becomes possible.
+Closes P1-23 and the half of P1-30 that 2.1-2 leaves open. **After 2.2** — all three of it — so a
+promotion is governed by the majority rule from the moment it becomes possible, and so a promotion
+that stalls is bounded rather than permanent. A pending `CoreGroupChanged` is the one kind nothing
+prunes, which makes 2.2-3 a prerequisite rather than a preference.
 
 - **Promotion** needs a node to be able to start voting without a restart: advertising
   `distlib/raft/0`, gaining a `RaftProtocol`, and satisfying openraft's learner-before-voter
