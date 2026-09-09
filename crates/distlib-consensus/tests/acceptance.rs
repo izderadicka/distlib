@@ -217,15 +217,14 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     // Three voters, so one can go and the remaining two are still a quorum.
     // Losing the *leader* is the case worth testing: the group has to elect
     // another before it can commit anything at all.
-    let leader = core
-        .iter()
-        .position(|peer| {
-            peer.node
-                .raft()
-                .and_then(|raft| raft.metrics().borrow().current_leader)
-                .is_some_and(|id| MemberId::try_from(id).is_ok_and(|id| id == peer.id))
-        })
-        .expect("a founded group has a leader");
+    //
+    // Waited for, not read once. `current_leader` is `None` while a term is
+    // being decided, and an expulsion committed immediately above is exactly
+    // the churn that can start one — so a single pass over the three peers can
+    // legitimately find nobody. Every other read of node state in this file
+    // waits for what it needs; this one did not, and its failure mode was a
+    // bare panic 7 seconds in, with no bound to name and nothing to retry.
+    let leader = leader_of(&core).await;
     let dead = core.remove(leader);
     dead.node.shutdown().await;
 
@@ -250,6 +249,30 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     for peer in core.iter().chain(&followers) {
         peer.node.shutdown().await;
     }
+}
+
+/// Which of `core` currently believes it is the leader.
+///
+/// Retried, because a founded group has a leader *eventually*: between one
+/// term ending and the next being decided there is a window in which every node
+/// answers `None`, and the group is asked to commit right before this.
+async fn leader_of(core: &[Peer]) -> usize {
+    tokio::time::timeout(SOON, async {
+        loop {
+            let found = core.iter().position(|peer| {
+                peer.node
+                    .raft()
+                    .and_then(|raft| raft.metrics().borrow().current_leader)
+                    .is_some_and(|id| MemberId::try_from(id).is_ok_and(|id| id == peer.id))
+            });
+            if let Some(leader) = found {
+                return leader;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a founded group must settle on a leader")
 }
 
 /// Admits `member` through `by`, and waits for it to take effect there.

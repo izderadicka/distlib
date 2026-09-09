@@ -114,6 +114,20 @@ pub enum MembershipEvent {
     /// removed, because it is the same map either way, and machines get
     /// renumbered far more often than founders get replaced (P1-23).
     CoreGroupChanged { core: Vec<(MemberId, NodeAddr)> },
+
+    /// A core member agrees to a proposal that is waiting for approvals (§4.4).
+    ///
+    /// `proposal` is the **log index** the proposal was applied at, not its
+    /// subject. Two pending proposals about the same person therefore stay
+    /// distinguishable, and the index is already the currency here — it is what
+    /// [`crate::MembershipState::changed_at`] speaks in.
+    ///
+    /// Last on purpose, and it must stay last. postcard encodes an enum variant
+    /// by its declaration index, so inserting one anywhere above would renumber
+    /// every variant after it: entries already written would deserialise as a
+    /// different event, and every signature's pre-image would change. Appending
+    /// leaves both alone, which is why `SIGNING_DOMAIN` does not move for this.
+    Approved { proposal: u64 },
 }
 
 impl MembershipEvent {

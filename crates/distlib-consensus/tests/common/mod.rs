@@ -156,6 +156,26 @@ pub async fn wait_for_upto(
     });
 }
 
+/// Waits for a proposal to be pending on `peer`, and answers with the log index
+/// [`distlib_consensus::MembershipEvent::Approved`] names it by.
+///
+/// Waited for on the node that is about to approve it, not read from the one
+/// that proposed it: an approval names an index its own node has to have applied
+/// before it can sign against the membership that index produced.
+pub async fn pending_on(peer: &Peer, what: &str) -> u64 {
+    wait_for(peer, what, |membership| {
+        membership.pending().next().is_some()
+    })
+    .await;
+    let (proposal, _) = peer
+        .node
+        .membership()
+        .pending()
+        .next()
+        .expect("just waited for one");
+    proposal
+}
+
 /// Waits until `condition` holds, or gives up and says what it was waiting for.
 ///
 /// For the things a test cannot see through the membership: each node derives

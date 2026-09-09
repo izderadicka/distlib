@@ -96,25 +96,50 @@ fn apply_next(state: &mut MembershipState, signed: &SignedEvent) -> Result<(), C
     state.apply(index, signed)
 }
 
-/// A founded group with `alice` and `bob` as founders, so both already vote.
+/// `who` approves the proposal made at log index `proposal`.
+fn approve(state: &mut MembershipState, who: &Signer, proposal: u64) -> Result<(), ConsensusError> {
+    propose(state, who, MembershipEvent::Approved { proposal })
+}
+
+/// The index of the one proposal waiting for approvals.
 ///
-/// Promotion is refused until a node can start voting without restarting — see
-/// `the_core_group_cannot_grow_yet` — so a test that needs a second voter founds
-/// with one rather than adding one.
-fn founded_by_two() -> (MembershipState, Signer, Signer) {
-    let alice = Signer::generate();
-    let bob = Signer::generate();
+/// Panics if there is not exactly one, because every test here that asks has
+/// made exactly one and the alternative is asserting against whichever the map
+/// happened to yield first.
+fn the_pending_one(state: &MembershipState) -> u64 {
+    let pending: Vec<u64> = state.pending().map(|(index, _)| index).collect();
+    assert_eq!(pending.len(), 1, "expected exactly one pending proposal");
+    pending[0]
+}
+
+/// A founded group of `n` founders, all of whom therefore vote.
+///
+/// Founding rather than admitting, for two reasons: promotion is refused until
+/// a node can start voting without restarting (see `the_core_group_cannot_grow_yet`),
+/// and the size of the core group is what sets every threshold in §4.4, so a
+/// test that needs three voters has to start with three.
+fn founded_by(n: usize) -> (MembershipState, Vec<Signer>) {
+    let signers: Vec<Signer> = (0..n).map(|_| Signer::generate()).collect();
+    let founders = signers
+        .iter()
+        .enumerate()
+        .map(|(index, signer)| signer.founder(&format!("founder-{index}")))
+        .collect();
     let mut state = MembershipState::new();
     propose(
         &mut state,
-        &alice,
-        MembershipEvent::found(
-            vec![alice.founder("alice"), bob.founder("bob")],
-            Timestamp::from_millis(1),
-        )
-        .unwrap(),
+        &signers[0],
+        MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap(),
     )
     .unwrap();
+    (state, signers)
+}
+
+/// A founded group with `alice` and `bob` as founders, so both already vote.
+fn founded_by_two() -> (MembershipState, Signer, Signer) {
+    let (state, mut signers) = founded_by(2);
+    let bob = signers.pop().expect("two founders");
+    let alice = signers.pop().expect("two founders");
     (state, alice, bob)
 }
 
@@ -425,22 +450,28 @@ fn a_signature_from_the_wrong_key_is_refused() {
 
 #[test]
 fn expulsion_removes_from_the_allowlist_and_the_core() {
-    let (mut state, alice, bob) = founded_by_two();
-    assert!(state.is_core(&bob.id));
+    // Three founders, because removing a voter takes a majority of the voters
+    // and the one being removed does not get a say: with two, one approval is
+    // all there could ever be and a majority is two.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+    assert!(state.is_core(&carol.id));
 
     propose(
         &mut state,
-        &alice,
+        alice,
         MembershipEvent::MemberExpelled {
-            member: bob.id,
+            member: carol.id,
             reason: "inactive".to_owned(),
         },
     )
     .unwrap();
+    let proposal = the_pending_one(&state);
+    approve(&mut state, bob, proposal).unwrap();
 
-    assert!(!allowlist(&state).contains(&bob.id));
+    assert!(!allowlist(&state).contains(&carol.id));
     assert!(
-        !state.is_core(&bob.id),
+        !state.is_core(&carol.id),
         "a non-member must not remain a voter; raft would wait on a vote that cannot come"
     );
 }
@@ -635,6 +666,528 @@ fn the_core_group_cannot_be_emptied() {
     );
 }
 
+// --- approvals (§4.4 step 2) ------------------------------------------------
+//
+// One rule throughout: changing who votes takes a majority of voters, and
+// everything else takes one.
+
+#[test]
+fn a_core_member_admitting_somebody_is_a_single_step() {
+    // What must not change. An admission takes one approval, a core proposer's
+    // own proposal is that approval, so `distlib admit` run against a core node
+    // still takes effect at once — the existing acceptance test and the
+    // by-hand runbook both depend on it.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    assert!(state.is_member(&bob.id));
+    assert_eq!(state.pending().count(), 0, "nothing was left waiting");
+}
+
+#[test]
+fn an_admission_proposed_by_a_follower_waits_for_a_core_member() {
+    // §4.4 step 1 lets any member submit; step 2 gives the decision to the core
+    // group. This is the only thing that changes for an ordinary admission.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    let carol = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+    assert!(!state.is_core(&bob.id), "bob joined after founding");
+
+    propose(
+        &mut state,
+        &bob,
+        MembershipEvent::MemberAdded {
+            member: carol.record("carol"),
+        },
+    )
+    .unwrap();
+    assert!(
+        !state.is_member(&carol.id),
+        "a follower's proposal must not admit anybody by itself"
+    );
+
+    let proposal = the_pending_one(&state);
+    approve(&mut state, &alice, proposal).unwrap();
+    assert!(state.is_member(&carol.id));
+    assert_eq!(
+        state.pending().count(),
+        0,
+        "a decided proposal stops pending"
+    );
+}
+
+#[test]
+fn expelling_a_core_member_takes_a_majority_of_the_core() {
+    // The rule this sub-phase exists for. Before it, one signed proposal from
+    // any member at all removed a voter — and since a removed voter really does
+    // leave openraft's voter set now, a handful of them shrank the group's
+    // ability to commit anything.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "mistyped, perhaps".to_owned(),
+        },
+    )
+    .unwrap();
+    assert!(
+        state.is_core(&carol.id),
+        "one core member's word must not remove a voter"
+    );
+    assert_eq!(voters(&state).len(), 3);
+
+    let proposal = the_pending_one(&state);
+    approve(&mut state, bob, proposal).unwrap();
+    assert!(!state.is_member(&carol.id));
+}
+
+#[test]
+fn expelling_a_follower_takes_one_core_member() {
+    // The other side of the same rule: only *voters* are expensive to remove.
+    // Somebody who does not vote can be shown the door by any core member, and
+    // that is the common case.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob) = (&founders[0], &founders[1]);
+    let newcomer = Signer::generate();
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberAdded {
+            member: newcomer.record("newcomer"),
+        },
+    )
+    .unwrap();
+
+    propose(
+        &mut state,
+        bob,
+        MembershipEvent::MemberExpelled {
+            member: newcomer.id,
+            reason: "not a voter".to_owned(),
+        },
+    )
+    .unwrap();
+
+    assert!(!state.is_member(&newcomer.id), "one core member is enough");
+    assert_eq!(state.pending().count(), 0);
+}
+
+#[test]
+fn giving_a_voter_a_new_address_takes_one_core_member() {
+    // A core node that moved has not changed who votes, and it is usually
+    // urgent: under `relay_mode = "disabled"` the group cannot reach it until
+    // this commits. Making it wait for a quorum would be ceremony charged at
+    // the worst moment.
+    let (mut state, founders) = founded_by(3);
+    let moved: Vec<(MemberId, NodeAddr)> = founders
+        .iter()
+        .enumerate()
+        .map(|(index, signer)| (signer.id, signer.addr(u16::from(index == 2))))
+        .collect();
+
+    propose(
+        &mut state,
+        &founders[0],
+        MembershipEvent::CoreGroupChanged { core: moved },
+    )
+    .unwrap();
+
+    assert_eq!(
+        state.core().get(&founders[2].id),
+        Some(&founders[2].addr(1))
+    );
+    assert_eq!(state.pending().count(), 0);
+}
+
+#[test]
+fn the_member_being_expelled_cannot_approve_it() {
+    // The threshold is a majority of the core group *including* them, so their
+    // own vote would let a core of four remove one of its own on the agreement
+    // of two other people rather than three.
+    let (mut state, founders) = founded_by(3);
+    let (alice, carol) = (&founders[0], &founders[2]);
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "asked to leave".to_owned(),
+        },
+    )
+    .unwrap();
+
+    let proposal = the_pending_one(&state);
+    assert_eq!(
+        approve(&mut state, carol, proposal),
+        Err(ConsensusError::SelfApproval { member: carol.id })
+    );
+    assert!(state.is_core(&carol.id), "the refused approval did nothing");
+}
+
+#[test]
+fn a_follower_cannot_approve() {
+    // Submitting is open to every member; deciding is not (§4.4 step 2).
+    let (mut state, founders) = founded_by(3);
+    let bystander = Signer::generate();
+    propose(
+        &mut state,
+        &founders[0],
+        MembershipEvent::MemberAdded {
+            member: bystander.record("bystander"),
+        },
+    )
+    .unwrap();
+    propose(
+        &mut state,
+        &founders[0],
+        MembershipEvent::MemberExpelled {
+            member: founders[2].id,
+            reason: "pending".to_owned(),
+        },
+    )
+    .unwrap();
+
+    let proposal = the_pending_one(&state);
+    assert_eq!(
+        approve(&mut state, &bystander, proposal),
+        Err(ConsensusError::ApproverNotCore {
+            approver: bystander.id
+        })
+    );
+    assert!(state.is_core(&founders[2].id));
+}
+
+#[test]
+fn approving_something_that_is_not_pending_is_refused() {
+    // Covers both "never proposed" and "already decided": approvals do not
+    // accumulate against a proposal that has taken effect.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+
+    assert_eq!(
+        approve(&mut state, alice, 7),
+        Err(ConsensusError::UnknownProposal { proposal: 7 })
+    );
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "decided".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+    approve(&mut state, bob, proposal).unwrap();
+
+    assert_eq!(
+        approve(&mut state, bob, proposal),
+        Err(ConsensusError::UnknownProposal { proposal })
+    );
+}
+
+#[test]
+fn the_last_voter_cannot_be_expelled() {
+    // A group with no voters can never commit anything again — including the
+    // event that would restore its voters — and unlike `CoreGroupChanged`,
+    // which refuses an empty core group outright, expulsion used to walk
+    // straight past that guard.
+    //
+    // What refuses it now is the threshold, not a special case: removing a
+    // voter takes a majority of the core, the only core member is the one being
+    // removed, and they cannot approve their own expulsion. So it can be
+    // proposed and never decided. Deleting any *one* of those three rules is
+    // enough to re-open the hole, which is why this asserts the outcome rather
+    // than an error.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+
+    for proposer in [&alice, &bob] {
+        propose(
+            &mut state,
+            proposer,
+            MembershipEvent::MemberExpelled {
+                member: alice.id,
+                reason: "the whole core group".to_owned(),
+            },
+        )
+        .unwrap();
+        let proposal = the_pending_one(&state);
+        assert_eq!(
+            approve(&mut state, &alice, proposal),
+            Err(ConsensusError::SelfApproval { member: alice.id }),
+            "the only core member is the one being expelled"
+        );
+        // Clear it, so the next round's `the_pending_one` is unambiguous.
+        propose(
+            &mut state,
+            &alice,
+            MembershipEvent::MemberAdded {
+                member: alice.record("alice"),
+            },
+        )
+        .unwrap();
+    }
+
+    assert_eq!(voters(&state), vec![alice.id], "the group can still commit");
+}
+
+#[test]
+fn an_approval_from_a_member_since_demoted_no_longer_counts() {
+    // The threshold is measured against the core group as it stands when an
+    // approval lands, and so are the approvals themselves. Counting one from
+    // somebody who has left the core group would let a shrinking core carry
+    // decisions on the word of people who are no longer voters.
+    let (mut state, founders) = founded_by(5);
+    let (a, b, c, d, e) = (
+        &founders[0],
+        &founders[1],
+        &founders[2],
+        &founders[3],
+        &founders[4],
+    );
+
+    // Expelling `e` takes three of five. `a` proposes it, `b` agrees: two.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: e.id,
+            reason: "under discussion".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = the_pending_one(&state);
+    approve(&mut state, b, expulsion).unwrap();
+
+    // Meanwhile `b` is demoted, which also takes three of five.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[a, c, d, e]),
+        },
+    )
+    .unwrap();
+    let demotion = state
+        .pending()
+        .map(|(index, _)| index)
+        .find(|index| *index != expulsion)
+        .expect("the demotion is pending too");
+    approve(&mut state, c, demotion).unwrap();
+    approve(&mut state, d, demotion).unwrap();
+    assert!(!state.is_core(&b.id), "b has been demoted");
+
+    // The expulsion now needs three of four, and holds approvals from `a` and
+    // `b` — but `b` is not a voter any more, so only `a`'s counts.
+    approve(&mut state, c, expulsion).unwrap();
+    assert!(
+        state.is_member(&e.id),
+        "two current voters are not a majority of four"
+    );
+
+    approve(&mut state, d, expulsion).unwrap();
+    assert!(!state.is_member(&e.id), "three are");
+}
+
+#[test]
+fn a_pending_proposal_about_a_member_is_dropped_when_their_membership_changes() {
+    // A pending expulsion of somebody who has since been expelled has nothing
+    // left to do, and one of somebody since re-admitted was decided against a
+    // group they were not in. Either way it must not sit there waiting to be
+    // approved into effect against a question that has moved.
+    let (mut state, founders) = founded_by(3);
+    let alice = &founders[0];
+    let (bob, carol) = (Signer::generate(), Signer::generate());
+    for newcomer in [&bob, &carol] {
+        propose(
+            &mut state,
+            alice,
+            MembershipEvent::MemberAdded {
+                member: newcomer.record("newcomer"),
+            },
+        )
+        .unwrap();
+    }
+
+    // A follower proposes expelling another follower: one approval short.
+    propose(
+        &mut state,
+        &carol,
+        MembershipEvent::MemberExpelled {
+            member: bob.id,
+            reason: "proposed by a follower".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.pending().count(), 1);
+
+    // A core member expels bob directly, which takes effect at once.
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: bob.id,
+            reason: "decided the other way".to_owned(),
+        },
+    )
+    .unwrap();
+
+    assert!(!state.is_member(&bob.id));
+    assert_eq!(
+        state.pending().count(),
+        0,
+        "a proposal about a member whose membership just changed is stale"
+    );
+}
+
+#[test]
+fn an_approval_can_be_repeated_to_re_examine_a_proposal() {
+    // A proposal can become sufficient without anybody approving it: expelling
+    // a voter takes a majority of the core, so a core group that shrinks lowers
+    // the threshold under a proposal already sitting there. Nothing re-examines
+    // a pending proposal on its own — deciding several at once on one
+    // membership change would be a surprising cascade — so an approver saying
+    // so again is what makes it reachable.
+    let (mut state, founders) = founded_by(5);
+    let (a, b, c, e) = (&founders[0], &founders[1], &founders[2], &founders[4]);
+
+    // Three of five to expel `e`; `a` and `b` agree, which is two.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: e.id,
+            reason: "under discussion".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = the_pending_one(&state);
+    approve(&mut state, b, expulsion).unwrap();
+
+    // `d` stands down, so three of five becomes three of four... and then `c`
+    // stands down too, leaving `a`, `b` and `e`: a majority is two, which the
+    // proposal already has.
+    for core in [core_group(&[a, b, c, e]), core_group(&[a, b, e])] {
+        propose(&mut state, a, MembershipEvent::CoreGroupChanged { core }).unwrap();
+        let demotion = state
+            .pending()
+            .map(|(index, _)| index)
+            .find(|index| *index != expulsion)
+            .expect("the demotion is pending");
+        for approver in [b, c, e] {
+            if state.pending().any(|(index, _)| index == demotion) {
+                approve(&mut state, approver, demotion).unwrap();
+            }
+        }
+    }
+    assert_eq!(
+        voters(&state).len(),
+        3,
+        "the core group has shrunk to three"
+    );
+    assert!(
+        state.is_member(&e.id),
+        "nothing re-examined the proposal on its own"
+    );
+
+    approve(&mut state, b, expulsion).unwrap();
+    assert!(
+        !state.is_member(&e.id),
+        "an approver saying so again is what re-examines it"
+    );
+}
+
+#[test]
+fn a_last_approval_that_cannot_be_applied_leaves_the_proposal_as_it_was() {
+    // `apply` promises that a refused entry changes nothing, and the last
+    // approval is the one place that is not free: the rules are re-checked and
+    // the change attempted in the same step, so a change that fails must not
+    // leave the approval that triggered it on the record. Otherwise a proposal
+    // that can never be applied quietly accumulates agreement, and a later
+    // reader cannot tell how many people actually said yes to something that
+    // happened.
+    let (mut state, founders) = founded_by(4);
+    let (a, b, c, d) = (&founders[0], &founders[1], &founders[2], &founders[3]);
+
+    // Demoting `d` takes three of four. `a` proposes it: one.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[a, b, c]),
+        },
+    )
+    .unwrap();
+    let demotion = the_pending_one(&state);
+
+    // Meanwhile `b` — named in that proposal — is expelled, which also takes
+    // three of four and gets them from `a`, `c` and `d`.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: b.id,
+            reason: "overtaken by events".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = state
+        .pending()
+        .map(|(index, _)| index)
+        .find(|index| *index != demotion)
+        .expect("the expulsion is pending too");
+    approve(&mut state, c, expulsion).unwrap();
+    approve(&mut state, d, expulsion).unwrap();
+    assert!(!state.is_member(&b.id));
+
+    // The demotion now needs two of the three voters left and has one, so `c`
+    // decides it — onto a core group naming somebody who is no longer a member.
+    assert_eq!(
+        approve(&mut state, c, demotion),
+        Err(ConsensusError::InvalidCoreGroup)
+    );
+
+    let (index, proposal) = state.pending().next().expect("still pending");
+    assert_eq!(index, demotion, "a refused change is not a decided one");
+    assert_eq!(
+        proposal.approvals().collect::<Vec<_>>(),
+        vec![a.id],
+        "the approval that could not be applied is not recorded"
+    );
+    assert_eq!(voters(&state).len(), 3, "and nothing moved");
+}
+
 // --- pledges ----------------------------------------------------------------
 
 #[test]
@@ -740,6 +1293,11 @@ fn a_core_member_can_change_the_core_group() {
         },
     )
     .unwrap();
+    // Demotion moves the voter set, so it takes a majority of it — and unlike
+    // an expulsion, the member concerned may agree to their own. Somebody
+    // standing down from the core group is resigning, not being removed.
+    let proposal = the_pending_one(&state);
+    approve(&mut state, &bob, proposal).unwrap();
 
     assert!(!state.is_core(&bob.id), "a core member may drop another");
     assert_eq!(voters(&state), vec![alice.id]);
@@ -827,7 +1385,7 @@ fn founding_is_proposed_against_the_empty_membership() {
 fn scenario() -> impl Strategy<Value = (usize, Vec<(usize, usize, u64)>)> {
     (
         1usize..4,
-        prop::collection::vec((0usize..4, 0usize..4, 0u64..3), 0..12),
+        prop::collection::vec((0usize..4, 0usize..4, 0u64..4), 0..12),
     )
 }
 
@@ -880,6 +1438,18 @@ proptest! {
             prop_assert!(state.is_member(id));
         }
     }
+
+    /// A founded group always has somebody who can vote. Not a rule of its own
+    /// but the sum of three — the majority a voter's removal takes, the
+    /// exclusion of the member being removed from it, and `CoreGroupChanged`
+    /// refusing an empty core group — and the thing all three exist to keep
+    /// true, since a group with no voters can never commit anything again,
+    /// including the event that would restore its voters.
+    #[test]
+    fn a_founded_group_is_never_left_without_a_voter((founders, ops) in scenario()) {
+        let state = fold(founders, &ops);
+        prop_assert_eq!(state.group_id().is_some(), !state.core().is_empty());
+    }
 }
 
 /// The fixed cast a generated scenario draws from. Seeded rather than random so
@@ -927,8 +1497,8 @@ fn apply_scenario(
         );
         let _ = apply_next(state, &signed);
     }
-    for &(actor, subject, kind) in &ops[range] {
-        let (actor, subject) = (&pool[actor % pool.len()], &pool[subject % pool.len()]);
+    for &(actor, choice, kind) in &ops[range] {
+        let (actor, subject) = (&pool[actor % pool.len()], &pool[choice % pool.len()]);
         let event = match kind {
             0 => MembershipEvent::MemberAdded {
                 member: subject.record("member"),
@@ -937,8 +1507,18 @@ fn apply_scenario(
                 member: subject.id,
                 reason: "generated".to_owned(),
             },
-            _ => MembershipEvent::CoreGroupChanged {
+            2 => MembershipEvent::CoreGroupChanged {
                 core: core_group(&[actor, subject]),
+            },
+            // Approvals are generated too, or the scenarios would stop
+            // exercising anything past the point a proposal starts waiting —
+            // which, now that most of them do, is nearly everything. Chosen by
+            // position rather than at random so a replayed run picks the same
+            // one and `applying_in_chunks_matches_applying_at_once` still means
+            // something.
+            _ => match state.pending().nth(choice % state.pending().count().max(1)) {
+                Some((proposal, _)) => MembershipEvent::Approved { proposal },
+                None => continue,
             },
         };
         // Refused events are expected and are exactly what the rules are for.

@@ -169,6 +169,72 @@ async fn the_applied_state_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn a_proposal_still_waiting_for_approvals_survives_a_restart() {
+    // Pending proposals are governance state, and durable state is the reason:
+    // if a restart dropped them, an in-flight core expulsion would vanish
+    // silently, and a restarted node would disagree with its peers about what
+    // is pending — a split projection, which is the one thing this crate exists
+    // to prevent. So the assertion is not only that it is still there, but that
+    // it is still approvable, which is what proves the approvals came back with
+    // it rather than an empty proposal being re-encoded.
+    let (mut store, dir) = new_store();
+    let (alice, bob, carol) = (Signer::generate(), Signer::generate(), Signer::generate());
+    store.apply(vec![founding(&alice)]).await.unwrap();
+    store
+        .apply(vec![entry(
+            2,
+            alice.sign(
+                MembershipEvent::MemberAdded {
+                    member: bob.record("bob"),
+                },
+                1,
+            ),
+        )])
+        .await
+        .unwrap();
+
+    // Bob is a member but not a voter, so his admission of carol waits.
+    store
+        .apply(vec![entry(
+            3,
+            bob.sign(
+                MembershipEvent::MemberAdded {
+                    member: carol.record("carol"),
+                },
+                2,
+            ),
+        )])
+        .await
+        .unwrap();
+    assert!(!store.membership().is_member(&carol.id));
+
+    let mut restarted = restart(store, &dir);
+
+    let pending: Vec<u64> = restarted
+        .membership()
+        .pending()
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        pending,
+        vec![3],
+        "the proposal must come back with the state"
+    );
+
+    restarted
+        .apply(vec![entry(
+            4,
+            alice.sign(MembershipEvent::Approved { proposal: 3 }, 3),
+        )])
+        .await
+        .unwrap();
+    assert!(
+        restarted.membership().is_member(&carol.id),
+        "a restored proposal must still be approvable"
+    );
+}
+
+#[tokio::test]
 async fn a_rejected_event_is_skipped_rather_than_fatal() {
     // The design decision worth pinning. Raft has already committed this entry,
     // so every node sees it; returning an error would take down the whole group

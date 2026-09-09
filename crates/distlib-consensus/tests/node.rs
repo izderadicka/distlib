@@ -16,7 +16,7 @@ use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{Peer, until, wait_for};
+use common::{Peer, pending_on, until, wait_for};
 
 #[tokio::test]
 async fn a_founded_group_derives_its_membership_from_the_log() {
@@ -479,6 +479,27 @@ async fn a_core_node_the_log_drops_stops_voting() {
         .await
         .unwrap();
 
+    // Removing a voter takes a majority of the voters (§4.4), so one core node
+    // saying so is not enough — and this is the first place that rule meets
+    // real consensus rather than a folded log. The second approval comes from
+    // the other survivor; the third node is the one being removed and could not
+    // approve it anyway.
+    //
+    // Waited for on the node about to approve, not read off the proposer: an
+    // approval names a log index, and signing one against a membership this
+    // node has not applied yet is the race that has broken tests here before.
+    let proposal = pending_on(&peers[1], "the expulsion to be pending on the second voter").await;
+    assert_eq!(
+        raft_voters(&peers[0]).len(),
+        3,
+        "one core node's word must not remove a voter"
+    );
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+
     // Both survivors, for the same reason: the change replicates, it is not
     // re-derived independently. The expelled node is not asked — the group has
     // stopped talking to it, which is the point of expelling it.
@@ -589,9 +610,27 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     .await
     .expect("every member may propose, voter or not");
 
-    wait_for(&founder, "the proposal to be committed", |membership| {
-        membership.is_member(&newcomer)
-    })
+    // Committed — as a *proposal*. §4.4 opens submitting to every member and
+    // gives the decision to the core group, so a non-voter's admission waits
+    // for a core member to agree to it. That is the half this test now proves
+    // in both directions: the entry reached the log, and it did not take effect
+    // on its own.
+    let proposal = pending_on(&founder, "the non-voter's proposal to be committed").await;
+    assert!(
+        !founder.node.membership().is_member(&newcomer),
+        "a non-voter's proposal must not admit anybody by itself"
+    );
+
+    founder
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &founder.secret)
+        .await
+        .unwrap();
+    wait_for(
+        &founder,
+        "the approved proposal to take effect",
+        |membership| membership.is_member(&newcomer),
+    )
     .await;
 
     founder.node.shutdown().await;

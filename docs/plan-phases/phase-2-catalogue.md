@@ -367,25 +367,57 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   argue either way, so it is written down.
 - **Every rule is re-checked when the last approval lands**, not only when the proposal was made.
   The group can move in between, and that gap is where this kind of thing goes wrong.
-- **An expulsion that would empty the core is refused at apply time** — the bug above. Still needed
-  even with the majority rule, since a core majority could otherwise expel every core member.
+- **~~An expulsion that would empty the core is refused at apply time.~~ Not built, because the
+  thresholds subsume it** — the deviation 2.2-1 records. Expelling the last voter needs a majority
+  of a core of one; the only core member is the one being expelled; and the target cannot approve
+  their own expulsion. So it can be proposed and never decided. Verified by mutation rather than
+  asserted: deleting any one of those three rules re-opens the hole and
+  `the_last_voter_cannot_be_expelled` fails, whereas a separate floor would have been a line no test
+  could reach. The hole the sub-phase was partly written to close is closed by a rule that has a
+  reason, not by a special case.
+- **Only approvals from current voters count**, on the same principle that measures the threshold
+  against the current core. An approval from somebody since demoted or expelled is not a voter's
+  agreement, and counting it would let a shrinking core carry decisions on the word of people who
+  have left it.
+- **A repeat approval is idempotent, not refused.** A proposal can become sufficient without anybody
+  approving it — a shrinking core lowers the threshold under one already sitting there — and nothing
+  re-examines a pending proposal on its own, since deciding several at once on one membership change
+  would be a surprising cascade. An existing approver saying so again is what makes it reachable.
+- **A duplicate proposal is accepted, not refused.** Two members expelling the same peer split their
+  approvals and neither reaches its threshold — a wart, but a self-healing one, since one more
+  approval on either decides it. Refusing would leave a stuck slot nothing can clear, and clearing
+  it needs the withdrawal event below.
 - **Majority is computed, not configured.** §4.4 says "configurable", and it cannot be a config file
   key: the fold must reach the same verdict on every node, so a per-node setting could split the
   membership. Configurable means *in the log*, which needs a policy event we do not have. §5.5 needs
   exactly the same machinery for its weight cap, so it gets built once, there. Deviation recorded.
-- **No expiry, but a withdrawal event.** Timestamps are not authoritative (P1-3), so any expiry
-  would have to be counted in log entries, which is arbitrary. Pending entries clear when the member
-  is expelled or re-admitted; what is left is bounded by how many people are genuinely under
-  discussion. A known gap, stated rather than pretended away.
+- **No expiry, but a withdrawal event — in 2.2-2, with its surface.** Timestamps are not
+  authoritative (P1-3), so any expiry would have to be counted in log entries, which is arbitrary.
+  Pending entries clear when the member they are about is expelled or re-admitted; what is left is
+  bounded by how many people are genuinely under discussion. A known gap, stated rather than
+  pretended away.
+- **A two-voter core group can no longer remove one of its voters.** A majority is two and the one
+  being removed does not get a say. This is a real behaviour change, not a pre-existing condition:
+  two healthy voters commit normally and simply cannot shrink. It is the price of "one member cannot
+  seize a group", and the way out is to grow to three, or for the departing voter to agree to a
+  demotion — which they may, since standing down is resigning rather than being removed. For the
+  same reason a core member cannot propose their own expulsion, so a graceful exit is
+  demote-then-expel.
 
 #### The two PRs
 
-- **2.2-1 — the state machine only.** The two events, the pending state in `MembershipState`, the
-  thresholds, the approval rules, the empty-core floor, and `changes_the_voters` written
-  symmetrically so 2.3 inherits it. Fast-lane tests throughout. Nothing user-visible changes for a
-  core operator, which is what keeps it reviewable.
+- **2.2-1 — the state machine only (done).** `Approved`, the pending state in `MembershipState`,
+  the thresholds, the approval rules, and `changes_the_voters` written symmetrically so 2.3 inherits
+  it. Fast-lane tests throughout, each rule mutation-checked. Nothing user-visible changes for a
+  core operator, which is what keeps it reviewable. Two deviations from the above, both recorded in
+  P2-4: the empty-core floor is **not** built, because the thresholds already refuse what it would
+  have caught; and duplicate proposals are accepted rather than refused, which is what defers the
+  withdrawal event to 2.2-2 rather than needing it here.
 - **2.2-2 — the surface.** `distlib pending` and `distlib approve <index>`; `group.propose_expel`
-  keeps its §7.1 name and gains `group.approve`; pending proposals appear in `node.status`. The
+  keeps its §7.1 name and gains `group.approve`; pending proposals appear in `node.status`; the
+  withdrawal event lands with `distlib withdraw`. **The gap it closes:** after 2.2-1 a follower's
+  `distlib admit` prints `admitted` and the admission then waits for a core member with nothing
+  saying so, and the joiner holding the ticket cannot connect until somebody approves it. The
   acceptance test and `manual-check.md` grow a genuine two-operator core expulsion.
 
 **Acceptance:** a three-node group; a follower proposes expelling a core member; one approval is not
