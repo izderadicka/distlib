@@ -1128,6 +1128,66 @@ fn an_approval_can_be_repeated_to_re_examine_a_proposal() {
     );
 }
 
+#[test]
+fn a_last_approval_that_cannot_be_applied_leaves_the_proposal_as_it_was() {
+    // `apply` promises that a refused entry changes nothing, and the last
+    // approval is the one place that is not free: the rules are re-checked and
+    // the change attempted in the same step, so a change that fails must not
+    // leave the approval that triggered it on the record. Otherwise a proposal
+    // that can never be applied quietly accumulates agreement, and a later
+    // reader cannot tell how many people actually said yes to something that
+    // happened.
+    let (mut state, founders) = founded_by(4);
+    let (a, b, c, d) = (&founders[0], &founders[1], &founders[2], &founders[3]);
+
+    // Demoting `d` takes three of four. `a` proposes it: one.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[a, b, c]),
+        },
+    )
+    .unwrap();
+    let demotion = the_pending_one(&state);
+
+    // Meanwhile `b` — named in that proposal — is expelled, which also takes
+    // three of four and gets them from `a`, `c` and `d`.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: b.id,
+            reason: "overtaken by events".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = state
+        .pending()
+        .map(|(index, _)| index)
+        .find(|index| *index != demotion)
+        .expect("the expulsion is pending too");
+    approve(&mut state, c, expulsion).unwrap();
+    approve(&mut state, d, expulsion).unwrap();
+    assert!(!state.is_member(&b.id));
+
+    // The demotion now needs two of the three voters left and has one, so `c`
+    // decides it — onto a core group naming somebody who is no longer a member.
+    assert_eq!(
+        approve(&mut state, c, demotion),
+        Err(ConsensusError::InvalidCoreGroup)
+    );
+
+    let (index, proposal) = state.pending().next().expect("still pending");
+    assert_eq!(index, demotion, "a refused change is not a decided one");
+    assert_eq!(
+        proposal.approvals().collect::<Vec<_>>(),
+        vec![a.id],
+        "the approval that could not be applied is not recorded"
+    );
+    assert_eq!(voters(&state).len(), 3, "and nothing moved");
+}
+
 // --- pledges ----------------------------------------------------------------
 
 #[test]

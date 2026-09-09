@@ -219,6 +219,25 @@ impl MembershipState {
         }
     }
 
+    /// Whether `approvals` are enough for `event` to take effect.
+    ///
+    /// **The only place a threshold is decided**, so a proposal that arrives
+    /// already approved and one that gets there five entries later are answered
+    /// by the same rule rather than by two that have to agree.
+    ///
+    /// Both sides of the comparison are measured against the core group as it
+    /// stands *now*: how many approvals are needed, and which of the ones held
+    /// still count. An approval from somebody since demoted or expelled is not
+    /// a voter's agreement, and counting it would let a shrinking core carry
+    /// decisions on the word of people who have left it.
+    fn decided(&self, event: &MembershipEvent, approvals: &BTreeSet<MemberId>) -> bool {
+        let voting = approvals
+            .iter()
+            .filter(|member| self.is_core(member))
+            .count();
+        voting >= self.approvals_needed(event)
+    }
+
     /// Whether `event` would move the set of Raft voters — as opposed to their
     /// addresses, or the membership around them.
     ///
@@ -237,10 +256,17 @@ impl MembershipState {
         }
     }
 
-    /// Records a submitted change, applying it at once if it already has every
-    /// approval it needs.
+    /// Records a submitted change, applying it at once if the approvals it
+    /// arrives with are already every approval it needs.
     ///
-    /// A core proposer's own proposal counts as their approval. That is what
+    /// It arrives with at most one — the proposer's own, and only when they are
+    /// a core member, since a follower's agreement does not count toward a
+    /// quorum of core nodes. So the two cases this decides between are "takes
+    /// one approval, and here it is" and "needs more than it has". Everything
+    /// that needs more waits in [`Self::pending`] for the rest to arrive as log
+    /// entries of their own, and [`Self::approve`] is what puts them there.
+    ///
+    /// That a core proposer's own proposal counts as their approval is what
     /// keeps a core operator's `distlib admit` and `distlib expel` a single
     /// step, as they are today: what changes is a *follower* submitting one,
     /// and a core member being removed.
@@ -250,7 +276,7 @@ impl MembershipState {
             approvals.insert(proposer);
         }
 
-        if approvals.len() >= self.approvals_needed(event) {
+        if self.decided(event, &approvals) {
             return self.enact(event);
         }
 
@@ -283,21 +309,25 @@ impl MembershipState {
             return Err(ConsensusError::UnknownProposal { proposal });
         };
 
-        let enough = match self.enough(&entry, approver) {
-            Ok(enough) => enough,
-            Err(error) => {
-                self.pending.insert(proposal, entry);
-                return Err(error);
-            }
-        };
+        if let Err(error) = self.still_allowed(&entry, approver) {
+            self.pending.insert(proposal, entry);
+            return Err(error);
+        }
 
-        if !enough {
-            // Idempotent rather than refused as a repeat. A proposal can become
-            // sufficient without anyone approving it — the core group shrinking
-            // lowers the threshold — and nothing re-examines a pending proposal
-            // until an approval lands on it. Letting an existing approver say so
-            // again is what makes that reachable.
-            entry.approvals.insert(approver);
+        // Built beside the stored set rather than into it, so the error path
+        // below puts back exactly what it took out. The set holds at most one
+        // entry per core member, so this is a handful of ids.
+        //
+        // Inserting is idempotent rather than refused as a repeat, because a
+        // proposal can become sufficient with nobody approving it — the core
+        // group shrinking lowers the threshold under one already sitting there
+        // — and nothing re-examines a pending proposal on its own. An existing
+        // approver saying so again is what makes that reachable.
+        let mut approvals = entry.approvals.clone();
+        approvals.insert(approver);
+
+        if !self.decided(&entry.event, &approvals) {
+            entry.approvals = approvals;
             self.pending.insert(proposal, entry);
             return Ok(());
         }
@@ -311,14 +341,13 @@ impl MembershipState {
         }
     }
 
-    /// Whether `approver`'s approval would be the last one `entry` needs, or an
-    /// error if the rules no longer allow them to give it.
+    /// Whether the rules still allow `approver` to approve `entry`.
     ///
-    /// Every rule is re-checked here rather than only when the proposal was
-    /// made. The group can move in between — that gap is precisely where this
-    /// kind of thing goes wrong — so the proposer must still be a member and
-    /// must still be allowed to have proposed it.
-    fn enough(&self, entry: &Proposal, approver: MemberId) -> Result<bool> {
+    /// Re-checked here rather than only when the proposal was made, because the
+    /// group can move in between and that gap is precisely where this kind of
+    /// thing goes wrong: the proposer must still be a member, and must still be
+    /// allowed to have proposed what they did.
+    fn still_allowed(&self, entry: &Proposal, approver: MemberId) -> Result<()> {
         if target(&entry.event) == Some(approver) {
             return Err(ConsensusError::SelfApproval { member: approver });
         }
@@ -327,20 +356,7 @@ impl MembershipState {
                 proposer: entry.proposer,
             });
         }
-        self.authorise(entry.proposer, &entry.event)?;
-
-        // Only approvals from current voters count, for the same reason the
-        // threshold is measured against the current core: an approval from
-        // somebody since demoted or expelled is not a voter's agreement, and
-        // counting it would let a shrinking core carry decisions on the word of
-        // people who have left it. `approver` is core — `authorise` refused the
-        // approval otherwise — so they are the one that is added.
-        let carried = entry
-            .approvals
-            .iter()
-            .filter(|member| **member != approver && self.is_core(member))
-            .count();
-        Ok(carried + 1 >= self.approvals_needed(&entry.event))
+        self.authorise(entry.proposer, &entry.event)
     }
 
     /// Puts a decided change into the state, and drops the pending proposals it
