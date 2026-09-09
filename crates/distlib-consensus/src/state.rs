@@ -72,7 +72,10 @@ impl Proposal {
         self.proposer
     }
 
-    /// Who has approved it so far.
+    /// Who has approved it so far — everyone who ever did.
+    ///
+    /// Not all of these necessarily count: see
+    /// [`MembershipState::approvals_counting`] for the ones that decide it.
     pub fn approvals(&self) -> impl Iterator<Item = MemberId> + '_ {
         self.approvals.iter().copied()
     }
@@ -153,6 +156,9 @@ impl MembershipState {
                 self.authorise(proposer, event)?;
                 match event {
                     MembershipEvent::Approved { proposal } => self.approve(*proposal, proposer)?,
+                    MembershipEvent::Withdrawn { proposal } => {
+                        self.withdraw(*proposal, proposer)?
+                    }
                     event => self.submit(index, proposer, event)?,
                 }
             }
@@ -231,11 +237,35 @@ impl MembershipState {
     /// a voter's agreement, and counting it would let a shrinking core carry
     /// decisions on the word of people who have left it.
     fn decided(&self, event: &MembershipEvent, approvals: &BTreeSet<MemberId>) -> bool {
-        let voting = approvals
+        self.counting(approvals).count() >= self.approvals_needed(event)
+    }
+
+    /// The approvals on `proposal` that still count toward its threshold.
+    ///
+    /// The same set [`Self::decided`] measures, exposed because anything
+    /// showing an operator "1 of 2" has to show the same 1. Reporting the raw
+    /// set beside a threshold computed from the current core group produces
+    /// sentences like "5 of 2, still waiting", which reads as a broken group
+    /// rather than as four approvals from people who have since left it.
+    ///
+    /// While a proposal is pending this is always fewer than
+    /// [`Self::approvals_needed`] — a proposal with enough is not pending.
+    pub fn approvals_counting<'a>(
+        &'a self,
+        proposal: &'a Proposal,
+    ) -> impl Iterator<Item = MemberId> + 'a {
+        self.counting(&proposal.approvals)
+    }
+
+    /// Those of `approvals` given by members who are core *now*.
+    fn counting<'a>(
+        &'a self,
+        approvals: &'a BTreeSet<MemberId>,
+    ) -> impl Iterator<Item = MemberId> + 'a {
+        approvals
             .iter()
-            .filter(|member| self.is_core(member))
-            .count();
-        voting >= self.approvals_needed(event)
+            .copied()
+            .filter(move |member| self.is_core(member))
     }
 
     /// Whether `event` would move the set of Raft voters — as opposed to their
@@ -339,6 +369,25 @@ impl MembershipState {
                 Err(error)
             }
         }
+    }
+
+    /// Takes back a proposal, at the request of the member who made it.
+    ///
+    /// **The authorisation lives here rather than in [`Self::authorise`]**, and
+    /// deliberately: the rule is "you proposed it", which needs the pending map
+    /// to check, and `authorise` sees only the event. Leaving it to
+    /// `authorise`'s catch-all would let any member withdraw anybody's
+    /// proposal — the veto that [`MembershipEvent::Withdrawn`] exists *not* to
+    /// be.
+    fn withdraw(&mut self, proposal: u64, member: MemberId) -> Result<()> {
+        let Some(entry) = self.pending.get(&proposal) else {
+            return Err(ConsensusError::UnknownProposal { proposal });
+        };
+        if entry.proposer != member {
+            return Err(ConsensusError::NotTheProposer { member, proposal });
+        }
+        self.pending.remove(&proposal);
+        Ok(())
     }
 
     /// Whether the rules still allow `approver` to approve `entry`.
@@ -534,11 +583,13 @@ impl MembershipState {
                 Ok(())
             }
 
-            // Unreachable: `apply` dispatches approvals, and an approval never
-            // becomes a pending proposal, so none ever reaches here. Spelled out
-            // rather than caught by a wildcard so that adding an event to the
-            // enum stays a compile error.
-            MembershipEvent::Approved { .. } => Err(ConsensusError::ApprovalIsNotAChange),
+            // Unreachable: `apply` dispatches both, and neither ever becomes a
+            // pending proposal, so neither reaches here. Spelled out rather than
+            // caught by a wildcard so that adding an event to the enum stays a
+            // compile error.
+            MembershipEvent::Approved { .. } | MembershipEvent::Withdrawn { .. } => {
+                Err(ConsensusError::NotAMembershipChange)
+            }
         }
     }
 }

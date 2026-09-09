@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# The lane split from PR #24. A four-voter group is the smallest one where an
+# approval can land, count, and still leave a proposal waiting — worth testing,
+# but four raft nodes do not belong in a lane whose job is feedback in seconds.
+[features]
+default = ["slow-tests"]
+slow-tests = []
+
 [dependencies]
 distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }

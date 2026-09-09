@@ -314,20 +314,100 @@ pub async fn admit(paths: &Paths, member: MemberId, name: Option<String>) -> Res
         Some(name) => json!({ "member": member, "name": name }),
         None => json!({ "member": member }),
     };
-    ask(paths, "group.propose_add", params).await?;
-    println!("admitted    {member}");
+    let answer = ask(paths, "group.propose_add", params).await?;
+    println!("{}", report("admitted", &member.to_string(), &answer));
     Ok(())
 }
 
 /// `distlib expel`
 pub async fn expel(paths: &Paths, member: MemberId, reason: String) -> Result<()> {
-    ask(
+    let answer = ask(
         paths,
         "group.propose_expel",
         json!({ "member": member, "reason": reason }),
     )
     .await?;
-    println!("expelled    {member}");
+    println!("{}", report("expelled", &member.to_string(), &answer));
+    Ok(())
+}
+
+/// What became of a proposal, said plainly.
+///
+/// The gap this closes: before approvals existed every proposal took effect, so
+/// `admitted <member>` was always true. Since 2.2-1 it may be waiting for core
+/// members to agree, and a command that printed `admitted` anyway would report
+/// something that has not happened — leaving the operator to wonder why the
+/// person they admitted still cannot connect.
+fn report(done: &str, subject: &str, answer: &Value) -> String {
+    let proposal = answer["proposal"].as_u64().unwrap_or(0);
+
+    if answer["applied"].as_bool().unwrap_or(false) {
+        return format!("{done:<12}{subject}");
+    }
+
+    let held = answer["waiting"]["approvals"].as_u64().unwrap_or(0);
+    let needed = answer["waiting"]["needed"].as_u64().unwrap_or(0);
+    // "{held} of {needed}" rather than "{needed - held} more", so there is no
+    // arithmetic here to disagree with the group's. The two numbers come from
+    // the same place and are already comparable; subtracting them locally is
+    // how a display invents "waiting for 0 more".
+    format!(
+        "proposed    {subject}\n            waiting for core approval — {held} of {needed} so \
+         far\n            a core member approves it with `distlib approve {proposal}`"
+    )
+}
+
+/// `distlib pending`
+pub async fn pending(paths: &Paths) -> Result<()> {
+    let answer = ask(paths, "group.pending", Value::Null).await?;
+    let proposals = answer["pending"].as_array().map_or(&[][..], |v| v);
+
+    if proposals.is_empty() {
+        println!("nothing is waiting for approval");
+        return Ok(());
+    }
+
+    for proposal in proposals {
+        println!(
+            "{:<8}{}",
+            proposal["proposal"].as_u64().unwrap_or(0),
+            proposal["what"].as_str().unwrap_or("?")
+        );
+        println!(
+            "        {} of {} approvals, proposed by {}",
+            proposal["approvals"].as_array().map_or(0, Vec::len),
+            proposal["needed"].as_u64().unwrap_or(0),
+            proposal["proposer"].as_str().unwrap_or("?")
+        );
+    }
+    println!();
+    println!("Approve one with `distlib approve <index>`, or take back your own");
+    println!("with `distlib withdraw <index>`.");
+    Ok(())
+}
+
+/// `distlib approve`
+pub async fn approve(paths: &Paths, proposal: u64) -> Result<()> {
+    let answer = ask(paths, "group.approve", json!({ "proposal": proposal })).await?;
+    // Reported on the *proposal*, not on the approval. The approval always
+    // commits — it is not itself a proposal — so saying "approved" and stopping
+    // would tell an operator a change had happened when it may still be one
+    // approval short. `group.approve` answers about the proposal for exactly
+    // this reason.
+    if answer["applied"].as_bool().unwrap_or(false) {
+        println!("approved    {proposal} — it has taken effect");
+    } else {
+        let held = answer["waiting"]["approvals"].as_u64().unwrap_or(0);
+        let needed = answer["waiting"]["needed"].as_u64().unwrap_or(0);
+        println!("approved    {proposal} — {held} of {needed}, still waiting for others");
+    }
+    Ok(())
+}
+
+/// `distlib withdraw`
+pub async fn withdraw(paths: &Paths, proposal: u64) -> Result<()> {
+    ask(paths, "group.withdraw", json!({ "proposal": proposal })).await?;
+    println!("withdrew    {proposal}");
     Ok(())
 }
 
@@ -471,6 +551,12 @@ fn print_live_status(live: &Value) {
             "follows     the log to index {}",
             live["followed_upto"].as_u64().unwrap_or(0)
         ),
+    }
+    // Only when there is something, so a group with nothing under discussion
+    // does not carry a line saying so.
+    match live["pending"].as_u64().unwrap_or(0) {
+        0 => {}
+        pending => println!("pending     {pending} awaiting approval — see `distlib pending`"),
     }
     println!("node        running");
 }
@@ -1086,5 +1172,65 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
+    }
+
+    /// The line this whole sub-phase exists for.
+    ///
+    /// Before approvals every proposal took effect, so `admitted <member>` was
+    /// always true. It is a string rather than a `println!` so that this can
+    /// check it: the operator reads this and nothing else, and a wrong word
+    /// here is the failure — somebody wondering why the person they admitted
+    /// still cannot connect.
+    #[test]
+    fn a_proposal_that_took_effect_reads_differently_from_one_that_is_waiting() {
+        let applied = report(
+            "admitted",
+            "alice",
+            &json!({ "proposal": 12, "applied": true, "waiting": Value::Null }),
+        );
+        assert_eq!(applied, "admitted    alice");
+
+        let waiting = report(
+            "admitted",
+            "alice",
+            &json!({
+                "proposal": 12,
+                "applied": false,
+                "waiting": { "approvals": 1, "needed": 3 },
+            }),
+        );
+        assert!(
+            !waiting.contains("admitted"),
+            "it has not been admitted: {waiting}"
+        );
+        assert!(waiting.contains("waiting for core approval"), "{waiting}");
+        assert!(waiting.contains("1 of 3"), "{waiting}");
+        assert!(
+            waiting.contains("distlib approve 12"),
+            "the next step has to name the proposal: {waiting}"
+        );
+    }
+
+    /// Two numbers that contradict each other must still print something true.
+    ///
+    /// They should not arrive — the API counts only approvals that still count
+    /// toward the threshold, and a proposal with enough of those is not pending
+    /// — but this line is the one an operator acts on, and an earlier draft
+    /// subtracted them here and printed "waiting for 0 more" on exactly this
+    /// input, which reads as a broken group rather than a display doing
+    /// arithmetic it had no business doing.
+    #[test]
+    fn a_waiting_line_states_the_counts_rather_than_deriving_one() {
+        let waiting = report(
+            "expelled",
+            "bob",
+            &json!({
+                "proposal": 3,
+                "applied": false,
+                "waiting": { "approvals": 5, "needed": 2 },
+            }),
+        );
+        assert!(!waiting.contains("waiting for 0"), "{waiting}");
+        assert!(waiting.contains("5 of 2"), "{waiting}");
     }
 }

@@ -523,6 +523,9 @@ impl MembershipNode {
             secret_key,
         )
         .await
+        // Founding is entry one and takes no approvals; the index says nothing
+        // the caller does not already know.
+        .map(|_| ())
     }
 
     /// Commits a signed event through Raft, forwarding to the leader if needed.
@@ -543,7 +546,14 @@ impl MembershipNode {
     /// [`MembershipState::changed_at`] — and this node is the one that knows
     /// which membership it has seen. A caller handing in a pre-signed event
     /// would be stating a view it had no way to be sure of.
-    pub async fn propose(&self, event: MembershipEvent, secret_key: &SecretKey) -> Result<()> {
+    /// Answers with the log index the entry was applied at.
+    ///
+    /// Which is what the proposer needs to say anything further about it. A
+    /// change that took effect and one now waiting for approvals are both `Ok`
+    /// — the entry committed and the fold accepted it either way — and the
+    /// difference is a question about [`MembershipState::pending`], keyed by
+    /// exactly this index.
+    pub async fn propose(&self, event: MembershipEvent, secret_key: &SecretKey) -> Result<u64> {
         match self.propose_once(&event, secret_key).await {
             // Somebody else changed the membership between reading it and
             // committing this. Catch up to what the group actually is, then
@@ -585,7 +595,7 @@ impl MembershipNode {
     }
 
     /// One attempt: sign against the membership this node holds, and commit it.
-    async fn propose_once(&self, event: &MembershipEvent, secret_key: &SecretKey) -> Result<()> {
+    async fn propose_once(&self, event: &MembershipEvent, secret_key: &SecretKey) -> Result<u64> {
         let event = SignedEvent::sign(
             secret_key,
             event.clone(),
@@ -605,7 +615,7 @@ impl MembershipNode {
     /// `ForwardToLeader` to be told — so it asks the core nodes it knows of,
     /// leader first, until one commits it. A node that is not the leader
     /// forwards through its own Raft, so any of them will do.
-    async fn commit_as_follower(&self, sources: &SharedSources, event: SignedEvent) -> Result<()> {
+    async fn commit_as_follower(&self, sources: &SharedSources, event: SignedEvent) -> Result<u64> {
         let candidates = follower::read(sources).candidates(self.id);
         if candidates.is_empty() {
             return Err(NodeError::NoLeader);
@@ -614,7 +624,7 @@ impl MembershipNode {
         let mut unreached = None;
         for (member, addr) in candidates {
             match self.memberlog.propose(member, &addr, event.clone()).await {
-                Ok(()) => return Ok(()),
+                Ok(index) => return Ok(index),
                 // The rules refused it. Every node reaches that verdict
                 // identically, so asking somebody else cannot change it.
                 Err(ProposeError::Rejected(error)) => return Err(NodeError::Event(error)),
@@ -636,7 +646,7 @@ impl MembershipNode {
 
     /// A voter's way to commit: through its own Raft, forwarding if it is not
     /// the leader.
-    async fn commit_as_core(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> Result<()> {
+    async fn commit_as_core(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> Result<u64> {
         let mut unreached = None;
 
         for _ in 0..PROPOSE_ATTEMPTS {
@@ -646,7 +656,10 @@ impl MembershipNode {
                 // event whose rules do not hold is skipped rather than fatal
                 // (P1-8), so reporting `Ok` on the strength of the commit alone
                 // would tell the caller something happened when it did not.
-                Ok(written) => return written.data.map_err(NodeError::Event),
+                Ok(written) => {
+                    let index = written.log_id.index;
+                    return written.data.map(|()| index).map_err(NodeError::Event);
+                }
                 Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => forward,
                 Err(other) => return Err(raft_failed(other)),
             };
@@ -654,7 +667,7 @@ impl MembershipNode {
             match (forward.leader_id, forward.leader_node) {
                 (Some(leader), Some(addr)) => {
                     match self.forward(leader, addr, event.clone()).await {
-                        Ok(()) => return Ok(()),
+                        Ok(index) => return Ok(index),
 
                         // The rules refused it. Every node reaches that verdict
                         // identically, so asking somebody else cannot change it.
@@ -708,7 +721,7 @@ impl MembershipNode {
         leader: RawMemberId,
         addr: NodeAddr,
         event: SignedEvent,
-    ) -> std::result::Result<(), ProposeError> {
+    ) -> std::result::Result<u64, ProposeError> {
         tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
         // Not `Unreachable`: that names a member who could not be reached, and
         // the only id we have here is one that is not a member id at all.

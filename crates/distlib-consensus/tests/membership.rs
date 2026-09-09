@@ -1021,6 +1021,73 @@ fn an_approval_from_a_member_since_demoted_no_longer_counts() {
 }
 
 #[test]
+fn the_approvals_reported_are_the_ones_that_count() {
+    // What anything showing an operator "1 of 3" has to show. Reporting the raw
+    // set beside a threshold computed from the current core group produces
+    // sentences like "2 of 3, still waiting" when only one of the two is still
+    // a voter — or, once the core shrinks further, "5 of 2", which reads as a
+    // broken group rather than as approvals from people who have left it.
+    let (mut state, founders) = founded_by(5);
+    let (a, b, c, d, e) = (
+        &founders[0],
+        &founders[1],
+        &founders[2],
+        &founders[3],
+        &founders[4],
+    );
+
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: e.id,
+            reason: "under discussion".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = the_pending_one(&state);
+    approve(&mut state, b, expulsion).unwrap();
+
+    let held = |state: &MembershipState| {
+        let (_, proposal) = state
+            .pending()
+            .find(|(index, _)| *index == expulsion)
+            .expect("still pending");
+        (
+            proposal.approvals().count(),
+            state.approvals_counting(proposal).count(),
+        )
+    };
+    assert_eq!(held(&state), (2, 2), "both approvers are voters");
+
+    // Expel `b`, who is one of them. Their approval stays on the record and
+    // stops counting.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: b.id,
+            reason: "overtaken".to_owned(),
+        },
+    )
+    .unwrap();
+    let departure = state
+        .pending()
+        .map(|(index, _)| index)
+        .find(|index| *index != expulsion)
+        .expect("pending too");
+    approve(&mut state, c, departure).unwrap();
+    approve(&mut state, d, departure).unwrap();
+    assert!(!state.is_member(&b.id));
+
+    assert_eq!(
+        held(&state),
+        (2, 1),
+        "the record keeps both; only one of them is still a voter"
+    );
+}
+
+#[test]
 fn a_pending_proposal_about_a_member_is_dropped_when_their_membership_changes() {
     // A pending expulsion of somebody who has since been expelled has nothing
     // left to do, and one of somebody since re-admitted was decided against a
@@ -1186,6 +1253,78 @@ fn a_last_approval_that_cannot_be_applied_leaves_the_proposal_as_it_was() {
         "the approval that could not be applied is not recorded"
     );
     assert_eq!(voters(&state).len(), 3, "and nothing moved");
+}
+
+#[test]
+fn a_proposer_can_take_back_their_own_proposal() {
+    let (mut state, founders) = founded_by(3);
+    let (alice, carol) = (&founders[0], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "on reflection, no".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+
+    propose(&mut state, alice, MembershipEvent::Withdrawn { proposal }).unwrap();
+
+    assert_eq!(state.pending().count(), 0);
+    assert!(state.is_core(&carol.id), "and nothing was decided");
+}
+
+#[test]
+fn only_the_proposer_may_withdraw() {
+    // The rule that keeps withdrawal from being a veto. A core member who could
+    // withdraw anybody's proposal could stop a decision the rest of the core
+    // group was reaching — which is exactly what the thresholds exist to
+    // prevent, arriving by another door.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "a majority may want this".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+
+    for other in [bob, carol] {
+        assert_eq!(
+            propose(&mut state, other, MembershipEvent::Withdrawn { proposal }),
+            Err(ConsensusError::NotTheProposer {
+                member: other.id,
+                proposal,
+            }),
+            "a core member is not thereby the proposer"
+        );
+    }
+
+    // And the decision the withdrawal would have blocked still happens.
+    approve(&mut state, bob, proposal).unwrap();
+    assert!(!state.is_member(&carol.id));
+}
+
+#[test]
+fn withdrawing_something_that_is_not_pending_is_refused() {
+    let (mut state, alice) = founded();
+
+    assert_eq!(
+        propose(
+            &mut state,
+            &alice,
+            MembershipEvent::Withdrawn { proposal: 7 }
+        ),
+        Err(ConsensusError::UnknownProposal { proposal: 7 })
+    );
 }
 
 // --- pledges ----------------------------------------------------------------
@@ -1385,7 +1524,7 @@ fn founding_is_proposed_against_the_empty_membership() {
 fn scenario() -> impl Strategy<Value = (usize, Vec<(usize, usize, u64)>)> {
     (
         1usize..4,
-        prop::collection::vec((0usize..4, 0usize..4, 0u64..4), 0..12),
+        prop::collection::vec((0usize..4, 0usize..4, 0u64..5), 0..12),
     )
 }
 
@@ -1510,16 +1649,25 @@ fn apply_scenario(
             2 => MembershipEvent::CoreGroupChanged {
                 core: core_group(&[actor, subject]),
             },
-            // Approvals are generated too, or the scenarios would stop
-            // exercising anything past the point a proposal starts waiting —
-            // which, now that most of them do, is nearly everything. Chosen by
-            // position rather than at random so a replayed run picks the same
-            // one and `applying_in_chunks_matches_applying_at_once` still means
-            // something.
-            _ => match state.pending().nth(choice % state.pending().count().max(1)) {
-                Some((proposal, _)) => MembershipEvent::Approved { proposal },
-                None => continue,
-            },
+            _ => {
+                // Approvals and withdrawals are generated too, or the scenarios
+                // would stop exercising anything past the point a proposal
+                // starts waiting — which, now that most of them do, is nearly
+                // everything. Chosen by position rather than at random so a
+                // replayed run picks the same one and
+                // `applying_in_chunks_matches_applying_at_once` still means
+                // something.
+                let Some((proposal, _)) =
+                    state.pending().nth(choice % state.pending().count().max(1))
+                else {
+                    continue;
+                };
+                if kind == 3 {
+                    MembershipEvent::Approved { proposal }
+                } else {
+                    MembershipEvent::Withdrawn { proposal }
+                }
+            }
         };
         // Refused events are expected and are exactly what the rules are for.
         let _ = propose(state, actor, event);

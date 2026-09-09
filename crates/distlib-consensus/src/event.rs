@@ -122,12 +122,25 @@ pub enum MembershipEvent {
     /// distinguishable, and the index is already the currency here — it is what
     /// [`crate::MembershipState::changed_at`] speaks in.
     ///
-    /// Last on purpose, and it must stay last. postcard encodes an enum variant
-    /// by its declaration index, so inserting one anywhere above would renumber
-    /// every variant after it: entries already written would deserialise as a
-    /// different event, and every signature's pre-image would change. Appending
-    /// leaves both alone, which is why `SIGNING_DOMAIN` does not move for this.
+    /// Appended, not inserted — see the note at the end of this enum.
     Approved { proposal: u64 },
+
+    /// The member who made a proposal takes it back.
+    ///
+    /// The deliberate way to clear a pending proposal, as against the automatic
+    /// one 2.2-3 adds. **Its proposer alone may withdraw it**, and that is the
+    /// whole rule: letting any core member withdraw would hand one of them a
+    /// veto over a decision a majority of the others were reaching, which is
+    /// precisely what the thresholds exist to prevent. Nobody else has anything
+    /// to take back.
+    ///
+    /// New variants go **here, at the end, and nowhere else.** postcard encodes
+    /// an enum variant by its declaration index, so inserting one anywhere above
+    /// would renumber every variant after it: entries already written would
+    /// deserialise as a different event, and every signature's pre-image would
+    /// change. Appending leaves both alone, which is why `SIGNING_DOMAIN` has
+    /// not had to move for either of these.
+    Withdrawn { proposal: u64 },
 }
 
 impl MembershipEvent {

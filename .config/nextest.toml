@@ -8,3 +8,27 @@
 # without oversubscribing a machine that is also building something. It matches
 # what a CI runner has anyway.
 test-threads = 4
+
+# Tests that stand up a whole cluster do not run alongside each other.
+#
+# `test-threads` above bounds how many tests run at once; it cannot say that
+# *these* four are each worth several. `founding` drives three real `distlib`
+# processes, the phase-1 acceptance criteria run five in-process nodes, and two
+# of the approval tests run four. Four threads can therefore put a dozen nodes
+# and three OS processes on the machine at once, and the ones that lose are the
+# ones waiting on replication — which is how `three_friends_found_a_group` came
+# to time out at its thirty-second bound roughly one run in eight, having passed
+# in under two seconds on its own.
+#
+# One at a time, because the point is that a cluster test gets the machine to
+# itself while the fast lane's hundred-odd unit tests keep the other threads
+# busy. Raising the bound instead would have hidden it: thirty seconds is
+# already far more than this needs, and a test that needs longer than that is
+# telling you about the runner rather than about the code — which is the
+# confusion this file exists to prevent.
+[test-groups]
+cluster = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(founding) or binary(acceptance) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
+test-group = 'cluster'

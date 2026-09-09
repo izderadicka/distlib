@@ -104,7 +104,7 @@ distlib-net = { path = "crates/distlib-net" }
 # asking for defaults would unify it back on and `--no-default-features`
 # would silently do nothing.
 distlib-consensus = { path = "crates/distlib-consensus", default-features = false }
-distlib-api = { path = "crates/distlib-api" }
+distlib-api = { path = "crates/distlib-api", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
