@@ -15,9 +15,10 @@
 use std::{
     fs::File,
     io::Read as _,
-    net::UdpSocket,
+    net::{TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU16, Ordering},
     time::{Duration, Instant},
 };
 
@@ -46,8 +47,11 @@ impl Friend {
     /// founder can be told who everyone is before there is a group to ask.
     fn introduce() -> Self {
         let dir = TempDir::new().unwrap();
-        let port = a_free_port();
-        let api_port = a_free_port();
+        // Each probed with the protocol that will use it: the transport is
+        // QUIC over UDP, the local api is HTTP over TCP, and a free port in one
+        // says nothing whatever about the other.
+        let port = a_free_port(Protocol::Udp);
+        let api_port = a_free_port(Protocol::Tcp);
 
         // The port has to be pinned before `whoami`, because founding writes
         // this address into the log and an OS-chosen one would be gone by the
@@ -179,6 +183,48 @@ impl Friend {
     }
 }
 
+/// Waits for `needle` in every node's log, and gives up the moment any of them
+/// has stopped.
+///
+/// Across *all* of them, which is the point rather than a convenience. The node
+/// that fails at startup is usually not the one being waited on: the survivors
+/// carry on trying to elect a leader and look perfectly healthy, so waiting on
+/// them one at a time sits out the whole bound against a node that is fine and
+/// then reports the wrong thing. That is what happened — an api listener lost a
+/// port race, and it surfaced thirty seconds later as a convergence failure
+/// blamed on a different node, with the line that said so buried in a log
+/// nobody had reason to read.
+///
+/// So this checks liveness before content, and prints *every* node's log when
+/// it does give up.
+fn wait_for_all(nodes: &mut [&mut Running], needle: &str) {
+    let deadline = Instant::now() + CONVERGE_TIMEOUT;
+    loop {
+        for node in nodes.iter_mut() {
+            if let Some(status) = node.exited() {
+                panic!(
+                    "a node exited ({status}) while the group waited for {needle:?}; its log was:\n{}",
+                    node.log_contents()
+                );
+            }
+        }
+        if nodes
+            .iter()
+            .all(|node| node.log_contents().contains(needle))
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let logs: String = nodes
+                .iter()
+                .map(|node| format!("--- {}\n{}\n", node.log.display(), node.log_contents()))
+                .collect();
+            panic!("timed out waiting for {needle:?} on every node; logs were:\n{logs}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// A node process, killed when the test ends however it ends.
 struct Running {
     child: Child,
@@ -187,19 +233,21 @@ struct Running {
 
 impl Running {
     /// Waits for `needle` to appear in this node's log.
-    fn wait_for(&self, needle: &str) {
-        let deadline = Instant::now() + CONVERGE_TIMEOUT;
-        while Instant::now() < deadline {
-            if self.log_contents().contains(needle) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!(
-            "timed out waiting for {needle:?} in {}; log was:\n{}",
-            self.log.display(),
-            self.log_contents()
-        );
+    ///
+    /// Gives up early if the node is no longer running, which is worth the two
+    /// extra lines: a node that fails at startup can never print anything, so
+    /// waiting the full bound turns "this process exited immediately" into a
+    /// thirty-second timeout blamed on whatever the test was waiting for. That
+    /// is not hypothetical — an api listener losing a port race was reported as
+    /// a convergence failure two steps further on, and the log line saying so
+    /// was three screens above the panic.
+    fn wait_for(&mut self, needle: &str) {
+        wait_for_all(&mut [self], needle);
+    }
+
+    /// The exit status, if this node has stopped on its own.
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
     }
 
     fn log_contents(&self) -> String {
@@ -236,16 +284,61 @@ fn distlib(data_dir: &Path) -> Command {
     command
 }
 
-/// A port nothing is listening on, most likely.
+/// Which protocol will bind the port, because a free UDP port is not a free
+/// TCP port and this test needs one of each per node.
+#[derive(Clone, Copy)]
+enum Protocol {
+    Udp,
+    Tcp,
+}
+
+/// Hands out the next port in [`PINNED`], so two nodes in one run cannot be
+/// given the same number even if both probe it while it is still free.
+static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
+
+/// Where pinned ports come from: below the kernel's ephemeral range, and above
+/// the crowded low numbers.
 ///
-/// Founding needs pinned ports, so the test cannot let the OS choose at bind
-/// time. Binding and releasing is the closest available approximation.
-fn a_free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Linux hands out 32768–60999 for anything that does not ask for a specific
+/// port, which is every outgoing connection and every socket bound to `:0`.
+const PINNED: std::ops::Range<u16> = 20_000..30_000;
+
+/// A port this test can pin, chosen where nothing else will be given it.
+///
+/// Founding needs pinned ports — the founder writes them into every node's
+/// configuration before anything binds — so the test cannot let the OS choose
+/// at bind time, and there is an unavoidable gap between deciding on a number
+/// and using it. What matters is *where the number comes from*.
+///
+/// This used to bind `:0`, read the port back and release it, which hands back
+/// an **ephemeral** port: exactly the range the kernel draws from for every
+/// unpinned socket, and this test starts three nodes that each open several.
+/// About one run in ten something took the number in between, and the failure
+/// was `Address already in use` on the api listener and a node that never
+/// started — reported as a thirty-second convergence timeout two steps later,
+/// which is nowhere near where the problem was.
+///
+/// So: a fixed range the kernel will not allocate from, walked by a counter so
+/// two nodes in one run cannot collide, offset by the process id so two runs on
+/// one machine do not either, and probed with the protocol that will use it.
+fn a_free_port(protocol: Protocol) -> u16 {
+    let span = PINNED.end - PINNED.start;
+    // Spreads concurrent runs apart. Not a guarantee — hence the probe — but it
+    // means two runs do not start walking from the same place.
+    let offset = (std::process::id() as u16).wrapping_mul(64);
+
+    for _ in 0..span {
+        let step = offset.wrapping_add(NEXT_PORT.fetch_add(1, Ordering::Relaxed));
+        let port = PINNED.start + step % span;
+        let free = match protocol {
+            Protocol::Udp => UdpSocket::bind(("127.0.0.1", port)).is_ok(),
+            Protocol::Tcp => TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        };
+        if free {
+            return port;
+        }
+    }
+    panic!("no free port in {PINNED:?}");
 }
 
 /// Waits for a process that is expected to give up on its own.
@@ -319,16 +412,14 @@ fn three_friends_found_a_group() {
 
     // 3. The other two start first. With three voters the founder needs one of
     //    them to grant its vote before it can commit anything.
-    let second = friends[1].run(false);
-    let third = friends[2].run(false);
-    let first = friends[0].run(true);
+    let mut second = friends[1].run(false);
+    let mut third = friends[2].run(false);
+    let mut first = friends[0].run(true);
 
     // 4. All three converge on one group, and only the founder was told to
     //    found it — the others learned everything by replication.
     let converged = "members=3 core=3";
-    for node in [&first, &second, &third] {
-        node.wait_for(converged);
-    }
+    wait_for_all(&mut [&mut first, &mut second, &mut third], converged);
     assert!(
         !second.log_contents().contains("founding the group"),
         "only the founder founds"
@@ -349,9 +440,7 @@ fn three_friends_found_a_group() {
     let newcomer = Friend::introduce();
     friends[0].admit(&newcomer.id);
 
-    for node in [&first, &second, &third] {
-        node.wait_for("members=4");
-    }
+    wait_for_all(&mut [&mut first, &mut second, &mut third], "members=4");
 
     // ...and a node that was told nothing about it lists them, live, while
     //    still running.
@@ -365,7 +454,7 @@ fn three_friends_found_a_group() {
     //    its own configuration, and follows the log without ever having been
     //    told what is in it. §4.3 end to end.
     newcomer.join(&friends[1].ticket());
-    let joined = newcomer.run(false);
+    let mut joined = newcomer.run(false);
     joined.wait_for("members=4");
 
     let listed = newcomer.members();

@@ -12,20 +12,25 @@ test-threads = 4
 # Tests that stand up a whole cluster do not run alongside each other.
 #
 # `test-threads` above bounds how many tests run at once; it cannot say that
-# *these* four are each worth several. `founding` drives three real `distlib`
+# *these* five are each worth several. `founding` drives three real `distlib`
 # processes, the phase-1 acceptance criteria run five in-process nodes, and two
 # of the approval tests run four. Four threads can therefore put a dozen nodes
-# and three OS processes on the machine at once, and the ones that lose are the
-# ones waiting on replication — which is how `three_friends_found_a_group` came
-# to time out at its thirty-second bound roughly one run in eight, having passed
-# in under two seconds on its own.
+# and three OS processes on one machine, which is what the note above says this
+# suite should not do.
 #
-# One at a time, because the point is that a cluster test gets the machine to
-# itself while the fast lane's hundred-odd unit tests keep the other threads
-# busy. Raising the bound instead would have hidden it: thirty seconds is
-# already far more than this needs, and a test that needs longer than that is
-# telling you about the runner rather than about the code — which is the
-# confusion this file exists to prevent.
+# Kept because it measurably helps — the whole lane got *faster*, 18-27s against
+# 22-40s, since the cluster tests stop thrashing each other while the fast
+# tests keep the other threads busy.
+#
+# It is **not** what fixed `three_friends_found_a_group`, though it was
+# introduced believing that. That test was failing about one run in ten because
+# it pinned ports drawn from the kernel's ephemeral range and something else was
+# given one before it bound; see `a_free_port` in its own file. Serialising the
+# cluster tests lowered the rate by lowering port churn, which is exactly the
+# kind of evidence that makes a wrong diagnosis look right — twelve clean runs
+# of a one-in-ten failure. Recorded here because the next person to see a
+# timeout in this suite should suspect the thing the timeout is waiting *on*,
+# not the runner.
 [test-groups]
 cluster = { max-threads = 1 }
 
