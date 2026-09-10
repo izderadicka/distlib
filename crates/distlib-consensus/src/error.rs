@@ -111,16 +111,26 @@ pub enum ConsensusError {
     #[error("{member} cannot approve a proposal to expel them")]
     SelfApproval { member: MemberId },
 
-    /// An approval reached the path that applies membership changes.
+    /// Somebody other than a proposal's own proposer tried to withdraw it.
     ///
-    /// Unreachable: [`MembershipState::apply`] dispatches approvals before that
-    /// point, and an approval never itself becomes a pending proposal. Spelled
-    /// out rather than swallowed, so a future routing mistake surfaces as a
-    /// refused entry instead of a silent no-op.
+    /// The rule that keeps withdrawal from being a veto: a core member who
+    /// could withdraw anybody's proposal could stop a decision the rest of the
+    /// core group was reaching, which is the thing the thresholds exist to
+    /// prevent. Withdrawing is taking back what *you* said.
+    #[error("{member} did not propose {proposal} and cannot withdraw it")]
+    NotTheProposer { member: MemberId, proposal: u64 },
+
+    /// An approval or a withdrawal reached the path that applies membership
+    /// changes.
+    ///
+    /// Unreachable: [`MembershipState::apply`] dispatches both before that
+    /// point, and neither ever becomes a pending proposal. Spelled out rather
+    /// than swallowed, so a future routing mistake surfaces as a refused entry
+    /// instead of a silent no-op.
     ///
     /// [`MembershipState::apply`]: crate::MembershipState::apply
-    #[error("an approval is not itself a membership change")]
-    ApprovalIsNotAChange,
+    #[error("an approval or a withdrawal is not itself a membership change")]
+    NotAMembershipChange,
 
     /// The proposal was made against a membership that has since changed.
     #[error(

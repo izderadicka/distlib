@@ -237,6 +237,60 @@ dl -d $DL/d members     # frank appears on a follower nobody told
 
 ---
 
+## 5a. Two operators agree — removing a **core** member (§4.4 step 2)
+
+Everything above removes a *follower*, which any core member does alone. Removing a
+voter is the other rule, and it is the first thing in this runbook that needs two people
+to agree. Run it with three voters still up, so restart the node killed in §5 first.
+
+Propose it from a **follower** — e is expelled by now, so use f from §5, or any member
+that is not a voter. Submitting is open to every member; deciding is not.
+
+```sh
+dl -d $DL/f expel $C --reason "manual check: two operators"
+```
+
+Expected — and the point of this section — is that it does **not** say `expelled`:
+
+```
+proposed    <c>
+            waiting for core approval — 0 of 2 so far
+            a core member approves it with `distlib approve <N>`
+```
+
+Note the index. On **a**:
+
+```sh
+dl -d $DL/a pending      # lists it: what, who proposed it, how many approvals
+dl -d $DL/a approve <N>
+```
+
+Expected: `approved <N> — 1 of 2, still waiting for others`. One of three voters is not a
+majority, and `dl -d $DL/a status` still shows three in the core group. Then on **b**:
+
+```sh
+dl -d $DL/b approve <N>
+```
+
+Expected: `approved <N> — it has taken effect`, `dl -d $DL/a members` no longer lists c,
+and c's core-group line drops to two. **c's own terminal** behaves like e's did in §4 —
+it is no longer a member, so it most likely never sees the entry removing it.
+
+Then the other half, which is what makes this safe rather than merely ceremonious. Try
+to withdraw somebody else's proposal — propose a fresh one from f and, from **a**:
+
+```sh
+dl -d $DL/f expel $B --reason "manual check: withdrawal"
+dl -d $DL/a withdraw <N>       # expect a refusal: a did not propose it
+dl -d $DL/f withdraw <N>       # expect: withdrew <N>
+```
+
+A core member who could withdraw anyone's proposal would hold a veto over a decision the
+rest of the core group was reaching, so only the proposer may. Check `dl -d $DL/a
+pending` is empty afterwards.
+
+---
+
 ## 6. After
 
 Restart the killed node and watch it rejoin and catch up — beyond §9, but the first
@@ -256,3 +310,5 @@ rm -rf $DL
 - Does a follower's `status` read sensibly while it is behind?
 - How long does a change take to reach a follower — gossip, or the 30-second poll?
 - Anything the README quickstart gets wrong now that followers exist.
+- Does `pending` tell you enough to decide, without going to the log for it?
+- Is it obvious from `admit`/`expel` output alone whether anything actually happened?

@@ -8,3 +8,32 @@
 # without oversubscribing a machine that is also building something. It matches
 # what a CI runner has anyway.
 test-threads = 4
+
+# Tests that stand up a whole cluster do not run alongside each other.
+#
+# `test-threads` above bounds how many tests run at once; it cannot say that
+# *these* five are each worth several. `founding` drives three real `distlib`
+# processes, the phase-1 acceptance criteria run five in-process nodes, and two
+# of the approval tests run four. Four threads can therefore put a dozen nodes
+# and three OS processes on one machine, which is what the note above says this
+# suite should not do.
+#
+# Kept because it measurably helps — the whole lane got *faster*, 18-27s against
+# 22-40s, since the cluster tests stop thrashing each other while the fast
+# tests keep the other threads busy.
+#
+# It is **not** what fixed `three_friends_found_a_group`, though it was
+# introduced believing that. That test was failing about one run in ten because
+# it pinned ports drawn from the kernel's ephemeral range and something else was
+# given one before it bound; see `a_free_port` in its own file. Serialising the
+# cluster tests lowered the rate by lowering port churn, which is exactly the
+# kind of evidence that makes a wrong diagnosis look right — twelve clean runs
+# of a one-in-ten failure. Recorded here because the next person to see a
+# timeout in this suite should suspect the thing the timeout is waiting *on*,
+# not the runner.
+[test-groups]
+cluster = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(founding) or binary(acceptance) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
+test-group = 'cluster'

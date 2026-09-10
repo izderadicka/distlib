@@ -520,6 +520,112 @@ async fn a_core_node_the_log_drops_stops_voting() {
 }
 
 #[tokio::test]
+async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
+    // §4.4 end to end, and the sub-phase's own acceptance: any member may
+    // *submit* a change, and a quorum of core nodes decides it. Before this,
+    // one signed proposal from anybody at all removed a voter — so a handful of
+    // them shrank the group's ability to commit anything, and a mistyped id in
+    // `distlib expel` did it by accident.
+    let peers = a_founded_trio().await;
+
+    // A member who does not vote. Admitted by a core node, so that step is one
+    // step and this test is about the expulsion rather than the admission.
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: follower_id,
+                    display_name: "the proposer".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let follower = Peer::start_with(
+        follower_key,
+        peers.iter().map(|peer| peer.id).collect(),
+        peers
+            .iter()
+            .map(|peer| (peer.id, peer.addr.clone()))
+            .collect(),
+    )
+    .await;
+    wait_for(&follower, "the log to reach the follower", |m| {
+        m.is_member(&follower_id)
+    })
+    .await;
+
+    // The follower proposes removing a voter. It commits — submitting is open
+    // to every member — and decides nothing.
+    let proposal = follower
+        .node
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: peers[2].id,
+                reason: "proposed by somebody who does not vote".to_owned(),
+            },
+            &follower.secret,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        raft_voters(&peers[0]).len(),
+        3,
+        "a follower's proposal must not remove a voter by itself"
+    );
+
+    // One core member agreeing is still not enough: three voters, so it takes
+    // two, and the third is the one being removed and gets no say.
+    pending_on(&peers[0], "the proposal to reach the first voter").await;
+    peers[0]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[0].secret)
+        .await
+        .unwrap();
+    assert!(
+        peers[0].node.membership().is_member(&peers[2].id),
+        "one of three voters is not a majority"
+    );
+    assert_eq!(
+        peers[0].node.membership().pending().count(),
+        1,
+        "and the proposal is still waiting"
+    );
+
+    // The second decides it, and 2.1-2's reconciliation loop takes the voter
+    // out of openraft rather than leaving a vote the group can never collect.
+    pending_on(&peers[1], "the proposal to reach the second voter").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+
+    for peer in &peers[..2] {
+        until("every surviving voter to drop the expelled one", || {
+            let voters = raft_voters(peer);
+            voters.len() == 2 && !voters.iter().any(|(member, _)| *member == peers[2].id)
+        })
+        .await;
+        assert_eq!(
+            peer.node.membership().pending().count(),
+            0,
+            "a decided proposal stops pending"
+        );
+    }
+
+    follower.node.shutdown().await;
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     // The reason `distlib/raft/0` and `distlib/memberlog/0` are two protocols.
     // Being in the allowlist proves you are a member; it is not licence to take

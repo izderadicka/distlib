@@ -36,6 +36,9 @@ impl Api {
             "group.members" => self.members(),
             "group.propose_add" => self.propose_add(parse(params)?).await,
             "group.propose_expel" => self.propose_expel(parse(params)?).await,
+            "group.pending" => self.pending(),
+            "group.approve" => self.approve(parse(params)?).await,
+            "group.withdraw" => self.withdraw(parse(params)?).await,
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
             "group.ticket" => self.ticket(),
             other => Err(Error::method_not_found(other)),
@@ -80,6 +83,9 @@ impl Api {
             // How far a follower has read the log. Null on a voter, which gets
             // the log pushed to it rather than fetching it.
             "followed_upto": (!self.node.is_core()).then(|| self.node.followed_upto()),
+            // A count, not a listing. Status is a summary and every other field
+            // in it is one line; `group.pending` is where the detail lives.
+            "pending": membership.pending().count(),
         }))
     }
 
@@ -131,6 +137,71 @@ impl Api {
         }))
     }
 
+    /// `group.pending` — the changes waiting for approvals (§4.4 step 2).
+    ///
+    /// `needed` and `approvals` are both measured against the core group as it
+    /// stands now — `approvals` counts only those from members who are still
+    /// voters — which is what the fold will do when the next approval lands.
+    /// So a proposal can be one approval away today and two away tomorrow, and
+    /// this reports what is true when asked rather than what was true when it
+    /// was proposed.
+    fn pending(&self) -> Result<Value, Error> {
+        let membership = self.node.membership();
+        let pending: Vec<Value> = membership
+            .pending()
+            .map(|(proposal, entry)| {
+                json!({
+                    "proposal": proposal,
+                    "proposer": entry.proposer(),
+                    "what": describe(entry.event()),
+                    "approvals": membership.approvals_counting(entry).collect::<Vec<_>>(),
+                    "needed": membership.approvals_needed(entry.event()),
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "changed_at": membership.changed_at(),
+            "pending": pending,
+        }))
+    }
+
+    /// `group.approve` — agree to a pending proposal (§4.4 step 2).
+    ///
+    /// **Answers about the proposal, not about the approval.** An approval is
+    /// never itself a proposal — the fold dispatches it rather than holding it —
+    /// so asking after the approval's own log index would always answer
+    /// "applied", which is true of the approval and says nothing about the
+    /// thing it was cast on. The caller wants to know whether the change has
+    /// happened yet, and that is a question about the proposal's index.
+    async fn approve(&self, params: Proposal) -> Result<Value, Error> {
+        self.commit(MembershipEvent::Approved {
+            proposal: params.proposal,
+        })
+        .await?;
+        Ok(self.outcome(params.proposal))
+    }
+
+    /// `group.withdraw` — take back a proposal of your own.
+    ///
+    /// No member parameter, for the same reason `group.pledge_set` has none:
+    /// only the proposer may withdraw, so accepting one would only produce
+    /// proposals the group refuses.
+    async fn withdraw(&self, params: Proposal) -> Result<Value, Error> {
+        self.commit(MembershipEvent::Withdrawn {
+            proposal: params.proposal,
+        })
+        .await?;
+        // Not `outcome`: a withdrawn proposal is not pending, and reporting
+        // that as "applied" would say the change had taken effect when the
+        // point of withdrawing was that it will not.
+        Ok(json!({
+            "changed_at": self.node.membership().changed_at(),
+            "proposal": params.proposal,
+            "withdrawn": true,
+        }))
+    }
+
     /// `group.propose_add` — admit a member (§4.3).
     async fn propose_add(&self, params: ProposeAdd) -> Result<Value, Error> {
         self.propose(MembershipEvent::MemberAdded {
@@ -168,18 +239,88 @@ impl Api {
         .await
     }
 
-    /// Commits an event, and reports where the membership ended up.
+    /// Commits an event, and reports what became of it.
     ///
-    /// Returning `changed_at` is what makes the answer useful to a caller that
-    /// is about to propose again: it is the view their next proposal will be
-    /// checked against.
+    /// **`applied` is the field that matters**, and the reason this returns
+    /// more than it used to: since 2.2-1 a committed proposal may be waiting
+    /// for core approvals rather than in effect, and a caller told only
+    /// "committed" would report success for something that has not happened
+    /// yet. The entry's own log index answers it — a proposal still in
+    /// `pending` under that index is waiting — which is exact where matching on
+    /// the event's content would not be, since two proposals can say the same
+    /// thing.
+    ///
+    /// `changed_at` stays for the caller about to propose again: it is the view
+    /// their next proposal will be checked against.
     async fn propose(&self, event: MembershipEvent) -> Result<Value, Error> {
+        let proposal = self.commit(event).await?;
+        Ok(self.outcome(proposal))
+    }
+
+    /// Commits an event, answering with the log index it was applied at.
+    async fn commit(&self, event: MembershipEvent) -> Result<u64, Error> {
         self.node
             .propose(event, &self.secret)
             .await
-            .map_err(|error| Error::failed(error.to_string()))?;
+            .map_err(|error| Error::failed(error.to_string()))
+    }
 
-        Ok(json!({ "changed_at": self.node.membership().changed_at() }))
+    /// Where the proposal at `proposal` now stands.
+    ///
+    /// One function for both the caller who just made it and the caller who
+    /// just approved it, because they are asking the same question — has this
+    /// change happened yet, and if not what is it waiting for — and two
+    /// implementations of it would be free to disagree.
+    fn outcome(&self, proposal: u64) -> Value {
+        let membership = self.node.membership();
+        let waiting = membership
+            .pending()
+            .find(|(index, _)| *index == proposal)
+            .map(|(_, entry)| {
+                json!({
+                    "approvals": membership.approvals_counting(entry).count(),
+                    "needed": membership.approvals_needed(entry.event()),
+                })
+            });
+
+        json!({
+            "changed_at": membership.changed_at(),
+            "proposal": proposal,
+            "applied": waiting.is_none(),
+            "waiting": waiting,
+        })
+    }
+}
+
+/// A one-line description of a proposal, for an operator deciding about it.
+///
+/// Rendered here rather than at the CLI because the API is the surface a
+/// caller writes against, and a caller that had to match on the event shape to
+/// print it would be reimplementing this.
+fn describe(event: &MembershipEvent) -> String {
+    match event {
+        MembershipEvent::MemberAdded { member } => {
+            format!("admit {} ({})", member.member_id, member.display_name)
+        }
+        MembershipEvent::MemberExpelled { member, reason } => {
+            format!("expel {member}: {reason}")
+        }
+        MembershipEvent::CoreGroupChanged { core } => format!(
+            "set the core group to {}",
+            core.iter()
+                .map(|(member, _)| member.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        MembershipEvent::PledgeChanged {
+            member,
+            pledge_bytes,
+        } => format!("set the pledge of {member} to {pledge_bytes} bytes"),
+        // Neither is ever a pending proposal — both are dispatched by the fold
+        // rather than held — so this is unreachable rather than a real case.
+        MembershipEvent::GroupFounded { group_id, .. } => format!("found group {group_id}"),
+        MembershipEvent::Approved { proposal } => format!("approve {proposal}"),
+        MembershipEvent::Withdrawn { proposal } => format!("withdraw {proposal}"),
     }
 }
 
@@ -207,6 +348,15 @@ struct ProposeExpel {
 #[serde(deny_unknown_fields)]
 struct PledgeSet {
     bytes: u64,
+}
+
+/// What `group.approve` and `group.withdraw` name: the log index a proposal was
+/// made at, which is what `group.pending` reports and what the log itself
+/// speaks in.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Proposal {
+    proposal: u64,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.

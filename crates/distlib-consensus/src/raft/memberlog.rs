@@ -151,8 +151,15 @@ pub struct Source {
 /// What became of a forwarded proposal.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ProposeOutcome {
-    /// Committed and applied.
-    Applied,
+    /// Committed and applied, as the log entry at `index`.
+    ///
+    /// The index is what the proposer needs to say anything further about their
+    /// own proposal: whether it took effect or is waiting for approvals is a
+    /// question about [`crate::MembershipState::pending`], and this is its key.
+    /// Deliberately *not* a third variant saying "pending" — that is a fact
+    /// about the state, not about what became of the entry, and putting it here
+    /// would be the same fact in two places, free to disagree.
+    Applied { index: u64 },
     /// Committed, then refused by the rules — the log has it, the state does not.
     Rejected(ConsensusError),
     /// Never made it into the log.
@@ -316,7 +323,9 @@ impl MemberlogProtocol {
             // The write reached the log; `data` is the state machine's verdict
             // on whether it then took effect.
             Ok(written) => match written.data {
-                Ok(()) => ProposeOutcome::Applied,
+                Ok(()) => ProposeOutcome::Applied {
+                    index: written.log_id.index,
+                },
                 Err(rejected) => ProposeOutcome::Rejected(rejected),
             },
             // Includes this node having lost leadership since the sender's hint
@@ -390,7 +399,7 @@ impl MemberlogClient {
         member: MemberId,
         addr: &NodeAddr,
         event: SignedEvent,
-    ) -> Result<(), ProposeError> {
+    ) -> Result<u64, ProposeError> {
         let unreachable = |message: String| ProposeError::Unreachable { member, message };
 
         let exchange = self.exchange(member, addr, Request::Propose(event));
@@ -403,7 +412,7 @@ impl MemberlogClient {
             Response::Fetched(_) => Err(ProposeError::NotCommitted(
                 "the peer answered a fetch to a proposal".to_owned(),
             )),
-            Response::Proposed(ProposeOutcome::Applied) => Ok(()),
+            Response::Proposed(ProposeOutcome::Applied { index }) => Ok(index),
             Response::Proposed(ProposeOutcome::Rejected(error)) => {
                 Err(ProposeError::Rejected(error))
             }

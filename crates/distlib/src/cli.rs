@@ -75,8 +75,9 @@ pub enum Command {
 
     /// Admit a member.
     ///
-    /// Any member may propose one; the group's rules decide whether it takes
-    /// effect. Needs the node running — it holds the log.
+    /// Any member may propose one; a core member has to agree (§4.4). Proposed
+    /// by a core member it takes effect at once, since their own proposal is
+    /// their approval. Needs the node running — it holds the log.
     Admit {
         /// The member to admit. They print theirs with `distlib whoami`.
         member: MemberId,
@@ -89,6 +90,10 @@ pub enum Command {
     /// Expel a member.
     ///
     /// The reason is recorded in the log alongside who proposed it.
+    ///
+    /// Removing a *core* member takes a majority of the core group, and the
+    /// member concerned gets no say — so it waits, and `distlib pending` is
+    /// where the others find it. Removing anybody else takes one core member.
     Expel {
         /// The member to remove.
         member: MemberId,
@@ -96,6 +101,30 @@ pub enum Command {
         /// Why. Kept in the log as the record of the decision.
         #[arg(long)]
         reason: String,
+    },
+
+    /// List the changes waiting for approvals.
+    ///
+    /// What the group is deciding but has not decided. Each line carries the
+    /// log index that names it, which is what `distlib approve` takes.
+    Pending,
+
+    /// Approve a pending change.
+    ///
+    /// Core members only: §4.4 opens *submitting* a change to every member and
+    /// gives the decision to a quorum of core nodes.
+    Approve {
+        /// The proposal, by the log index `distlib pending` lists it under.
+        proposal: u64,
+    },
+
+    /// Take back a change you proposed.
+    ///
+    /// Yours alone: a core member able to withdraw anybody's proposal would
+    /// hold a veto over a decision the rest of the core group was reaching.
+    Withdraw {
+        /// The proposal, by the log index `distlib pending` lists it under.
+        proposal: u64,
     },
 
     /// Set this node's storage pledge.

@@ -106,6 +106,120 @@ impl Harness {
         }
     }
 
+    /// Founds a group of `voters` core nodes and serves the API on the first.
+    ///
+    /// Needed because a threshold only becomes visible above three voters: with
+    /// one or two, every proposal either applies at once or can never be
+    /// decided at all. Four is the smallest group where an approval can land,
+    /// count, and still leave the proposal waiting — which is the case
+    /// `group.approve` has to report honestly.
+    ///
+    /// Only the first node serves the API; the rest propose through their own
+    /// `MembershipNode`, which is what the other operators would be doing.
+    #[cfg(feature = "slow-tests")]
+    async fn founded_by(voters: usize) -> (Self, Vec<Arc<MembershipNode>>, Vec<SecretKey>) {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let dir = TempDir::new().unwrap();
+        let secrets: Vec<SecretKey> = (0..voters).map(|_| SecretKey::generate()).collect();
+        let ids: Vec<MemberId> = secrets
+            .iter()
+            .map(|secret| MemberId::from(secret.public()))
+            .collect();
+
+        let mut nodes = Vec::new();
+        let mut addrs = Vec::new();
+        for (index, secret) in secrets.iter().enumerate() {
+            let others = ids
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, id)| *id);
+            let (writer, reader) = allowlist(ids[index], others);
+            let hooks = AllowlistHooks::new(reader);
+            let endpoint = configure(
+                Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
+                secret.clone(),
+                hooks.clone(),
+                distlib_consensus::alpns(true),
+            )
+            .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+
+            addrs.push(NodeAddr {
+                relay: None,
+                direct: endpoint.bound_sockets().into_iter().collect(),
+            });
+            let core = ids.iter().map(|id| (*id, NodeAddr::default())).collect();
+            nodes.push(Arc::new(
+                MembershipNode::start(
+                    endpoint,
+                    hooks,
+                    writer,
+                    &{
+                        let path = dir.path().join(format!("node-{index}"));
+                        std::fs::create_dir_all(&path).unwrap();
+                        path
+                    },
+                    core,
+                )
+                .await
+                .unwrap(),
+            ));
+        }
+
+        let founders = ids
+            .iter()
+            .zip(&addrs)
+            .enumerate()
+            .map(|(index, (id, addr))| {
+                (
+                    MemberRecord {
+                        member_id: *id,
+                        display_name: format!("founder-{index}"),
+                        pledge_bytes: 0,
+                    },
+                    addr.clone(),
+                )
+            })
+            .collect();
+        nodes[0].init_group(founders, &secrets[0]).await.unwrap();
+        for node in &nodes {
+            timeout(Duration::from_secs(15), async {
+                while node.membership().group_id().is_none() {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("the founding entry must reach every founder");
+        }
+
+        let token = "0123456789abcdef".repeat(4);
+        let server = serve(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            Api {
+                node: Arc::clone(&nodes[0]),
+                secret: secrets[0].clone(),
+                net: distlib_core::NetConfig::default(),
+            },
+            SecretString::from(token.clone()),
+        )
+        .await
+        .unwrap();
+
+        let harness = Self {
+            node: Arc::clone(&nodes[0]),
+            server,
+            token,
+            _dir: dir,
+        };
+        (harness, nodes, secrets)
+    }
+
     /// A call carrying the right token. Returns its `result`.
     async fn call(&self, method: &str, params: Value) -> Value {
         let (status, answer) = self.post(Some(&self.token), rpc(method, params)).await;
@@ -279,6 +393,182 @@ async fn a_proposal_the_rules_refuse_comes_back_as_an_error() {
     );
 
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_proposal_that_takes_effect_says_so_and_one_that_waits_says_what_it_waits_for() {
+    // The gap this closes. Before approvals every proposal took effect, so
+    // "admitted" was always true; since 2.2-1 one may be waiting for core
+    // members to agree, and an API that reported only "committed" would tell a
+    // caller something had happened that had not — leaving them to wonder why
+    // the person they admitted still cannot connect.
+    //
+    // The waiting case here is a node proposing its own expulsion. In a group
+    // of one that is the only proposal that *can* wait — removing a voter takes
+    // a majority of the core, and the one core member is the one being removed,
+    // so their own proposal is not their approval. It never decides, which is
+    // the point of `the_last_voter_cannot_be_expelled`; what is being checked
+    // is that the API says so rather than reporting success.
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+
+    let applied = harness
+        .call(
+            "group.propose_add",
+            json!({ "member": MemberId::from(SecretKey::generate().public()) }),
+        )
+        .await;
+    assert_eq!(
+        applied["applied"],
+        json!(true),
+        "a core member admitting somebody is one step: their proposal is their approval"
+    );
+    assert_eq!(applied["waiting"], Value::Null);
+
+    let waiting = harness
+        .call(
+            "group.propose_expel",
+            json!({ "member": me, "reason": "the only voter" }),
+        )
+        .await;
+    assert_eq!(
+        waiting["applied"],
+        json!(false),
+        "removing a voter takes a majority, and the target does not vote on it"
+    );
+    assert_eq!(waiting["waiting"]["approvals"], json!(0));
+    assert_eq!(waiting["waiting"]["needed"], json!(1));
+
+    // And the caller is told which proposal it is, by the index everything else
+    // names it by.
+    let proposal = waiting["proposal"].as_u64().expect("a proposal index");
+    let pending = harness.call("group.pending", Value::Null).await;
+    let listed = pending["pending"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{pending}");
+    assert_eq!(listed[0]["proposal"], json!(proposal));
+    assert_eq!(listed[0]["proposer"], json!(me));
+    assert_eq!(listed[0]["needed"], json!(1));
+    assert!(
+        listed[0]["what"].as_str().unwrap().starts_with("expel "),
+        "an operator deciding about this has to be able to read it: {pending}"
+    );
+
+    // Status carries the count, so somebody who never runs `distlib pending`
+    // still finds out there is something to look at.
+    let status = harness.call("node.status", Value::Null).await;
+    assert_eq!(status["pending"], json!(1));
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_proposer_can_withdraw_their_own_proposal() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+
+    let waiting = harness
+        .call(
+            "group.propose_expel",
+            json!({ "member": me, "reason": "changed my mind in a moment" }),
+        )
+        .await;
+    let proposal = waiting["proposal"].as_u64().expect("a proposal index");
+
+    harness
+        .call("group.withdraw", json!({ "proposal": proposal }))
+        .await;
+
+    let pending = harness.call("group.pending", Value::Null).await;
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 0, "{pending}");
+
+    // And a proposal that is not there cannot be approved into existence.
+    let refused = harness
+        .refuse("group.approve", json!({ "proposal": proposal }))
+        .await;
+    assert_eq!(code(&refused), -32000);
+
+    harness.shutdown().await;
+}
+
+// Four in-process raft nodes: skipped by `--no-default-features`, like every
+// other multi-node test in this workspace.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn approving_answers_about_the_proposal_not_about_the_approval() {
+    use distlib_consensus::MembershipEvent;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // The trap this exists for. An approval is never itself a proposal — the
+    // fold dispatches it rather than holding it — so it *always* applies. An
+    // implementation that reported on the approval's own log index would answer
+    // "applied" every single time, and `distlib approve` would tell an operator
+    // the change had happened while it was still an approval short.
+    //
+    // Four voters, because a threshold is only visible above three: a majority
+    // of four is three, so the proposer's own approval plus one more is two,
+    // and the proposal is still waiting when this node approves it.
+    let (harness, nodes, secrets) = Harness::founded_by(4).await;
+    let doomed = nodes[3].id();
+
+    // Another operator proposes removing a voter. Their own approval counts, so
+    // it stands at one of three.
+    let proposal = nodes[1]
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: doomed,
+                reason: "proposed by somebody else".to_owned(),
+            },
+            &secrets[1],
+        )
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        while harness.node.membership().pending().count() == 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the proposal must replicate to the node serving the api");
+
+    let approved = harness
+        .call("group.approve", json!({ "proposal": proposal }))
+        .await;
+
+    assert_eq!(
+        approved["applied"],
+        json!(false),
+        "two of four is not a majority, and the answer is about the proposal: {approved}"
+    );
+    assert_eq!(
+        approved["proposal"],
+        json!(proposal),
+        "not the approval's own index"
+    );
+    assert_eq!(approved["waiting"]["approvals"], json!(2));
+    assert_eq!(approved["waiting"]["needed"], json!(3));
+    assert!(
+        harness.node.membership().is_member(&doomed),
+        "and nothing has happened to them yet"
+    );
+
+    // The third approval decides it, and only then does the answer change.
+    let third = nodes[2]
+        .propose(MembershipEvent::Approved { proposal }, &secrets[2])
+        .await;
+    third.unwrap();
+    timeout(Duration::from_secs(15), async {
+        while harness.node.membership().is_member(&doomed) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("three of four is a majority");
+
+    harness.shutdown().await;
+    for node in nodes.into_iter().skip(1) {
+        node.shutdown().await;
+    }
 }
 
 #[tokio::test]

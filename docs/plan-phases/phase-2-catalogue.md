@@ -421,12 +421,20 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   P2-4: the empty-core floor is **not** built, because the thresholds already refuse what it would
   have caught; and duplicate proposals are accepted rather than refused, which is what defers the
   withdrawal event to 2.2-2 rather than needing it here.
-- **2.2-2 — the surface.** `distlib pending` and `distlib approve <index>`; `group.propose_expel`
-  keeps its §7.1 name and gains `group.approve`; pending proposals appear in `node.status`; the
-  withdrawal event lands with `distlib withdraw`. **The gap it closes:** after 2.2-1 a follower's
-  `distlib admit` prints `admitted` and the admission then waits for a core member with nothing
-  saying so, and the joiner holding the ticket cannot connect until somebody approves it. The
-  acceptance test and `manual-check.md` grow a genuine two-operator core expulsion.
+- **2.2-2 — the surface (done).** `distlib pending`, `distlib approve <index>` and `distlib
+  withdraw <index>`; `group.propose_expel` keeps its §7.1 name and gains `group.approve`,
+  `group.withdraw` and `group.pending`; `node.status` carries a pending **count**. The acceptance
+  test and `manual-check.md` grow a genuine two-operator core expulsion, the latter as a new §5a
+  rather than a rewrite of §4 — §4 is still the one-approval path and is still worth running.
+
+  Two deviations, both recorded in P2-5. **The listing is `group.pending`, not `node.status`**: the
+  plan said pending proposals appear in status, and status is a summary whose every other field is
+  one line, so a listing there would be its only unbounded one. And **`MembershipNode::propose` now
+  answers with the log index its entry was applied at**, which `ProposeOutcome::Applied` carries
+  across the wire. That is what closes the gap this sub-phase exists for: `distlib admit` from a
+  follower said `admitted` and then waited with nothing saying so, and telling the difference needs
+  the proposal's own index rather than a guess from the event's content, since two proposals can say
+  the same thing.
 
 - **2.2-3 — bounding the pending set.** Three findings from reviewing 2.2-1, with one combined
   answer. **They are one change because each one alone is worse than all three together**: expiry
