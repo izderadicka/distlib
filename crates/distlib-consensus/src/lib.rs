@@ -27,4 +27,4 @@ pub use raft::{
     TypeConfig,
 };
 pub use signed::SignedEvent;
-pub use state::{MembershipState, Proposal};
+pub use state::{MembershipState, PENDING_EXPIRY, Proposal};
