@@ -22,11 +22,16 @@ use crate::{
 
 /// How far the log may advance past a proposal before it stops waiting.
 ///
-/// Counted in log entries rather than in time, and that is the only measure
-/// available: timestamps are the proposer's own clock and nothing verifies them
-/// (P1-3), so anything derived from one could differ between nodes and split the
-/// membership. Log position is the one quantity every node agrees on, and the
-/// one compaction neither renumbers nor reuses.
+/// Counted in log entries rather than in time. Not because a timestamp could
+/// not be folded — `at` is signed, so every node reads the same bytes and would
+/// reach the same verdict — but because nothing *verifies* it (P1-3). Expiring
+/// on time needs a "now", and the fold has none: the only candidate is the
+/// timestamp of whatever entry is being applied, which is equally self-reported.
+/// So one member whose clock is a year fast would sweep the whole pending set
+/// the moment they committed anything. That is not an attack — §2 assumes
+/// members do not attack the protocol — it is a misconfiguration, and
+/// misconfigured clocks are ordinary. Log position carries no such blast radius,
+/// and compaction neither renumbers nor reuses it.
 ///
 /// **What this does and does not fix.** It bounds the map — which is re-encoded
 /// into redb on every apply, so unbounded growth is write amplification on the
@@ -39,6 +44,16 @@ use crate::{
 /// A hundred and twenty-eight, because a contested expulsion in a five-voter
 /// group is four entries, so this is thirty-odd governance decisions. A proposal
 /// that has watched that many go past is not under discussion any more.
+///
+/// **One number for every group is known to be wrong, and wrong in opposite
+/// directions at the two ends.** A group with heavy membership churn burns this
+/// quickly, so a genuine deliberation can be swept while it is still being had;
+/// a settled group of three friends may never reach it, so the abandoned slot
+/// this exists to clear is never cleared for them. Deferred rather than guessed
+/// at, and recorded against P2-6 under "Carried out of Phase 2" in
+/// `docs/plan-phases/phase-2-catalogue.md` — nobody has yet watched a real
+/// group's membership-event rate, so choosing a better number now would be
+/// guessing with extra steps.
 ///
 /// Not refreshed by approvals. A proposal that cannot gather its threshold
 /// within this much group activity is not going to, and a rule that could be

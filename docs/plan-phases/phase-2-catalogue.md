@@ -617,6 +617,12 @@ without a restart. Plus a paragraph in `manual-check.md` for both.
 
 ---
 
+## Carried out of Phase 2 — open, and why they are not being guessed at
+
+| Item | Standing |
+|---|---|
+| **P2-6** — `PENDING_EXPIRY` is one fixed count for every group | **Open.** Raised reviewing 2.2-3: groups differ in how fast they move, and one number is wrong in *opposite* directions at the two ends. A group with heavy membership churn burns 128 entries quickly, so a real deliberation can be swept while it is still being had; a settled group of three may never reach 128, so the abandoned slot the rule exists to clear is never cleared for them. Three candidate answers, none obviously right yet. **A policy event in the log** (core-majority, deterministic) lets each group choose — §5.5's weight cap needs exactly that machinery, so it gets built once, there, and this joins it; but it only moves the choice, it does not say what to choose. **Changing the unit** so the count ticks with governance activity rather than with every membership entry helps the busy end and does nothing for the quiet one. **Committed timestamps** turn out to be deterministic after all — `at` is signed, so every node reads the same bytes — but nothing verifies them, and the fold's only available "now" is another self-reported timestamp, so a single member with a fast clock would sweep the whole pending set. Not an attack under §2, just a misconfiguration, and those are ordinary. **Deferred rather than tuned blind**, on the P1-35 precedent: nobody has yet watched a real group's membership-event rate, so a better number chosen now would be guessing with extra steps. Revisit when there is a group that has been running long enough to have one. |
+
 ## Testing and the lanes
 
 The split holds: `slow-tests` on by default, `cargo test-fast` during development, `cargo test-all`
