@@ -366,6 +366,7 @@ impl MembershipNode {
             state_machine.clone(),
             allowlist,
             addresses,
+            hooks.clone(),
         ));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
@@ -845,8 +846,14 @@ async fn follow_membership(
     state_machine: StateMachineStore,
     writer: AllowlistWriter,
     addresses: AddressBook,
+    hooks: AllowlistHooks,
 ) {
     let mut memberships = state_machine.subscribe();
+    // What this task last published, so it can tell a core node that has
+    // *moved* from one it is merely seeing again. Empty at startup, which is
+    // right: there are no connections yet to be pointing anywhere stale.
+    let mut published: BTreeMap<MemberId, NodeAddr> = BTreeMap::new();
+
     loop {
         // Read before waiting, so a node that applied entries before this task
         // started enforces them immediately rather than at the next change —
@@ -864,8 +871,11 @@ async fn follow_membership(
             // window in which anything reacting to the allowlist dials an id
             // that resolves to nothing. Doing it in this order means one
             // observable event — the allowlist changing — implies both.
-            let core = state_machine.core_addresses();
+            let core: BTreeMap<MemberId, NodeAddr> =
+                state_machine.core_addresses().into_iter().collect();
             addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
+            let_go_of_the_moved(&published, &core, &hooks);
+            published = core;
 
             let members: Vec<MemberId> = membership.allowlist().collect();
             tracing::debug!(count = members.len(), "allowlist derived from the log");
@@ -880,6 +890,49 @@ async fn follow_membership(
 
         if memberships.changed().await.is_err() {
             return;
+        }
+    }
+}
+
+/// Closes every connection to a core node the log has just moved.
+///
+/// Knowing the new address is not enough, and this is the half of P1-23 that
+/// only an end-to-end test could have found. A node that is killed — which is
+/// what a machine being renumbered looks like from outside — sends no close
+/// frame, so its peers keep a connection that still reads as open to a socket
+/// with nothing behind it. While they do, iroh will not reach that endpoint id
+/// anywhere else: the dial goes to the pinned path and times out, forever,
+/// however often it is retried and whatever address is handed to it. Measured
+/// on the real thing: the leader dialled the correct new address every 52
+/// milliseconds for thirty seconds and never once connected. With this, the
+/// same test converges in about a second.
+///
+/// So the log moving a member is the signal to let go of what we hold — and it
+/// goes through [`AllowlistHooks`] rather than [`Connections`] because that map
+/// holds only the connections this codebase opened. The one that pins the path
+/// is usually iroh-gossip's, which we have no handle on at all; every
+/// connection the endpoint makes or accepts passes through the hooks, so they
+/// are the only place that can reach it. `distlib-net`'s `tests/moved.rs` is
+/// the demonstration, down at the level where the behaviour lives.
+///
+/// Nothing tells [`Connections`] separately. Closing a connection is enough:
+/// its cache drops one that is no longer live and dials a fresh one, which is
+/// what that check is for. Removing the entry as well passed every test with
+/// the line deleted, which is the definition of code nothing is holding up.
+///
+/// On every node, not only the leader. A follower fetching the log over
+/// `distlib/memberlog/0` holds exactly the same stale handle, and it has no
+/// [`crate::raft::core_group`] loop to notice.
+fn let_go_of_the_moved(
+    published: &BTreeMap<MemberId, NodeAddr>,
+    core: &BTreeMap<MemberId, NodeAddr>,
+    hooks: &AllowlistHooks,
+) {
+    for (member, addr) in core {
+        // `is_some_and`, so a member seen for the first time is not "moved".
+        if published.get(member).is_some_and(|was| was != addr) {
+            let closed = hooks.close_connections_to(*member);
+            tracing::info!(%member, closed, "the log moves a core node; letting go of it");
         }
     }
 }

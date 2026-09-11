@@ -571,6 +571,130 @@ async fn approving_answers_about_the_proposal_not_about_the_approval() {
     }
 }
 
+/// The pair that pins the threshold rule for the core group, and the reason
+/// they are written as one test rather than two: the claim is not "this
+/// applies" or "that waits" but that the *same* event takes a different
+/// threshold depending on whether it moves the voters. Split apart, either half
+/// passes against an implementation that treats every `CoreGroupChanged` alike.
+///
+/// Three voters, because that is the smallest group where a majority is more
+/// than one and so the two answers can differ at all.
+///
+/// **Mutation check:** delete the `CoreGroupChanged` arm of
+/// `MembershipState::changes_the_voters` and the second half goes red — a
+/// demotion becomes a one-approval change and applies at once — while the first
+/// half stays green.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn moving_a_core_node_applies_while_dropping_one_waits_for_a_majority() {
+    let (harness, nodes, _) = Harness::founded_by(3).await;
+    let moved = nodes[2].id();
+
+    // Where the log says that node is now, plus somewhere it is not. A real
+    // move would replace the address outright; adding to it keeps the cluster
+    // reachable for the second half of this test while still being a genuine
+    // change to what the log records.
+    let mut addr = harness
+        .node
+        .core_addresses()
+        .into_iter()
+        .find_map(|(member, addr)| (member == moved).then_some(addr))
+        .expect("the log records an address for every core node");
+    addr.direct
+        .insert(SocketAddr::from((Ipv4Addr::LOCALHOST, 1)));
+
+    let answer = harness
+        .call(
+            "group.propose_core",
+            json!({ "member": moved, "addr": addr }),
+        )
+        .await;
+    assert_eq!(
+        answer["applied"],
+        json!(true),
+        "the same three people vote before and after, so one core member decides it: {answer}"
+    );
+
+    // The same event kind, proposed by the same core member, about the same
+    // person — and now it has to wait, because this one changes who votes.
+    let answer = harness
+        .call(
+            "group.propose_core",
+            json!({ "member": moved, "addr": Value::Null }),
+        )
+        .await;
+    assert_eq!(
+        answer["applied"],
+        json!(false),
+        "dropping a voter takes a majority of the voters: {answer}"
+    );
+    assert_eq!(answer["waiting"]["approvals"], json!(1));
+    assert_eq!(answer["waiting"]["needed"], json!(2));
+    assert!(
+        harness.node.membership().is_core(&moved),
+        "and nothing has happened to them yet"
+    );
+
+    // And it is legible to the core members who have to decide about it. The
+    // event carries the whole desired core group rather than a delta, so the
+    // obvious rendering — list what is in it — tells an approver who would be
+    // *left*, which for a demotion is everyone except the one fact that matters.
+    let pending = harness.call("group.pending", Value::Null).await;
+    let what = pending["pending"][0]["what"].as_str().unwrap_or_default();
+    assert!(
+        what.contains(&moved.to_string()) && what.contains("drop"),
+        "a pending core change has to name who it is about: {pending}"
+    );
+
+    harness.shutdown().await;
+    for node in nodes.into_iter().skip(1) {
+        node.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn propose_core_refuses_what_would_change_nothing() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+
+    // Committing either of these would apply — the map is valid — and applying
+    // moves `changed_at`, which invalidates every proposal in flight. Asking
+    // for something that is already true must not be able to do that.
+    let (_, here) = harness
+        .node
+        .core_addresses()
+        .into_iter()
+        .next()
+        .expect("the founder is a core node");
+    let unchanged = harness
+        .refuse("group.propose_core", json!({ "member": me, "addr": here }))
+        .await;
+    assert_eq!(code(&unchanged), -32602);
+
+    let stranger = MemberId::from(SecretKey::generate().public());
+    let not_core = harness
+        .refuse(
+            "group.propose_core",
+            json!({ "member": stranger, "addr": Value::Null }),
+        )
+        .await;
+    assert_eq!(code(&not_core), -32602);
+
+    // And `addr` has to be said, either way. Left out it would mean "demote
+    // them", which is the one thing here that must never happen because a field
+    // was forgotten.
+    let omitted = harness
+        .refuse("group.propose_core", json!({ "member": me }))
+        .await;
+    assert_eq!(
+        code(&omitted),
+        -32602,
+        "a missing addr is not an implicit demotion: {omitted}"
+    );
+
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_pledge_is_set_for_this_node_and_no_other() {
     let harness = Harness::start().await;

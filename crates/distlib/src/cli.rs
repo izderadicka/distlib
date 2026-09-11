@@ -127,6 +127,17 @@ pub enum Command {
         proposal: u64,
     },
 
+    /// Change the core group: who votes, and where they are.
+    ///
+    /// The core group is the set of Raft voters (§4.2). It is also the only
+    /// addressing the log records, so this is how a core node that changed IP
+    /// or port tells the group where it went — without which, in a group with
+    /// no relay, it is out of its own group for good.
+    Core {
+        #[command(subcommand)]
+        command: CoreCommand,
+    },
+
     /// Set this node's storage pledge.
     ///
     /// Only ever this node's: a pledge is a promise about the proposer's own
@@ -189,5 +200,58 @@ pub enum Command {
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 10)]
         timeout: u64,
+    },
+}
+
+/// `distlib core <...>`
+///
+/// Two verbs rather than one that takes a whole list, because an operator knows
+/// what they want to change and not necessarily where every other core node is.
+/// The API assembles the rest from the log — see `group.propose_core`.
+#[derive(Debug, Subcommand)]
+pub enum CoreCommand {
+    /// Record where a core node is, adding them to the core group if they are
+    /// not in it.
+    ///
+    /// **Moving an existing core node takes one core approval; adding a voter
+    /// takes a majority of them.** That is the standing rule — changing *who*
+    /// votes needs a majority of the voters, everything else needs one — and it
+    /// is why a node that has merely moved is back in touch quickly.
+    ///
+    /// The addresses given replace whatever the log holds for that member
+    /// rather than adding to them: a node that moved is not at both, and an old
+    /// address left behind is a path every peer goes on trying.
+    ///
+    /// **Adding somebody who does not vote yet does not work yet.** It will be
+    /// proposed, and refused when the last approval lands: a node only serves
+    /// consensus from startup, so promoting one would add a voter that counts
+    /// toward quorum and can never answer. Moving a node that already votes is
+    /// what this command does today.
+    Set {
+        /// The member whose address this is.
+        member: MemberId,
+
+        /// A socket address they can be reached at. May be repeated.
+        ///
+        /// Required, along with `--relay`, because this command exists to say
+        /// where a node is: recording nothing would leave them reachable only
+        /// by address lookup, which is exactly what a group with
+        /// `relay_mode = "disabled"` does not have.
+        #[arg(long = "addr", value_name = "HOST:PORT")]
+        addrs: Vec<SocketAddr>,
+
+        /// A relay they can be reached through.
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
+
+    /// Drop a member from the core group.
+    ///
+    /// A demotion, not an expulsion: they stay a member and keep following the
+    /// log, they just stop voting on it. Takes a majority of the core group,
+    /// since it changes who votes.
+    Remove {
+        /// The member to stop counting as a voter.
+        member: MemberId,
     },
 }

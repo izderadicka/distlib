@@ -142,6 +142,38 @@ impl Friend {
         );
     }
 
+    /// Renumbers this node's transport port, as a renumbered machine would be.
+    ///
+    /// `[consensus] core` is rewritten with everyone's *old* addresses, this
+    /// node's own included, because that is the position the group is really in
+    /// after a machine moves: nobody has been told, and the stale list is what
+    /// is on disk. It does not matter either — once a group is founded the log
+    /// decides who votes and where they are, and this is the test that says so.
+    fn move_to(&mut self, everyone: &[(String, u16)], port: u16) {
+        self.port = port;
+        self.agree_on(everyone);
+    }
+
+    /// Tells the group where a core node is now, through the CLI.
+    fn core_set(&self, member: &str, port: u16) -> String {
+        let output = distlib(self.dir.path())
+            .args([
+                "core",
+                "set",
+                member,
+                "--addr",
+                &format!("127.0.0.1:{port}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "core set failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
     /// Asks this node for a join ticket.
     fn ticket(&self) -> String {
         let output = distlib(self.dir.path()).arg("ticket").output().unwrap();
@@ -506,4 +538,73 @@ fn group_id(log: &str) -> String {
         .next()
         .expect("the group id is one word")
         .to_owned()
+}
+
+#[test]
+fn a_core_node_that_moves_is_told_to_the_group_and_comes_back() {
+    // P1-23, end to end and through the commands. The failure it closes: a core
+    // node in a group with no relay changes IP or port, nobody can reach it
+    // again, and — because the only addressing the log ever recorded was the
+    // founding one — there was no way to say so. Refounding the group was the
+    // whole of the fix.
+    let mut friends: Vec<Friend> = (0..3).map(|_| Friend::introduce()).collect();
+    let everyone: Vec<(String, u16)> = friends
+        .iter()
+        .map(|friend| (friend.id.clone(), friend.port))
+        .collect();
+    for friend in &friends {
+        friend.agree_on(&everyone);
+    }
+
+    let mut second = friends[1].run(false);
+    let mut third = friends[2].run(false);
+    let mut first = friends[0].run(true);
+    wait_for_all(
+        &mut [&mut first, &mut second, &mut third],
+        "members=3 core=3",
+    );
+
+    // The third friend's machine is renumbered. It stops, comes back on a
+    // different port, and the other two are still looking for it on the old
+    // one — which under `relay_mode = "disabled"` is the whole of the problem:
+    // there is no lookup to fall back on.
+    third.stop();
+    let moved_port = a_free_port(Protocol::Udp);
+    friends[2].move_to(&everyone, moved_port);
+    let mut third = friends[2].run(false);
+
+    // Meanwhile the group carries on without it — two of three is still a
+    // majority — so there is something for the moved node to have missed.
+    let newcomer = Friend::introduce();
+    friends[0].admit(&newcomer.id);
+    wait_for_all(&mut [&mut first, &mut second], "members=4");
+
+    // And it *has* missed it. Asserted rather than assumed, because without
+    // this the test would go on passing the day a moved node starts finding its
+    // own way back — and would then be proving nothing about the command it is
+    // named for. A node the group cannot reach cannot be told anything: there
+    // is no race here to lose.
+    assert!(
+        !third.log_contents().contains("members=4"),
+        "a moved node should be out of touch until the group is told where it went; its log was:\n{}",
+        third.log_contents()
+    );
+
+    // One core member says where it went. An address change does not move the
+    // voters, so it takes one approval and theirs is it: this applies rather
+    // than waiting, which is what makes a moved node's way back quick.
+    let said = friends[0].core_set(&friends[2].id, moved_port);
+    assert!(
+        said.contains("core set"),
+        "moving a core node takes one core approval, so it should apply at once; got:\n{said}"
+    );
+
+    // And the entry it committed is what reaches the moved node: it can only
+    // learn `members=4` by being replicated to, at the address the log now
+    // carries.
+    wait_for_all(&mut [&mut first, &mut second, &mut third], "members=4");
+
+    for node in [first, second, third] {
+        node.stop();
+    }
 }

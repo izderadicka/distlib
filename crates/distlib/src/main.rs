@@ -11,7 +11,7 @@ use distlib_core::DataDir;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
-    cli::{Cli, Command},
+    cli::{Cli, Command, CoreCommand},
     commands::Paths,
 };
 
@@ -35,6 +35,14 @@ async fn main() -> Result<()> {
         Command::Pending => commands::pending(&paths).await,
         Command::Approve { proposal } => commands::approve(&paths, proposal).await,
         Command::Withdraw { proposal } => commands::withdraw(&paths, proposal).await,
+        Command::Core { command } => match command {
+            CoreCommand::Set {
+                member,
+                addrs,
+                relay,
+            } => commands::core_set(&paths, member, addrs, relay).await,
+            CoreCommand::Remove { member } => commands::core_remove(&paths, member).await,
+        },
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,
         Command::Join { ticket } => commands::join(&paths, &ticket),

@@ -419,6 +419,75 @@ pub async fn withdraw(paths: &Paths, proposal: u64) -> Result<()> {
     Ok(())
 }
 
+/// `distlib core set`
+///
+/// At least one address is required. The alternative — an empty
+/// [`NodeAddr`], meaning "reachable by lookup alone" — is a real thing to want
+/// under `relay_mode = "default"`, but it is also what a mistyped flag produces,
+/// and this command replaces whatever the log held. Silently clearing a core
+/// node's only address is the one mistake here that takes the group down, so it
+/// has to be asked for some other way than by leaving the arguments off.
+pub async fn core_set(
+    paths: &Paths,
+    member: MemberId,
+    addrs: Vec<SocketAddr>,
+    relay: Option<String>,
+) -> Result<()> {
+    if addrs.is_empty() && relay.is_none() {
+        bail!(
+            "say where {member} is: `distlib core set {member} --addr HOST:PORT` \
+             (and/or --relay URL)"
+        );
+    }
+
+    let addr = NodeAddr {
+        relay,
+        direct: addrs.iter().copied().collect(),
+    };
+    let answer = ask(
+        paths,
+        "group.propose_core",
+        json!({ "member": member, "addr": addr }),
+    )
+    .await?;
+
+    println!(
+        "{}",
+        report(
+            "core set",
+            &format!("{member} at {}", where_it_is(&addr)),
+            &answer,
+        )
+    );
+    Ok(())
+}
+
+/// `distlib core remove`
+pub async fn core_remove(paths: &Paths, member: MemberId) -> Result<()> {
+    // `addr: null` is the removal, and it is spelled out rather than omitted:
+    // the api refuses a missing `addr` for the same reason this passes one.
+    let answer = ask(
+        paths,
+        "group.propose_core",
+        json!({ "member": member, "addr": Value::Null }),
+    )
+    .await?;
+
+    println!("{}", report("demoted", &member.to_string(), &answer));
+    Ok(())
+}
+
+/// Where a node is, in as many words as it takes.
+///
+/// Named for what it renders rather than `describe`, which `distlib-api` uses
+/// for the other half of the same event — what a proposal *says*, as against
+/// where it puts somebody.
+fn where_it_is(addr: &NodeAddr) -> String {
+    let mut parts: Vec<String> = addr.direct.iter().map(SocketAddr::to_string).collect();
+    parts.extend(addr.relay.iter().map(|relay| format!("via {relay}")));
+    parts.join(", ")
+}
+
 /// `distlib pledge`
 pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
     ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
@@ -1189,6 +1258,47 @@ mod tests {
     /// check it: the operator reads this and nothing else, and a wrong word
     /// here is the failure — somebody wondering why the person they admitted
     /// still cannot connect.
+    #[tokio::test]
+    async fn core_set_refuses_to_record_nowhere() {
+        // The one mistake here that takes a group down. An empty `NodeAddr`
+        // means "reachable by lookup alone", which is a real thing to want with
+        // relays on — and is also what a mistyped flag produces, against a
+        // command that replaces whatever the log held. So it has to be asked for
+        // some other way than by leaving the arguments off.
+        //
+        // Refused before anything is dialled, which is what lets this be a unit
+        // test: there is no node here to ask.
+        let paths = Paths {
+            config_file: std::path::PathBuf::from("/nonexistent/config.toml"),
+            data_dir: DataDir::new("/nonexistent"),
+        };
+
+        let refused = core_set(&paths, an_id(7), vec![], None)
+            .await
+            .expect_err("an address is required");
+        let said = refused.to_string();
+        assert!(
+            said.contains("--addr"),
+            "the refusal has to name the way out; got: {said}"
+        );
+    }
+
+    #[test]
+    fn an_address_is_rendered_as_somewhere_you_could_go() {
+        // What `distlib core set` echoes back, and what `manual-check.md` reads
+        // to confirm the right port went in.
+        let addr = NodeAddr {
+            relay: Some("https://relay.example".to_owned()),
+            direct: ["127.0.0.1:11204".parse().expect("a literal address")]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            where_it_is(&addr),
+            "127.0.0.1:11204, via https://relay.example"
+        );
+    }
+
     #[test]
     fn a_proposal_that_took_effect_reads_differently_from_one_that_is_waiting() {
         let applied = report(

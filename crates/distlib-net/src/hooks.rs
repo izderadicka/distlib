@@ -39,6 +39,14 @@ pub mod close_code {
     /// whoever reads a packet capture: one is "you are not in this group", the
     /// other "you are, but consensus is not yours to take part in".
     pub const NOT_A_VOTER: VarInt = VarInt::from_u32(0x1001);
+
+    /// The log says this peer is somewhere else now.
+    ///
+    /// Usually nobody reads it — the far end of a connection to a node that
+    /// has moved is a socket with nothing behind it — but a node that moved
+    /// *and* kept its old port would, and "you are at a new address" is not a
+    /// refusal.
+    pub const MOVED: VarInt = VarInt::from_u32(0x1002);
 }
 
 /// Human-readable reason sent alongside [`close_code::NOT_A_MEMBER`].
@@ -46,6 +54,9 @@ pub const NOT_A_MEMBER_REASON: &[u8] = b"not a member";
 
 /// Human-readable reason sent alongside [`close_code::NOT_A_VOTER`].
 pub const NOT_A_VOTER_REASON: &[u8] = b"not a voter";
+
+/// Human-readable reason sent alongside [`close_code::MOVED`].
+pub const MOVED_REASON: &[u8] = b"the log gives you a new address";
 
 /// How long the same peer's refusals are summarised rather than logged.
 ///
@@ -117,6 +128,38 @@ impl AllowlistHooks {
         while self.allowlist.changed().await.is_ok() {
             self.evict_once();
         }
+    }
+
+    /// Closes every connection to `peer`, whatever protocol opened it.
+    ///
+    /// For a peer the log has *moved*, which is a different thing from one it
+    /// has expelled: they are still a member, and this is not a refusal. What
+    /// it is, is the release of the old path — and it has to happen here rather
+    /// than in [`crate::Connections`] because that map holds only the
+    /// connections this crate's callers opened. The one that matters most is
+    /// usually iroh-gossip's, which we never see. Every connection the endpoint
+    /// makes or accepts passes through these hooks, so this is the only place
+    /// that can reach all of them.
+    ///
+    /// **Why closing them matters, measured rather than assumed.** A node that
+    /// is killed sends no close frame, so its peers keep a connection that
+    /// looks open to a socket with nothing behind it — and while they do, iroh
+    /// will not reach that endpoint id at its new address: the dial is sent to
+    /// the pinned path and times out, indefinitely, however many times it is
+    /// retried and whatever address is supplied. Releasing the connection after
+    /// the move is known is what frees it. `tests/moved.rs` is the
+    /// demonstration: same two endpoints, same new address, reachable or not
+    /// according to this one act.
+    ///
+    /// Returns how many were closed, for the caller that wants to say so.
+    pub fn close_connections_to(&self, peer: MemberId) -> usize {
+        let handles = self.lock().remove(&peer).unwrap_or_default();
+        handles
+            .iter()
+            .filter_map(WeakConnectionHandle::upgrade)
+            .filter(crate::connections::is_live)
+            .map(|connection| connection.close(close_code::MOVED, MOVED_REASON))
+            .count()
     }
 
     /// Whether a recorded connection is still worth keeping.
