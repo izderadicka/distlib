@@ -612,11 +612,19 @@ async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
             voters.len() == 2 && !voters.iter().any(|(member, _)| *member == peers[2].id)
         })
         .await;
-        assert_eq!(
-            peer.node.membership().pending().count(),
-            0,
-            "a decided proposal stops pending"
-        );
+        // Waited for rather than asserted, and the two waits are on different
+        // mechanisms on purpose. openraft puts a membership change into effect
+        // when the entry is *appended*, not when it is applied — which is what
+        // `server_metrics` reports and what the reconciliation loop relies on —
+        // so a node can already be down to two voters while its state machine
+        // has yet to apply the approval that caused it. Asserting the
+        // projection the instant the voter set moves is reading a second
+        // mechanism through the first, which is how this failed about one fast
+        // lane run in nine.
+        wait_for(peer, "a decided proposal to stop pending", |m| {
+            m.pending().count() == 0
+        })
+        .await;
     }
 
     follower.node.shutdown().await;

@@ -379,6 +379,14 @@ pub async fn pending(paths: &Paths) -> Result<()> {
             proposal["needed"].as_u64().unwrap_or(0),
             proposal["proposer"].as_str().unwrap_or("?")
         );
+        // "changes" rather than a time, because that is what it counts: the
+        // number sits still while the group is quiet and then moves in a
+        // burst. Saying "expires in 12" would promise a duration nothing here
+        // measures.
+        println!(
+            "        stops waiting after {} more change(s) to the group",
+            proposal["expires_after_changes"].as_u64().unwrap_or(0)
+        );
     }
     println!();
     println!("Approve one with `distlib approve <index>`, or take back your own");

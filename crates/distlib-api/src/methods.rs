@@ -156,6 +156,10 @@ impl Api {
                     "what": describe(entry.event()),
                     "approvals": membership.approvals_counting(entry).collect::<Vec<_>>(),
                     "needed": membership.approvals_needed(entry.event()),
+                    // A count of further *changes*, not a duration: it only
+                    // moves when the group commits something. Named so a
+                    // caller cannot read it as time.
+                    "expires_after_changes": membership.expires_after(proposal),
                 })
             })
             .collect();

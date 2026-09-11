@@ -20,6 +20,32 @@ use crate::{
     signed::SignedEvent,
 };
 
+/// How far the log may advance past a proposal before it stops waiting.
+///
+/// Counted in log entries rather than in time, and that is the only measure
+/// available: timestamps are the proposer's own clock and nothing verifies them
+/// (P1-3), so anything derived from one could differ between nodes and split the
+/// membership. Log position is the one quantity every node agrees on, and the
+/// one compaction neither renumbers nor reuses.
+///
+/// **What this does and does not fix.** It bounds the map — which is re-encoded
+/// into redb on every apply, so unbounded growth is write amplification on the
+/// hot path, not just memory — and it clears a slot whose proposer has gone away
+/// without withdrawing it. It does *not* make a proposal expire after any
+/// amount of *time*: in a quiet group a year-old proposal may be three entries
+/// old and will still be waiting. Nothing available fixes that, and pretending
+/// otherwise would be worse than saying so.
+///
+/// A hundred and twenty-eight, because a contested expulsion in a five-voter
+/// group is four entries, so this is thirty-odd governance decisions. A proposal
+/// that has watched that many go past is not under discussion any more.
+///
+/// Not refreshed by approvals. A proposal that cannot gather its threshold
+/// within this much group activity is not going to, and a rule that could be
+/// held open indefinitely by one member approving periodically would be a
+/// slower version of the thing being fixed.
+pub const PENDING_EXPIRY: u64 = 128;
+
 /// Who the group is, as of the events applied so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipState {
@@ -93,12 +119,27 @@ fn target(event: &MembershipEvent) -> Option<MemberId> {
     }
 }
 
-/// The member an event concerns, for deciding which pending proposals a change
-/// has made stale. Wider than [`target`]: an admission is about somebody too.
-fn subject(event: &MembershipEvent) -> Option<MemberId> {
+/// What an event is *about*, for deciding which pending proposals conflict with
+/// it and which a change has made stale.
+///
+/// Wider than [`target`] in two directions: an admission is about somebody too,
+/// and the core group is a subject in its own right even though it is not a
+/// member. That second one is the whole of what 2.2-3 needed — before it, a
+/// pending `CoreGroupChanged` was the one kind of proposal nothing could ever
+/// conflict with and nothing could ever clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Subject {
+    Member(MemberId),
+    CoreGroup,
+}
+
+fn subject(event: &MembershipEvent) -> Option<Subject> {
     match event {
-        MembershipEvent::MemberAdded { member } => Some(member.member_id),
-        MembershipEvent::MemberExpelled { member, .. } => Some(*member),
+        MembershipEvent::MemberAdded { member } => Some(Subject::Member(member.member_id)),
+        MembershipEvent::MemberExpelled { member, .. } => Some(Subject::Member(*member)),
+        MembershipEvent::CoreGroupChanged { .. } => Some(Subject::CoreGroup),
+        // A pledge needs no approvals and so never waits; founding, approvals
+        // and withdrawals are not proposals at all.
         _ => None,
     }
 }
@@ -167,6 +208,14 @@ impl MembershipState {
         // Only a successful apply moves it, which is what makes it a usable
         // comparand for the next proposal.
         self.changed_at = index;
+
+        // Then drop whatever the log has now left behind. After the dispatch
+        // above rather than before it, so a refused entry changes nothing; the
+        // consequence is that the last index at which a proposal can still be
+        // approved is exactly `proposal + PENDING_EXPIRY` — an approval landing
+        // there is dispatched, and only then is the proposal swept.
+        self.pending
+            .retain(|proposal, _| index.saturating_sub(*proposal) < PENDING_EXPIRY);
         Ok(())
     }
 
@@ -310,13 +359,25 @@ impl MembershipState {
             return self.enact(event);
         }
 
-        // Deliberately not refused as a duplicate of an identical proposal
-        // already pending. Two members expelling the same peer at the same time
-        // would then split their approvals and neither would reach its
-        // threshold — a wart, but a self-healing one, since one more approval
-        // on either decides it. Refusing instead would leave a stuck slot that
-        // nothing can clear, and clearing it needs the withdrawal event that
-        // arrives with its surface in 2.2-2.
+        // One waiting proposal per subject. Two about the same thing split the
+        // approvals they need and neither reaches its threshold, and the shape
+        // that really bites is one member asking over and over: each attempt
+        // makes a fresh entry and spreads the approvals thinner.
+        //
+        // Refused rather than superseded, because superseding would let anybody
+        // discard the approvals a proposal had gathered by proposing again.
+        // That leaves a slot only its proposer can clear — which is what
+        // `Withdrawn` is for, and what [`PENDING_EXPIRY`] is for when the
+        // proposer has gone away.
+        if let Some(proposed_about) = subject(event)
+            && let Some((waiting, _)) = self
+                .pending
+                .iter()
+                .find(|(_, pending)| subject(&pending.event) == Some(proposed_about))
+        {
+            return Err(ConsensusError::AlreadyPending { proposal: *waiting });
+        }
+
         self.pending.insert(
             index,
             Proposal {
@@ -415,12 +476,31 @@ impl MembershipState {
     /// question that has moved: a pending expulsion of a member who has since
     /// been expelled has nothing left to do, and one of a member who has since
     /// been re-admitted was decided against a group they were not in.
+    ///
+    /// The same now holds for the core group, and it is worth stating rather
+    /// than inheriting from the rule above. `CoreGroupChanged` carries the
+    /// *whole* desired core group rather than a delta (P1-23), so a pending one
+    /// was composed against a map that has since moved — approving it later
+    /// would not add to the change just made, it would silently revert it.
     fn enact(&mut self, event: &MembershipEvent) -> Result<()> {
+        // Asked before the change, because afterwards the voter set has already
+        // moved and the comparison would say no.
+        let moved_the_voters = self.changes_the_voters(event);
         self.apply_to_founded_group(event)?;
-        if let Some(member) = subject(event) {
-            self.pending
-                .retain(|_, pending| subject(&pending.event) != Some(member));
-        }
+
+        let about = subject(event);
+        self.pending.retain(|_, pending| {
+            let pending = subject(&pending.event);
+            // Same subject: answering a question that has moved.
+            if pending == about {
+                return false;
+            }
+            // And the core group by any route. Expelling a voter moves the
+            // voter set while being *about* that member, so the subject rule
+            // alone leaves a core group composed against the old map waiting —
+            // which is the same staleness arriving by a different door.
+            !(moved_the_voters && pending == Some(Subject::CoreGroup))
+        });
         Ok(())
     }
 
@@ -444,6 +524,17 @@ impl MembershipState {
     /// Whether `member` is currently a Raft voter.
     pub fn is_core(&self, member: &MemberId) -> bool {
         self.core.contains_key(member)
+    }
+
+    /// How many further changes the proposal at `proposal` will still be
+    /// waiting after.
+    ///
+    /// Zero means the next entry sweeps it. Deliberately a count of *changes*
+    /// rather than of anything time-like: it only moves when the group commits
+    /// something, so a proposal can sit at the same number for a month and then
+    /// go in an afternoon. Anything displaying it should say so.
+    pub fn expires_after(&self, proposal: u64) -> u64 {
+        PENDING_EXPIRY.saturating_sub(self.changed_at.saturating_sub(proposal) + 1)
     }
 
     /// Changes waiting for approvals, each with the log index that

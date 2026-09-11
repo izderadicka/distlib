@@ -333,6 +333,75 @@ async fn an_installed_snapshot_is_the_current_one_and_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn an_installed_snapshot_carries_proposals_that_are_still_approvable() {
+    // A different code path from a restart, and the one a node catching up
+    // takes. A snapshot that carried the map but lost the approvals on it would
+    // pass a presence check and still be wrong: the node would disagree with
+    // its peers about how close a decision was, and an approval that should
+    // have decided something would not.
+    let (mut store, _dir) = new_store();
+    let (alice, bob, carol) = (Signer::generate(), Signer::generate(), Signer::generate());
+    store.apply(vec![founding(&alice)]).await.unwrap();
+    store
+        .apply(vec![entry(
+            2,
+            alice.sign(
+                MembershipEvent::MemberAdded {
+                    member: bob.record("bob"),
+                },
+                1,
+            ),
+        )])
+        .await
+        .unwrap();
+    // Bob is a member but not a voter, so his admission of carol waits.
+    store
+        .apply(vec![entry(
+            3,
+            bob.sign(
+                MembershipEvent::MemberAdded {
+                    member: carol.record("carol"),
+                },
+                2,
+            ),
+        )])
+        .await
+        .unwrap();
+
+    let built = store
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .unwrap();
+
+    let (mut other, _other_dir) = new_store();
+    other
+        .install_snapshot(&built.meta, built.snapshot)
+        .await
+        .unwrap();
+
+    let pending: Vec<u64> = other
+        .membership()
+        .pending()
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(pending, vec![3], "the proposal came with the snapshot");
+
+    other
+        .apply(vec![entry(
+            4,
+            alice.sign(MembershipEvent::Approved { proposal: 3 }, 3),
+        )])
+        .await
+        .unwrap();
+    assert!(
+        other.membership().is_member(&carol.id),
+        "a proposal restored from a snapshot must still be approvable"
+    );
+}
+
+#[tokio::test]
 async fn a_builder_is_unaffected_by_later_applies() {
     // The trait asks for a view that subsequent changes do not disturb.
     let (mut store, _dir) = new_store();

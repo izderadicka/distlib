@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_consensus::{
-    ConsensusError, MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp,
+    ConsensusError, MemberRecord, MembershipEvent, MembershipState, PENDING_EXPIRY, SignedEvent,
+    Timestamp,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -1204,49 +1205,44 @@ fn a_last_approval_that_cannot_be_applied_leaves_the_proposal_as_it_was() {
     // that can never be applied quietly accumulates agreement, and a later
     // reader cannot tell how many people actually said yes to something that
     // happened.
-    let (mut state, founders) = founded_by(4);
-    let (a, b, c, d) = (&founders[0], &founders[1], &founders[2], &founders[3]);
+    //
+    // A promotion is the case to use, because it fails at apply time for a
+    // reason no other event can clear: `PromotionUnsupported` is about what a
+    // node can do, not about anything the group might change its mind on. The
+    // races that used to serve here are now swept as stale before they can
+    // fail, which is the point of the prune in `enact`.
+    let (mut state, founders) = founded_by(3);
+    let (a, b, c) = (&founders[0], &founders[1], &founders[2]);
+    let newcomer = Signer::generate();
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberAdded {
+            member: newcomer.record("newcomer"),
+        },
+    )
+    .unwrap();
 
-    // Demoting `d` takes three of four. `a` proposes it: one.
+    // Growing the core group moves the voters, so it takes two of the three.
     propose(
         &mut state,
         a,
         MembershipEvent::CoreGroupChanged {
-            core: core_group(&[a, b, c]),
+            core: core_group(&[a, b, c, &newcomer]),
         },
     )
     .unwrap();
-    let demotion = the_pending_one(&state);
+    let promotion = the_pending_one(&state);
 
-    // Meanwhile `b` — named in that proposal — is expelled, which also takes
-    // three of four and gets them from `a`, `c` and `d`.
-    propose(
-        &mut state,
-        a,
-        MembershipEvent::MemberExpelled {
-            member: b.id,
-            reason: "overtaken by events".to_owned(),
-        },
-    )
-    .unwrap();
-    let expulsion = state
-        .pending()
-        .map(|(index, _)| index)
-        .find(|index| *index != demotion)
-        .expect("the expulsion is pending too");
-    approve(&mut state, c, expulsion).unwrap();
-    approve(&mut state, d, expulsion).unwrap();
-    assert!(!state.is_member(&b.id));
-
-    // The demotion now needs two of the three voters left and has one, so `c`
-    // decides it — onto a core group naming somebody who is no longer a member.
     assert_eq!(
-        approve(&mut state, c, demotion),
-        Err(ConsensusError::InvalidCoreGroup)
+        approve(&mut state, b, promotion),
+        Err(ConsensusError::PromotionUnsupported {
+            member: newcomer.id
+        })
     );
 
     let (index, proposal) = state.pending().next().expect("still pending");
-    assert_eq!(index, demotion, "a refused change is not a decided one");
+    assert_eq!(index, promotion, "a refused change is not a decided one");
     assert_eq!(
         proposal.approvals().collect::<Vec<_>>(),
         vec![a.id],
@@ -1325,6 +1321,276 @@ fn withdrawing_something_that_is_not_pending_is_refused() {
         ),
         Err(ConsensusError::UnknownProposal { proposal: 7 })
     );
+}
+
+#[test]
+fn a_second_proposal_about_the_same_member_is_refused_naming_the_first() {
+    // Two proposals about one subject split the approvals they need and neither
+    // reaches its threshold. The shape that really bites is one member asking
+    // over and over, spreading them thinner with every attempt.
+    let (mut state, founders) = founded_by(3);
+    let (alice, carol) = (&founders[0], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "first".to_owned(),
+        },
+    )
+    .unwrap();
+    let waiting = the_pending_one(&state);
+
+    assert_eq!(
+        propose(
+            &mut state,
+            &founders[1],
+            MembershipEvent::MemberExpelled {
+                member: carol.id,
+                reason: "asking again".to_owned(),
+            },
+        ),
+        Err(ConsensusError::AlreadyPending { proposal: waiting }),
+        "the answer is to approve the one already waiting"
+    );
+    assert_eq!(state.pending().count(), 1);
+}
+
+#[test]
+fn the_core_group_is_a_subject_of_its_own() {
+    // The case nothing could conflict with and nothing could clear before this:
+    // `CoreGroupChanged` had no subject, so a member who kept asking to change
+    // the core group made a fresh pending entry every time, for ever.
+    let (mut state, founders) = founded_by(4);
+    let (a, b, c, d) = (&founders[0], &founders[1], &founders[2], &founders[3]);
+
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[a, b, c]),
+        },
+    )
+    .unwrap();
+    let waiting = the_pending_one(&state);
+
+    assert_eq!(
+        propose(
+            &mut state,
+            b,
+            MembershipEvent::CoreGroupChanged {
+                core: core_group(&[a, b, d]),
+            },
+        ),
+        Err(ConsensusError::AlreadyPending { proposal: waiting }),
+        "one core group, one proposal about it at a time"
+    );
+}
+
+#[test]
+fn deciding_the_core_group_clears_a_proposal_composed_against_the_old_one() {
+    // `CoreGroupChanged` carries the whole desired core group rather than a
+    // delta (P1-23), so a pending one was composed against a map that has since
+    // moved: approving it later would not add to the change just made, it would
+    // silently revert it.
+    let (mut state, founders) = founded_by(3);
+    let (a, b, c) = (&founders[0], &founders[1], &founders[2]);
+
+    // `c` proposes dropping `b`, and it waits: two of three are needed.
+    propose(
+        &mut state,
+        c,
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&[a, c]),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.pending().count(), 1);
+
+    // Meanwhile the group expels `c`, which is also a change to the voters and
+    // also takes two — so it is decided by the other two.
+    propose(
+        &mut state,
+        a,
+        MembershipEvent::MemberExpelled {
+            member: c.id,
+            reason: "overtaken".to_owned(),
+        },
+    )
+    .unwrap();
+    let expulsion = state
+        .pending()
+        .find(|(_, proposal)| matches!(proposal.event(), MembershipEvent::MemberExpelled { .. }))
+        .map(|(index, _)| index)
+        .expect("the expulsion is pending");
+    approve(&mut state, b, expulsion).unwrap();
+
+    assert!(!state.is_member(&c.id));
+    assert_eq!(
+        state.pending().count(),
+        0,
+        "a core group proposed against the old map must not survive the new one"
+    );
+}
+
+#[test]
+fn a_change_that_takes_effect_at_once_is_not_refused_as_a_duplicate() {
+    // The rule governs proposals that *wait*. An immediate change has no
+    // approvals to split, so a core member deciding something is never blocked
+    // by somebody else having proposed it — their decision simply settles it,
+    // and the prune clears what was waiting.
+    let (mut state, founders) = founded_by(3);
+    let alice = &founders[0];
+    let (bob, carol) = (Signer::generate(), Signer::generate());
+    for newcomer in [&bob, &carol] {
+        propose(
+            &mut state,
+            alice,
+            MembershipEvent::MemberAdded {
+                member: newcomer.record("newcomer"),
+            },
+        )
+        .unwrap();
+    }
+
+    propose(
+        &mut state,
+        &carol,
+        MembershipEvent::MemberExpelled {
+            member: bob.id,
+            reason: "proposed by a follower".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.pending().count(), 1);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: bob.id,
+            reason: "decided by a core member".to_owned(),
+        },
+    )
+    .unwrap();
+
+    assert!(!state.is_member(&bob.id));
+    assert_eq!(state.pending().count(), 0);
+}
+
+/// Advances the log without touching any subject, until `changed_at` reaches
+/// `upto`.
+///
+/// Pledges are the filler because they are the one event that needs no
+/// approvals and is about nothing: they apply at once, move the index, and
+/// cannot conflict with or clear what is waiting.
+fn advance_to(state: &mut MembershipState, who: &Signer, upto: u64) {
+    let mut pledge = 0;
+    while state.changed_at() < upto {
+        pledge += 1;
+        propose(
+            state,
+            who,
+            MembershipEvent::PledgeChanged {
+                member: who.id,
+                pledge_bytes: pledge,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(state.changed_at(), upto, "the filler must land exactly");
+}
+
+#[test]
+fn a_proposal_can_be_approved_on_the_last_index_before_it_expires() {
+    // The boundary itself rather than somewhere near it. An off-by-one in a
+    // rule that silently deletes governance state does not look like an
+    // off-by-one — it looks like an approval that did nothing.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "decided at the last moment".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+
+    // The sweep runs after the dispatch, so an approval landing exactly
+    // `PENDING_EXPIRY` entries later is still acted on.
+    advance_to(&mut state, alice, proposal + PENDING_EXPIRY - 1);
+    assert_eq!(
+        state.expires_after(proposal),
+        0,
+        "the next change sweeps it, so this is the last chance"
+    );
+
+    approve(&mut state, bob, proposal).unwrap();
+    assert!(!state.is_member(&carol.id), "the approval still counted");
+}
+
+#[test]
+fn a_proposal_stops_waiting_once_the_log_has_moved_past_it() {
+    // One entry later than the test above, and the proposal is gone. This is
+    // what bounds the map: `MembershipState` is re-encoded into redb on every
+    // apply, so a proposal nobody will ever decide is write amplification on
+    // the hot path for the life of the group.
+    let (mut state, founders) = founded_by(3);
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "nobody got round to it".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+
+    advance_to(&mut state, alice, proposal + PENDING_EXPIRY);
+    assert_eq!(state.pending().count(), 0, "swept");
+
+    assert_eq!(
+        approve(&mut state, bob, proposal),
+        Err(ConsensusError::UnknownProposal { proposal }),
+        "and an approval arriving late is told so rather than silently ignored"
+    );
+    assert!(
+        state.is_member(&carol.id),
+        "an expiry is not a decision either way"
+    );
+}
+
+#[test]
+fn a_subject_is_free_again_once_its_proposal_has_expired() {
+    // The two rules have to fit together: one proposal per subject would be a
+    // slot nothing could reuse if expiry did not eventually clear it. This is
+    // what makes refusing a duplicate safe when the proposer has gone away.
+    let (mut state, founders) = founded_by(3);
+    let (alice, carol) = (&founders[0], &founders[2]);
+    let expel = |reason: &str| MembershipEvent::MemberExpelled {
+        member: carol.id,
+        reason: reason.to_owned(),
+    };
+
+    propose(&mut state, alice, expel("abandoned")).unwrap();
+    let proposal = the_pending_one(&state);
+    assert!(matches!(
+        propose(&mut state, alice, expel("too soon")),
+        Err(ConsensusError::AlreadyPending { .. })
+    ));
+
+    advance_to(&mut state, alice, proposal + PENDING_EXPIRY);
+
+    propose(&mut state, alice, expel("asking afresh")).unwrap();
+    assert_eq!(state.pending().count(), 1, "the subject is free again");
 }
 
 // --- pledges ----------------------------------------------------------------
@@ -1576,6 +1842,37 @@ proptest! {
         for id in state.core().keys() {
             prop_assert!(state.is_member(id));
         }
+    }
+
+    /// Nothing waiting is ever a duplicate, and there is never more waiting
+    /// than there are things to wait about.
+    ///
+    /// The general form of one-proposal-per-subject, which the cases above can
+    /// only check one at a time. The bound is the number of distinct subjects a
+    /// generated scenario can produce — four members and the core group — and
+    /// it is what makes the map's size a property of the *group* rather than of
+    /// how many times somebody has asked.
+    #[test]
+    fn nothing_waits_twice_about_the_same_thing((founders, ops) in scenario()) {
+        let state = fold(founders, &ops);
+        let mut subjects: Vec<String> = state
+            .pending()
+            .map(|(_, proposal)| match proposal.event() {
+                MembershipEvent::MemberAdded { member } => member.member_id.to_string(),
+                MembershipEvent::MemberExpelled { member, .. } => member.to_string(),
+                // One key for every core group, not one per *proposed* core
+                // group — otherwise two proposals about it would look like two
+                // subjects and the property would pass on the very case it
+                // exists to catch.
+                MembershipEvent::CoreGroupChanged { .. } => "the core group".to_owned(),
+                other => panic!("{other:?} does not wait for approvals"),
+            })
+            .collect();
+        let before = subjects.len();
+        subjects.sort();
+        subjects.dedup();
+        prop_assert_eq!(before, subjects.len(), "two proposals about one subject");
+        prop_assert!(before <= 5, "four members and the core group");
     }
 
     /// A founded group always has somebody who can vote. Not a rule of its own

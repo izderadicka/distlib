@@ -436,8 +436,8 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   the proposal's own index rather than a guess from the event's content, since two proposals can say
   the same thing.
 
-- **2.2-3 — bounding the pending set.** Three findings from reviewing 2.2-1, with one combined
-  answer. **They are one change because each one alone is worse than all three together**: expiry
+- **2.2-3 — bounding the pending set (done).** Three findings from reviewing 2.2-1, with one
+  combined answer. **They are one change because each one alone is worse than all three together**: expiry
   without one-per-subject still lets duplicates pile up inside the window; one-per-subject without
   expiry re-creates the stuck slot that made duplicates acceptable in the first place; and
   withdrawal alone (2.2-2) does nothing about a proposer who has gone away.
@@ -447,9 +447,17 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
      then, because `subject()` is `None`. Two costs, and the second is the serious one. It is
      unbounded state that `MembershipState` re-encodes into redb on *every* apply, so it is write
      amplification on the hot path rather than only memory. And **a stale proposal stays live**: one
-     made against a five-voter core group can be approved into effect a year later by people who
-     never saw the discussion. The rules are re-checked, so it is not unsound — but "somebody once
-     proposed this" is not the same as "the group is deciding this now".
+     made against a five-voter core group can be approved into effect much later by people who never
+     saw the discussion. The rules are re-checked, so it is not unsound — but "somebody once proposed
+     this" is not the same as "the group is deciding this now".
+
+     **What was built bounds the first and only partly answers the second, and the difference
+     matters.** `PENDING_EXPIRY` counts *log entries*, because log position is the one quantity
+     every node agrees on and compaction neither renumbers nor reuses — a timestamp is the
+     proposer's own clock (P1-3) and two nodes could read it differently, which is a split
+     membership. So expiry measures **group activity, not time**: in a quiet group a year-old
+     proposal may be three entries old and will still be waiting. Nothing available fixes that, and
+     the earlier wording here implied otherwise.
   2. **The same action proposed repeatedly makes a new pending entry each time**, splitting the
      approvals it needs. The worst case is exactly the one that is never pruned: a member who keeps
      asking to join the core group.
@@ -471,10 +479,16 @@ separate `CoreGroupChanged`. Founders are the exception, and they are a differen
   The constant lives in code, not config, for the same reason the majority does — and joins §5.5's
   policy event when that lands.
 
-  **Test gap to close while here:** the restart path carries pending proposals
-  (`a_proposal_still_waiting_for_approvals_survives_a_restart`), but the **snapshot-install** path is
-  different code and nothing asserts a node that installs a snapshot inherits pending proposals it
-  can still approve.
+  **Two things found while building it.** Expelling a core member moves the voter set while being
+  *about* that member, so the subject rule alone left a core group composed against the old map
+  waiting — the same staleness by a different door, and `enact` now clears on either. And
+  one-proposal-per-subject governs proposals that **wait**: a core member whose change takes effect
+  at once is never blocked by somebody else having proposed it, because an immediate change has no
+  approvals to split. Both have tests saying so.
+
+  **Test gap closed while here:** the restart path already carried pending proposals, but the
+  **snapshot-install** path is different code and nothing asserted that a node catching up inherits
+  proposals it can still approve.
 
 **Ordering.** After 2.2-2, because expiry that silently drops a proposal is only tolerable once
 `distlib pending` exists to show what is waiting and why. Before 2.3, because promotion is the case

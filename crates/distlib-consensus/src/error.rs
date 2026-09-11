@@ -84,6 +84,17 @@ pub enum ConsensusError {
     #[error("{proposer} is not a core member and cannot change the core group")]
     NotCoreMember { proposer: MemberId },
 
+    /// A change was proposed about something that already has a proposal
+    /// waiting.
+    ///
+    /// Refused rather than superseded, and rather than allowed alongside. Two
+    /// proposals about one subject split the approvals they need and neither
+    /// reaches its threshold; letting a new one replace the old would let
+    /// anybody reset the approvals it had gathered simply by proposing again.
+    /// Names the one already waiting, so the answer is to approve that.
+    #[error("a change is already waiting for approval at index {proposal}")]
+    AlreadyPending { proposal: u64 },
+
     /// An approval named a proposal that is not waiting for one.
     ///
     /// Either it was never made, or it has already been decided — approvals do
