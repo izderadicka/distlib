@@ -583,7 +583,7 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > every harness that called `node.shutdown()` had to grow the router half; `Peer::shutdown`
   > and its equivalents do it in production's order.
 
-- **2a-2 — `distlib-sync`.** iroh-docs + blobs store wired into `Runtime`; `NamespaceCreated` (D1);
+- **2a-2 — `distlib-sync`.** *(split while building it — see the note below.)* iroh-docs + blobs store wired into `Runtime`; `NamespaceCreated` (D1);
   the catalogue namespace opened from the log; `start_sync` against the members it should sync with;
   catalogue record types and key encode/decode in `distlib-core` (§5.2 field-level keys, per-file
   keys under `file/{blob_hash}`); a typed write path and a projection event stream over `LiveEvent`.
@@ -605,6 +605,25 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
   **Note for the reviewer of 2b-1:** this acceptance already moves blobs, because docs entry values
   *are* blobs. What it exercises is iroh-docs' internal downloader, not our code.
+
+  > **Split in two while building it.** Whole, this is the largest PR of the phase — a new crate,
+  > two new dependencies, a log event, record types, `Runtime` wiring and four acceptance runs —
+  > and the half that deserves the most careful reading is the smallest.
+  >
+  > - **2a-2a — the namespace in the log** *(done, delta P2-11)*. `Namespace` and
+  >   `NamespaceSecret` in `distlib-core`, `NamespaceCreated` in the log with its rules, founding
+  >   creating the catalogue's, and `raft.redb` at 0600 now that the log carries a secret. No new
+  >   dependency, and nothing yet reads the key.
+  > - **2a-2b — `distlib-sync`** — everything else above: iroh-docs and the blobs store, the
+  >   catalogue namespace opened from the log, record types and key encoding, the typed write path,
+  >   the projection stream, the `DataDir` accessors, and the acceptance runs. It also owes a core
+  >   node proposing the namespace when its log has none, which is how a group founded before
+  >   2a-2a gets one.
+  >
+  > The address-book widening stays in 2a-2b and keeps its "verify the failure first" instruction:
+  > [`addresses.rs`](../../crates/distlib-net/src/addresses.rs) argues that iroh-gossip's own
+  > in-band lookup already supplies follower addresses once a node is in the swarm, and whether
+  > that covers docs' downloader is a question only a running sync can answer.
 
 - **2a-3 — `distlib-store`.** SQLite schema (`items`, `item_files`, `members`) + the projection task
   consuming 2a-2's stream + tantivy index + `admin.reindex`. Projection must be **idempotent**
