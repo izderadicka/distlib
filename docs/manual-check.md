@@ -237,7 +237,60 @@ dl -d $DL/d members     # frank appears on a follower nobody told
 
 ---
 
-## 5a. Two operators agree — removing a **core** member (§4.4 step 2)
+## 5a. A core node moves house — clause P1-23, "a core node changes IP or port"
+
+The one failure in phase 1 that had no way out: a core node in a group with
+`relay_mode = "disabled"` gets a new port, nobody can reach it again, and nothing in the
+log could say where it went. Refounding the group was the only fix. Do it on purpose.
+
+Run it with all three voters up — two of three is a quorum, one of two is not — so this
+comes before the core expulsion below. Check `dl -d $DL/a status` names a or c as the
+leader (if it names b, kill a different one and adjust the ids below), then Ctrl-C **b**'s
+terminal. Then edit its `config.toml`, change `[net] bind_addr_v4` to a port
+nothing else is using, and start it again with `dl -d $DL/b run`.
+
+It comes up, says `members=… core=…` from the log it already had, and then goes quiet.
+It can still reach the others — it has their addresses from the log — so you will see it
+call elections it cannot win. What it cannot do is be *reached*. Prove it: admit somebody
+from a node that is still where it was.
+
+```sh
+dl -d $DL/g init >/dev/null
+G=$(dl -d $DL/g whoami | awk '/^identity/{print $2}')
+dl -d $DL/a admit $G --name grace
+dl -d $DL/a members            # grace is there
+dl -d $DL/d members            # and on a follower nobody told
+```
+
+The moved node's terminal never mentions grace: its member count stays where it was.
+Now tell the group where it went, from any core member:
+
+```sh
+dl -d $DL/a core set $B --addr 127.0.0.1:<b's new port>
+```
+
+Expected: `core set    <id> at 127.0.0.1:<port>` — **applied, not proposed**. Moving a
+core node does not change *who* votes, so it takes one core approval and the proposer's
+own is it. Compare with the other verb, which does change who votes:
+
+```sh
+dl -d $DL/a core remove $B     # expect: proposed … waiting for core approval — 1 of 2
+dl -d $DL/a pending            # it is there, with what it is waiting for
+dl -d $DL/a withdraw <N>       # take it back; b is wanted, and §5b needs three voters
+```
+
+Within a second or two of the `core set`, the moved node's terminal should print a
+membership line naming grace. That is the whole claim: it was replicated to, at an
+address it only learned by being told.
+
+Worth watching, because it is what made this hard to find — how long the gap is between
+the `core set` returning and the moved node catching up. It should be about a second. If
+it is thirty, the connection-closing half of the fix has stopped working and the node is
+waiting for a dead path to time out rather than being redialled.
+
+---
+
+## 5b. Two operators agree — removing a **core** member (§4.4 step 2)
 
 Everything above removes a *follower*, which any core member does alone. Removing a
 voter is the other rule, and it is the first thing in this runbook that needs two people
@@ -312,3 +365,6 @@ rm -rf $DL
 - Anything the README quickstart gets wrong now that followers exist.
 - Does `pending` tell you enough to decide, without going to the log for it?
 - Is it obvious from `admit`/`expel` output alone whether anything actually happened?
+- Does `core set` say enough for you to tell an applied change from a waiting one?
+- Is there anything that tells you a core node is unreachable *before* you notice it
+  has stopped keeping up?

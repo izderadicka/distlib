@@ -499,14 +499,44 @@ enough; a second core approval applies it, and 2.1-2's reconciliation loop drops
 openraft. Plus the same by hand in `manual-check.md`, which is the first time the runbook has needed
 two operators to agree on anything.
 
-### 2.3 — Promotion (1 PR)
+### 2.3 — The core group can be changed by hand, and then promoted (2 PRs)
+
+> **Revised while building it.** The plan had 2.3 as one PR: the CLI surface, promotion, and both
+> acceptance runs. Two things moved the boundary. The surface is small, self-contained and needs no
+> promotion — and it is what the *address* acceptance run needs, which 2.1 deferred for exactly that
+> reason. Promotion is the opposite: it needs a node to start voting without restarting, which means
+> a `Raft` built at runtime, protocols served before there is one to serve them with, and a state
+> machine reset — all the openraft risk in the sub-phase, and none of it a prerequisite for the
+> address case. So the surface goes first and the risk goes second, and the second is driven by the
+> verb the first ships.
+>
+> **What 2.3-1 found.** The address acceptance did not pass when the surface was built, and the
+> reason was not in the log at all — see P2-7. Enactment worked; reaching the moved node did not,
+> because a peer that is killed leaves its peers holding a connection that pins iroh's path to where
+> it used to be. That is a transport fix, in `distlib-net`, and it is what actually closes P1-23.
 
 Closes P1-23 and the half of P1-30 that 2.1-2 leaves open. **After 2.2** — all three of it — so a
 promotion is governed by the majority rule from the moment it becomes possible, and so a promotion
 that stalls is bounded rather than permanent. A pending `CoreGroupChanged` is the one kind nothing
 prunes, which makes 2.2-3 a prerequisite rather than a preference.
 
-- **Promotion** needs a node to be able to start voting without a restart: advertising
+- **2.3-1** *(done, delta P2-7)* — **the CLI and API surface for the core group**, and the address
+  acceptance 2.1 deferred. `group.propose_core` takes a *delta* — one member and where they should
+  be, or `null` to drop them — and assembles the whole map from the node's own projection, because
+  the map is a read-modify-write and only the node can sign one against the `changed_at` it read it
+  at. `distlib core set <member> [--addr ...] [--relay ...]` and `distlib core remove <member>`.
+  Each is a proposal 2.2's rules then govern, and the two thresholds are pinned together: moving an
+  existing core node applies on one approval, dropping one waits for a majority.
+
+  It also carries the transport half of P1-23, which the acceptance run found and nothing else
+  could have: a node closes every connection it holds to a core member the log has just moved,
+  because until it does, iroh keeps dialling where that member used to be. `distlib-net`'s
+  `tests/moved.rs` is that behaviour on its own, without a cluster around it.
+
+  `AddressBook` and the memberlog's core-group answer needed no work, as the plan said: both
+  already read the projection.
+
+- **2.3-2** — **promotion.** Needs a node to be able to start voting without a restart: advertising
   `distlib/raft/0`, gaining a `RaftProtocol`, and satisfying openraft's learner-before-voter
   requirement. `ConsensusError::PromotionUnsupported` goes away in the same change.
 
@@ -522,16 +552,11 @@ prunes, which makes 2.2-3 a prerequisite rather than a preference.
   Failure modes to test: a change proposed during an election, a change that would remove the
   proposer, a node restarting mid-change.
 
-- **The CLI and API surface for the core group** — `distlib core set <member> [--addr ...]
-  [--relay ...]`, `distlib core remove <member>`, `group.propose_core` — lands here, because this
-  is the first sub-phase where a core-group change is something an operator can usefully submit by
-  hand. Each of them is a proposal that 2.2's rules then govern. `AddressBook` and the memberlog's
-  core-group answer need no work: both already read the projection.
-
-**Acceptance:** the end-to-end version 2.1 could not do. A three-node group; restart one core node
-on a different port under `relay_mode = "disabled"`; submit its new address by hand; the group
-converges and the moved node is dialable again. Then promote a follower and watch it start voting
-without a restart. Plus a paragraph in `manual-check.md` for both.
+**Acceptance:** 2.3-1 has the end-to-end version 2.1 could not do, and it passes: a three-node
+group; restart one core node on a different port under `relay_mode = "disabled"`; submit its new
+address by hand; the group converges and the moved node is replicated to again — in about a second,
+where before the fix it never converged at all. 2.3-2 adds the other half: promote a follower and
+watch it start voting without a restart. A paragraph in `manual-check.md` for each, in its own PR.
 
 ### 2a — The catalogue converges (4 PRs)
 
@@ -622,6 +647,8 @@ without a restart. Plus a paragraph in `manual-check.md` for both.
 | Item | Standing |
 |---|---|
 | **P2-6** — `PENDING_EXPIRY` is one fixed count for every group | **Open.** Raised reviewing 2.2-3: groups differ in how fast they move, and one number is wrong in *opposite* directions at the two ends. A group with heavy membership churn burns 128 entries quickly, so a real deliberation can be swept while it is still being had; a settled group of three may never reach 128, so the abandoned slot the rule exists to clear is never cleared for them. Three candidate answers, none obviously right yet. **A policy event in the log** (core-majority, deterministic) lets each group choose — §5.5's weight cap needs exactly that machinery, so it gets built once, there, and this joins it; but it only moves the choice, it does not say what to choose. **Changing the unit** so the count ticks with governance activity rather than with every membership entry helps the busy end and does nothing for the quiet one. **Committed timestamps** turn out to be deterministic after all — `at` is signed, so every node reads the same bytes — but nothing verifies them, and the fold's only available "now" is another self-reported timestamp, so a single member with a fast clock would sweep the whole pending set. Not an attack under §2, just a misconfiguration, and those are ordinary. **Deferred rather than tuned blind**, on the P1-35 precedent: nobody has yet watched a real group's membership-event rate, so a better number chosen now would be guessing with extra steps. Revisit when there is a group that has been running long enough to have one. |
+| The **fast lane is not fast**: `cargo test-fast` is about 37 seconds, not the ~5 this document claims below. It is not the feature-unification trap — `--no-default-features` is applied — but ungated multi-node tests, `three_founders_converge_on_one_group` (7.8 s) among them, against this document's own rule that everything with more than one node belongs in the slow lane. | Noticed in 2.3-1 while measuring what `tests/moved.rs` added (4.2 s). Not fixed there, because gating tests changes what CI runs on every push and that is a decision rather than a tidy-up: some of these may be in the fast lane deliberately. What is wanted first is the list — which multi-node tests are ungated, and how much of the 37 seconds each is — and then one decision about all of them. |
+| **A core node that is demoted keeps running as a voter.** `Role` is read once at startup, so a node the log drops from the core group holds its `Raft`, keeps serving `distlib/raft/0` to whoever will still speak it, and never starts a follow loop — the mirror of the promotion gap 2.3-2 closes. | Raised while planning 2.3-1 and deliberately left. It is the same machinery as promotion — changing a running node's role without restarting it — so fixing it separately would mean building that twice. It belongs in 2.3-2 or immediately after, and is recorded here so it is not carried by memory. |
 
 ## Testing and the lanes
 
