@@ -40,8 +40,12 @@ pub enum SyncError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// A value was written but could not be read back out of the blob store.
-    #[error("the catalogue holds an entry whose content is not here")]
+    /// The entry is here and its content is not — usually because it has just
+    /// arrived from another member and the download has not finished.
+    ///
+    /// A moment rather than a fault, on a node that is catching up; a fault
+    /// only if it persists. See [`crate::Catalogue::get`].
+    #[error("the catalogue holds an entry whose content has not arrived here")]
     MissingContent {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,

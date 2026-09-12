@@ -117,8 +117,13 @@ async fn an_item_written_on_one_node_is_read_on_the_other() {
 
     let read = tokio::time::timeout(SOON, async {
         loop {
-            if let Some(value) = bob.catalogue().get("item/1/title").await.unwrap() {
-                return value;
+            // `MissingContent` is "the entry is here and its value is still
+            // being fetched", which is a moment this poll is meant to wait
+            // out rather than a failure — see `Catalogue::get`.
+            match bob.catalogue().get("item/1/title").await {
+                Ok(Some(value)) => return value,
+                Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Err(error) => panic!("reading the catalogue failed: {error}"),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

@@ -214,6 +214,15 @@ impl Catalogue {
     }
 
     /// Reads one entry: the latest value any member wrote at `key`.
+    ///
+    /// **An entry and its content arrive separately**, and the distinction is
+    /// visible here: set reconciliation brings the key and the hash of its
+    /// value, and the engine's downloader fetches the value afterwards — which
+    /// is why `LiveEvent` has both `InsertRemote { content_status }` and a
+    /// later `ContentReady`. So `Ok(None)` means nobody has written that key,
+    /// while [`SyncError::MissingContent`] means somebody has and the bytes
+    /// have not landed on this node yet. A caller that is polling should treat
+    /// the second as "not yet" rather than as a failure.
     pub async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<bytes::Bytes>> {
         let doc = self.document()?;
         let query = iroh_docs::store::Query::single_latest_per_key().key_exact(key.as_ref());
