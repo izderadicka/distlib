@@ -7,7 +7,8 @@
 //! <root>/
 //! ├── config.toml      configuration (see [`crate::config`])
 //! ├── keys/node.key    ed25519 secret key, 0600
-//! ├── raft/            membership log + state machine   (phase 1)
+//! ├── api.token        local api bearer token, 0600
+//! ├── raft.redb        membership log + state machine   (phase 1)
 //! ├── docs/            iroh-docs replicas               (phase 2)
 //! ├── blobs/           iroh-blobs content store         (phase 2)
 //! ├── db/              SQLite read model                (phase 2)
@@ -16,6 +17,11 @@
 //!
 //! Accessors exist for the paths that are used today; the rest are listed above
 //! so each phase adds its accessor here rather than inventing a path locally.
+//!
+//! `raft.redb` is one file rather than the `raft/` directory this doc used to
+//! promise, and the doc was the thing that was wrong: openraft's log and state
+//! machine share a single redb database, which is what makes a node's whole
+//! consensus state one thing to copy or delete.
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +69,21 @@ impl DataDir {
     /// `<root>/api.token`.
     pub fn api_token_file(&self) -> PathBuf {
         self.0.join("api.token")
+    }
+
+    /// `<root>/raft.redb` — the membership log and the state folded from it.
+    pub fn raft_db(&self) -> PathBuf {
+        self.0.join("raft.redb")
+    }
+
+    /// `<root>/docs` — the catalogue's replicas.
+    pub fn docs_dir(&self) -> PathBuf {
+        self.0.join("docs")
+    }
+
+    /// `<root>/blobs` — content, from catalogue entry values to media files.
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.0.join("blobs")
     }
 
     /// Creates the root directory and any parents. Existing directories are fine.
