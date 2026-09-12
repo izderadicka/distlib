@@ -225,6 +225,70 @@ impl StateMachineStore {
         Ok(verdicts)
     }
 
+    /// Empties everything this node has applied, so a Raft can fill it in.
+    ///
+    /// **Only for a follower being promoted**, and it is why promotion touches
+    /// storage rather than only plumbing. There are two reasons for it, and
+    /// they are worth keeping apart because only one of them is load-bearing.
+    ///
+    /// **The one that is: it is what lets the leader reach this node at all.**
+    /// A node with a founded log and an empty Raft voter set is, to
+    /// [`crate::raft::RaftProtocol`], a node that is not a voter and must not
+    /// be talked into behaving like one — the P1-22 rule, and a deliberate
+    /// one. A follower that seats a Raft without clearing its projection is
+    /// exactly that shape, so it refuses the very `AppendEntries` that would
+    /// catch it up, and the promotion never completes. Mutation-checked: skip
+    /// this call and the node takes its seat and is never made a voter.
+    /// Blanking the projection puts it back into the "no group yet" window
+    /// where [`crate::raft::network::TrustedCore`] answers instead — which is
+    /// why that type holds the core group the log gave rather than
+    /// configuration.
+    ///
+    /// **The one that is not, or not demonstrably: folding exactly once.** A
+    /// follower's projection is already complete — it has folded every event
+    /// fetched over `distlib/memberlog/0` — but its *Raft* log is empty,
+    /// because it never ran one. So the leader replicates from the beginning
+    /// and the fold would run a second time over events it has already folded.
+    /// Tried, out of curiosity: the second fold converges on the same
+    /// membership, because most of it is refused the second time — a member
+    /// already added, a group already founded — and refusals leave the state
+    /// alone. So this is not fixing a corruption anybody has seen. It makes
+    /// once-only true by construction rather than by case analysis over log
+    /// shapes, which is the weaker claim and the honest one.
+    ///
+    /// **The allowlist survives this**, which is what makes it safe: with no
+    /// `GroupFounded` applied, [`crate::MembershipNode`]'s allowlist task
+    /// leaves the last set in place rather than publishing an empty one — the
+    /// same rule that lets a founding node connect before there is a log. So
+    /// this node keeps talking to exactly whom it was talking to, and the log
+    /// replaces that picture when it arrives.
+    ///
+    /// `followed_upto` goes with the rest. It is a cursor into a log this node
+    /// no longer fetches, and leaving it set would strand a value that means
+    /// nothing to a voter.
+    pub async fn reset_for_promotion(&self) -> StorageResult<()> {
+        let encoded = {
+            let mut applied = self.lock();
+            *applied = Applied::default();
+            encode(&*applied, ErrorSubject::StateMachine)?
+        };
+
+        write_key(
+            &self.inner.db,
+            SM,
+            APPLIED,
+            encoded,
+            ErrorSubject::StateMachine,
+        )
+        .await?;
+
+        // Announced like any other change, and this one matters more than most:
+        // it is what tells the allowlist task to stop publishing and hold what
+        // it has.
+        self.announce(&MembershipState::new());
+        Ok(())
+    }
+
     /// The core group with an address for each, as Raft has it.
     ///
     /// [`MembershipState::core`] gives the same members and no addresses — the

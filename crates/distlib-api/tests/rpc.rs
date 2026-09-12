@@ -48,7 +48,7 @@ impl Harness {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            distlib_consensus::alpns(true),
+            distlib_consensus::alpns(),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
@@ -142,7 +142,7 @@ impl Harness {
                 Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
                 secret.clone(),
                 hooks.clone(),
-                distlib_consensus::alpns(true),
+                distlib_consensus::alpns(),
             )
             .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .unwrap()

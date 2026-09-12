@@ -18,7 +18,9 @@
 //! is where §4.2's non-core followers get their copy.
 
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AddressBook, Connections, IsRejection, NetError, alpn};
+use distlib_net::{
+    AddressBook, Connections, IsRejection, NOT_A_VOTER_REASON, NetError, alpn, close_code,
+};
 use iroh::{
     Endpoint,
     endpoint::Connection,
@@ -31,6 +33,7 @@ use std::time::Duration;
 
 use crate::{
     error::ConsensusError,
+    raft::seat::Seat,
     raft::{
         log_store::LogStore, network::MAX_RPC_BYTES, state_machine::StateMachineStore,
         types::TypeConfig,
@@ -217,7 +220,13 @@ pub enum ProposeError {
 /// [`ProposeOutcome::NotCommitted`] — harmless, but not the intended shape.
 #[derive(Clone)]
 pub struct MemberlogProtocol {
-    raft: Raft<TypeConfig>,
+    /// The Raft that commits what is proposed here — if this node has one.
+    ///
+    /// Empty on a node that does not vote. Every node's router serves this
+    /// protocol regardless, because a router's protocols are fixed when it
+    /// spawns: a node that may be promoted has to be listening before it has
+    /// anything to answer with. See [`Seat`].
+    seat: Seat,
     /// A second handle on the same database openraft writes through.
     ///
     /// Reading it here rather than going through openraft is deliberate: redb
@@ -236,23 +245,23 @@ impl std::fmt::Debug for MemberlogProtocol {
 
 impl MemberlogProtocol {
     /// Serves the log backed by `raft`.
-    pub fn new(raft: Raft<TypeConfig>, log: LogStore, state_machine: StateMachineStore) -> Self {
+    pub(crate) fn new(seat: Seat, log: LogStore, state_machine: StateMachineStore) -> Self {
         Self {
-            raft,
+            seat,
             log,
             state_machine,
         }
     }
 
-    async fn answer(&self, request: Request) -> Response {
+    async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
-            Request::Propose(event) => Response::Proposed(self.propose(event).await),
-            Request::From { cursor } => Response::Fetched(self.fetch(cursor)),
+            Request::Propose(event) => Response::Proposed(self.propose(raft, event).await),
+            Request::From { cursor } => Response::Fetched(self.fetch(raft, cursor)),
         }
     }
 
     /// Everything committed since `cursor`.
-    fn fetch(&self, cursor: u64) -> Fetched {
+    fn fetch(&self, raft: &Raft<TypeConfig>, cursor: u64) -> Fetched {
         if self.state_machine.membership().group_id().is_none() {
             return Fetched::NoGroup;
         }
@@ -279,7 +288,7 @@ impl MemberlogProtocol {
             Ok(events) => Fetched::Entries {
                 up_to,
                 events,
-                source: self.source(),
+                source: source(raft),
             },
             Err(error) => {
                 // Nothing to hand over rather than a protocol error: the caller
@@ -291,33 +300,15 @@ impl MemberlogProtocol {
         }
     }
 
-    /// Who to ask next time, from Raft's own view of the group.
-    fn source(&self) -> Source {
-        let metrics = self.raft.metrics();
-        let metrics = metrics.borrow();
-
-        Source {
-            core: metrics
-                .membership_config
-                .nodes()
-                .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
-                .collect(),
-            leader: metrics
-                .current_leader
-                .and_then(|id| MemberId::try_from(id).ok()),
-        }
-    }
-
-    async fn propose(&self, event: SignedEvent) -> ProposeOutcome {
-        let written =
-            match tokio::time::timeout(COMMIT_TIMEOUT, self.raft.client_write(event)).await {
-                Ok(written) => written,
-                Err(_) => {
-                    return ProposeOutcome::NotCommitted(format!(
-                        "the entry did not commit within {COMMIT_TIMEOUT:?}"
-                    ));
-                }
-            };
+    async fn propose(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> ProposeOutcome {
+        let written = match tokio::time::timeout(COMMIT_TIMEOUT, raft.client_write(event)).await {
+            Ok(written) => written,
+            Err(_) => {
+                return ProposeOutcome::NotCommitted(format!(
+                    "the entry did not commit within {COMMIT_TIMEOUT:?}"
+                ));
+            }
+        };
 
         match written {
             // The write reached the log; `data` is the state machine's verdict
@@ -337,6 +328,25 @@ impl MemberlogProtocol {
     }
 }
 
+/// Who to ask next time, from Raft's own view of the group.
+fn source(raft: &Raft<TypeConfig>) -> Source {
+    {
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow();
+
+        Source {
+            core: metrics
+                .membership_config
+                .nodes()
+                .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+                .collect(),
+            leader: metrics
+                .current_leader
+                .and_then(|id| MemberId::try_from(id).ok()),
+        }
+    }
+}
+
 impl ProtocolHandler for MemberlogProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // No authorisation here on purpose. Every member may propose — §4.3 and
@@ -344,6 +354,24 @@ impl ProtocolHandler for MemberlogProtocol {
         // `MembershipState::apply`, which every node runs identically. A check
         // here would be a second opinion that only this node holds.
         loop {
+            // What *is* decided here is whether this node can answer at all.
+            // Both halves of this protocol need a Raft — one commits, the other
+            // reads Raft's view of the group to say who to ask next — and a
+            // node that does not vote has none. Refused with the same code a
+            // non-voter gets on `distlib/raft/0`, and for the same reason: the
+            // router serves this on every node because its protocols are fixed
+            // when it spawns, so the answer has to be given per connection
+            // rather than by what the endpoint advertises.
+            //
+            // Re-read each time round, not once: a follower promoted mid
+            // connection starts being able to answer without the peer having to
+            // dial again.
+            let Some(raft) = self.seat.raft() else {
+                tracing::debug!("refused a memberlog request; this node does not vote");
+                connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                return Ok(());
+            };
+
             let Ok((mut send, mut recv)) = connection.accept_bi().await else {
                 // The peer closed the connection: the normal way this ends.
                 return Ok(());
@@ -355,8 +383,8 @@ impl ProtocolHandler for MemberlogProtocol {
                 .map_err(AcceptError::from_err)?;
             let request: Request = postcard::from_bytes(&encoded).map_err(AcceptError::from_err)?;
 
-            let encoded =
-                postcard::to_stdvec(&self.answer(request).await).map_err(AcceptError::from_err)?;
+            let encoded = postcard::to_stdvec(&self.answer(&raft, request).await)
+                .map_err(AcceptError::from_err)?;
 
             send.write_all(&encoded)
                 .await

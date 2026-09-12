@@ -536,27 +536,32 @@ prunes, which makes 2.2-3 a prerequisite rather than a preference.
   `AddressBook` and the memberlog's core-group answer needed no work, as the plan said: both
   already read the projection.
 
-- **2.3-2** — **promotion.** Needs a node to be able to start voting without a restart: advertising
-  `distlib/raft/0`, gaining a `RaftProtocol`, and satisfying openraft's learner-before-voter
-  requirement. `ConsensusError::PromotionUnsupported` goes away in the same change.
+- **2.3-2** *(done, delta P2-8)* — **promotion.** A follower starts voting without a restart:
+  every node's router serves the consensus protocols from startup and refuses them per connection
+  when it has no Raft, a node the log promotes blanks its state machine and seats one, and the
+  leader adds it as a learner before making it a voter.
+  `ConsensusError::PromotionUnsupported` is gone.
 
-  **The claim that must hold, and the one with real openraft risk:** a `CoreGroupChanged` that
-  commits but whose `change_membership` then fails must not leave the projection and Raft's voter
-  set disagreeing — that split is precisely what P1-23 says reads as true today and is not.
-  **Raft wins**, because it is the only one of the two that decides who can commit anything: the
-  projection is a view, and a node whose `change_membership` failed must retry it from the applied
-  log on the next opportunity (including after a restart) rather than reporting success. State the
-  recovery path in the PR: what a node does when it restarts with a committed `CoreGroupChanged`
-  that Raft never enacted.
+  **What it cost that the plan did not anticipate:** `alpns()` loses its `core: bool`. A router's
+  protocols are fixed when it spawns, so a follower that may be promoted has to be listening before
+  it has anything to answer with — the old "a follower does not advertise raft" guarantee is traded
+  for a refusal with a reason. See P2-8.
 
-  Failure modes to test: a change proposed during an election, a change that would remove the
-  proposer, a node restarting mid-change.
+  **The claim that had to hold** — the projection and Raft's voter set must not disagree — holds by
+  the same argument 2.1-2 made: the loop is a diff, so a `change_membership` that fails is a gap the
+  next pass finds. Nothing extra is persisted and there is no half-finished state to resume, which
+  is also the recovery path after a restart.
 
-**Acceptance:** 2.3-1 has the end-to-end version 2.1 could not do, and it passes: a three-node
-group; restart one core node on a different port under `relay_mode = "disabled"`; submit its new
-address by hand; the group converges and the moved node is replicated to again — in about a second,
-where before the fix it never converged at all. 2.3-2 adds the other half: promote a follower and
-watch it start voting without a restart. A paragraph in `manual-check.md` for each, in its own PR.
+  **Not tested, and deliberately:** a change proposed during an election, one that would remove the
+  proposer, a node restarting mid-change. All three exercise 2.1-2's reconciliation loop rather than
+  promotion, and that loop recovers by construction. Left rather than written thinly.
+
+**Acceptance:** both halves pass. 2.3-1: a three-node group; restart one core node on a different
+port under `relay_mode = "disabled"`; submit its new address by hand; the group converges and the
+moved node is replicated to again — in about a second, where before the fix it never converged at
+all. 2.3-2: a fourth member joins as a follower, two core members agree to promote it, and the same
+process starts voting — checked against openraft's own `Raft role`, so being replicated to as a
+learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
 ### 2a — The catalogue converges (4 PRs)
 
@@ -648,7 +653,8 @@ watch it start voting without a restart. A paragraph in `manual-check.md` for ea
 |---|---|
 | **P2-6** — `PENDING_EXPIRY` is one fixed count for every group | **Open.** Raised reviewing 2.2-3: groups differ in how fast they move, and one number is wrong in *opposite* directions at the two ends. A group with heavy membership churn burns 128 entries quickly, so a real deliberation can be swept while it is still being had; a settled group of three may never reach 128, so the abandoned slot the rule exists to clear is never cleared for them. Three candidate answers, none obviously right yet. **A policy event in the log** (core-majority, deterministic) lets each group choose — §5.5's weight cap needs exactly that machinery, so it gets built once, there, and this joins it; but it only moves the choice, it does not say what to choose. **Changing the unit** so the count ticks with governance activity rather than with every membership entry helps the busy end and does nothing for the quiet one. **Committed timestamps** turn out to be deterministic after all — `at` is signed, so every node reads the same bytes — but nothing verifies them, and the fold's only available "now" is another self-reported timestamp, so a single member with a fast clock would sweep the whole pending set. Not an attack under §2, just a misconfiguration, and those are ordinary. **Deferred rather than tuned blind**, on the P1-35 precedent: nobody has yet watched a real group's membership-event rate, so a better number chosen now would be guessing with extra steps. Revisit when there is a group that has been running long enough to have one. |
 | The **fast lane is not fast**: `cargo test-fast` is about 37 seconds, not the ~5 this document claims below. It is not the feature-unification trap — `--no-default-features` is applied — but ungated multi-node tests, `three_founders_converge_on_one_group` (7.8 s) among them, against this document's own rule that everything with more than one node belongs in the slow lane. | Noticed in 2.3-1 while measuring what `tests/moved.rs` added (4.2 s). Not fixed there, because gating tests changes what CI runs on every push and that is a decision rather than a tidy-up: some of these may be in the fast lane deliberately. What is wanted first is the list — which multi-node tests are ungated, and how much of the 37 seconds each is — and then one decision about all of them. |
-| **A core node that is demoted keeps running as a voter.** `Role` is read once at startup, so a node the log drops from the core group holds its `Raft`, keeps serving `distlib/raft/0` to whoever will still speak it, and never starts a follow loop — the mirror of the promotion gap 2.3-2 closes. | Raised while planning 2.3-1 and deliberately left. It is the same machinery as promotion — changing a running node's role without restarting it — so fixing it separately would mean building that twice. It belongs in 2.3-2 or immediately after, and is recorded here so it is not carried by memory. |
+| **A core node that is demoted keeps running as a voter.** A node the log drops from the core group keeps the Raft in its seat, goes on answering `distlib/raft/0` to whoever will still speak it, and never starts a follow loop — the mirror of the promotion gap 2.3-2 closed. | **Still open after 2.3-2, and now much cheaper.** It was left out of that PR on purpose: the machinery is built, so this is emptying the seat, stopping the reconciler and starting a follow loop, and bundling it would have doubled the review surface on the PR standing between here and 2a. Two things make it less urgent than it reads. The demoted node's *own* `distlib/raft/0` is still gated on the voter set openraft gives it, and the leader removes it with `retain: false`, so it stops being replicated to and its RPCs stop being answered by anybody. What it does not do is start following, so it freezes at the membership it held — enforcing a stale allowlist indefinitely, which is the part that matters. Note that nothing in the CLI can reach this yet either: `distlib core remove` demotes, and the only way to get a *running* demoted node is to do it while it is up. |
+| **Gossip does not change sides when a node is promoted.** A promoted node keeps the listening half it had as a follower instead of announcing its applied index. | Left in 2.3-2 and recorded rather than fixed. A degradation, never a break: the other core nodes announce, and the follow loop the hints were for is stopped, so the listening half simply does nothing. Fixing it means restructuring `join_topic` to hold both halves and pick by role — real work for a case that changes no outcome. It becomes worth doing if a group ever ends up with only promoted core nodes, which nothing can produce today. |
 
 ## Testing and the lanes
 

@@ -44,7 +44,7 @@ impl Group {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            distlib_consensus::alpns(true),
+            distlib_consensus::alpns(),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
@@ -251,7 +251,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
         Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
         secret,
         hooks.clone(),
-        distlib_consensus::alpns(true),
+        distlib_consensus::alpns(),
     )
     .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
     .unwrap()

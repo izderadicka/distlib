@@ -174,6 +174,67 @@ impl Friend {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    /// Approves a pending change through the CLI.
+    fn approve(&self, proposal: u64) {
+        let output = distlib(self.dir.path())
+            .args(["approve", &proposal.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "approve failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The index of the one change waiting for approval.
+    fn the_pending_one(&self) -> u64 {
+        let output = distlib(self.dir.path()).arg("pending").output().unwrap();
+        assert!(
+            output.status.success(),
+            "pending failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listed = String::from_utf8(output.stdout).unwrap();
+        listed
+            .lines()
+            .find_map(|line| line.split_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("expected one proposal waiting; got:\n{listed}"))
+    }
+
+    /// Waits for this node's own account of itself to satisfy `settled`.
+    ///
+    /// Polled rather than asserted, because the last step of a promotion is
+    /// the leader noticing a learner has caught up — and it notices on its own
+    /// retry rather than being woken, since replication progress is not
+    /// something openraft reports through the metrics the reconciler watches.
+    /// A couple of seconds, then, and asserting straight away is asserting the
+    /// absence of that delay rather than the promotion.
+    fn wait_for_status(&self, what: &str, settled: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + CONVERGE_TIMEOUT;
+        loop {
+            let status = self.status();
+            if settled(&status) {
+                return status;
+            }
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for {what}; this node last said:\n{status}");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// What this node says about itself, live.
+    fn status(&self) -> String {
+        let output = distlib(self.dir.path()).arg("status").output().unwrap();
+        assert!(
+            output.status.success(),
+            "status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
     /// Asks this node for a join ticket.
     fn ticket(&self) -> String {
         let output = distlib(self.dir.path()).arg("ticket").output().unwrap();
@@ -605,6 +666,95 @@ fn a_core_node_that_moves_is_told_to_the_group_and_comes_back() {
     wait_for_all(&mut [&mut first, &mut second, &mut third], "members=4");
 
     for node in [first, second, third] {
+        node.stop();
+    }
+}
+
+#[test]
+fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
+    // 2.3-2, through the commands, and the half of P1-30 that 2.1-2 left open.
+    // The claim is the last four words of the name: the node that ends up
+    // voting is the same process that started as a follower, and nobody
+    // restarted it or edited its configuration.
+    let friends: Vec<Friend> = (0..3).map(|_| Friend::introduce()).collect();
+    let everyone: Vec<(String, u16)> = friends
+        .iter()
+        .map(|friend| (friend.id.clone(), friend.port))
+        .collect();
+    for friend in &friends {
+        friend.agree_on(&everyone);
+    }
+
+    let mut second = friends[1].run(false);
+    let mut third = friends[2].run(false);
+    let mut first = friends[0].run(true);
+    wait_for_all(
+        &mut [&mut first, &mut second, &mut third],
+        "members=3 core=3",
+    );
+
+    // A fourth member joins the ordinary way: admitted, handed a ticket, and
+    // started. It follows the log and votes on nothing.
+    let newcomer = Friend::introduce();
+    friends[0].admit(&newcomer.id);
+    newcomer.join(&friends[1].ticket());
+    let mut joined = newcomer.run(false);
+    joined.wait_for("members=4");
+
+    let before = newcomer.status();
+    assert!(
+        before.contains("role        member") && before.contains("follows     the log"),
+        "a joiner follows rather than votes; got:\n{before}"
+    );
+
+    // Promoting somebody changes who votes, so it takes a majority of the
+    // three — one core member to propose it and a second to agree.
+    let said = friends[0].core_set(&newcomer.id, newcomer.port);
+    assert!(
+        said.contains("proposed"),
+        "adding a voter is not one member's decision; got:\n{said}"
+    );
+    friends[1].approve(friends[1].the_pending_one());
+
+    // It reads the same entry the leader does, and sits down.
+    joined.wait_for("this node is now a voter");
+
+    // And then it is caught up *as a voter*, which is the part that cannot be
+    // faked: it blanked its own projection on the way in, so a fifth member
+    // admitted now can only reach it over `distlib/raft/0`. The count is what
+    // distinguishes this from the picture it had as a follower — the text of
+    // the membership line is otherwise identical either side of the promotion.
+    let fifth = Friend::introduce();
+    friends[0].admit(&fifth.id);
+    wait_for_all(
+        &mut [&mut first, &mut second, &mut third, &mut joined],
+        "members=5 core=4",
+    );
+
+    let after = newcomer.wait_for_status("the promoted node to start voting", |status| {
+        status
+            .lines()
+            .any(|line| matches!(line.trim(), "Raft role   Follower" | "Raft role   Leader"))
+    });
+    assert!(
+        after.contains("role        core member"),
+        "the promoted node should know it votes; got:\n{after}"
+    );
+    // Openraft's own word for it, and the assertion that makes this test about
+    // *voting* rather than about being replicated to. A node that had been
+    // added as a learner and never promoted would satisfy everything above —
+    // it would hold a Raft, be caught up, and read "core member" off the log —
+    // and would report `Learner` here. A voter reports `Follower` or `Leader`.
+    let role = after
+        .lines()
+        .find_map(|line| line.strip_prefix("Raft role   "))
+        .unwrap_or_else(|| panic!("the promoted node should run a Raft; got:\n{after}"));
+    assert!(
+        matches!(role.trim(), "Follower" | "Leader"),
+        "a promoted node must be a voter, not a learner; got Raft role {role}"
+    );
+
+    for node in [first, second, third, joined] {
         node.stop();
     }
 }

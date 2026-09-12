@@ -19,7 +19,10 @@
 // state_machine.rs make.
 #![allow(clippy::result_large_err)]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{Connections, NOT_A_VOTER_REASON, alpn, close_code};
@@ -39,7 +42,7 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::raft::{state_machine::StateMachineStore, types::TypeConfig};
+use crate::raft::{seat::Seat, state_machine::StateMachineStore, types::TypeConfig};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -74,19 +77,71 @@ enum Response {
     ),
 }
 
+/// Who this node will speak consensus with while it holds no voter set of its
+/// own.
+///
+/// The stand-in [`RaftProtocol::may_speak_raft`] falls back to, and shared
+/// rather than fixed because there are now two windows in which a node has no
+/// voter set, with different right answers:
+///
+/// * **Founding.** Raft has not been initialised, and the only thing that can
+///   say who the voters are is `[consensus] core` — configuration, because
+///   there is no log yet.
+/// * **Promotion.** A follower taking its seat empties its state machine so
+///   the log folds exactly once
+///   ([`crate::StateMachineStore::reset_for_promotion`]), which puts it back
+///   into "no group, no voters" for as long as it takes the leader to catch it
+///   up. Configuration is the *wrong* answer there: a node that joined by
+///   ticket has whatever core group that ticket named, which may be years out
+///   of date. The right answer is the core group the log itself gave, captured
+///   the moment before it was blanked.
+///
+/// Getting this wrong is not cosmetic. The window is where a node can be
+/// talked into applying a `GroupFounded` naming somebody else and rebuilding
+/// its allowlist from it — which is the attack the narrow founding window was
+/// made narrow for.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TrustedCore(Arc<Mutex<BTreeSet<MemberId>>>);
+
+impl TrustedCore {
+    pub(crate) fn new(members: BTreeSet<MemberId>) -> Self {
+        Self(Arc::new(Mutex::new(members)))
+    }
+
+    /// Whether `peer` is one of them.
+    fn contains(&self, peer: &MemberId) -> bool {
+        self.lock().contains(peer)
+    }
+
+    /// Replaces them — for a node about to blank its state machine, saying who
+    /// the log said the voters were while it still knew.
+    pub(crate) fn replace(&self, members: BTreeSet<MemberId>) {
+        *self.lock() = members;
+    }
+
+    /// A poison-tolerant lock; the guard covers a set lookup and nothing else.
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<MemberId>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Serves `distlib/raft/0` by handing requests to the local Raft.
 #[derive(Clone)]
 pub struct RaftProtocol {
-    raft: Raft<TypeConfig>,
+    /// The Raft to hand requests to — if this node has one.
+    ///
+    /// Empty on a node that does not vote, which every node's router now serves
+    /// this protocol on regardless. See [`Seat`]: a router's protocols are
+    /// fixed when it spawns and cannot be added to, so a node that may be
+    /// promoted has to be serving consensus before it can answer any of it.
+    seat: Seat,
     /// The log-derived membership, for deciding when founding is over.
     ///
     /// Raft's own config cannot answer that: it is empty both for a node that
     /// has not been initialised *yet* and for one that never will be.
     state_machine: StateMachineStore,
-    /// The members this node was configured to found a group with.
-    ///
-    /// The only voters it will accept before Raft knows its own.
-    founding_core: BTreeSet<MemberId>,
+    /// The only voters this node will accept before Raft knows its own.
+    trusted: TrustedCore,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it. There is
@@ -101,30 +156,42 @@ impl std::fmt::Debug for RaftProtocol {
 impl RaftProtocol {
     /// Serves `raft` to voters.
     ///
-    /// `founding_core` is the configured founding core group — `[consensus]
-    /// core` — which is the only thing that can say who the voters are before
-    /// Raft has been initialised. Empty for a node that is not founding
-    /// anything, which is exactly right: it should serve consensus to nobody.
-    pub fn new(
+    /// `trusted` is who to accept from while Raft knows no voters of its own —
+    /// see [`TrustedCore`]. Empty for a node that is neither founding nor being
+    /// promoted, which is exactly right: it should serve consensus to nobody.
+    pub(crate) fn new(seat: Seat, state_machine: StateMachineStore, trusted: TrustedCore) -> Self {
+        Self {
+            seat,
+            state_machine,
+            trusted,
+        }
+    }
+
+    /// Serves a Raft that already exists, for a caller assembling a node by
+    /// hand.
+    ///
+    /// The [`Seat`] is an affair between a node and its own promotion, so it
+    /// is not part of this crate's surface; a caller outside it has a `Raft`
+    /// and wants it served. `founding_core` is who to accept from until Raft
+    /// knows its own voters — see [`Self::may_speak_raft`].
+    pub fn serving(
         raft: Raft<TypeConfig>,
         state_machine: StateMachineStore,
         founding_core: BTreeSet<MemberId>,
     ) -> Self {
-        Self {
-            raft,
+        Self::new(
+            Seat::holding(raft),
             state_machine,
-            founding_core,
-        }
+            TrustedCore::new(founding_core),
+        )
     }
 
-    async fn answer(&self, request: Request) -> Response {
+    async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
-            Request::AppendEntries(rpc) => {
-                Response::AppendEntries(self.raft.append_entries(rpc).await)
-            }
-            Request::Vote(rpc) => Response::Vote(self.raft.vote(rpc).await),
+            Request::AppendEntries(rpc) => Response::AppendEntries(raft.append_entries(rpc).await),
+            Request::Vote(rpc) => Response::Vote(raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
-                Response::InstallSnapshot(self.raft.install_snapshot(rpc).await)
+                Response::InstallSnapshot(raft.install_snapshot(rpc).await)
             }
         }
     }
@@ -136,8 +203,9 @@ impl RaftProtocol {
     /// founder sends `Vote` to peers whose Raft membership is still empty and
     /// founding could never happen if they refused it.
     ///
-    /// The stand-in is the *configured* founding core group, and it is narrow
-    /// on purpose. "Voter set is empty" was the first answer and it was wrong:
+    /// The stand-in is [`TrustedCore`] — the configured founding core group
+    /// while founding, and the core group the log last gave while a promotion
+    /// is being caught up — and it is narrow on purpose. "Voter set is empty" was the first answer and it was wrong:
     /// a node that is never initialised has an empty voter set for its whole
     /// life, so it would serve consensus to every member in its allowlist
     /// forever. That is not hypothetical — a member could send it a `Vote`, an
@@ -146,21 +214,18 @@ impl RaftProtocol {
     /// the real group. Phase 1b makes it worse: every follower runs an
     /// uninitialised Raft with the full membership in its allowlist.
     ///
-    /// So the window is bounded twice over — by who (`founding_core`, not
+    /// So the window is bounded twice over — by who ([`TrustedCore`], not
     /// "anyone we would talk to") and by when (only until the log says a group
     /// exists, after which an empty voter set means this node is not a voter at
     /// all and must not be talked into behaving like one).
     ///
-    /// The second bound is deliberately ahead of its use, and unreachable
-    /// today: nothing in phase 1a can give a node a founded log *and* an empty
-    /// Raft config, so mutating that half of the condition away breaks no test.
-    /// It bites in 1b, where a member listed in a stale `[consensus] core` that
-    /// the group was founded without will hold the log through follower mode
-    /// while never being a voter — and would otherwise go on serving consensus
-    /// to whoever that stale config names.
-    fn may_speak_raft(&self, peer: MemberId) -> bool {
+    /// The second bound bites in 1b, where a member listed in a stale
+    /// `[consensus] core` that the group was founded without holds the log
+    /// through follower mode while never being a voter — and would otherwise go
+    /// on serving consensus to whoever that stale config names.
+    fn may_speak_raft(&self, raft: &Raft<TypeConfig>, peer: MemberId) -> bool {
         {
-            let metrics = self.raft.metrics();
+            let metrics = raft.metrics();
             let membership = &metrics.borrow().membership_config;
             let mut voters = membership.voter_ids().peekable();
             if voters.peek().is_some() {
@@ -169,7 +234,7 @@ impl RaftProtocol {
             }
         }
 
-        self.state_machine.membership().group_id().is_none() && self.founding_core.contains(&peer)
+        self.state_machine.membership().group_id().is_none() && self.trusted.contains(&peer)
     }
 }
 
@@ -183,18 +248,31 @@ impl ProtocolHandler for RaftProtocol {
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
         loop {
-            // Re-checked every time rather than once at accept. The voter set
-            // changes under a long-lived connection — founding ends, and later
-            // a `CoreGroupChanged` demotes somebody — and a check made only at
-            // accept would keep serving whoever got in before it moved. §4.4
-            // makes the same argument for the allowlist: refusing the *next*
-            // connection is not enough when the current one is still open. One
-            // watch borrow per RPC is not worth optimising away.
-            if !self.may_speak_raft(peer) {
+            // Re-checked every time rather than once at accept, and both
+            // halves can move under a long-lived connection. Whether this node
+            // has a Raft at all now changes — a follower is promoted and takes
+            // its seat without restarting — and so does who may speak to it:
+            // founding ends, and later a `CoreGroupChanged` demotes somebody. A
+            // check made only at accept would keep serving whoever got in
+            // before either moved. §4.4 makes the same argument for the
+            // allowlist: refusing the *next* connection is not enough when the
+            // current one is still open. One lock and one watch borrow per RPC
+            // is not worth optimising away.
+            //
+            // An empty seat is refused as a non-voter, because that is what
+            // this node is. It is not an error and not a protocol failure: every
+            // node serves this ALPN now, since a router cannot be given a
+            // protocol after it spawns and a node that may be promoted has to be
+            // listening before it has anything to answer with.
+            let Some(raft) = self
+                .seat
+                .raft()
+                .filter(|raft| self.may_speak_raft(raft, peer))
+            else {
                 tracing::info!(%peer, "refused raft rpc from a non-voter");
                 connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
                 return Ok(());
-            }
+            };
 
             let (mut send, mut recv) = match connection.accept_bi().await {
                 Ok(streams) => streams,
@@ -205,7 +283,7 @@ impl ProtocolHandler for RaftProtocol {
             let encoded = recv.read_to_end(MAX_RPC_BYTES).await.accepting()?;
             let request: Request = postcard::from_bytes(&encoded).accepting()?;
 
-            let response = self.answer(request).await;
+            let response = self.answer(&raft, request).await;
             let encoded = postcard::to_stdvec(&response).accepting()?;
 
             send.write_all(&encoded).await.accepting()?;

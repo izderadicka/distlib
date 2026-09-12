@@ -16,7 +16,7 @@ use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{Peer, pending_on, until, wait_for};
+use common::{PATIENTLY, Peer, pending_on, until, until_upto, wait_for, wait_for_upto};
 
 #[tokio::test]
 async fn a_founded_group_derives_its_membership_from_the_log() {
@@ -797,13 +797,19 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
     // bystander will talk to — gets nothing here. Being a voter somewhere else
     // is not being a voter of a Raft this node does not run.
     //
-    // Refused during the handshake rather than after it: a node that follows
-    // rather than votes serves ping and nothing else, and iroh's router is what
-    // an endpoint advertises, so the ALPN is not on offer in the first place.
-    // Stronger than the connect-then-close the voter gate gives, and the reason
-    // both are worth having — a core node has to advertise raft, so its
-    // refusals happen a step later.
-    let refused = founder
+    // **Refused after the handshake rather than during it, which changed in
+    // 2.3-2.** A follower used not to advertise `distlib/raft/0` at all, so the
+    // connection failed with "no known protocol" — earlier, and stronger. That
+    // is no longer available: a router's protocols are fixed when it spawns, so
+    // a node that may be promoted has to be listening before it has a Raft to
+    // listen with. What replaces it is this: the connection opens and is closed
+    // with a reason, and the RPC underneath is never answered.
+    //
+    // The claim in the comment above is unchanged and is what this checks. The
+    // bystander's stand-in voter set is its own `[consensus] core`, which is
+    // empty — it was configured to found nothing — so there is nobody it will
+    // accept consensus from, the founder included.
+    let opened = founder
         .node
         .endpoint()
         .connect(
@@ -811,10 +817,17 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
             distlib_net::alpn::RAFT,
         )
         .await
-        .expect_err("a node that founds nothing must not serve raft at all");
+        .expect("the alpn is advertised on every node now");
+    let closed = tokio::time::timeout(Duration::from_secs(10), opened.closed())
+        .await
+        .expect("a node that founds nothing must close a raft connection");
     assert!(
-        format!("{refused}").contains("known protocol"),
-        "refused for the wrong reason: {refused}"
+        format!("{closed}").contains("not a voter"),
+        "refused for the wrong reason: {closed}"
+    );
+    assert!(
+        !bystander.node.is_core(),
+        "and it is still not a voter of anything"
     );
 
     founder.node.shutdown().await;
@@ -1475,4 +1488,158 @@ async fn an_expelled_follower_stops_asking_and_says_so() {
 
     follower.node.shutdown().await;
     core.node.shutdown().await;
+}
+
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
+    // 2.3-2, and the claim P1-30 deferred. Two halves have to meet without
+    // either going first: openraft will not make a node a voter until it is a
+    // learner it can replicate to, and it cannot replicate to a node with no
+    // Raft. The log is the rendezvous — the leader and the promoted node read
+    // the same committed `CoreGroupChanged`.
+    //
+    // **The assertion that matters is the last one**, not that the node votes.
+    // Taking a seat means blanking the state machine so the log folds exactly
+    // once, and the risk in doing that is ending up with a membership subtly
+    // unlike everybody else's. So this compares the whole projection against a
+    // founder's.
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    // A member who follows: not in anybody's founding core group, so it starts
+    // with no Raft at all.
+    //
+    // Admitted before it is started, as `acceptance.rs` does and for the same
+    // reason: a node the log does not name yet is refused by every core node,
+    // and a follower that has never held the log backs off a full minute
+    // before asking again.
+    let key = SecretKey::generate();
+    let joining = MemberId::from(key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: joining,
+                    display_name: "joiner".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    let joiner = Peer::start_with(
+        key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    // Patient, because a follower learns by fetching: gossip makes it prompt
+    // but promises nothing, and the guarantee underneath is its own 30-second
+    // timer. Every wait in this test that depends on the joiner noticing
+    // something is bounded the same way, for the same reason.
+    wait_for_upto(
+        &joiner,
+        PATIENTLY,
+        "the joiner to catch up as a follower",
+        |m| m.is_member(&joiner.id),
+    )
+    .await;
+    assert!(
+        !joiner.node.is_core() && joiner.node.raft().is_none(),
+        "a follower holds the log without voting on it"
+    );
+
+    // Something for it to have missed while it is being promoted, so the
+    // comparison at the end is against a log with more than founding in it.
+    let absentee = MemberId::from(SecretKey::generate().public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: absentee,
+                    display_name: "absentee".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    // The one core member is a majority of one, so this applies at once.
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![
+                    (founder.id, founder.addr.clone()),
+                    (joiner.id, joiner.addr.clone()),
+                ],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    // Both halves, in the order they can only happen in: the joiner reads the
+    // entry, stops following, blanks itself and sits down; the leader adds it
+    // as a learner, catches it up, and then makes it a voter.
+    until_upto(PATIENTLY, "the joiner to take a seat in consensus", || {
+        joiner.node.raft().is_some()
+    })
+    .await;
+    until("openraft to make the joiner a voter", || {
+        founder.node.raft().is_some_and(|raft| {
+            raft.metrics()
+                .borrow()
+                .membership_config
+                .voter_ids()
+                .count()
+                == 2
+        })
+    })
+    .await;
+
+    // And it is caught up, identically. `changed_at` included: it is what
+    // every later proposal is checked against, so a promoted node that agreed
+    // about the membership but not about *when* it last moved would refuse
+    // proposals the rest of the group accepts.
+    wait_for_upto(
+        &joiner,
+        PATIENTLY,
+        "the promoted node to be caught up",
+        |membership| *membership == founder.node.membership(),
+    )
+    .await;
+
+    let promoted = joiner.node.membership();
+    assert!(promoted.is_core(&joiner.id), "and it says so itself");
+    assert!(
+        promoted.is_member(&absentee),
+        "including the entry it was never served as a follower"
+    );
+    assert_eq!(
+        promoted.pending().count(),
+        0,
+        "a log folded twice would leave proposals behind that were already decided"
+    );
+
+    founder.node.shutdown().await;
+    joiner.node.shutdown().await;
 }

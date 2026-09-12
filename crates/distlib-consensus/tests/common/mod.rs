@@ -74,7 +74,7 @@ impl Peer {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
             secret.clone(),
             hooks.clone(),
-            distlib_consensus::alpns(true),
+            distlib_consensus::alpns(),
         )
         .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .unwrap()
@@ -189,7 +189,12 @@ pub async fn pending_on(peer: &Peer, what: &str) -> u64 {
 /// does nothing — which is exactly what happened here, gossip supplying an
 /// address the address book had failed to learn.
 pub async fn until(what: &str, condition: impl Fn() -> bool) {
-    tokio::time::timeout(SOON, async {
+    until_upto(SOON, what, condition).await;
+}
+
+/// [`until`] with the bound named, for waits that outlast [`SOON`].
+pub async fn until_upto(bound: Duration, what: &str, condition: impl Fn() -> bool) {
+    tokio::time::timeout(bound, async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
