@@ -58,8 +58,17 @@ directory first.
 
 ```sh
 cargo build
+rm -rf $DL                       # see below: a data directory is not portable between builds
 for n in a b c d e f; do dl -d $DL/$n init; done
 ```
+
+**Start from empty directories, and upgrade every node together.** What a node stores
+is postcard-encoded, which carries no field names and no version, so a build that adds
+a field to a stored shape cannot read what an older one wrote — `run` says so rather
+than reporting "Hit the end of buffer". The same is true over the wire: a node that
+receives a Raft snapshot from a peer running a different build hits it there instead,
+where it is much harder to read. Two builds of `distlib` in one group is not a
+supported arrangement, and this runbook assumes one.
 
 **Collect ids.** `whoami` prints one whether or not a port is pinned.
 

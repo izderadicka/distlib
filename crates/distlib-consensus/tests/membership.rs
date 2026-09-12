@@ -1869,6 +1869,24 @@ fn a_namespace_is_created_once_and_keeps_its_first_key() {
     );
 }
 
+/// The realistic way a secret escapes is a log line, and events are what get
+/// logged: a refused entry, a dropped proposal, a test failure all print one.
+#[test]
+fn an_event_carrying_a_secret_does_not_print_it() {
+    let secret = NamespaceSecret::generate().unwrap();
+    let event = MembershipEvent::NamespaceCreated {
+        kind: Namespace::Catalogue,
+        secret: secret.clone(),
+    };
+
+    let shown = format!("{event:?}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(
+        !shown.contains(&format!("{:?}", secret.expose())),
+        "the bytes themselves must not appear: {shown}"
+    );
+}
+
 /// The fold may not invent anything, and a secret is the sharpest case: a
 /// state machine that generated one would leave every node holding a
 /// different key to a namespace they all believe they share.
