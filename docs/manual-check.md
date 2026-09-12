@@ -416,11 +416,13 @@ enforcing that allowlist for as long as it ran.
 
 Do it to d, which §5c just promoted. The voters are a, b and d, so demoting one takes a
 majority of three — two of the others have to say so. a is stopped from the end of §5c,
-so restart it first and let it catch up:
+so restart it first and let it catch up. **This is also what §6 used to ask for** —
+watch it rejoin and pick the log back up — so do that watching here:
 
 ```sh
 dl -d $DL/a run &              # or its own terminal
-dl -d $DL/a status             # wait for `role  core member`
+dl -d $DL/a status             # wait for `role  core member`, and for
+                               # `changed_at` to reach what b reports
 dl -d $DL/b core remove $D
 dl -d $DL/b pending            # note the index
 dl -d $DL/a approve <N>
@@ -459,8 +461,8 @@ it is why `dl -d $DL/d members` immediately after the admit will not show carol 
 
 ## 6. After
 
-Restart the killed node and watch it rejoin and catch up — beyond §9, but the first
-thing anyone would actually do next.
+Everything is stopped and thrown away. The restart-and-catch-up that used to be the
+interesting part of this section is §5d's opening step, which needs it anyway.
 
 ```sh
 pgrep -af distlib       # must be empty once everything is stopped

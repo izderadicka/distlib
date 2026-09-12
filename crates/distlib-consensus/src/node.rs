@@ -924,7 +924,11 @@ async fn serve_role(mut role: Role) {
 ///    moment a peer can no longer be answered is the moment this node stops
 ///    being a voter, rather than a window in which it answers with errors.
 ///    Shutting down matters on its own: a Raft left running campaigns for a
-///    group that no longer counts its vote.
+///    group that no longer counts its vote. **Not mutation-checked, and it
+///    cannot be**: the handle is gone from the seat either way, so a Raft
+///    that was shut down and one that was merely dropped look identical from
+///    anywhere a test can stand. Deleting the call breaks nothing visible,
+///    which is the reason to say so here rather than to delete it.
 /// 3. **Point the follow cursor at what is already applied**, so the loop
 ///    picks up where the Raft left off instead of re-fetching the whole log.
 /// 4. **Start following**, which is the part that matters — a demoted node
