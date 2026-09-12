@@ -16,7 +16,47 @@ use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
-use common::{PATIENTLY, Peer, pending_on, until, until_upto, wait_for, wait_for_upto};
+use common::{Peer, pending_on, until, wait_for};
+// Only the slow lane waits this long, and importing them unconditionally is a
+// warning in every `--no-default-features` build.
+#[cfg(feature = "slow-tests")]
+use common::{PATIENTLY, until_upto, wait_for_upto};
+
+/// The endpoint's ALPN list and the router's handlers are two declarations of
+/// the same fact, and only one of them can be derived from the other.
+///
+/// The endpoint is built before any handler exists — the node needs the
+/// endpoint — so `alpns()` has to state the set in advance, and an endpoint
+/// that advertises a protocol nothing handles negotiates it and then refuses
+/// every stream (P1-11). Now that the caller assembles the router, that drift
+/// is one forgotten line away in a crate that no longer sees the list.
+///
+/// Compared as sorted lists rather than as sets, so a duplicate ALPN fails
+/// here too: iroh's protocol map is a `BTreeMap`, and a second handler for an
+/// ALPN silently replaces the first.
+#[tokio::test]
+async fn a_node_serves_exactly_the_protocols_its_endpoint_advertises() {
+    let peer = Peer::start(SecretKey::generate(), vec![]).await;
+
+    let mut served: Vec<String> = peer
+        .node
+        .protocols()
+        .into_iter()
+        .map(|(alpn, _)| String::from_utf8_lossy(&alpn).into_owned())
+        .collect();
+    let mut advertised: Vec<String> = distlib_consensus::alpns()
+        .into_iter()
+        .map(|alpn| String::from_utf8_lossy(&alpn).into_owned())
+        .collect();
+    served.sort();
+    advertised.sort();
+
+    assert_eq!(
+        served, advertised,
+        "what the router is given must be what the endpoint offers"
+    );
+    peer.shutdown().await;
+}
 
 #[tokio::test]
 async fn a_founded_group_derives_its_membership_from_the_log() {
@@ -42,7 +82,7 @@ async fn a_founded_group_derives_its_membership_from_the_log() {
         membership.is_core(&founder.id),
         "founders are the initial voters"
     );
-    founder.node.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -96,8 +136,8 @@ async fn admitting_a_member_reaches_every_node() {
         .await;
     }
 
-    first.node.shutdown().await;
-    second.node.shutdown().await;
+    first.shutdown().await;
+    second.shutdown().await;
 }
 
 #[tokio::test]
@@ -123,7 +163,7 @@ async fn the_bootstrap_seed_survives_until_a_group_exists() {
         "the seed must still be enforced; without it core nodes could never \
          reach each other to replicate the founding entry"
     );
-    node.node.shutdown().await;
+    node.shutdown().await;
 }
 
 #[tokio::test]
@@ -164,7 +204,7 @@ async fn founding_replaces_the_seed_with_the_log() {
     .expect("a member only ever in the seed must stop being admitted once the log speaks");
 
     assert!(founder.hooks.allowlist().is_allowed(&founder.id));
-    founder.node.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -235,8 +275,8 @@ async fn a_follower_can_propose() {
         .await;
     }
 
-    first.node.shutdown().await;
-    second.node.shutdown().await;
+    first.shutdown().await;
+    second.shutdown().await;
 }
 
 #[tokio::test]
@@ -279,7 +319,7 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
         "the caller should learn which member was not found; got {error}"
     );
     assert!(founder.node.membership().is_member(&founder.id));
-    founder.node.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -336,7 +376,7 @@ async fn three_founders_converge_on_one_group() {
     }
 
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -454,7 +494,7 @@ async fn a_core_node_that_moves_is_dialled_at_its_new_address() {
     }
 
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -515,7 +555,7 @@ async fn a_core_node_the_log_drops_stops_voting() {
     }
 
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -615,8 +655,8 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
         "and neither door let it through"
     );
 
-    bystander.node.shutdown().await;
-    founder.node.shutdown().await;
+    bystander.shutdown().await;
+    founder.shutdown().await;
 }
 
 /// MEM-04: a core node the log demotes gives up its seat and starts following.
@@ -699,7 +739,7 @@ async fn a_core_node_the_log_demotes_stands_down_and_starts_following() {
     .await;
 
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -766,7 +806,7 @@ async fn a_demoted_node_catches_up_on_what_it_missed() {
     .await;
 
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -878,9 +918,9 @@ async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
         .await;
     }
 
-    follower.node.shutdown().await;
+    follower.shutdown().await;
     for peer in peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -998,8 +1038,8 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     )
     .await;
 
-    founder.node.shutdown().await;
-    bystander.node.shutdown().await;
+    founder.shutdown().await;
+    bystander.shutdown().await;
 }
 
 #[tokio::test]
@@ -1081,8 +1121,8 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
         "and it is still not a voter of anything"
     );
 
-    founder.node.shutdown().await;
-    bystander.node.shutdown().await;
+    founder.shutdown().await;
+    bystander.shutdown().await;
 }
 
 #[tokio::test]
@@ -1174,8 +1214,8 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
     .await
     .expect("a follower must admit whoever the log says is a member");
 
-    follower.node.shutdown().await;
-    founder.node.shutdown().await;
+    follower.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -1246,8 +1286,8 @@ async fn a_follower_proposes_through_a_core_node() {
     })
     .await;
 
-    follower.node.shutdown().await;
-    founder.node.shutdown().await;
+    follower.shutdown().await;
+    founder.shutdown().await;
 }
 
 // Six seconds, and on its own the reason this binary took six: it waits out a
@@ -1320,8 +1360,8 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
     .await;
     assert_eq!(follower.node.membership(), founder.node.membership());
 
-    follower.node.shutdown().await;
-    founder.node.shutdown().await;
+    follower.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -1409,8 +1449,8 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
         "the timer is 30s, so {took:?} means this waited for it rather than being told"
     );
 
-    follower.node.shutdown().await;
-    founder.node.shutdown().await;
+    follower.shutdown().await;
+    founder.shutdown().await;
 }
 
 #[tokio::test]
@@ -1506,7 +1546,7 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
     assert_eq!(echo, b"by id alone");
 
     for peer in &peers {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -1590,9 +1630,9 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
     .expect("a follower must learn where the other core nodes are from the ones it asks");
     assert_eq!(echo, b"never introduced");
 
-    follower.node.shutdown().await;
+    follower.shutdown().await;
     for peer in &core {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 
@@ -1655,8 +1695,8 @@ async fn a_follower_reports_where_the_core_group_is() {
         "a follower must be able to say where the group's core nodes are"
     );
 
-    follower.node.shutdown().await;
-    founder.node.shutdown().await;
+    follower.shutdown().await;
+    founder.shutdown().await;
 }
 
 // Two seconds, most of it letting the gossip swarm form before taking it away.
@@ -1737,8 +1777,8 @@ async fn an_expelled_follower_stops_asking_and_says_so() {
         "the node knows which group threw it out"
     );
 
-    follower.node.shutdown().await;
-    core.node.shutdown().await;
+    follower.shutdown().await;
+    core.shutdown().await;
 }
 
 #[cfg(feature = "slow-tests")]
@@ -1891,6 +1931,6 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
         "a log folded twice would leave proposals behind that were already decided"
     );
 
-    founder.node.shutdown().await;
-    joiner.node.shutdown().await;
+    founder.shutdown().await;
+    joiner.shutdown().await;
 }

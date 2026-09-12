@@ -226,7 +226,7 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     // bare panic 7 seconds in, with no bound to name and nothing to retry.
     let leader = leader_of(&core).await;
     let dead = core.remove(leader);
-    dead.node.shutdown().await;
+    dead.shutdown().await;
 
     // No pause: the group is asked to commit while it is still working out who
     // leads it. That is the realistic shape of losing a leader, and it is what
@@ -247,7 +247,7 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     }
 
     for peer in core.iter().chain(&followers) {
-        peer.node.shutdown().await;
+        peer.shutdown().await;
     }
 }
 

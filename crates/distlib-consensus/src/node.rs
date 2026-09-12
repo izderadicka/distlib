@@ -15,9 +15,9 @@ use std::{
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{
-    AddressBook, AllowlistHooks, AllowlistWriter, Connections, alpn, ping::PingProtocol,
+    AddressBook, AllowlistHooks, AllowlistWriter, Connections, Protocols, alpn, ping::PingProtocol,
 };
-use iroh::{Endpoint, SecretKey, protocol::Router};
+use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::GOSSIP_ALPN, net::Gossip};
 use openraft::{
     Config, Raft, ServerState,
@@ -180,6 +180,23 @@ fn start(task: &RoleTask, handle: JoinHandle<()>) {
     *task.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
 }
 
+/// The transport a node is served on, which it no longer owns.
+///
+/// The two are passed together because they are one decision: the process has
+/// exactly one endpoint and exactly one gossip over it, made by whoever
+/// assembles the process, and a node handed one without the other could not
+/// be served at all. See `distlib::Runtime`.
+pub struct Transport {
+    /// What this node answers and dials on. Its ALPNs must be [`alpns`].
+    pub endpoint: Endpoint,
+    /// What the memberlog announces on and a follower listens to.
+    ///
+    /// Given rather than made here: from phase 2 iroh-docs is handed this same
+    /// instance, and a second swarm over one endpoint would not see the
+    /// topics the first had joined.
+    pub gossip: Gossip,
+}
+
 /// A running consensus node.
 ///
 /// Owns the router serving its peers, the tasks that keep the allowlist in step
@@ -201,7 +218,15 @@ pub struct MembershipNode {
     /// alternative is an `Option` whose `None` arm is unreachable.
     sources: SharedSources,
     state_machine: StateMachineStore,
-    router: Router,
+    endpoint: Endpoint,
+    /// The handlers this node needs served, kept so [`Self::protocols`] can
+    /// hand them out after the node exists. All three are cheap clones over
+    /// the state they answer from.
+    raft_protocol: RaftProtocol,
+    memberlog_protocol: MemberlogProtocol,
+    /// The gossip this node was given, for [`Self::protocols`] and for the
+    /// task that joins the group's topic.
+    swarm: Gossip,
     /// Held, not detached: it is the only thing keeping the allowlist writable,
     /// and dropping it would freeze membership at whatever was last applied.
     allowlist_updates: JoinHandle<()>,
@@ -257,6 +282,14 @@ impl std::fmt::Debug for MembershipNode {
 impl MembershipNode {
     /// Starts consensus on `endpoint`, storing state under `data_dir`.
     ///
+    /// The caller owns the endpoint, the gossip and the router: from phase 2
+    /// on, iroh-docs needs the same `Gossip` this node announces on and all of
+    /// it accepted on one router, so there cannot be a second of either. What
+    /// this node needs served it declares through [`Self::protocols`], which
+    /// the caller hands to [`distlib_net::serve`] once every subsystem has
+    /// said the same. The node is therefore not answering anything until the
+    /// caller has done that.
+    ///
     /// `hooks` must be the same instance installed on the endpoint: the
     /// eviction task reaches connections through it, and a different instance
     /// would have an empty table.
@@ -278,12 +311,16 @@ impl MembershipNode {
     /// a node the group was founded without is a follower whatever its config
     /// says.
     pub async fn start(
-        endpoint: Endpoint,
+        transport: Transport,
         hooks: AllowlistHooks,
         allowlist: AllowlistWriter,
         data_dir: &Path,
         core: Vec<(MemberId, NodeAddr)>,
     ) -> Result<Self> {
+        let Transport {
+            endpoint,
+            gossip: swarm,
+        } = transport;
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
         let db = Arc::new(
@@ -326,9 +363,6 @@ impl MembershipNode {
             core.iter().any(|(member, _)| *member == id)
         };
 
-        // Gossip is spawned before the router, because the router has to serve
-        // it: a node that announced but did not accept would talk to nobody.
-        let swarm = Gossip::builder().spawn(endpoint.clone());
         // The gossip listener sends on this and the follow loop waits on it.
         // Seeded with `MayHaveMissed` because that is true at startup: this
         // node has heard nothing yet and has no idea how far the log reaches.
@@ -376,18 +410,11 @@ impl MembershipNode {
         // it blanks itself — see `TrustedCore`.
         let trusted = TrustedCore::new(core.iter().map(|(member, _)| *member).collect());
 
-        let router = Router::builder(endpoint)
-            .accept(alpn::PING, PingProtocol)
-            .accept(
-                alpn::RAFT,
-                RaftProtocol::new(seat.clone(), state_machine.clone(), trusted.clone()),
-            )
-            .accept(
-                alpn::MEMBERLOG,
-                MemberlogProtocol::new(seat.clone(), served_log, state_machine.clone()),
-            )
-            .accept(GOSSIP_ALPN, swarm.clone())
-            .spawn();
+        // Built here rather than in `protocols`, so that what answers a peer is
+        // decided once, at the same moment as the seat it reads.
+        let raft_protocol = RaftProtocol::new(seat.clone(), state_machine.clone(), trusted.clone());
+        let memberlog_protocol =
+            MemberlogProtocol::new(seat.clone(), served_log, state_machine.clone());
 
         let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
         let follow: RoleTask = Arc::new(Mutex::new(None));
@@ -397,7 +424,13 @@ impl MembershipNode {
         // group. A founder has none for the moment before it founds one, and a
         // new follower has none until its first fetch — so the task waits for
         // one rather than the caller having to order any of that.
-        let gossip = tokio::spawn(join_topic(swarm, state_machine.clone(), id, is_core, hints));
+        let gossip = tokio::spawn(join_topic(
+            swarm.clone(),
+            state_machine.clone(),
+            id,
+            is_core,
+            hints,
+        ));
 
         let allowlist_updates = tokio::spawn(follow_membership(
             state_machine.clone(),
@@ -407,9 +440,6 @@ impl MembershipNode {
         ));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
-        // What makes `CoreGroupChanged` mean anything to Raft. Only a voter has
-        // a Raft to change, and only the leader may change it — the task sorts
-        // that out for itself rather than being started and stopped as
         // What makes `CoreGroupChanged` mean anything to Raft. Only a voter has
         // a Raft to change, and only the leader may change it — the task sorts
         // that out for itself rather than being started and stopped as
@@ -450,7 +480,10 @@ impl MembershipNode {
             seat,
             sources,
             state_machine,
-            router,
+            endpoint,
+            raft_protocol,
+            memberlog_protocol,
+            swarm,
             allowlist_updates,
             evictions,
             memberlog,
@@ -470,7 +503,31 @@ impl MembershipNode {
 
     /// The endpoint this node serves and dials on.
     pub fn endpoint(&self) -> &Endpoint {
-        self.router.endpoint()
+        &self.endpoint
+    }
+
+    /// What this node needs the caller's router to serve, and with what.
+    ///
+    /// Exactly the ALPNs [`alpns`] names, which is the one thing a test can
+    /// check: the endpoint is built from that list before any handler exists,
+    /// so the two are declared separately and can only be kept in step by
+    /// being compared. An endpoint offering a protocol nothing handles
+    /// negotiates it and then refuses every stream (P1-11).
+    ///
+    /// Gossip is in here although this crate did not author the handler. What
+    /// must be served and what we wrote are different questions, and it is the
+    /// first that the router and the endpoint both need answered — so the
+    /// node, which is the thing that gossips, is what says so.
+    pub fn protocols(&self) -> Protocols {
+        vec![
+            (alpn::PING.to_vec(), Box::new(PingProtocol) as Box<_>),
+            (GOSSIP_ALPN.to_vec(), Box::new(self.swarm.clone())),
+            (alpn::RAFT.to_vec(), Box::new(self.raft_protocol.clone())),
+            (
+                alpn::MEMBERLOG.to_vec(),
+                Box::new(self.memberlog_protocol.clone()),
+            ),
+        ]
     }
 
     /// The connections this node holds, for any protocol added alongside Raft.
@@ -814,7 +871,11 @@ impl MembershipNode {
         self.memberlog.propose(leader, &addr, event).await
     }
 
-    /// Stops consensus, the router and the background tasks.
+    /// Stops consensus and this node's background tasks.
+    ///
+    /// Not the router or the endpoint: the caller owns both, serves other
+    /// subsystems on them, and shuts them down after this returns — see
+    /// `distlib::Runtime::shutdown`, which keeps the order this used to have.
     /// Takes `&self` rather than `self` so the node can be shared.
     ///
     /// The local API serves from the same node this returns to, and an owning
@@ -843,9 +904,6 @@ impl MembershipNode {
             tracing::warn!(%error, "raft did not shut down cleanly");
         }
         self.gossip.abort();
-        if let Err(error) = self.router.shutdown().await {
-            tracing::warn!(%error, "router did not shut down cleanly");
-        }
     }
 }
 

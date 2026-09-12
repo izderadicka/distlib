@@ -13,7 +13,7 @@ use std::{
 };
 
 use distlib_api::{Api, Server, serve};
-use distlib_consensus::{MemberRecord, MembershipNode};
+use distlib_consensus::{MemberRecord, MembershipNode, Transport};
 use distlib_core::{MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
 use http_body_util::{BodyExt as _, Full};
@@ -22,7 +22,9 @@ use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
+    protocol::Router,
 };
+use iroh_gossip::net::Gossip;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -32,6 +34,12 @@ struct Harness {
     node: Arc<MembershipNode>,
     server: Server,
     token: String,
+    /// One per node started here, the API's own first.
+    ///
+    /// A node no longer owns what serves it, and a router left running holds
+    /// an endpoint open — so the harness keeps them and [`Harness::shutdown`]
+    /// closes every one, including the routers of nodes a test stops itself.
+    routers: Vec<Router>,
     _dir: TempDir,
 }
 
@@ -60,9 +68,13 @@ impl Harness {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
+        let swarm = Gossip::builder().spawn(endpoint.clone());
         let node = Arc::new(
             MembershipNode::start(
-                endpoint,
+                Transport {
+                    endpoint: endpoint.clone(),
+                    gossip: swarm,
+                },
                 hooks,
                 writer,
                 dir.path(),
@@ -71,6 +83,7 @@ impl Harness {
             .await
             .unwrap(),
         );
+        let router = distlib_net::serve(endpoint, node.protocols());
 
         node.init_group(
             vec![(
@@ -102,6 +115,7 @@ impl Harness {
             node,
             server,
             token,
+            routers: vec![router],
             _dir: dir,
         }
     }
@@ -129,6 +143,7 @@ impl Harness {
             .collect();
 
         let mut nodes = Vec::new();
+        let mut routers = Vec::new();
         let mut addrs = Vec::new();
         for (index, secret) in secrets.iter().enumerate() {
             let others = ids
@@ -155,9 +170,13 @@ impl Harness {
                 direct: endpoint.bound_sockets().into_iter().collect(),
             });
             let core = ids.iter().map(|id| (*id, NodeAddr::default())).collect();
-            nodes.push(Arc::new(
+            let swarm = Gossip::builder().spawn(endpoint.clone());
+            let node = Arc::new(
                 MembershipNode::start(
-                    endpoint,
+                    Transport {
+                        endpoint: endpoint.clone(),
+                        gossip: swarm,
+                    },
                     hooks,
                     writer,
                     &{
@@ -169,7 +188,9 @@ impl Harness {
                 )
                 .await
                 .unwrap(),
-            ));
+            );
+            routers.push(distlib_net::serve(endpoint, node.protocols()));
+            nodes.push(node);
         }
 
         let founders = ids
@@ -215,6 +236,7 @@ impl Harness {
             node: Arc::clone(&nodes[0]),
             server,
             token,
+            routers,
             _dir: dir,
         };
         (harness, nodes, secrets)
@@ -273,6 +295,11 @@ impl Harness {
     async fn shutdown(self) {
         self.server.shutdown();
         self.node.shutdown().await;
+        // Last, as production does it: a router's shutdown closes the endpoint
+        // under it, and the nodes a test stopped itself still have theirs here.
+        for router in &self.routers {
+            let _ = router.shutdown().await;
+        }
     }
 }
 

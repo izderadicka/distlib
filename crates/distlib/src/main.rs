@@ -1,19 +1,15 @@
-//! The `distlib` binary: wires the crates together and provides the CLI.
-
-mod cli;
-mod commands;
+//! The `distlib` binary: parses the CLI and calls into the library.
 
 use std::{io::IsTerminal as _, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
+use distlib::{
+    cli::{Cli, Command, CoreCommand},
+    commands::{self, Paths},
+};
 use distlib_core::DataDir;
 use tracing_subscriber::EnvFilter;
-
-use crate::{
-    cli::{Cli, Command, CoreCommand},
-    commands::Paths,
-};
 
 #[tokio::main]
 async fn main() -> Result<()> {

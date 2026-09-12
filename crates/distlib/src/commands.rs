@@ -13,6 +13,8 @@ use distlib_core::{
     token,
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
+
+use crate::Runtime;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 use serde_json::{Value, json};
 
@@ -93,42 +95,15 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     let secret = load_secret_key(&paths.secret_key_file())?;
     let me = member_id(&secret);
 
-    // The bootstrap seed, and the last time configuration has anything to say
-    // about who this node talks to. Once `GroupFounded` is applied the node
-    // replaces it with the log's membership and never reads this again.
-    let (writer, allowed) = allowlist(me, config.consensus.core.iter().map(|core| core.member));
-    let hooks = AllowlistHooks::new(allowed);
-    // What this node serves, which since 2.3-2 is the same on every node:
-    // whether it *answers* consensus is decided per connection by whether it
-    // has a Raft, because a router's protocols are fixed when it spawns and a
-    // follower that may be promoted has to be listening first. This used to be
-    // computed from configuration here and was a standing hazard — the
-    // endpoint is built before the log is opened, so the answer could disagree
-    // with the one `start` reached.
-    let core = core_group(&config);
-    let endpoint = build_endpoint(
-        secret.clone(),
-        &config.net,
-        hooks.clone(),
-        distlib_consensus::alpns(),
-    )
-    .await?;
-
-    tracing::info!(member = %me, "node started");
-    for addr in endpoint.bound_sockets() {
-        tracing::info!(%addr, "listening");
-    }
-
-    let node = Arc::new(
-        MembershipNode::start(endpoint, hooks, writer, paths.data_dir.root(), core).await?,
-    );
+    let runtime = Runtime::start(&secret, &config, paths.data_dir.root()).await?;
+    let node = Arc::clone(runtime.node());
 
     if found_group {
         if let Err(error) = found(&node, &config, &secret, me).await {
             // Shut down rather than propagating straight out. Dropping a live
             // node leaves iroh complaining that the endpoint was never closed,
             // and that complaint lands after the error it should not bury.
-            node.shutdown().await;
+            runtime.shutdown().await;
             return Err(error);
         }
     } else if node.membership().group_id().is_none() {
@@ -154,7 +129,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
 
     // Reaching a relay takes a moment and may never happen offline, so report
     // it when it arrives instead of blocking startup on it.
-    let watcher = node.endpoint().clone();
+    let watcher = runtime.endpoint().clone();
     let relay_task = tokio::spawn(async move {
         watcher.online().await;
         for relay in watcher.home_relay_status().get() {
@@ -180,7 +155,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     if let Some(api) = api {
         api.shutdown();
     }
-    node.shutdown().await;
+    runtime.shutdown().await;
 
     if expelled {
         bail!(
@@ -903,20 +878,6 @@ fn founders(
             (record(member.member, member.name.clone()), addr)
         })
         .collect())
-}
-
-/// The configured core group, with an address for each.
-///
-/// The whole list, not just this node's own entry: a follower needs the others'
-/// addresses to fetch the log from them, and a core node needs their ids to
-/// know who may speak Raft to it before there is a log to say.
-fn core_group(config: &Config) -> Vec<(MemberId, NodeAddr)> {
-    config
-        .consensus
-        .core
-        .iter()
-        .map(|member| (member.member, member.addr()))
-        .collect()
 }
 
 /// Starts the local API.
