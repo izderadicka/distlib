@@ -64,11 +64,22 @@ impl Seat {
 
     /// Sits down: this node votes from now on.
     ///
-    /// Replaces whatever was there, which is unreachable today — a node is
-    /// promoted once and nothing demotes it in place (that gap is recorded in
-    /// the phase-2 register) — and is the only sane meaning if it ever is not.
+    /// Replaces whatever was there, which is the only sane meaning: a seat is
+    /// emptied by [`Self::vacate`] before it is filled again.
     pub(crate) fn take(&self, raft: Raft<TypeConfig>) {
         *self.lock() = Some(raft);
+    }
+
+    /// Stands up: this node stops voting, and hands back the Raft it was
+    /// voting with so the caller can shut it down.
+    ///
+    /// Emptying comes first and shutting down second, deliberately. Every
+    /// handler reads the seat per connection, so the moment this returns
+    /// nothing new can reach the Raft — whereas a Raft shut down while still
+    /// seated would answer RPCs with an error for as long as the shutdown
+    /// took, which reads to a peer as a broken voter rather than as no voter.
+    pub(crate) fn vacate(&self) -> Option<Raft<TypeConfig>> {
+        self.lock().take()
     }
 
     /// A poison-tolerant lock.

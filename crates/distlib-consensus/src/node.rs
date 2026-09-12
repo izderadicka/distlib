@@ -229,9 +229,11 @@ pub struct MembershipNode {
     /// which has no Raft to change, and filled when one is promoted.
     core_group: RoleTask,
 
-    /// Waiting for the log to say this node votes. `None` on a node that
-    /// already does.
-    promotion: Option<JoinHandle<()>>,
+    /// Watching the log for a change of role, and making it true when one
+    /// comes. Every node has one: a follower's is waiting to be promoted, a
+    /// voter's to be demoted, and a promoted follower's goes on to the second
+    /// once it has done the first.
+    role: JoinHandle<()>,
 
     /// Whether this node has been expelled from its group.
     ///
@@ -415,40 +417,33 @@ impl MembershipNode {
         //
         // A follower runs the other two instead: the loop that fetches the log,
         // and the one waiting to be told it may stop.
-        let promotion = if let Some(log) = spare_log {
+        let role = Role {
+            me: id,
+            config,
+            network,
+            log: spare_log,
+            state_machine: state_machine.clone(),
+            client: memberlog.clone(),
+            sources: Arc::clone(&sources),
+            expelled: expelled.clone(),
+            listens: listens.clone(),
+            seat: seat.clone(),
+            trusted,
+            follow: Arc::clone(&follow),
+            core_group: Arc::clone(&core_group),
+        };
+        if role.log.is_some() {
             start(
                 &follow,
-                tokio::spawn(follower::follow(
-                    follower::Following {
-                        me: id,
-                        state_machine: state_machine.clone(),
-                        client: memberlog.clone(),
-                        sources: Arc::clone(&sources),
-                        expelled: expelled.clone(),
-                    },
-                    listens,
-                )),
+                tokio::spawn(follower::follow(role.following(), listens)),
             );
-            Some(tokio::spawn(take_the_seat(Promoting {
-                me: id,
-                config,
-                network,
-                log,
-                state_machine: state_machine.clone(),
-                seat: seat.clone(),
-                trusted,
-                follow: Arc::clone(&follow),
-                core_group: Arc::clone(&core_group),
-            })))
-        } else {
-            if let Some(raft) = seat.raft() {
-                start(
-                    &core_group,
-                    tokio::spawn(core_group::enact(raft, state_machine.clone())),
-                );
-            }
-            None
-        };
+        } else if let Some(raft) = seat.raft() {
+            start(
+                &core_group,
+                tokio::spawn(core_group::enact(raft, state_machine.clone())),
+            );
+        }
+        let role = tokio::spawn(serve_role(role));
 
         Ok(Self {
             id,
@@ -463,7 +458,7 @@ impl MembershipNode {
             gossip,
             follow,
             core_group,
-            promotion,
+            role,
             expelled,
         })
     }
@@ -549,8 +544,10 @@ impl MembershipNode {
 
     /// How far this node has followed a log it does not vote on.
     ///
-    /// Zero on a voter, which has the log pushed to it and tracks its position
-    /// through Raft instead.
+    /// Zero on a node that has only ever voted: it has the log pushed to it
+    /// and tracks its position through Raft instead. A node the log *demotes*
+    /// is pointed at what it had applied, so its follow loop picks up where
+    /// its Raft left off — see [`StateMachineStore::resume_following`].
     pub fn followed_upto(&self) -> u64 {
         self.state_machine.followed_upto()
     }
@@ -670,6 +667,11 @@ impl MembershipNode {
 
     /// One attempt: sign against the membership this node holds, and commit it.
     async fn propose_once(&self, event: &MembershipEvent, secret_key: &SecretKey) -> Result<u64> {
+        // Before signing, so an oversized proposal is refused to the caller
+        // who can still fix it rather than replicated to everyone who cannot.
+        // See [`MembershipEvent::within_limits`].
+        event.within_limits()?;
+
         let event = SignedEvent::sign(
             secret_key,
             event.clone(),
@@ -820,10 +822,8 @@ impl MembershipNode {
     pub async fn shutdown(&self) {
         self.allowlist_updates.abort();
         self.evictions.abort();
-        // Before anything can be promoted out from under the rest of this.
-        if let Some(promotion) = &self.promotion {
-            promotion.abort();
-        }
+        // Before anything can change role out from under the rest of this.
+        self.role.abort();
         // Before Raft stops, so a change in flight is abandoned rather than
         // outliving the thing it was changing.
         stop(&self.core_group);
@@ -849,25 +849,141 @@ impl MembershipNode {
     }
 }
 
-/// Everything a follower needs in order to become a voter without restarting.
+/// Everything a node needs in order to change role without restarting.
 ///
-/// Held by the task rather than by the node, because none of it means anything
-/// to a node that already votes and all of it is consumed exactly once.
-struct Promoting {
+/// Held by the task rather than by the node: nothing here is any use to a node
+/// whose role is not changing, and most of it is consumed exactly once.
+struct Role {
     me: MemberId,
     config: Arc<Config>,
     network: RaftNetworkFactoryImpl,
-    /// The Raft log store, untouched since startup.
+    /// The Raft log store, for a node that does not have a Raft yet.
     ///
     /// A follower opens one and never writes to it — it folds what it fetches
     /// straight into the state machine — so this is empty, which is exactly
-    /// what a new learner should have.
-    log: LogStore,
+    /// what a new learner should have. `None` on a node that started as a
+    /// voter, whose openraft owns it.
+    log: Option<LogStore>,
     state_machine: StateMachineStore,
+    client: MemberlogClient,
+    sources: SharedSources,
+    expelled: watch::Sender<bool>,
+    listens: gossip::Hints,
     seat: Seat,
     trusted: TrustedCore,
     follow: RoleTask,
     core_group: RoleTask,
+}
+
+impl Role {
+    /// What the follow loop is started with, built fresh each time: a node can
+    /// be started as a follower, promoted, and demoted back again, and the
+    /// loop is a new task on each pass.
+    fn following(&self) -> follower::Following {
+        follower::Following {
+            me: self.me,
+            state_machine: self.state_machine.clone(),
+            client: self.client.clone(),
+            sources: Arc::clone(&self.sources),
+            expelled: self.expelled.clone(),
+        }
+    }
+}
+
+/// Follows the log's answer to "does this node vote", for the life of the node.
+///
+/// One task rather than two because the two directions are mutually exclusive
+/// and strictly alternating: a node is never waiting to be promoted and to be
+/// demoted at the same time, and each transition is what makes the other one
+/// reachable. Writing it as a sequence is also what keeps the ordering
+/// guarantees each half needs — nothing can promote a node midway through
+/// standing it down.
+///
+/// **Promotion is once, demotion is once, and then the node needs a restart.**
+/// A demoted node's Raft log is no longer the empty one a new learner should
+/// have, and handing it back to `Raft::new` is a case nothing here has tested;
+/// the entry in the phase-2 register says so. A restart re-reads the
+/// projection, comes up as a follower, and the promotion path is available
+/// again from there.
+async fn serve_role(mut role: Role) {
+    if let Some(log) = role.log.take()
+        && !take_the_seat(&role, log).await
+    {
+        return;
+    }
+    stand_down(role).await;
+}
+
+/// Waits for the log to say this node no longer votes, and then makes that
+/// true: the mirror of [`take_the_seat`], and the smaller half of it.
+///
+/// **Ordered, like its mirror, and for the same kind of reason:**
+///
+/// 1. **Stop reconciling**, before the Raft it reconciles goes away.
+/// 2. **Empty the seat, then shut the Raft down.** In that order, so that the
+///    moment a peer can no longer be answered is the moment this node stops
+///    being a voter, rather than a window in which it answers with errors.
+///    Shutting down matters on its own: a Raft left running campaigns for a
+///    group that no longer counts its vote. **Not mutation-checked, and it
+///    cannot be**: the handle is gone from the seat either way, so a Raft
+///    that was shut down and one that was merely dropped look identical from
+///    anywhere a test can stand. Deleting the call breaks nothing visible,
+///    which is the reason to say so here rather than to delete it.
+/// 3. **Point the follow cursor at what is already applied**, so the loop
+///    picks up where the Raft left off instead of re-fetching the whole log.
+/// 4. **Start following**, which is the part that matters — a demoted node
+///    that does not follow freezes at the membership it held and goes on
+///    enforcing that allowlist indefinitely.
+///
+/// The projection is *not* blanked, which is the asymmetry with promotion. It
+/// is right already, having been built from the same log, and there is no
+/// P1-22 window to climb back out of: a follower needs no consensus served to
+/// it.
+///
+/// Expect this to take up to `follower::POLL` to have visible effect, because
+/// gossip does not change sides — a demoted node keeps the announcing half it
+/// had as a voter, so nothing pokes its new follow loop and the timer is what
+/// it waits on.
+async fn stand_down(role: Role) {
+    let mut memberships = role.state_machine.subscribe();
+    loop {
+        {
+            let seen = memberships.borrow_and_update();
+            // Founded, because a founder is not core until it has founded and
+            // the two are indistinguishable from here.
+            if seen.group_id().is_some() && !seen.is_core(&role.me) {
+                break;
+            }
+        }
+        if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
+            return;
+        }
+    }
+    tracing::info!("the log says this node no longer votes; standing down");
+
+    stop(&role.core_group);
+    if let Some(raft) = role.seat.vacate()
+        && let Err(error) = raft.shutdown().await
+    {
+        // Kept going deliberately. The seat is already empty, so this node has
+        // stopped being reachable as a voter whatever openraft's own task did
+        // on the way out; refusing to start following on top of that would
+        // leave it frozen, which is the failure being fixed.
+        tracing::warn!(%error, "consensus did not shut down cleanly after demotion");
+    }
+    if let Err(error) = role.state_machine.resume_following().await {
+        // Also not fatal: the cursor stays at zero and the first poll re-fetches
+        // the log, which the fold refuses entry by entry and converges anyway.
+        tracing::warn!(%error, "could not point the follow cursor at what is applied");
+    }
+
+    let listens = role.listens.clone();
+    start(
+        &role.follow,
+        tokio::spawn(follower::follow(role.following(), listens)),
+    );
+    tracing::info!("this node is now a follower");
 }
 
 /// Waits for the log to say this node votes, and then makes that true.
@@ -900,33 +1016,34 @@ struct Promoting {
 /// 5. **Start reconciling**, so this node does its share of putting later
 ///    core-group changes into effect once it is leader material.
 ///
-/// Returns when it has done it, or when the state machine goes away.
-async fn take_the_seat(promoting: Promoting) {
-    let Promoting {
+/// Returns `true` once it has done it; `false` if it could not, or if the
+/// state machine went away.
+async fn take_the_seat(role: &Role, log: LogStore) -> bool {
+    let Role {
         me,
         config,
         network,
-        log,
         state_machine,
         seat,
         trusted,
         follow,
         core_group,
-    } = promoting;
+        ..
+    } = role;
 
     let mut memberships = state_machine.subscribe();
     loop {
-        if memberships.borrow_and_update().is_core(&me) {
+        if memberships.borrow_and_update().is_core(me) {
             break;
         }
         if memberships.changed().await.is_err() {
             tracing::error!("membership channel closed");
-            return;
+            return false;
         }
     }
     tracing::info!("the log says this node votes now; taking a seat in consensus");
 
-    stop(&follow);
+    stop(follow);
     trusted.replace(state_machine.membership().core().keys().copied().collect());
 
     if let Err(error) = state_machine.reset_for_promotion().await {
@@ -937,13 +1054,13 @@ async fn take_the_seat(promoting: Promoting) {
         // is restarted, which is the honest outcome of a disk that will not
         // take a write.
         tracing::error!(%error, "could not clear this node's state to be promoted");
-        return;
+        return false;
     }
 
     let raft = match Raft::new(
-        RawMemberId::from(me),
-        config,
-        network,
+        RawMemberId::from(*me),
+        Arc::clone(config),
+        network.clone(),
         log,
         state_machine.clone(),
     )
@@ -952,16 +1069,17 @@ async fn take_the_seat(promoting: Promoting) {
         Ok(raft) => raft,
         Err(error) => {
             tracing::error!(%error, "could not start consensus after being promoted");
-            return;
+            return false;
         }
     };
 
     seat.take(raft.clone());
     start(
-        &core_group,
-        tokio::spawn(core_group::enact(raft, state_machine)),
+        core_group,
+        tokio::spawn(core_group::enact(raft, state_machine.clone())),
     );
     tracing::info!("this node is now a voter");
+    true
 }
 
 /// Joins the group's gossip topic once there is a group, and stays on it.

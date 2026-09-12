@@ -407,10 +407,62 @@ voters with one of them down, and nothing would have committed at all.
 
 ---
 
+## 5d. A voter stands down — clause MEM-04, "a demoted node keeps its seat"
+
+The mirror of §5c, and until the review-findings PR the half that did not work: a node
+the log dropped from the core group kept its Raft, went on answering `distlib/raft/0`,
+and never started following — so it froze at the membership it held and went on
+enforcing that allowlist for as long as it ran.
+
+Do it to d, which §5c just promoted. The voters are a, b and d, so demoting one takes a
+majority of three — two of the others have to say so. a is stopped from the end of §5c,
+so restart it first and let it catch up. **This is also what §6 used to ask for** —
+watch it rejoin and pick the log back up — so do that watching here:
+
+```sh
+dl -d $DL/a run &              # or its own terminal
+dl -d $DL/a status             # wait for `role  core member`, and for
+                               # `changed_at` to reach what b reports
+dl -d $DL/b core remove $D
+dl -d $DL/b pending            # note the index
+dl -d $DL/a approve <N>
+```
+
+**Watch d's terminal:**
+
+* `the log says this node no longer votes; standing down`
+* `this node is now a follower`
+
+Then ask it:
+
+```sh
+dl -d $DL/d status
+```
+
+Expected: `role  member` with no `Raft role` line at all — it has given the seat up
+rather than sitting in it as a non-voter — and a `follows  the log to index N` line
+whose N is where its Raft had got to, not zero. That number is the point: it picks up
+where it left off instead of re-fetching the whole log.
+
+It is still a member, so prove it is keeping up rather than frozen. Admit somebody from
+b, then ask d:
+
+```sh
+dl -d $DL/b admit $C --name "carol, once more"
+dl -d $DL/d members
+```
+
+**Be patient: this takes up to thirty seconds.** A demoted node keeps the announcing
+half of gossip it had as a voter, so nothing pokes its new follow loop and it waits out
+the idle poll. That is recorded in the phase-2 register, not a fault in this step — but
+it is why `dl -d $DL/d members` immediately after the admit will not show carol yet.
+
+---
+
 ## 6. After
 
-Restart the killed node and watch it rejoin and catch up — beyond §9, but the first
-thing anyone would actually do next.
+Everything is stopped and thrown away. The restart-and-catch-up that used to be the
+interesting part of this section is §5d's opening step, which needs it anyway.
 
 ```sh
 pgrep -af distlib       # must be empty once everything is stopped
