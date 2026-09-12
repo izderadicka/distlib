@@ -107,7 +107,7 @@ impl Node {
         let router = Router::builder(endpoint)
             .accept(
                 distlib_net::alpn::RAFT,
-                RaftProtocol::new(raft.clone(), served, founding_core),
+                RaftProtocol::serving(raft.clone(), served, founding_core),
             )
             .spawn();
 

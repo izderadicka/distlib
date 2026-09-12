@@ -20,11 +20,20 @@
 //! nothing on a follower; it wakes when leadership moves and picks up whatever
 //! the previous leader did not finish.
 //!
-//! **Promotion is not here.** A node only starts serving `distlib/raft/0` when
-//! it starts up as a voter (P1-30), so promoting one now would create a voter
-//! that counts toward quorum and can never answer. The state machine refuses
-//! such an event outright, so this never sees one; the loud log below is a
-//! backstop for the day that rule changes without this one.
+//! **Promotion takes two rounds, and that is openraft's rule rather than ours.**
+//! A node has to be a learner the leader can replicate to before it can be made
+//! a voter, because a voter counts toward quorum from the moment it is one and
+//! a voter nobody has caught up cannot answer. So a member the log adds to the
+//! core group is first given a node entry ([`ChangeMembers::AddNodes`], which
+//! is what `Raft::add_learner` sends), and only promoted
+//! ([`ChangeMembers::AddVoterIds`]) once replication to it has caught up. The
+//! waiting is deliberate: `AddVoterIds` does *not* wait, and promoting a
+//! learner that is still far behind moves the quorum before there is anybody
+//! new able to contribute to it.
+//!
+//! The other half of promotion is on the node being promoted — see
+//! `MembershipNode`'s `take_the_seat`. Neither half can go first, so the log is
+//! the rendezvous: both read the same committed `CoreGroupChanged`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,6 +71,17 @@ enum Pass {
 
     /// Something was submitted; look again, in case there is more.
     Changed,
+
+    /// There is something to do, but not yet: a new core node is still being
+    /// caught up.
+    ///
+    /// Its own answer because it needs its own waking. The loop otherwise
+    /// sleeps until the log changes or this node's leadership does, and a
+    /// learner finishing its catch-up is neither — replication progress is not
+    /// on `server_metrics` at all. Without this the group would sit with a
+    /// committed promotion it had begun and would not finish, until something
+    /// unrelated happened to wake it.
+    Waiting,
 }
 
 /// Keeps openraft's voter set in step with the log's, for as long as this node
@@ -84,6 +104,14 @@ pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineSto
             // than one pass is the ordinary case rather than an error path.
             Ok(Pass::Changed) => continue,
             Ok(Pass::Converged | Pass::NotOurs) => {}
+            // Nothing to submit yet, and nothing that will wake us when there
+            // is. Polling is the honest answer: the thing being waited for is
+            // a counter on another node moving, and openraft reports it only
+            // through metrics that change on every heartbeat.
+            Ok(Pass::Waiting) => {
+                tokio::time::sleep(RETRY).await;
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "could not put the core group into effect; will retry");
                 tokio::time::sleep(RETRY).await;
@@ -129,9 +157,17 @@ enum Change {
     Readdress(BTreeMap<RawMemberId, NodeAddr>),
     /// Voters the log no longer lists.
     Remove(BTreeSet<RawMemberId>),
-    /// The log names voters Raft does not have. Not a change — nothing here can
-    /// promote — so this is something to say rather than something to do.
-    CannotPromote(Vec<MemberId>),
+    /// Members the log makes voters that Raft has never heard of.
+    ///
+    /// Added as learners first, never straight to voters: see the module docs.
+    Learn(BTreeMap<RawMemberId, NodeAddr>),
+    /// Learners the log makes voters, which have caught up.
+    Promote(BTreeSet<RawMemberId>),
+    /// Learners the log makes voters, which have not caught up yet.
+    ///
+    /// Nothing to do but wait, and named rather than folded into "converged"
+    /// so that a promotion which never completes is a state with a word for it.
+    CatchingUp(Vec<MemberId>),
 }
 
 /// What one comparison says to do, given what the log wants and what Raft has.
@@ -147,10 +183,16 @@ enum Change {
 /// before removals: a departing voter is not in `wanted`, so its address is
 /// never in `Readdress` anyway, and taking the half that cannot reduce the
 /// voter set first means a failure in between leaves a group that is fully
-/// addressable rather than one short.
+/// addressable rather than one short. Promotion comes last of the three,
+/// because it is the only one that has to wait for somebody else — a learner
+/// catching up — and a pass blocked on that must not hold up a removal.
+///
+/// `learners` is every node openraft has that is not a voter, against whether
+/// replication to it has caught up.
 fn next_change(
     wanted: &BTreeMap<MemberId, NodeAddr>,
     voters: &BTreeMap<MemberId, NodeAddr>,
+    learners: &BTreeMap<MemberId, bool>,
 ) -> Option<Change> {
     // An empty `wanted` is not "remove every voter". It means either that no
     // group has been founded, or that expulsions have emptied the projection's
@@ -183,13 +225,34 @@ fn next_change(
         return Some(Change::Remove(departed));
     }
 
-    let promoted: Vec<MemberId> = wanted
-        .keys()
-        .filter(|member| !voters.contains_key(member))
-        .copied()
+    // Whoever the log makes a voter and Raft does not have yet, in the two
+    // steps openraft requires. `learners` is who it already replicates to, so
+    // the first step is for everybody else and the second only for those it has
+    // caught up with.
+    let joining = wanted.keys().filter(|member| !voters.contains_key(member));
+
+    let (known, unknown): (Vec<MemberId>, Vec<MemberId>) =
+        joining.partition(|member| learners.contains_key(member));
+
+    let strangers: BTreeMap<RawMemberId, NodeAddr> = unknown
+        .iter()
+        .filter_map(|member| Some((RawMemberId::from(*member), wanted.get(member)?.clone())))
         .collect();
-    if !promoted.is_empty() {
-        return Some(Change::CannotPromote(promoted));
+    if !strangers.is_empty() {
+        return Some(Change::Learn(strangers));
+    }
+
+    let (ready, behind): (Vec<MemberId>, Vec<MemberId>) = known
+        .into_iter()
+        .partition(|member| learners.get(member).copied().unwrap_or(false));
+
+    if !ready.is_empty() {
+        return Some(Change::Promote(
+            ready.into_iter().map(RawMemberId::from).collect(),
+        ));
+    }
+    if !behind.is_empty() {
+        return Some(Change::CatchingUp(behind));
     }
 
     None
@@ -215,6 +278,38 @@ fn current_voters(
         .collect()
 }
 
+/// Every node openraft has that is not a voter, against whether replication to
+/// it has caught up.
+///
+/// "Caught up" is measured against what the leader has *committed* rather than
+/// what it has written: a learner that has everything the group has agreed on
+/// can carry its share of the next quorum, and holding out for the last
+/// uncommitted entry would mean a promotion that never happens under steady
+/// write load.
+///
+/// A learner openraft is not reporting replication for counts as behind. That
+/// is the safe reading of "no information" and it is self-correcting — the
+/// next pass asks again.
+fn learner_progress(
+    membership: &openraft::Membership<RawMemberId, NodeAddr>,
+    replication: Option<&BTreeMap<RawMemberId, Option<openraft::LogId<RawMemberId>>>>,
+    committed: Option<u64>,
+) -> BTreeMap<MemberId, bool> {
+    let voters: BTreeSet<RawMemberId> = membership.voter_ids().collect();
+    membership
+        .nodes()
+        .filter(|(id, _)| !voters.contains(*id))
+        .filter_map(|(id, _)| {
+            let member = MemberId::try_from(*id).ok()?;
+            let matched = replication
+                .and_then(|progress| progress.get(id))
+                .and_then(|matched| matched.as_ref())
+                .map(|log_id| log_id.index);
+            Some((member, matched >= committed))
+        })
+        .collect()
+}
+
 /// Compares once, and submits at most one change.
 async fn pass(
     raft: &Raft<TypeConfig>,
@@ -233,8 +328,25 @@ async fn pass(
         return Ok(Pass::Converged);
     };
 
+    // `metrics` rather than `server_metrics` for this one: replication
+    // progress is not on the server view, and it is the only thing that can
+    // say whether a learner is ready to be made a voter.
+    let (replication, committed) = {
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow();
+        (
+            metrics.replication.clone(),
+            metrics.last_applied.map(|log_id| log_id.index),
+        )
+    };
+    let learners = learner_progress(
+        server.membership_config.membership(),
+        replication.as_ref(),
+        committed,
+    );
+
     let published = state_machine.membership();
-    let Some(change) = next_change(published.core(), &voters) else {
+    let Some(change) = next_change(published.core(), &voters, &learners) else {
         return Ok(Pass::Converged);
     };
 
@@ -267,13 +379,33 @@ async fn pass(
                 .await?;
             Ok(Pass::Changed)
         }
-        Change::CannotPromote(promoted) => {
-            tracing::error!(
-                ?promoted,
-                "the log names core nodes that do not vote, and promotion is not implemented; \
-                 they will not take part in consensus"
+        Change::Learn(joining) => {
+            tracing::info!(
+                count = joining.len(),
+                "the log adds a core node; replicating to it before it may vote"
             );
-            Ok(Pass::Converged)
+            // `AddNodes`, which is what `Raft::add_learner` sends, rather than
+            // calling `add_learner` itself: its blocking form waits for the
+            // learner to catch up *inside the call*, which would hold this pass
+            // open across a catch-up that may never finish and stop it doing
+            // anything else in the meantime. The wait belongs in the loop,
+            // where it is a state with a name — see `Change::CatchingUp`.
+            raft.change_membership(ChangeMembers::AddNodes(joining), false)
+                .await?;
+            Ok(Pass::Changed)
+        }
+        Change::Promote(ready) => {
+            tracing::info!(
+                count = ready.len(),
+                "a core node has caught up; it votes now"
+            );
+            raft.change_membership(ChangeMembers::AddVoterIds(ready), false)
+                .await?;
+            Ok(Pass::Changed)
+        }
+        Change::CatchingUp(behind) => {
+            tracing::debug!(?behind, "waiting for a new core node to catch up");
+            Ok(Pass::Waiting)
         }
     }
 }
@@ -304,10 +436,23 @@ mod tests {
         RawMemberId::from(member(seed))
     }
 
+    /// No learners at all — openraft has heard of nobody but its voters.
+    fn nobody() -> BTreeMap<MemberId, bool> {
+        BTreeMap::new()
+    }
+
+    /// Learners, each against whether replication to them has caught up.
+    fn learners(entries: &[(u8, bool)]) -> BTreeMap<MemberId, bool> {
+        entries
+            .iter()
+            .map(|(seed, ready)| (member(*seed), *ready))
+            .collect()
+    }
+
     #[test]
     fn agreement_asks_for_nothing() {
         let both = view(&[(1, 11), (2, 12), (3, 13)]);
-        assert_eq!(next_change(&both, &both), None);
+        assert_eq!(next_change(&both, &both, &nobody()), None);
     }
 
     #[test]
@@ -316,7 +461,7 @@ mod tests {
         let voters = view(&[(1, 11), (2, 12), (3, 13)]);
 
         assert_eq!(
-            next_change(&wanted, &voters),
+            next_change(&wanted, &voters, &nobody()),
             Some(Change::Readdress(BTreeMap::from([(raw(3), at(99))])))
         );
     }
@@ -327,7 +472,7 @@ mod tests {
         let voters = view(&[(1, 11), (2, 12), (3, 13)]);
 
         assert_eq!(
-            next_change(&wanted, &voters),
+            next_change(&wanted, &voters, &nobody()),
             Some(Change::Remove(BTreeSet::from([raw(3)])))
         );
     }
@@ -341,17 +486,21 @@ mod tests {
         let voters = view(&[(1, 11), (2, 12), (3, 13)]);
 
         assert_eq!(
-            next_change(&wanted, &voters),
+            next_change(&wanted, &voters, &nobody()),
             Some(Change::Readdress(BTreeMap::from([(raw(2), at(99))])))
         );
 
         // The pass after the addresses have landed.
         let voters = view(&[(1, 11), (2, 99), (3, 13)]);
         assert_eq!(
-            next_change(&wanted, &voters),
+            next_change(&wanted, &voters, &nobody()),
             Some(Change::Remove(BTreeSet::from([raw(3)])))
         );
-        assert_eq!(next_change(&wanted, &wanted), None, "and then it is done");
+        assert_eq!(
+            next_change(&wanted, &wanted, &nobody()),
+            None,
+            "and then it is done"
+        );
     }
 
     #[test]
@@ -362,22 +511,72 @@ mod tests {
         let voters = view(&[(1, 11), (2, 12)]);
 
         assert_eq!(
-            next_change(&wanted, &voters),
+            next_change(&wanted, &voters, &nobody()),
             Some(Change::Remove(BTreeSet::from([raw(2)])))
         );
     }
 
     #[test]
-    fn a_voter_the_log_has_gained_is_reported_not_added() {
-        // Promotion is refused by the state machine, so this is unreachable —
-        // and says so loudly rather than quietly doing nothing, because the two
-        // rules have to move together.
+    fn a_new_voter_learns_first_catches_up_and_only_then_votes() {
+        // The three-state transition openraft requires, in the one place it can
+        // be read without a cluster. A voter counts toward quorum the moment it
+        // is one, so a node goes absent → learner → voter and never straight to
+        // the end: promoting somebody who is still behind moves the quorum
+        // before there is anybody new able to contribute to it.
+        let wanted = view(&[(1, 11), (2, 12)]);
+        let voters = view(&[(1, 11)]);
+
+        // Absent: openraft has never heard of them, so give it somewhere to
+        // replicate to. The address comes from the log, which is the only
+        // place it is recorded.
+        assert_eq!(
+            next_change(&wanted, &voters, &nobody()),
+            Some(Change::Learn(BTreeMap::from([(raw(2), at(12))])))
+        );
+
+        // A learner, still behind: nothing to submit, and saying so rather than
+        // reporting agreement — the group has a promotion under way.
+        assert_eq!(
+            next_change(&wanted, &voters, &learners(&[(2, false)])),
+            Some(Change::CatchingUp(vec![member(2)]))
+        );
+
+        // Caught up.
+        assert_eq!(
+            next_change(&wanted, &voters, &learners(&[(2, true)])),
+            Some(Change::Promote(BTreeSet::from([raw(2)])))
+        );
+
+        // And once openraft agrees, there is nothing left to do.
+        assert_eq!(next_change(&wanted, &wanted, &nobody()), None);
+    }
+
+    #[test]
+    fn a_voter_that_still_has_to_move_is_moved_before_anybody_is_promoted() {
+        // Promotion is the only change that waits on another node, so it goes
+        // last: a pass blocked on a learner catching up must not hold up an
+        // address the group needs.
+        let wanted = view(&[(1, 99), (2, 12)]);
+        let voters = view(&[(1, 11)]);
+
+        assert_eq!(
+            next_change(&wanted, &voters, &learners(&[(2, true)])),
+            Some(Change::Readdress(BTreeMap::from([(raw(1), at(99))])))
+        );
+    }
+
+    #[test]
+    fn a_learner_nobody_is_replicating_to_counts_as_behind() {
+        // `learner_progress` reports a learner with no replication entry as
+        // not caught up, and this is the shape that reaches `next_change`. The
+        // safe reading of no information, and self-correcting: the next pass
+        // asks again.
         let wanted = view(&[(1, 11), (2, 12)]);
         let voters = view(&[(1, 11)]);
 
         assert_eq!(
-            next_change(&wanted, &voters),
-            Some(Change::CannotPromote(vec![member(2)]))
+            next_change(&wanted, &voters, &learners(&[(2, false)])),
+            Some(Change::CatchingUp(vec![member(2)]))
         );
     }
 
@@ -390,6 +589,6 @@ mod tests {
         // never commit the event that would restore them.
         let voters = view(&[(1, 11), (2, 12)]);
 
-        assert_eq!(next_change(&BTreeMap::new(), &voters), None);
+        assert_eq!(next_change(&BTreeMap::new(), &voters, &nobody()), None);
     }
 }

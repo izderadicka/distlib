@@ -98,20 +98,19 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     // replaces it with the log's membership and never reads this again.
     let (writer, allowed) = allowlist(me, config.consensus.core.iter().map(|core| core.member));
     let hooks = AllowlistHooks::new(allowed);
-    // What this node expects to serve. Decided from configuration because the
-    // endpoint is built before the log is opened, and the log gets the final
-    // say over the role inside `start` — but that mismatch cannot escape:
-    // iroh's router calls `set_alpns` with what it actually accepts, so a node
-    // the group was founded without stops advertising raft the moment its
-    // router comes up. This is the same answer arrived at earlier, which is
-    // what makes it worth stating.
+    // What this node serves, which since 2.3-2 is the same on every node:
+    // whether it *answers* consensus is decided per connection by whether it
+    // has a Raft, because a router's protocols are fixed when it spawns and a
+    // follower that may be promoted has to be listening first. This used to be
+    // computed from configuration here and was a standing hazard — the
+    // endpoint is built before the log is opened, so the answer could disagree
+    // with the one `start` reached.
     let core = core_group(&config);
-    let is_core = core.iter().any(|(member, _)| *member == me);
     let endpoint = build_endpoint(
         secret.clone(),
         &config.net,
         hooks.clone(),
-        distlib_consensus::alpns(is_core),
+        distlib_consensus::alpns(),
     )
     .await?;
 
@@ -754,7 +753,7 @@ pub async fn status(paths: &Paths, online: bool) -> Result<()> {
             secret,
             &config.net,
             AllowlistHooks::new(allowed),
-            distlib_consensus::alpns(false),
+            distlib_consensus::alpns(),
         )
         .await
         {
@@ -1025,6 +1024,7 @@ async fn report_membership(mut memberships: tokio::sync::watch::Receiver<Members
         }
 
         if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
             return;
         }
     }

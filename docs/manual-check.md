@@ -344,6 +344,69 @@ pending` is empty afterwards.
 
 ---
 
+## 5c. A follower starts voting — clause P1-30, "promotion needs a restart"
+
+The other half of the core group being changeable, and the one phase 1 deferred: until
+2.3-2 a node served consensus only if it had *started* as a voter, so the core group
+could shrink and move but never grow. Adding one was refused outright.
+
+Do it to d, which has been following since §2. First, what it says about itself:
+
+```sh
+dl -d $DL/d status
+```
+
+Expected: `role        member` and a `follows     the log to index N` line — no Raft
+role at all, because it does not vote and is not pretending to.
+
+§5b expelled c from the core group, so the voters are a and b. Adding a third changes
+who votes, which takes a majority of the two — a proposes, b agrees:
+
+```sh
+dl -d $DL/a core set $D --addr 127.0.0.1:11207
+dl -d $DL/a pending            # note the index
+dl -d $DL/b approve <N>
+```
+
+**Watch d's terminal.** In order, and each line is a step that could not happen before:
+
+* `the log says this node votes now; taking a seat in consensus`
+* a membership line, then `this node is now a voter`
+
+Between those two it empties its own copy of the log. Nothing in the terminal says so —
+the membership line is only printed once there is a group, so the node simply goes quiet
+for a moment — but `dl -d $DL/d status` caught in that window reads `group  none yet`
+and `members  0 (0 core)`. That is deliberate: a node holding a log but no voters of its
+own is exactly what this codebase refuses to speak consensus to, so it has to look like
+a node that has not started yet for as long as it takes the leader to catch it up. What
+it does *not* do in that window is forget who it will talk to — it keeps enforcing the
+allowlist it already had, which is why it stays reachable throughout.
+
+Then ask it again:
+
+```sh
+dl -d $DL/d status
+```
+
+Expected: `role        core member`, and a `Raft role` line saying `Follower` or
+`Leader` — **not** `Learner`. Learner means it is being replicated to but is not yet
+counted in a quorum, which is the halfway state promotion passes through; it should take
+a second or two to leave it.
+
+Prove it is really voting rather than only being told things. Stop a — the group is
+three voters now, so two is still a majority — and admit somebody from b:
+
+```sh
+# Ctrl-C a's terminal
+dl -d $DL/b admit $C --name "carol, back again"
+dl -d $DL/d members
+```
+
+That commit needed d's vote. Before this sub-phase, the same group would have had two
+voters with one of them down, and nothing would have committed at all.
+
+---
+
 ## 6. After
 
 Restart the killed node and watch it rejoin and catch up — beyond §9, but the first
@@ -366,5 +429,8 @@ rm -rf $DL
 - Does `pending` tell you enough to decide, without going to the log for it?
 - Is it obvious from `admit`/`expel` output alone whether anything actually happened?
 - Does `core set` say enough for you to tell an applied change from a waiting one?
+- Is a node in the middle of being promoted alarming to watch? It goes quiet, and
+  `status` says it is in no group. Nothing explains that while it is happening — should
+  it?
 - Is there anything that tells you a core node is unreachable *before* you notice it
   has stopped keeping up?

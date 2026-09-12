@@ -575,11 +575,14 @@ fn a_voter_can_be_given_a_new_address() {
 }
 
 #[test]
-fn the_core_group_cannot_grow_yet() {
-    // Removals and address changes are enacted in Raft; promotion is not, and
-    // cannot be until a node can begin voting without restarting. Refusing the
-    // event is what keeps the projection and Raft's voter set from disagreeing
-    // — an addition never commits, so there is nothing to disagree about.
+fn the_core_group_can_grow() {
+    // Until 2.3-2 this was refused outright with `PromotionUnsupported`: a node
+    // served `distlib/raft/0` only if it had started as a voter, so a promoted
+    // one would have counted toward quorum and never answered. Both halves of
+    // that have moved — every node serves the protocol now, and the
+    // reconciliation loop adds a new voter as a learner before promoting it —
+    // so the fold's job here is the same as for any other core-group change:
+    // decide whether the map is valid, and record it.
     let (mut state, alice) = founded();
     let bob = Signer::generate();
     propose(
@@ -591,23 +594,21 @@ fn the_core_group_cannot_grow_yet() {
     )
     .unwrap();
 
-    let refused = propose(
+    // A majority of one is one, so alice's own proposal decides it.
+    propose(
         &mut state,
         &alice,
         MembershipEvent::CoreGroupChanged {
             core: core_group(&[&alice, &bob]),
         },
-    );
+    )
+    .unwrap();
 
-    assert_eq!(
-        refused,
-        Err(ConsensusError::PromotionUnsupported { member: bob.id })
-    );
-    assert_eq!(
-        voters(&state),
-        vec![alice.id],
-        "the voter set must not move"
-    );
+    let mut grown = voters(&state);
+    grown.sort();
+    let mut both = vec![alice.id, bob.id];
+    both.sort();
+    assert_eq!(grown, both, "the projection names the new voter");
 }
 
 #[test]
@@ -1206,43 +1207,36 @@ fn a_last_approval_that_cannot_be_applied_leaves_the_proposal_as_it_was() {
     // reader cannot tell how many people actually said yes to something that
     // happened.
     //
-    // A promotion is the case to use, because it fails at apply time for a
-    // reason no other event can clear: `PromotionUnsupported` is about what a
-    // node can do, not about anything the group might change its mind on. The
-    // races that used to serve here are now swept as stale before they can
-    // fail, which is the point of the prune in `enact`.
+    // A core group naming somebody who is not a member is the case to use,
+    // because it fails at apply time for a reason nothing between the proposal
+    // and the last approval can clear. `InvalidCoreGroup` is about the map
+    // itself, and the only thing that would make it valid — admitting the
+    // stranger — is a change to a different subject, so the prune in `enact`
+    // does not reach it either. The races that used to serve here are now
+    // swept as stale before they can fail, which is that prune's whole point;
+    // promotion served here until 2.3-2 made it succeed.
     let (mut state, founders) = founded_by(3);
     let (a, b, c) = (&founders[0], &founders[1], &founders[2]);
-    let newcomer = Signer::generate();
-    propose(
-        &mut state,
-        a,
-        MembershipEvent::MemberAdded {
-            member: newcomer.record("newcomer"),
-        },
-    )
-    .unwrap();
+    let stranger = Signer::generate();
 
-    // Growing the core group moves the voters, so it takes two of the three.
+    // Changing the core group moves the voters, so it takes two of the three.
     propose(
         &mut state,
         a,
         MembershipEvent::CoreGroupChanged {
-            core: core_group(&[a, b, c, &newcomer]),
+            core: core_group(&[a, b, c, &stranger]),
         },
     )
     .unwrap();
-    let promotion = the_pending_one(&state);
+    let doomed = the_pending_one(&state);
 
     assert_eq!(
-        approve(&mut state, b, promotion),
-        Err(ConsensusError::PromotionUnsupported {
-            member: newcomer.id
-        })
+        approve(&mut state, b, doomed),
+        Err(ConsensusError::InvalidCoreGroup)
     );
 
     let (index, proposal) = state.pending().next().expect("still pending");
-    assert_eq!(index, promotion, "a refused change is not a decided one");
+    assert_eq!(index, doomed, "a refused change is not a decided one");
     assert_eq!(
         proposal.approvals().collect::<Vec<_>>(),
         vec![a.id],

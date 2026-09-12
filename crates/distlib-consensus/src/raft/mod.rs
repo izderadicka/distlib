@@ -8,6 +8,7 @@ pub mod follower;
 pub mod log_store;
 pub mod memberlog;
 pub mod network;
+pub(crate) mod seat;
 pub mod state_machine;
 pub mod types;
 
@@ -16,5 +17,6 @@ pub use memberlog::{
     FetchFailed, Fetched, MemberlogClient, MemberlogProtocol, ProposeError, ProposeOutcome, Source,
 };
 pub use network::{RaftClient, RaftNetworkFactoryImpl, RaftProtocol};
+pub(crate) use seat::Seat;
 pub use state_machine::StateMachineStore;
 pub use types::TypeConfig;
