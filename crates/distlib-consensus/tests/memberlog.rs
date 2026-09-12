@@ -16,11 +16,15 @@ use distlib_consensus::{
     Fetched, MemberRecord, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
 };
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AddressBook, AllowlistHooks, Connections, allowlist, endpoint::configure};
+use distlib_net::{
+    AddressBook, AllowlistHooks, Connections, Transport, allowlist, endpoint::configure,
+};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
+    protocol::Router,
 };
+use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
 /// A founded group of one, and somebody outside it who may ask for the log.
@@ -29,6 +33,7 @@ struct Group {
     id: MemberId,
     addr: NodeAddr,
     secret: SecretKey,
+    router: Router,
     _dir: TempDir,
 }
 
@@ -56,8 +61,12 @@ impl Group {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
+        let swarm = Gossip::builder().spawn(endpoint.clone());
         let node = MembershipNode::start(
-            endpoint,
+            Transport {
+                endpoint: endpoint.clone(),
+                gossip: swarm,
+            },
             hooks,
             writer,
             dir.path(),
@@ -65,6 +74,7 @@ impl Group {
         )
         .await
         .unwrap();
+        let router = distlib_net::serve(endpoint, node.protocols());
 
         node.init_group(vec![(record(id, "founder"), addr.clone())], &secret)
             .await
@@ -75,8 +85,15 @@ impl Group {
             id,
             addr,
             secret,
+            router,
             _dir: dir,
         }
+    }
+
+    /// Stops this node and the transport under it, in production's order.
+    async fn shutdown(&self) {
+        self.node.shutdown().await;
+        let _ = self.router.shutdown().await;
     }
 
     /// Admits `member`, so the log has something beyond its founding entry.
@@ -163,7 +180,7 @@ async fn the_fetched_log_folds_to_the_same_membership() {
     );
     assert!(rebuilt.is_member(&bob));
 
-    group.node.shutdown().await;
+    group.shutdown().await;
 }
 
 #[tokio::test]
@@ -203,7 +220,7 @@ async fn a_cursor_only_advances_over_what_it_has_seen() {
     }
     assert_eq!(state, group.node.membership());
 
-    group.node.shutdown().await;
+    group.shutdown().await;
 }
 
 #[tokio::test]
@@ -230,7 +247,7 @@ async fn the_answer_says_where_to_ask_next() {
         source.core
     );
 
-    group.node.shutdown().await;
+    group.shutdown().await;
 }
 
 #[tokio::test]
@@ -262,8 +279,12 @@ async fn a_node_with_no_group_hands_over_nothing() {
         relay: None,
         direct: endpoint.bound_sockets().into_iter().collect(),
     };
+    let swarm = Gossip::builder().spawn(endpoint.clone());
     let unfounded = MembershipNode::start(
-        endpoint,
+        Transport {
+            endpoint: endpoint.clone(),
+            gossip: swarm,
+        },
         hooks,
         writer,
         dir.path(),
@@ -271,6 +292,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
     )
     .await
     .unwrap();
+    let serving = distlib_net::serve(endpoint, unfounded.protocols());
 
     let asking = configure(
         Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
@@ -295,6 +317,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
     );
 
     unfounded.shutdown().await;
+    let _ = serving.shutdown().await;
 }
 
 #[tokio::test]
@@ -319,5 +342,5 @@ async fn an_unreachable_node_is_a_failure_rather_than_an_answer() {
 
     assert_eq!(failed.member, absent);
 
-    group.node.shutdown().await;
+    group.shutdown().await;
 }

@@ -13,11 +13,13 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState};
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
+use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
+    protocol::Router,
 };
+use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
 /// A member, its endpoint and its running consensus.
@@ -29,6 +31,11 @@ pub struct Peer {
     /// Kept so a test can ask what this node would actually admit, which is the
     /// thing being enforced — not just what the log says.
     pub hooks: AllowlistHooks,
+    /// What serves this node's protocols, which the node no longer owns.
+    ///
+    /// Held for the same reason production holds it: nothing answers without
+    /// it, and closing the endpoint is its job — see [`Peer::shutdown`].
+    router: Router,
     _dir: TempDir,
 }
 
@@ -86,9 +93,23 @@ impl Peer {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
-        let node = MembershipNode::start(endpoint, hooks.clone(), writer, dir.path(), core)
-            .await
-            .unwrap();
+        // The same assembly production does, in the same order: gossip before
+        // the node that announces on it, the router after the node that says
+        // what it serves. See `distlib::Runtime`.
+        let swarm = Gossip::builder().spawn(endpoint.clone());
+        let node = MembershipNode::start(
+            Transport {
+                endpoint: endpoint.clone(),
+                gossip: swarm,
+            },
+            hooks.clone(),
+            writer,
+            dir.path(),
+            core,
+        )
+        .await
+        .unwrap();
+        let router = distlib_net::serve(endpoint, node.protocols());
 
         Self {
             secret,
@@ -96,8 +117,15 @@ impl Peer {
             node,
             addr,
             hooks,
+            router,
             _dir: dir,
         }
+    }
+
+    /// Stops this node and the transport under it, in production's order.
+    pub async fn shutdown(&self) {
+        self.node.shutdown().await;
+        let _ = self.router.shutdown().await;
     }
 
     pub fn record(&self, name: &str) -> MemberRecord {

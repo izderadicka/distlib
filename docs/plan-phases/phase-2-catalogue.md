@@ -569,12 +569,19 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 `iroh_blobs::api::Store` — docs entry *values* live in it. So 2a wires the store as docs' backing;
 2b is where media files and transfer arrive.
 
-- **2a-1 — Ownership refactor. No behaviour change.**
+- **2a-1 — Ownership refactor. No behaviour change.** *(done, delta P2-10)*
   `crates/distlib` gains `[lib]` and `Runtime`; `Gossip` is spawned by `Runtime` and passed to
   `MembershipNode::start`; `MembershipNode` loses its `router` and gains `protocols()`; the
   consensus test harness (`tests/common/mod.rs`) builds the router from `protocols()` in the one
   place it already builds a node. Add the ALPN-agreement test.
   **Acceptance:** the entire existing suite passes unchanged, including the by-hand runbook.
+
+  > **Two things the plan did not anticipate, both small.** The router assembly is repeated at
+  > five call sites, not one — `tests/memberlog.rs` and `distlib-api`'s `tests/rpc.rs` build
+  > nodes of their own — so the fold over `RouterBuilder` became `distlib_net::serve`, in the
+  > crate that already owns `build_endpoint`. And a node no longer closes its own endpoint, so
+  > every harness that called `node.shutdown()` had to grow the router half; `Peer::shutdown`
+  > and its equivalents do it in production's order.
 
 - **2a-2 — `distlib-sync`.** iroh-docs + blobs store wired into `Runtime`; `NamespaceCreated` (D1);
   the catalogue namespace opened from the log; `start_sync` against the members it should sync with;

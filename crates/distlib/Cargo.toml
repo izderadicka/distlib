@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "distlib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "distlib"
 path = "src/main.rs"
@@ -25,6 +29,9 @@ distlib-consensus = { workspace = true }
 distlib-api = { workspace = true }
 serde_json = { workspace = true }
 iroh = { workspace = true }
+# The one gossip instance in the process: the memberlog announces on it, and
+# from 2a-2 iroh-docs is handed the same one.
+iroh-gossip = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
