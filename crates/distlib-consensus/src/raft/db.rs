@@ -117,6 +117,26 @@ where
     Ok(())
 }
 
+/// A stored value that will not decode.
+///
+/// Nearly always a data directory written by a different build: everything
+/// here is postcard-encoded, and postcard carries no field names or version —
+/// so adding a field to a stored shape (2a-2a added the group's namespaces to
+/// the membership state) makes what is already on disk unreadable. Worth its
+/// own type because the underlying message is "Hit the end of buffer,
+/// expected more data", which names the symptom and leaves the operator to
+/// guess the cause.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "stored `{key}` could not be decoded; a data directory written by another version of \
+     distlib cannot be read by this one"
+)]
+struct Undecodable {
+    key: String,
+    #[source]
+    source: postcard::Error,
+}
+
 /// Reads and decodes one key, if present.
 pub(crate) fn read_key<T>(
     db: &Database,
@@ -133,9 +153,14 @@ where
     let Some(value) = table.get(key).map_err(|source| fail(&source))? else {
         return Ok(None);
     };
-    Ok(Some(
-        postcard::from_bytes(value.value()).map_err(|source| fail(&source))?,
-    ))
+    Ok(Some(postcard::from_bytes(value.value()).map_err(
+        |source| {
+            fail(&Undecodable {
+                key: key.to_owned(),
+                source,
+            })
+        },
+    )?))
 }
 
 /// Writes one already-encoded key, committing off the async workers.

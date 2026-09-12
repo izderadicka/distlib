@@ -4,9 +4,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
-use distlib_consensus::{
-    MemberRecord, MembershipNode, MembershipState, RAFT_DB, StateMachineStore,
-};
+use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
     Config, CoreMember, DataDir, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
@@ -36,7 +34,7 @@ impl Paths {
     }
 
     fn raft_db(&self) -> std::path::PathBuf {
-        self.data_dir.root().join(RAFT_DB)
+        self.data_dir.raft_db()
     }
 }
 
@@ -95,7 +93,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     let secret = load_secret_key(&paths.secret_key_file())?;
     let me = member_id(&secret);
 
-    let runtime = Runtime::start(&secret, &config, paths.data_dir.root()).await?;
+    let runtime = Runtime::start(&secret, &config, &paths.data_dir).await?;
     let node = Arc::clone(runtime.node());
 
     if found_group {
