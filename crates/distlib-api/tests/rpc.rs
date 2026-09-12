@@ -592,10 +592,12 @@ async fn approving_answers_about_the_proposal_not_about_the_approval() {
     .await
     .expect("three of four is a majority");
 
-    harness.shutdown().await;
+    // The other nodes first: the harness holds their routers, and closing an
+    // endpoint out from under a Raft that has not stopped is the wrong order.
     for node in nodes.into_iter().skip(1) {
         node.shutdown().await;
     }
+    harness.shutdown().await;
 }
 
 /// The pair that pins the threshold rule for the core group, and the reason
@@ -673,10 +675,12 @@ async fn moving_a_core_node_applies_while_dropping_one_waits_for_a_majority() {
         "a pending core change has to name who it is about: {pending}"
     );
 
-    harness.shutdown().await;
+    // The other nodes first: the harness holds their routers, and closing an
+    // endpoint out from under a Raft that has not stopped is the wrong order.
     for node in nodes.into_iter().skip(1) {
         node.shutdown().await;
     }
+    harness.shutdown().await;
 }
 
 #[tokio::test]
