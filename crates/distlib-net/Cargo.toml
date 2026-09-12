@@ -11,6 +11,9 @@ authors.workspace = true
 [dependencies]
 distlib-core = { workspace = true }
 iroh = { workspace = true }
+# For `Transport`: the one gossip a process has, passed alongside the endpoint
+# to everything that speaks on it. This crate does not serve gossip itself.
+iroh-gossip = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

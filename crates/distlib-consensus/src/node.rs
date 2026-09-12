@@ -15,7 +15,8 @@ use std::{
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{
-    AddressBook, AllowlistHooks, AllowlistWriter, Connections, Protocols, alpn, ping::PingProtocol,
+    AddressBook, AllowlistHooks, AllowlistWriter, Connections, Protocols, Transport, alpn,
+    ping::PingProtocol,
 };
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::GOSSIP_ALPN, net::Gossip};
@@ -180,23 +181,6 @@ fn start(task: &RoleTask, handle: JoinHandle<()>) {
     *task.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
 }
 
-/// The transport a node is served on, which it no longer owns.
-///
-/// The two are passed together because they are one decision: the process has
-/// exactly one endpoint and exactly one gossip over it, made by whoever
-/// assembles the process, and a node handed one without the other could not
-/// be served at all. See `distlib::Runtime`.
-pub struct Transport {
-    /// What this node answers and dials on. Its ALPNs must be [`alpns`].
-    pub endpoint: Endpoint,
-    /// What the memberlog announces on and a follower listens to.
-    ///
-    /// Given rather than made here: from phase 2 iroh-docs is handed this same
-    /// instance, and a second swarm over one endpoint would not see the
-    /// topics the first had joined.
-    pub gossip: Gossip,
-}
-
 /// A running consensus node.
 ///
 /// Owns the router serving its peers, the tasks that keep the allowlist in step
@@ -282,9 +266,9 @@ impl std::fmt::Debug for MembershipNode {
 impl MembershipNode {
     /// Starts consensus on `endpoint`, storing state under `data_dir`.
     ///
-    /// The caller owns the endpoint, the gossip and the router: from phase 2
-    /// on, iroh-docs needs the same `Gossip` this node announces on and all of
-    /// it accepted on one router, so there cannot be a second of either. What
+    /// The caller owns the [`Transport`] and the router: from phase 2 on,
+    /// iroh-docs needs the same `Gossip` this node announces on and all of it
+    /// accepted on one router, so there cannot be a second of either. What
     /// this node needs served it declares through [`Self::protocols`], which
     /// the caller hands to [`distlib_net::serve`] once every subsystem has
     /// said the same. The node is therefore not answering anything until the

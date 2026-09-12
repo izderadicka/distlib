@@ -1066,6 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "distlib-core",
  "iroh",
+ "iroh-gossip",
  "iroh-relay",
  "thiserror 2.0.20",
  "tokio",

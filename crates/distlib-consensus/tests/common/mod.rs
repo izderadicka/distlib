@@ -11,9 +11,9 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, Transport};
+use distlib_consensus::{MemberRecord, MembershipNode, MembershipState};
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
+use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},

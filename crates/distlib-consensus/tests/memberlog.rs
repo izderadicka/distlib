@@ -14,10 +14,11 @@ use std::{
 
 use distlib_consensus::{
     Fetched, MemberRecord, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
-    Transport,
 };
 use distlib_core::{MemberId, NodeAddr};
-use distlib_net::{AddressBook, AllowlistHooks, Connections, allowlist, endpoint::configure};
+use distlib_net::{
+    AddressBook, AllowlistHooks, Connections, Transport, allowlist, endpoint::configure,
+};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},

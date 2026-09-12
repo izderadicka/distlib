@@ -13,9 +13,9 @@ use std::{
 };
 
 use distlib_api::{Api, Server, serve};
-use distlib_consensus::{MemberRecord, MembershipNode, Transport};
+use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{MemberId, NodeAddr, Ticket};
-use distlib_net::{AllowlistHooks, allowlist, endpoint::configure};
+use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};

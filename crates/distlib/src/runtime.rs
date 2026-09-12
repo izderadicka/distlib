@@ -16,9 +16,9 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use distlib_consensus::{MembershipNode, Transport};
+use distlib_consensus::MembershipNode;
 use distlib_core::{Config, MemberId, NodeAddr, identity::member_id};
-use distlib_net::{AllowlistHooks, allowlist, build_endpoint};
+use distlib_net::{AllowlistHooks, Transport, allowlist, build_endpoint};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_gossip::net::Gossip;
 
