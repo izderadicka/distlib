@@ -1024,6 +1024,7 @@ async fn report_membership(mut memberships: tokio::sync::watch::Receiver<Members
         }
 
         if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
             return;
         }
     }

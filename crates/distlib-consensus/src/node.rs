@@ -920,6 +920,7 @@ async fn take_the_seat(promoting: Promoting) {
             break;
         }
         if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
             return;
         }
     }
@@ -986,6 +987,7 @@ async fn join_topic(
             break group;
         }
         if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
             return;
         }
     };
@@ -1080,6 +1082,7 @@ async fn follow_membership(
         }
 
         if memberships.changed().await.is_err() {
+            tracing::error!("membership channel closed");
             return;
         }
     }
