@@ -301,6 +301,18 @@ impl MemberlogProtocol {
     }
 
     async fn propose(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> ProposeOutcome {
+        // The other door into the log, and the one that is not this node's own
+        // caller: a follower forwards an already-signed event here. Reading it
+        // verifies the signature, so a refusal is attributable; see
+        // [`MembershipEvent::within_limits`] for why this is not in the fold.
+        match event
+            .event()
+            .and_then(crate::MembershipEvent::within_limits)
+        {
+            Ok(()) => {}
+            Err(refused) => return ProposeOutcome::Rejected(refused),
+        }
+
         let written = match tokio::time::timeout(COMMIT_TIMEOUT, raft.client_write(event)).await {
             Ok(written) => written,
             Err(_) => {

@@ -159,6 +159,42 @@ fn subject(event: &MembershipEvent) -> Option<Subject> {
     }
 }
 
+/// Whether the core group just enacted leaves `proposed` unsafe to approve.
+///
+/// A pending `CoreGroupChanged` carries the *whole* desired core group rather
+/// than a delta (P1-23), so approving it later writes its map wholesale. That
+/// is only safe where the map still agrees with the change just made:
+/// anywhere it does not, approving it would silently revert that change. With
+/// `relay_mode = "disabled"` the worst case is putting a moved core node's
+/// dead address back, carrying a majority's signature — the failure 2.1
+/// existed to close. So staleness wins ties, and the caller says out loud
+/// which proposal it dropped.
+///
+/// **The rule: a map is stale iff it names a member the change moved, at
+/// anything other than where the change put them.** Judged only over the
+/// members the change actually moved, because the rest of the map is nobody's
+/// business here.
+///
+/// Absence is the case worth spelling out, because it is what the blunt rule
+/// this replaced got wrong. A map that does not name somebody is proposing to
+/// *demote* them, and that is compatible with any change to where they are —
+/// approving it does not revert the move, it makes the move moot. So omission
+/// never counts against a map, and a demotion keeps the approvals it has
+/// gathered while the member it is about changes address underneath it.
+fn superseded_by(
+    proposed: &[(MemberId, NodeAddr)],
+    before: &BTreeMap<MemberId, NodeAddr>,
+    now: &BTreeMap<MemberId, NodeAddr>,
+) -> bool {
+    let proposed: BTreeMap<_, _> = proposed.iter().map(|(id, addr)| (id, addr)).collect();
+    before.keys().chain(now.keys()).any(|member| {
+        before.get(member) != now.get(member)
+            && proposed
+                .get(member)
+                .is_some_and(|wants| Some(*wants) != now.get(member))
+    })
+}
+
 impl MembershipState {
     /// An empty state, before any event has been applied.
     pub fn new() -> Self {
@@ -492,30 +528,41 @@ impl MembershipState {
     /// been expelled has nothing left to do, and one of a member who has since
     /// been re-admitted was decided against a group they were not in.
     ///
-    /// The same now holds for the core group, and it is worth stating rather
-    /// than inheriting from the rule above. `CoreGroupChanged` carries the
-    /// *whole* desired core group rather than a delta (P1-23), so a pending one
-    /// was composed against a map that has since moved — approving it later
-    /// would not add to the change just made, it would silently revert it.
+    /// The core group is judged differently, by [`superseded_by`]: it is the
+    /// one subject where two proposals routinely coexist, because a
+    /// voter-changing map waits for a majority while an address-only one
+    /// enacts on a single approval and sails straight past it. Dropping every
+    /// pending core proposal whenever the map moved at all discarded approvals
+    /// nobody had withdrawn, so the pending map is now compared against the
+    /// change rather than assumed stale by it.
     fn enact(&mut self, event: &MembershipEvent) -> Result<()> {
-        // Asked before the change, because afterwards the voter set has already
-        // moved and the comparison would say no.
-        let moved_the_voters = self.changes_the_voters(event);
+        // Kept across the change: what superseded a pending core map is the
+        // difference between these two, not either one alone.
+        let before = self.core.clone();
         self.apply_to_founded_group(event)?;
 
         let about = subject(event);
-        self.pending.retain(|_, pending| {
-            let pending = subject(&pending.event);
-            // Same subject: answering a question that has moved.
-            if pending == about {
-                return false;
+        let (core, mut dropped) = (&self.core, Vec::new());
+        self.pending.retain(|index, pending| {
+            let keep = match &pending.event {
+                MembershipEvent::CoreGroupChanged { core: proposed } => {
+                    !superseded_by(proposed, &before, core)
+                }
+                // Same subject: answering a question that has moved.
+                other => subject(other) != about,
+            };
+            if !keep {
+                dropped.push((*index, pending.proposer));
             }
-            // And the core group by any route. Expelling a voter moves the
-            // voter set while being *about* that member, so the subject rule
-            // alone leaves a core group composed against the old map waiting —
-            // which is the same staleness arriving by a different door.
-            !(moved_the_voters && pending == Some(Subject::CoreGroup))
+            keep
         });
+        for (proposal, proposer) in dropped {
+            tracing::info!(
+                proposal,
+                %proposer,
+                "the change just made supersedes a pending proposal; dropping it"
+            );
+        }
         Ok(())
     }
 
@@ -634,7 +681,24 @@ impl MembershipState {
             MembershipEvent::MemberAdded { member } => {
                 // Insert rather than reject-if-present: this is also how an
                 // expelled member is re-admitted, and how a record is corrected.
-                self.members.insert(member.member_id, member.clone());
+                //
+                // The pledge survives that, because it is the one field of the
+                // record its own member owns: `PledgeChanged` is self-only
+                // (P1-20) precisely so nobody sets somebody else's, and
+                // overwriting it from a `MemberAdded` — which always carries
+                // the zero `propose_add` fills in — is that same write by
+                // another door. Correcting a display name would otherwise
+                // retract a storage promise §5.5's custodian assignment reads.
+                // Re-admitting an expelled member finds no record and so
+                // starts them at zero, which is the intent there.
+                let record = MemberRecord {
+                    pledge_bytes: self
+                        .members
+                        .get(&member.member_id)
+                        .map_or(member.pledge_bytes, |had| had.pledge_bytes),
+                    ..member.clone()
+                };
+                self.members.insert(member.member_id, record);
                 Ok(())
             }
 

@@ -139,6 +139,20 @@ pub enum ConsensusError {
     )]
     StaleProposal { seen: u64, current: u64 },
 
+    /// A free-text field on a proposal was longer than the log will carry.
+    ///
+    /// Not a rule the fold enforces: by the time an entry is folded it has
+    /// been replicated to every node, so the cost this avoids has already
+    /// been paid. It is checked where a proposal enters the log instead.
+    #[error("{field} is {length} bytes, and the limit is {limit}")]
+    TooLong {
+        /// The field's name, owned because this type is deserialised on the
+        /// proposer's node and `serde`'s borrowed lifetime cannot reach there.
+        field: String,
+        length: usize,
+        limit: usize,
+    },
+
     /// Serialising an event failed.
     ///
     /// Carries the message rather than `postcard::Error`, because this type is

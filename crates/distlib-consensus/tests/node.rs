@@ -519,6 +519,257 @@ async fn a_core_node_the_log_drops_stops_voting() {
     }
 }
 
+/// MEM-06: free text on a proposal is bounded, at both doors into the log.
+///
+/// The limit itself is `mem_06_free_text_on_a_proposal_is_bounded` in
+/// `tests/proof_issues.rs`; this is the wiring. Two doors, because there are
+/// two ways an entry gets proposed and only one of them is this node's own
+/// caller: `MembershipNode::propose`, and a peer forwarding an already-signed
+/// event over `distlib/memberlog/0`. The second is the one a check in the API
+/// layer would have missed.
+#[tokio::test]
+async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |membership| {
+        membership.group_id().is_some()
+    })
+    .await;
+
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    let oversized = MembershipEvent::MemberAdded {
+        member: MemberRecord {
+            member_id: newcomer,
+            display_name: "x".repeat(distlib_consensus::MAX_DISPLAY_NAME + 1),
+            pledge_bytes: 0,
+        },
+    };
+
+    // Door one: proposed here. Refused before it is signed, so nothing of it
+    // reaches the log at all.
+    let refused = founder
+        .node
+        .propose(oversized.clone(), &founder.secret)
+        .await
+        .expect_err("an over-long display name must not commit");
+    assert!(
+        refused.to_string().contains("display_name"),
+        "unexpected refusal: {refused}"
+    );
+
+    // Door two: signed elsewhere and forwarded. A member with no Raft of its
+    // own hands the event to a core node, which is the path a check in the
+    // API layer would never see.
+    let bystander_key = SecretKey::generate();
+    let bystander_id = MemberId::from(bystander_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: bystander_id,
+                    display_name: "bystander".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    let bystander = Peer::start(bystander_key, vec![founder.id]).await;
+    let founder_addr = NodeAddr {
+        relay: None,
+        direct: founder.addr.direct.clone(),
+    };
+
+    let signed = distlib_consensus::SignedEvent::sign(
+        &bystander.secret,
+        oversized,
+        distlib_consensus::Timestamp::now(),
+        founder.node.membership().changed_at(),
+    )
+    .unwrap();
+
+    let refused = distlib_consensus::MemberlogClient::new(
+        bystander.node.endpoint().clone(),
+        bystander.node.connections().clone(),
+        distlib_net::AddressBook::default(),
+    )
+    .propose(founder.id, &founder_addr, signed)
+    .await
+    .expect_err("a forwarded proposal is held to the same limit");
+    assert!(
+        refused.to_string().contains("display_name"),
+        "unexpected refusal: {refused}"
+    );
+
+    assert!(
+        !founder.node.membership().is_member(&newcomer),
+        "and neither door let it through"
+    );
+
+    bystander.node.shutdown().await;
+    founder.node.shutdown().await;
+}
+
+/// MEM-04: a core node the log demotes gives up its seat and starts following.
+///
+/// Before this it kept the Raft, went on answering `distlib/raft/0` to anyone
+/// who would still speak it, and — the part that actually hurt — never started
+/// a follow loop, so it froze at the membership it held and went on enforcing
+/// that allowlist for as long as the process lived.
+///
+/// The slow half of the claim, that it then catches up on changes made after
+/// it stood down, is `a_demoted_node_catches_up_on_what_it_missed` below; that
+/// its follow cursor starts from what it had applied rather than from zero is
+/// `mem_04_a_demoted_node_follows_on_from_what_it_applied` in
+/// `tests/proof_issues.rs`, because nothing visible from out here tells the
+/// two apart — a cursor left at zero re-fetches the log and converges anyway.
+#[tokio::test]
+async fn a_core_node_the_log_demotes_stands_down_and_starts_following() {
+    let peers = a_founded_trio().await;
+    assert!(
+        peers[2].node.raft().is_some(),
+        "a founder starts out voting"
+    );
+
+    // Drop the third founder from the core group, leaving them a member.
+    // Changing who votes takes a majority, so the other two both have to say so.
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![
+                    (peers[0].id, peers[0].addr.clone()),
+                    (peers[1].id, peers[1].addr.clone()),
+                ],
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the demotion to be pending on the second voter").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+
+    wait_for(
+        &peers[2],
+        "the demoted node to read its own demotion",
+        |m| !m.is_core(&peers[2].id),
+    )
+    .await;
+    assert!(
+        peers[2].node.membership().is_member(&peers[2].id),
+        "demoting is not expelling"
+    );
+
+    until("the demoted node to give up its seat", || {
+        peers[2].node.raft().is_none()
+    })
+    .await;
+    assert!(!peers[2].node.is_core());
+
+    // And it proposes the way a follower does — forwarded to a core node —
+    // rather than through a Raft it no longer has. This is the demotion
+    // reaching every path that asks "do I vote", not just the seat.
+    peers[2]
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: peers[2].id,
+                pledge_bytes: 42,
+            },
+            &peers[2].secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&peers[0], "the demoted node's pledge to commit", |m| {
+        m.member(&peers[2].id).is_some_and(|r| r.pledge_bytes == 42)
+    })
+    .await;
+
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}
+
+/// MEM-04's other half: the demoted node keeps up with changes made after it
+/// stood down, instead of freezing at the membership it held.
+///
+/// Slow, and for a reason that is recorded rather than incidental: gossip does
+/// not change sides (the phase-2 register), so a demoted node keeps the
+/// announcing half it had as a voter and nothing pokes its new follow loop.
+/// What it waits on is the idle poll, which is thirty seconds.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_demoted_node_catches_up_on_what_it_missed() {
+    let peers = a_founded_trio().await;
+
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![
+                    (peers[0].id, peers[0].addr.clone()),
+                    (peers[1].id, peers[1].addr.clone()),
+                ],
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the demotion to be pending").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        peers[2].node.raft().is_none()
+    })
+    .await;
+
+    // Something the demoted node can only learn by asking: it is not a voter,
+    // so nothing replicates to it.
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "newcomer".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+
+    wait_for_upto(
+        &peers[2],
+        PATIENTLY,
+        "the demoted node to fetch a change made after it stood down",
+        |m| m.is_member(&newcomer),
+    )
+    .await;
+
+    for peer in peers {
+        peer.node.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
     // §4.4 end to end, and the sub-phase's own acceptance: any member may

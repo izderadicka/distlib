@@ -143,7 +143,68 @@ pub enum MembershipEvent {
     Withdrawn { proposal: u64 },
 }
 
+/// The longest a member's display name may be, in bytes.
+///
+/// Generous for a name and small enough that a member list stays a thing you
+/// can print. UTF-8 bytes rather than characters because bytes are what the
+/// log carries and what every node counts identically.
+pub const MAX_DISPLAY_NAME: usize = 64;
+
+/// The longest the reason on an expulsion may be, in bytes.
+///
+/// Roomier than a name because it is meant to be a sentence somebody reads
+/// later, and it is written once per expulsion rather than once per member.
+pub const MAX_REASON: usize = 512;
+
+fn within(field: &'static str, text: &str, limit: usize) -> Result<()> {
+    if text.len() > limit {
+        return Err(ConsensusError::TooLong {
+            field: field.to_owned(),
+            length: text.len(),
+            limit,
+        });
+    }
+    Ok(())
+}
+
 impl MembershipEvent {
+    /// Checks the free-text this event carries against the limits above.
+    ///
+    /// **Checked before an entry is proposed, not while it is folded**, which
+    /// is the one rule in this crate that deliberately does not live in
+    /// [`crate::MembershipState::apply`]. Everything there is a rule about
+    /// what the state may *become*, and every node has to reach the same
+    /// verdict about it. This is a rule about what the log should be made to
+    /// carry, and by the time the fold sees an entry every node already has
+    /// the bytes — a megabyte display name refused at the fold is a megabyte
+    /// replicated, stored and re-read on every cold start regardless. So it
+    /// goes at the two places a proposal enters the log:
+    /// [`crate::MembershipNode::propose`] for one made here, and
+    /// [`crate::raft::memberlog::MemberlogProtocol`] for one forwarded by a
+    /// follower.
+    ///
+    /// The consequence, stated rather than papered over: a core node that
+    /// skipped this could still commit an oversized entry, and every other
+    /// node would fold it. That is the §2 threat model — members do not attack
+    /// the protocol — and this is a foot-gun guard, the same standing as the
+    /// empty-core-group refusal (P2-4).
+    pub fn within_limits(&self) -> Result<()> {
+        match self {
+            Self::GroupFounded { founders, .. } => founders.iter().try_for_each(|(member, _)| {
+                within("display_name", &member.display_name, MAX_DISPLAY_NAME)
+            }),
+            Self::MemberAdded { member } => {
+                within("display_name", &member.display_name, MAX_DISPLAY_NAME)
+            }
+            Self::MemberExpelled { reason, .. } => within("reason", reason, MAX_REASON),
+            // Nothing free-text: ids, addresses, a byte count and a log index.
+            Self::PledgeChanged { .. }
+            | Self::CoreGroupChanged { .. }
+            | Self::Approved { .. }
+            | Self::Withdrawn { .. } => Ok(()),
+        }
+    }
+
     /// Builds the founding event, deriving the group id from the founders.
     ///
     /// Derived rather than random so it needs no RNG and can be recomputed by

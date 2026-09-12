@@ -266,6 +266,17 @@ impl StateMachineStore {
     /// `followed_upto` goes with the rest. It is a cursor into a log this node
     /// no longer fetches, and leaving it set would strand a value that means
     /// nothing to a voter.
+    ///
+    /// **So does the snapshot**, in the same transaction, because it is the
+    /// one piece of this store keyed to a log index rather than derived from
+    /// the state: a snapshot built at index 200 of the log this node followed
+    /// outlives a reset that puts `last_applied` back to nothing. Leaving it
+    /// costs twice. `get_current_snapshot` would hand the leader a picture of
+    /// a group this node is no longer in, and — worse — `build_snapshot`
+    /// refuses to persist anything older than what is stored, so every
+    /// snapshot this node ever built again would be silently dropped and its
+    /// log would never compact. Reachable by demote, restart as a follower,
+    /// promote again.
     pub async fn reset_for_promotion(&self) -> StorageResult<()> {
         let encoded = {
             let mut applied = self.lock();
@@ -273,13 +284,18 @@ impl StateMachineStore {
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
-        write_key(
-            &self.inner.db,
-            SM,
-            APPLIED,
-            encoded,
-            ErrorSubject::StateMachine,
-        )
+        // One transaction: an applied cursor at nothing beside a snapshot at
+        // index 200 is exactly the disagreement this is clearing, and a crash
+        // between two writes would persist it.
+        write_txn(&self.inner.db, ErrorSubject::StateMachine, move |txn| {
+            let fail = writing(ErrorSubject::StateMachine);
+            let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
+            table
+                .insert(APPLIED, encoded.as_slice())
+                .map_err(|source| fail(&source))?;
+            table.remove(SNAPSHOT).map_err(|source| fail(&source))?;
+            Ok(())
+        })
         .await?;
 
         // Announced like any other change, and this one matters more than most:
@@ -287,6 +303,38 @@ impl StateMachineStore {
         // it has.
         self.announce(&MembershipState::new());
         Ok(())
+    }
+
+    /// Points the follow cursor at what this node has already applied, for a
+    /// node that has just stopped voting.
+    ///
+    /// The mirror of [`Self::reset_for_promotion`], and much the smaller half:
+    /// a demoted node's projection is correct and stays, because it was built
+    /// from the same log the follow loop is about to go on reading. What is
+    /// wrong is only the cursor, which a voter never touched — leaving it at
+    /// zero would have the node re-fetch the whole log on its first poll and
+    /// log a refusal per entry. Bandwidth and noise rather than correctness,
+    /// as `catch_up` says: the fold refuses a replayed event and a refusal
+    /// leaves the state alone. Persisted rather than set in memory so that a
+    /// restart before the first poll does not lose it.
+    ///
+    /// Both are log indices in the same space — the memberlog serves entries
+    /// by their Raft log index, which is what `apply` records — so the two
+    /// cursors are comparable, and this is the one place that relies on it.
+    pub async fn resume_following(&self) -> StorageResult<()> {
+        let encoded = {
+            let mut applied = self.lock();
+            applied.followed_upto = applied.last_applied.map_or(0, |at| at.index);
+            encode(&*applied, ErrorSubject::StateMachine)?
+        };
+        write_key(
+            &self.inner.db,
+            SM,
+            APPLIED,
+            encoded,
+            ErrorSubject::StateMachine,
+        )
+        .await
     }
 
     /// The core group with an address for each, as Raft has it.
