@@ -447,7 +447,7 @@ pub async fn core_set(
     let answer = ask(
         paths,
         "group.propose_core",
-        json!({ "member": member, "addr": addr }),
+        json!({ "change": "set", "member": member, "addr": addr }),
     )
     .await?;
 
@@ -464,12 +464,10 @@ pub async fn core_set(
 
 /// `distlib core remove`
 pub async fn core_remove(paths: &Paths, member: MemberId) -> Result<()> {
-    // `addr: null` is the removal, and it is spelled out rather than omitted:
-    // the api refuses a missing `addr` for the same reason this passes one.
     let answer = ask(
         paths,
         "group.propose_core",
-        json!({ "member": member, "addr": Value::Null }),
+        json!({ "change": "remove", "member": member }),
     )
     .await?;
 

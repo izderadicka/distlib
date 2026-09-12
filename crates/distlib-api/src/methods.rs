@@ -245,41 +245,41 @@ impl Api {
     /// while the map put back an address, a voter, or a demotion the group had
     /// just decided.
     ///
-    /// So the caller names one member and what should become of them, and never
-    /// has to know where the others are.
+    /// So the caller names one member and says which of two things should
+    /// become of them — `"change": "set"` with an address, or
+    /// `"change": "remove"` — and never has to know where the others are.
     ///
-    /// `addr` is where to reach them, and replaces whatever the log holds rather
-    /// than adding to it: a node that moved is not at both addresses, and a
-    /// stale one left behind is a path every peer keeps trying. `None` drops
-    /// them from the core group — a demotion, not an expulsion; they stay a
-    /// member.
+    /// An address given replaces whatever the log holds rather than adding to
+    /// it: a node that moved is not at both addresses, and a stale one left
+    /// behind is a path every peer keeps trying. Removal is a demotion, not an
+    /// expulsion; they stay a member.
     ///
     /// [`ConsensusError::StaleProposal`]: distlib_consensus::ConsensusError::StaleProposal
     async fn propose_core(&self, params: ProposeCore) -> Result<Value, Error> {
         let membership = self.node.membership();
         let mut core = membership.core().clone();
 
-        match params.addr {
-            Some(addr) => {
-                if core.get(&params.member) == Some(&addr) {
+        // Either arm refuses a request that would change nothing, rather than
+        // committing it as a no-op. The event would apply — the map is valid —
+        // and applying it moves `changed_at`, which invalidates every proposal
+        // in flight. Nothing should be able to do that by asking for something
+        // that was already true.
+        match params {
+            ProposeCore::Set { member, addr } => {
+                if core.get(&member) == Some(&addr) {
                     return Err(Error::invalid_params(format!(
-                        "{} is already a core node at that address",
-                        params.member
+                        "{member} is already a core node at that address"
                     )));
                 }
-                core.insert(params.member, addr);
+                core.insert(member, addr);
             }
-            // Refused rather than committed as a no-op. The event would apply —
-            // the map is valid — and applying it moves `changed_at`, which
-            // invalidates every proposal in flight. Nothing should be able to do
-            // that by asking for something that was already true.
-            None if core.remove(&params.member).is_none() => {
-                return Err(Error::invalid_params(format!(
-                    "{} is not a core node",
-                    params.member
-                )));
+            ProposeCore::Remove { member } => {
+                if core.remove(&member).is_none() {
+                    return Err(Error::invalid_params(format!(
+                        "{member} is not a core node"
+                    )));
+                }
             }
-            None => {}
         }
 
         self.propose(MembershipEvent::CoreGroupChanged {
@@ -458,33 +458,28 @@ struct ProposeExpel {
     reason: String,
 }
 
-/// What `group.propose_core` names: one member, and where they should be
-/// reached — or `null`, which drops them from the core group.
+/// What `group.propose_core` is asked to do: one member, and which of the two
+/// things should become of them.
 ///
-/// `addr` is deserialised through [`stated`] rather than as a plain
-/// `Option<NodeAddr>`, and that is the whole point of it. serde lets an
-/// `Option` field be missing and reads it as `None` — which here would mean a
-/// forgotten or misspelled `addr` silently demoting a voter. So the field has
-/// to be *said*, and `null` is how you say "nowhere".
+/// **Tagged, rather than inferred from whether an address was given.** The
+/// shape this replaced was a single `addr: Option<NodeAddr>` where `null` meant
+/// "drop them" — one field answering two unrelated questions, *where are they*
+/// and *should they vote*, so the difference between moving a node and demoting
+/// it was a value rather than a word. It also needed a custom deserialiser to
+/// stop serde reading a **missing** `addr` as `None`, which is to say: a
+/// forgotten field would have demoted a voter, and the only thing standing in
+/// the way was a helper somebody had to remember to keep. A tag makes that
+/// unrepresentable instead of guarded against, and it reads the same way the
+/// two CLI verbs do.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ProposeCore {
-    member: MemberId,
-    #[serde(deserialize_with = "stated")]
-    addr: Option<NodeAddr>,
-}
+#[serde(tag = "change", rename_all = "snake_case", deny_unknown_fields)]
+enum ProposeCore {
+    /// Where to reach `member` once they vote — moving them if they are
+    /// already a core node, adding them if they are not.
+    Set { member: MemberId, addr: NodeAddr },
 
-/// Reads an `Option` that must be present, `null` included.
-///
-/// serde only calls this when the field is there, so an absent one falls
-/// through to the missing-field error a required field gets — which is exactly
-/// what an `Option` does not get on its own.
-fn stated<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::deserialize(deserializer)
+    /// Stop counting `member` as a voter. They stay a member.
+    Remove { member: MemberId },
 }
 
 #[derive(Debug, Deserialize, Serialize)]

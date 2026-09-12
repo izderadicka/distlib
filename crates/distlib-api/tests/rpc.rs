@@ -606,7 +606,7 @@ async fn moving_a_core_node_applies_while_dropping_one_waits_for_a_majority() {
     let answer = harness
         .call(
             "group.propose_core",
-            json!({ "member": moved, "addr": addr }),
+            json!({ "change": "set", "member": moved, "addr": addr }),
         )
         .await;
     assert_eq!(
@@ -620,7 +620,7 @@ async fn moving_a_core_node_applies_while_dropping_one_waits_for_a_majority() {
     let answer = harness
         .call(
             "group.propose_core",
-            json!({ "member": moved, "addr": Value::Null }),
+            json!({ "change": "remove", "member": moved }),
         )
         .await;
     assert_eq!(
@@ -653,7 +653,7 @@ async fn moving_a_core_node_applies_while_dropping_one_waits_for_a_majority() {
 }
 
 #[tokio::test]
-async fn propose_core_refuses_what_would_change_nothing() {
+async fn propose_core_refuses_a_no_op_and_anything_it_would_have_to_guess_at() {
     let harness = Harness::start().await;
     let me = harness.node.id();
 
@@ -667,7 +667,10 @@ async fn propose_core_refuses_what_would_change_nothing() {
         .next()
         .expect("the founder is a core node");
     let unchanged = harness
-        .refuse("group.propose_core", json!({ "member": me, "addr": here }))
+        .refuse(
+            "group.propose_core",
+            json!({ "change": "set", "member": me, "addr": here }),
+        )
         .await;
     assert_eq!(code(&unchanged), -32602);
 
@@ -675,22 +678,29 @@ async fn propose_core_refuses_what_would_change_nothing() {
     let not_core = harness
         .refuse(
             "group.propose_core",
-            json!({ "member": stranger, "addr": Value::Null }),
+            json!({ "change": "remove", "member": stranger }),
         )
         .await;
     assert_eq!(code(&not_core), -32602);
 
-    // And `addr` has to be said, either way. Left out it would mean "demote
-    // them", which is the one thing here that must never happen because a field
-    // was forgotten.
-    let omitted = harness
-        .refuse("group.propose_core", json!({ "member": me }))
-        .await;
-    assert_eq!(
-        code(&omitted),
-        -32602,
-        "a missing addr is not an implicit demotion: {omitted}"
-    );
+    // And which of the two it is has to be *said*. An address left off a
+    // `set` is not a quiet demotion, and there is no shape here that means one
+    // thing or the other depending on whether a field was remembered.
+    for malformed in [
+        json!({ "change": "set", "member": me }),
+        json!({ "member": me, "addr": here }),
+        json!({ "change": "move", "member": me, "addr": here }),
+        json!({ "change": "remove", "member": me, "addr": here }),
+    ] {
+        let refused = harness
+            .refuse("group.propose_core", malformed.clone())
+            .await;
+        assert_eq!(
+            code(&refused),
+            -32602,
+            "{malformed} should not be a proposal at all; got {refused}"
+        );
+    }
 
     harness.shutdown().await;
 }
