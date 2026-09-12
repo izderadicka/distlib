@@ -385,6 +385,10 @@ fn describe(event: &MembershipEvent, membership: &MembershipState) -> String {
         MembershipEvent::GroupFounded { group_id, .. } => format!("found group {group_id}"),
         MembershipEvent::Approved { proposal } => format!("approve {proposal}"),
         MembershipEvent::Withdrawn { proposal } => format!("withdraw {proposal}"),
+        // The kind, never the secret. This string is rendered to anyone
+        // holding the API token and printed by `distlib pending`; the key to
+        // the group's catalogue belongs in neither.
+        MembershipEvent::NamespaceCreated { kind, .. } => format!("create the {kind} namespace"),
     }
 }
 

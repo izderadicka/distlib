@@ -35,6 +35,53 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).map_err(CoreError::io("write private file", path))
 }
 
+/// Makes `path` readable by its owner alone, creating it empty if absent.
+///
+/// For a file this process does not write itself — a database another crate
+/// opens, say — where refusing is the wrong answer: a node that has been
+/// running since before the file held anything secret should tighten it and
+/// carry on, not fail to start. Whoever writes the bytes still decides what
+/// goes in; this only decides who may read them.
+#[cfg(unix)]
+pub fn ensure_private(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let Ok(metadata) = fs::metadata(path) else {
+        // Created here rather than by the caller so that it exists at 0600
+        // from the start: creating it first and tightening after would leave a
+        // window in which it is world-readable, and it is the caller's very
+        // next act to write to it.
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .map_err(CoreError::io("create private file", path))?;
+        return Ok(());
+    };
+
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+    // Loud, because it means the file has been readable by somebody else for
+    // as long as it has existed, and tightening it now does not undo that.
+    tracing::warn!(
+        path = %path.display(),
+        mode = format!("{:o}", mode & 0o777),
+        "tightening the permissions on a file that others could read"
+    );
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(CoreError::io("restrict private file", path))
+}
+
+#[cfg(not(unix))]
+pub fn ensure_private(path: &Path) -> Result<()> {
+    warn_unenforced(path);
+    Ok(())
+}
+
 /// Refuses a file that anyone but the owner can read or write.
 #[cfg(unix)]
 pub fn check_permissions(path: &Path) -> Result<()> {

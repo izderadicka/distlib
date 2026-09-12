@@ -8,7 +8,7 @@ use distlib_consensus::{
 };
 use std::net::{Ipv4Addr, SocketAddr};
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, MemberId, Namespace, NamespaceSecret, NodeAddr};
 use iroh::SecretKey;
 // The property tests, and only they, are generated.
 #[cfg(feature = "slow-tests")]
@@ -1766,6 +1766,133 @@ fn founding_is_proposed_against_the_empty_membership() {
 
     propose(&mut state, &alice, founding).unwrap();
     assert!(state.group_id().is_some());
+}
+
+// --- namespaces -------------------------------------------------------------
+
+/// The catalogue's key reaches every member the way membership does, and the
+/// same rule decides who may hand it out.
+#[test]
+fn a_core_member_creates_a_namespace_and_everybody_has_the_key() {
+    let (mut state, alice) = founded();
+    let secret = NamespaceSecret::generate().unwrap();
+
+    assert_eq!(state.namespace(Namespace::Catalogue), None, "none to start");
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::NamespaceCreated {
+            kind: Namespace::Catalogue,
+            secret: secret.clone(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(state.namespace(Namespace::Catalogue), Some(&secret));
+    assert_eq!(
+        state.pending().count(),
+        0,
+        "a core member's own approval is the only one this needs"
+    );
+}
+
+/// A namespace is a thing the group agrees about, so the core group decides
+/// it — the [`MembershipEvent::CoreGroupChanged`] rule, for the same reason.
+#[test]
+fn a_follower_cannot_create_a_namespace() {
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob"),
+        },
+    )
+    .unwrap();
+    assert!(state.is_member(&bob.id) && !state.is_core(&bob.id));
+
+    let refused = propose(
+        &mut state,
+        &bob,
+        MembershipEvent::NamespaceCreated {
+            kind: Namespace::Catalogue,
+            secret: NamespaceSecret::generate().unwrap(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        refused,
+        ConsensusError::NamespaceNotCore { proposer: bob.id }
+    );
+    assert_eq!(state.namespace(Namespace::Catalogue), None);
+}
+
+/// The first key wins. A second would not replace the namespace so much as
+/// abandon it: everything written under the first would still exist and no
+/// longer be anybody's catalogue.
+#[test]
+fn a_namespace_is_created_once_and_keeps_its_first_key() {
+    let (mut state, alice) = founded();
+    let first = NamespaceSecret::generate().unwrap();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::NamespaceCreated {
+            kind: Namespace::Catalogue,
+            secret: first.clone(),
+        },
+    )
+    .unwrap();
+
+    let refused = propose(
+        &mut state,
+        &alice,
+        MembershipEvent::NamespaceCreated {
+            kind: Namespace::Catalogue,
+            secret: NamespaceSecret::generate().unwrap(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        refused,
+        ConsensusError::NamespaceExists {
+            kind: Namespace::Catalogue
+        }
+    );
+    assert_eq!(
+        state.namespace(Namespace::Catalogue),
+        Some(&first),
+        "the key the group has been using is the one it keeps"
+    );
+}
+
+/// The fold may not invent anything, and a secret is the sharpest case: a
+/// state machine that generated one would leave every node holding a
+/// different key to a namespace they all believe they share.
+#[test]
+fn folding_one_entry_twice_reaches_the_same_key() {
+    let (mut state, alice) = founded();
+    let mut elsewhere = state.clone();
+
+    let signed = alice.sign(
+        MembershipEvent::NamespaceCreated {
+            kind: Namespace::Catalogue,
+            secret: NamespaceSecret::generate().unwrap(),
+        },
+        state.changed_at(),
+    );
+    apply_next(&mut state, &signed).unwrap();
+    apply_next(&mut elsewhere, &signed).unwrap();
+
+    assert_eq!(
+        state.namespace(Namespace::Catalogue),
+        elsewhere.namespace(Namespace::Catalogue),
+        "two nodes folding the same entry hold the same key"
+    );
+    assert!(state.namespace(Namespace::Catalogue).is_some());
 }
 
 // --- properties -------------------------------------------------------------

@@ -4,7 +4,7 @@
 //! the only Raft state in the system (§4.2); the catalogue and everything else
 //! sync by other means.
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, MemberId, Namespace, NamespaceSecret, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConsensusError, Result};
@@ -134,13 +134,37 @@ pub enum MembershipEvent {
     /// precisely what the thresholds exist to prevent. Nobody else has anything
     /// to take back.
     ///
+    /// Appended, not inserted — see the note at the end of this enum.
+    Withdrawn { proposal: u64 },
+
+    /// The group gains a document namespace, and everybody gets the key to it.
+    ///
+    /// §5.1 has namespace secrets "distributed via the join flow", and the log
+    /// is that flow: a joiner fetches it before it can sync anything, so the
+    /// log already reaches exactly the members and nobody else. One event
+    /// serves every kind — the catalogue now, `community` in phase 4, `works`
+    /// in §6.2 — rather than one event per namespace.
+    ///
+    /// **Only a core member may propose one**, on the [`Self::CoreGroupChanged`]
+    /// pattern, and the fold refuses a second namespace of the same kind: a
+    /// replacement secret would not merge with what the group already has, it
+    /// would orphan it, silently, on every node at once.
+    ///
+    /// The secret is not a security boundary (see
+    /// [`distlib_core::NamespaceSecret`]); expulsion therefore does not rotate
+    /// it. An expelled member keeps the bytes and is refused at the endpoint,
+    /// which is where membership has always been enforced.
+    ///
     /// New variants go **here, at the end, and nowhere else.** postcard encodes
     /// an enum variant by its declaration index, so inserting one anywhere above
     /// would renumber every variant after it: entries already written would
     /// deserialise as a different event, and every signature's pre-image would
     /// change. Appending leaves both alone, which is why `SIGNING_DOMAIN` has
-    /// not had to move for either of these.
-    Withdrawn { proposal: u64 },
+    /// not had to move for any of these.
+    NamespaceCreated {
+        kind: Namespace,
+        secret: NamespaceSecret,
+    },
 }
 
 /// The longest a member's display name may be, in bytes.
@@ -197,11 +221,13 @@ impl MembershipEvent {
                 within("display_name", &member.display_name, MAX_DISPLAY_NAME)
             }
             Self::MemberExpelled { reason, .. } => within("reason", reason, MAX_REASON),
-            // Nothing free-text: ids, addresses, a byte count and a log index.
+            // Nothing free-text: ids, addresses, a byte count, a log index,
+            // and a namespace secret that is 32 bytes by construction.
             Self::PledgeChanged { .. }
             | Self::CoreGroupChanged { .. }
             | Self::Approved { .. }
-            | Self::Withdrawn { .. } => Ok(()),
+            | Self::Withdrawn { .. }
+            | Self::NamespaceCreated { .. } => Ok(()),
         }
     }
 

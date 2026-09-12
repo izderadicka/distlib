@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_core::{MemberId, NodeAddr, RawMemberId};
+use distlib_core::{MemberId, Namespace, NamespaceSecret, NodeAddr, RawMemberId};
 use distlib_net::{
     AddressBook, AllowlistHooks, AllowlistWriter, Connections, Protocols, Transport, alpn,
     ping::PingProtocol,
@@ -124,6 +124,11 @@ pub enum NodeError {
     /// The event itself was not valid.
     #[error(transparent)]
     Event(#[from] ConsensusError),
+
+    /// Something this node had to produce for itself would not come: today
+    /// only a namespace secret, and only when the OS refuses randomness.
+    #[error(transparent)]
+    Core(#[from] distlib_core::CoreError),
 
     /// A leader was known but could not be got to commit, on every attempt.
     #[error("could not get {leader} to commit the proposal")]
@@ -307,6 +312,12 @@ impl MembershipNode {
         } = transport;
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
+        // The log carries the group's namespace secrets, so the file holding
+        // it is as private as the node key and the api token — and it is redb
+        // that creates it, which has no say over the mode. Tightened rather
+        // than refused: a data directory written before the log carried a
+        // secret is not a misconfiguration, it is an older version of this.
+        distlib_core::private_file::ensure_private(&path)?;
         let db = Arc::new(
             Database::create(&path).map_err(|source| NodeError::Database {
                 path,
@@ -634,9 +645,36 @@ impl MembershipNode {
             MembershipEvent::found(founders, Timestamp::now())?,
             secret_key,
         )
+        .await?;
+
+        // The catalogue namespace, in the entry after the group itself.
+        //
+        // Two entries rather than a field on `GroupFounded`, so that phase 4's
+        // `community` and §6.2's `works` reuse this verbatim — and so that a
+        // group founded before this existed can be given one without rewriting
+        // its first entry.
+        //
+        // If this half fails the group is founded and has no catalogue, which
+        // is recoverable but not by this node on its own: it takes a core
+        // member proposing one. Said plainly rather than left to the caller to
+        // work out from a generic commit failure.
+        self.propose(
+            MembershipEvent::NamespaceCreated {
+                kind: Namespace::Catalogue,
+                secret: NamespaceSecret::generate()?,
+            },
+            secret_key,
+        )
         .await
-        // Founding is entry one and takes no approvals; the index says nothing
-        // the caller does not already know.
+        .inspect_err(|error| {
+            tracing::error!(
+                %error,
+                "the group is founded but has no catalogue namespace; a core member must \
+                 create one before anything can be catalogued"
+            );
+        })
+        // Founding takes no approvals; the indices say nothing the caller does
+        // not already know.
         .map(|_| ())
     }
 

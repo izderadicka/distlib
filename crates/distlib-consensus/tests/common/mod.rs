@@ -122,6 +122,11 @@ impl Peer {
         }
     }
 
+    /// Where this node keeps its files, for the tests that check them.
+    pub fn data_dir(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+
     /// Stops this node and the transport under it, in production's order.
     pub async fn shutdown(&self) {
         self.node.shutdown().await;

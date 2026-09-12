@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{MemberRecord, MembershipEvent};
-use distlib_core::{MemberId, NodeAddr};
+use distlib_core::{MemberId, Namespace, NodeAddr};
 use iroh::SecretKey;
 
 mod common;
@@ -81,6 +81,51 @@ async fn a_founded_group_derives_its_membership_from_the_log() {
     assert!(
         membership.is_core(&founder.id),
         "founders are the initial voters"
+    );
+    founder.shutdown().await;
+}
+
+/// Founding writes two entries, and the second is the catalogue's key.
+///
+/// A group whose founding stopped after the first is founded and has no
+/// catalogue — recoverable, but only by a core member proposing one, so this
+/// pins that founding does not leave the group in that state.
+#[tokio::test]
+async fn founding_also_creates_the_catalogue_namespace() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    wait_for(&founder, "the catalogue namespace", |membership| {
+        membership.namespace(Namespace::Catalogue).is_some()
+    })
+    .await;
+    founder.shutdown().await;
+}
+
+/// The log now carries the group's namespace secrets, so the file holding it
+/// is as private as the node key beside it.
+///
+/// redb creates that file and has no say over its mode, which is why this is
+/// checked rather than assumed.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_log_is_readable_by_its_owner_alone() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    let log = founder.data_dir().join(distlib_consensus::RAFT_DB);
+    let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "group and other must have nothing: {mode:o}"
     );
     founder.shutdown().await;
 }
@@ -1175,6 +1220,19 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
         membership.group_id() == founder.node.membership().group_id()
     })
     .await;
+    assert_eq!(
+        follower
+            .node
+            .membership()
+            .namespace(Namespace::Catalogue)
+            .map(distlib_core::NamespaceSecret::expose),
+        founder
+            .node
+            .membership()
+            .namespace(Namespace::Catalogue)
+            .map(distlib_core::NamespaceSecret::expose),
+        "the key to the catalogue reaches a member the same way membership does"
+    );
     assert_eq!(
         follower.node.membership(),
         founder.node.membership(),

@@ -1,6 +1,6 @@
 //! The error type for everything in `distlib-consensus`.
 
-use distlib_core::MemberId;
+use distlib_core::{MemberId, Namespace};
 use thiserror::Error;
 
 /// The result of any fallible operation in this crate.
@@ -144,6 +144,15 @@ pub enum ConsensusError {
     /// Not a rule the fold enforces: by the time an entry is folded it has
     /// been replicated to every node, so the cost this avoids has already
     /// been paid. It is checked where a proposal enters the log instead.
+    /// A namespace may be created once. A second secret for the same kind
+    /// would not replace the first so much as orphan everything written under
+    /// it, on every node at once.
+    #[error("the group already has a {kind} namespace")]
+    NamespaceExists { kind: Namespace },
+
+    #[error("{proposer} is not a core member and cannot create a namespace")]
+    NamespaceNotCore { proposer: MemberId },
+
     #[error("{field} is {length} bytes, and the limit is {limit}")]
     TooLong {
         /// The field's name, owned because this type is deserialised on the

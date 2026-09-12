@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, MemberId, Namespace, NamespaceSecret, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -80,6 +80,14 @@ pub struct MembershipState {
     /// Keyed by log index because that is what [`MembershipEvent::Approved`]
     /// names, and because it is already unique and already monotonic.
     pending: BTreeMap<u64, Proposal>,
+    /// The document namespaces the group has, and the key to each.
+    ///
+    /// Part of the membership projection rather than a store of its own
+    /// because it arrives the same way membership does — committed to the log,
+    /// folded identically on every node — and because the same rule decides
+    /// who may read it: whoever may read the log. `distlib-sync` opens a
+    /// replica from what is here; nothing else reads it.
+    namespaces: BTreeMap<Namespace, NamespaceSecret>,
     /// Log index of the last entry that changed this state.
     ///
     /// The log's own index rather than a counter of our own: one monotonic
@@ -295,6 +303,12 @@ impl MembershipState {
             }
             MembershipEvent::Approved { .. } if !self.core.contains_key(&proposer) => {
                 Err(ConsensusError::ApproverNotCore { approver: proposer })
+            }
+            // The same rule as the core group's, for the same reason: this is
+            // the group deciding something about itself rather than about one
+            // member, and the core group is who decides those.
+            MembershipEvent::NamespaceCreated { .. } if !self.core.contains_key(&proposer) => {
+                Err(ConsensusError::NamespaceNotCore { proposer })
             }
             _ => Ok(()),
         }
@@ -610,6 +624,16 @@ impl MembershipState {
     ///
     /// What a proposal is made against: a proposer states the value they saw,
     /// and [`Self::apply`] refuses anything proposed against a superseded one.
+    /// The key to one of the group's namespaces, once it has that one.
+    ///
+    /// `None` before the namespace is created — which is every group founded
+    /// before this event existed, and any founding that stopped between the
+    /// two entries it writes. A core node is what fixes that, by proposing
+    /// one; nothing here can, because a fold may not invent a secret.
+    pub fn namespace(&self, kind: Namespace) -> Option<&NamespaceSecret> {
+        self.namespaces.get(&kind)
+    }
+
     pub fn changed_at(&self) -> u64 {
         self.changed_at
     }
@@ -748,6 +772,19 @@ impl MembershipState {
                 // voter as a learner first and promotes it only once it has
                 // caught up.
                 self.core = folded;
+                Ok(())
+            }
+
+            MembershipEvent::NamespaceCreated { kind, secret } => {
+                // First one wins, rather than the last. Approving a second
+                // secret for the same kind would not replace the namespace so
+                // much as abandon it: every node would open a fresh, empty
+                // replica and whatever the group had written would still exist
+                // and no longer be anybody's catalogue.
+                if self.namespaces.contains_key(kind) {
+                    return Err(ConsensusError::NamespaceExists { kind: *kind });
+                }
+                self.namespaces.insert(*kind, secret.clone());
                 Ok(())
             }
 
