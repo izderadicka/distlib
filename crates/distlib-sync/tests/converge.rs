@@ -30,6 +30,9 @@ use tokio::sync::watch;
 struct Node {
     catalogue: Catalogue,
     addr: NodeAddr,
+    /// Kept so one test can break the content store without touching the
+    /// document store beside it.
+    blobs: MemStore,
     router: Router,
 }
 
@@ -70,6 +73,7 @@ impl Node {
         Self {
             catalogue,
             addr,
+            blobs,
             router,
         }
     }
@@ -153,6 +157,49 @@ async fn what_one_member_writes_the_other_reads() {
 
     alice.shutdown().await;
     bob.shutdown().await;
+}
+
+/// A store that is *broken* must not look like a store that is merely behind.
+///
+/// The distinction is the whole of `MissingContent`: a caller polling for an
+/// entry to arrive waits out that error, so anything else going wrong has to
+/// be reported as something else — or a node with a closed, full or corrupt
+/// store waits for ever for content that is never coming. Shutting the store
+/// down is the one breakage a test can stage.
+#[tokio::test]
+async fn a_broken_store_is_not_reported_as_content_on_its_way() {
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let (to_node, sees) = watch::channel(MembershipState::new());
+    let node = Node::start(key.clone(), sees).await;
+    to_node
+        .send(founded(
+            vec![(record(id, "alice"), node.addr.clone())],
+            &key,
+        ))
+        .unwrap();
+    tokio::time::timeout(SOON, node.catalogue.ready())
+        .await
+        .unwrap();
+
+    node.catalogue.put("item/1/title", "Dune").await.unwrap();
+    assert!(node.catalogue.get("item/1/title").await.unwrap().is_some());
+
+    // Only the content store, so the document store beside it still answers:
+    // the entry is found, and its bytes cannot be. This is the state a read
+    // hits while the router is tearing the store down, and it stands in for
+    // every other way a store can be broken — full, corrupt, unreadable.
+    node.blobs.shutdown().await.unwrap();
+
+    match node.catalogue.get("item/1/title").await {
+        Err(distlib_sync::SyncError::MissingContent { .. }) => {
+            panic!("a closed store must not read as content that is still on its way")
+        }
+        Err(_) => {}
+        Ok(value) => panic!("a closed store cannot answer with {value:?}"),
+    }
+
+    node.shutdown().await;
 }
 
 /// The document key is a wire fact: two nodes that compute it differently see

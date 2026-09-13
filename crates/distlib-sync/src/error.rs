@@ -16,14 +16,6 @@ pub type Result<T> = std::result::Result<T, SyncError>;
 /// §5.1's "wrap, don't expose" rule draws for the types.
 #[derive(Debug, Error)]
 pub enum SyncError {
-    /// The content store would not open.
-    #[error("could not open the blob store at {path}")]
-    BlobStore {
-        path: PathBuf,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     /// The replica store would not open.
     #[error("could not open the document store at {path}")]
     DocumentStore {
@@ -43,10 +35,22 @@ pub enum SyncError {
     /// The entry is here and its content is not — usually because it has just
     /// arrived from another member and the download has not finished.
     ///
-    /// A moment rather than a fault, on a node that is catching up; a fault
-    /// only if it persists. See [`crate::Catalogue::get`].
-    #[error("the catalogue holds an entry whose content has not arrived here")]
-    MissingContent {
+    /// **A state, not a failure**, which is why it carries no source: it is
+    /// read from [`iroh_blobs::api::proto::BlobStatus`] rather than inferred
+    /// from something going wrong. A moment on a node that is catching up; a
+    /// fault only if it persists. See [`crate::Catalogue::get`].
+    #[error("the content of catalogue entry {hash} has not arrived on this node")]
+    MissingContent { hash: String },
+
+    /// The content store itself failed.
+    ///
+    /// Distinct from [`Self::MissingContent`] on purpose: a caller polling for
+    /// an entry to arrive treats *that* as "not yet", and a store that is
+    /// broken, closed or out of disk must not look like one that is merely
+    /// behind — it would be waited on for ever.
+    #[error("the catalogue's content store failed while it was {doing}")]
+    Content {
+        doing: &'static str,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -61,6 +65,17 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    /// Wraps a content-store failure, saying what was being attempted.
+    pub(crate) fn content<E>(doing: &'static str) -> impl Fn(E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        move |source| Self::Content {
+            doing,
+            source: Box::new(source),
+        }
+    }
+
     /// Wraps an iroh-docs failure, saying what was being attempted.
     pub(crate) fn docs(doing: &'static str) -> impl Fn(anyhow::Error) -> Self {
         move |source| Self::Docs {

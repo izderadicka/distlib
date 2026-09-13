@@ -24,7 +24,7 @@ use distlib_consensus::MembershipState;
 use distlib_core::{GroupId, MemberId};
 use distlib_net::{Protocols, Transport};
 use iroh::{EndpointAddr, SecretKey};
-use iroh_blobs::{BlobsProtocol, api::Store as BlobStore};
+use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
 use iroh_docs::{
     Author, AuthorId, Capability, NamespaceSecret,
     api::Doc,
@@ -234,15 +234,26 @@ impl Catalogue {
         else {
             return Ok(None);
         };
-        let content = self
-            .inner
-            .blobs
-            .store()
-            .get_bytes(entry.content_hash())
+        // Asked, rather than inferred from a failed read. `get_bytes` reports
+        // seven kinds of trouble and only one of them is "we do not have this
+        // yet"; a caller polling for an entry to arrive would wait for ever on
+        // the other six. So the state comes from the store's own answer, and
+        // anything that goes wrong on the way stays an error.
+        let blobs = self.inner.blobs.store().blobs();
+        let hash = entry.content_hash();
+        let status = blobs.status(hash).await.map_err(SyncError::content(
+            "asked whether an entry's content is here",
+        ))?;
+        if !matches!(status, BlobStatus::Complete { .. }) {
+            return Err(SyncError::MissingContent {
+                hash: hash.to_string(),
+            });
+        }
+
+        let content = blobs
+            .get_bytes(hash)
             .await
-            .map_err(|source| SyncError::MissingContent {
-                source: source.into(),
-            })?;
+            .map_err(SyncError::content("reading an entry's content"))?;
         Ok(Some(content))
     }
 
