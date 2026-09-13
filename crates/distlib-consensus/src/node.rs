@@ -1227,22 +1227,22 @@ async fn join_topic(
     // included, since they are the ones who will answer for the group.
     let (sender, receiver) = topic.split();
 
-    // The listener pokes the announcer when a neighbour arrives. That is what
-    // makes this self-healing without a timer: a node that joins late is a new
-    // neighbour to everyone already present, and they answer by saying where
-    // they are.
-    let (arrivals, arrived) = watch::channel(0);
-
     // None of these three returns while the node is running; the task is
     // stopped by being aborted, like the rest of the node's tasks.
     tokio::join!(
-        gossip::announce_address(&endpoint, &secret, &state_machine, &sender, arrived),
+        gossip::announce_address(
+            &endpoint,
+            &secret,
+            &state_machine,
+            &sender,
+            directory.learned(),
+        ),
         async {
             if is_core {
                 gossip::announce_log(state_machine.clone(), &sender).await;
             }
         },
-        gossip::listen(receiver, hints, directory, is_core, arrivals),
+        gossip::listen(receiver, hints, directory, is_core),
     );
 }
 

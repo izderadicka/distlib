@@ -185,7 +185,7 @@ async fn ever_arrives(catalogue: &distlib_sync::Catalogue, key: &str, window: Du
 
 /// One core node and two followers, every one of them a member.
 struct Group {
-    _dir: TempDir,
+    dir: TempDir,
     alice: Runtime,
     alice_key: SecretKey,
     bob: Runtime,
@@ -275,7 +275,7 @@ async fn a_group_with_two_followers() -> Group {
     }
 
     Group {
-        _dir: dir,
+        dir,
         alice,
         alice_key,
         bob,
@@ -573,6 +573,70 @@ async fn an_expelled_member_stops_receiving_entries() {
         b"The Word for World Is Forest"
     );
 
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// **A member that joins long after everyone else still learns where they are.**
+///
+/// The case the `NeighborUp` trigger exists for, and the one no other test here
+/// reaches. Bob announced where he was when he joined; the latecomer was not in
+/// the swarm to hear it, and bob has no reason to say it again — his address has
+/// not changed and nothing is on a timer. What makes him speak is the newcomer's
+/// arrival making them neighbours.
+///
+/// **Why the wait is load-bearing rather than padding.** Early in a node's life
+/// iroh is still discovering its own addresses, and every change prompts a
+/// re-announcement; a member joining during that churn learns its peers by
+/// accident. That is not hypothetical — it is why an earlier version of this
+/// file still passed with the arrival trigger deleted. Letting the group settle
+/// first removes the accident, so what is left is the mechanism.
+#[tokio::test]
+async fn a_late_joiner_still_learns_where_the_others_are() {
+    let group = a_group_with_two_followers().await;
+    let bob_id = MemberId::from(group.bob.endpoint().id());
+    let alice_id = MemberId::from(group.alice.endpoint().id());
+
+    // Long enough for address discovery to quiesce, so that a re-announcement
+    // can only be the answer to an arrival.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    let latecomer_key = SecretKey::generate();
+    let latecomer_id = MemberId::from(latecomer_key.public());
+    group
+        .alice
+        .node()
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: record(latecomer_id, "latecomer"),
+            },
+            &group.alice_key,
+        )
+        .await
+        .unwrap();
+
+    let latecomer = Runtime::start(
+        &latecomer_key,
+        &following(alice_id, &bound(&group.alice)),
+        &DataDir::new(group.dir.path().join("latecomer")),
+    )
+    .await
+    .unwrap();
+
+    let found = tokio::time::timeout(PATIENTLY, async {
+        loop {
+            if let Some(addr) = latecomer.node().known_addresses().address_of(bob_id) {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a member joining late must still learn where the others are");
+    assert_eq!(found, NodeAddr::from(&group.bob.endpoint().addr()));
+
+    latecomer.shutdown().await;
     group.carol.shutdown().await;
     group.bob.shutdown().await;
     group.alice.shutdown().await;

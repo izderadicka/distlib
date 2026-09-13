@@ -136,22 +136,28 @@ const LEAST_BETWEEN_ANNOUNCEMENTS: Duration = Duration::from_secs(5);
 /// carry — `MemberRecord` has no address field and Raft's node map holds voters
 /// — so if a follower does not say where it is, nobody can find out (P2-14).
 ///
-/// **Three triggers, no timer.** Joining the topic, this endpoint's own address
-/// changing, and a neighbour arriving. The last is what makes the whole thing
-/// self-healing without a periodic broadcast: a node that joins late, or a core
-/// node that comes back after a restart, is a new neighbour to everyone already
-/// present, and they answer by saying where they are. A node that misses an
-/// announcement therefore waits for the next arrival rather than for a timer.
+/// **Three triggers, no timer.** Joining the topic; this endpoint's own address
+/// changing; and **hearing where somebody new is**.
 ///
-/// What it cannot do is reach somebody who never becomes anyone's neighbour.
-/// That is what the core group's directory is for, and it is a separate piece
-/// of work.
+/// That last one is what carries a late joiner, and it took a failing test to
+/// find out. A neighbour arriving sounds like the answer and is not — that was
+/// tried first: two members who cannot yet resolve each other never *become*
+/// neighbours, so in a group whose swarm is a star around one core node, nobody
+/// downstream ever sees the newcomer arrive. Deleting that trigger broke no
+/// test, so it is not here.
+///
+/// What does reach everyone is the newcomer's own announcement, relayed. So
+/// hearing about somebody is taken as a reason to say where we are: somebody
+/// this node has only just heard of has probably not heard of this node either.
+///
+/// Deliberately symmetric, and it terminates — an announcement is worth relaying
+/// once, a member is new once, and the floor below bounds the rate regardless.
 pub async fn announce_address(
     endpoint: &Endpoint,
     secret: &SecretKey,
     state_machine: &StateMachineStore,
     sender: &GossipSender,
-    mut arrivals: watch::Receiver<u64>,
+    mut newcomers: watch::Receiver<u64>,
 ) {
     let mut addresses = endpoint.watch_addr().stream();
 
@@ -181,8 +187,8 @@ pub async fn announce_address(
                 tracing::debug!("the endpoint stopped reporting its address; announcing no more");
                 return;
             },
-            arrived = arrivals.changed() => if arrived.is_err() {
-                tracing::debug!("nothing is listening to the topic any more; announcing no more");
+            newcomer = newcomers.changed() => if newcomer.is_err() {
+                tracing::debug!("nothing is learning addresses any more; announcing no more");
                 return;
             },
         }
@@ -226,7 +232,6 @@ pub async fn listen(
     hints: watch::Sender<Hint>,
     directory: Directory,
     is_core: bool,
-    arrivals: watch::Sender<u64>,
 ) {
     while let Some(event) = receiver.next().await {
         let hint = match event {
@@ -270,15 +275,7 @@ pub async fn listen(
             // The first moment this node can hear a given peer. Anything
             // announced before now went past it, and there is no way to know
             // what — so look.
-            //
-            // **And say where we are.** A neighbour arriving is somebody who
-            // may never have heard this node's address, and answering an
-            // arrival is what makes the whole scheme self-healing without any
-            // node broadcasting on a timer.
-            Ok(Event::NeighborUp(_)) => {
-                arrivals.send_modify(|arrivals| *arrivals = arrivals.wrapping_add(1));
-                Hint::MayHaveMissed
-            }
+            Ok(Event::NeighborUp(_)) => Hint::MayHaveMissed,
 
             // A neighbour has gone. Whatever it would have relayed goes
             // unheard, so this is the same "look" as any other gap — and it is
