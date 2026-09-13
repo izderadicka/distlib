@@ -14,7 +14,7 @@ use std::{
 };
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
-use distlib_core::{MemberId, NodeAddr};
+use distlib_core::{ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr};
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, catalogue_key};
 use iroh::{
@@ -23,7 +23,7 @@ use iroh::{
     protocol::Router,
 };
 use iroh_blobs::store::mem::MemStore;
-use iroh_gossip::net::Gossip;
+use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use tokio::sync::watch;
 
 /// A member with a catalogue, and the transport under it.
@@ -41,7 +41,12 @@ impl Node {
         let endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .secret_key(secret.clone())
-            .alpns(distlib_sync::alpns())
+            .alpns(
+                distlib_sync::alpns()
+                    .into_iter()
+                    .chain([GOSSIP_ALPN.to_vec()])
+                    .collect(),
+            )
             .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .unwrap()
             .bind()
@@ -59,7 +64,7 @@ impl Node {
         let catalogue = Catalogue::start(
             Transport {
                 endpoint: endpoint.clone(),
-                gossip,
+                gossip: gossip.clone(),
             },
             (*blobs).clone(),
             None,
@@ -68,7 +73,22 @@ impl Node {
         )
         .await
         .unwrap();
-        let router = distlib_net::serve(endpoint, catalogue.protocols());
+        // **Gossip is served here, not by the catalogue.** A document's live
+        // updates ride the process's gossip swarm — without it a node gets
+        // only what the first reconciliation brought and never hears another
+        // word. In production `MembershipNode` serves it, since one ALPN has
+        // one owner; here the test has to.
+        let router = distlib_net::serve(
+            endpoint,
+            catalogue
+                .protocols()
+                .into_iter()
+                .chain([(
+                    GOSSIP_ALPN.to_vec(),
+                    Box::new(gossip.clone()) as Box<dyn iroh::protocol::DynProtocolHandler>,
+                )])
+                .collect(),
+        );
 
         Self {
             catalogue,
@@ -154,6 +174,123 @@ async fn what_one_member_writes_the_other_reads() {
     .await
     .expect("what alice wrote must reach bob");
     assert_eq!(&read[..], b"Dune");
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// A whole item, written on one node and read back on the other.
+///
+/// The field-level test of what `what_one_member_writes_the_other_reads`
+/// proves for a single key: an item is a set of entries, and the set survives
+/// the crossing intact.
+#[tokio::test]
+async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
+    let alice_key = SecretKey::generate();
+    let bob_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let bob_id = MemberId::from(bob_key.public());
+
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let alice = Node::start(alice_key.clone(), alice_sees).await;
+    let bob = Node::start(bob_key, bob_sees).await;
+
+    let founding = founded(
+        vec![
+            (record(alice_id, "alice"), alice.addr.clone()),
+            (record(bob_id, "bob"), bob.addr.clone()),
+        ],
+        &alice_key,
+    );
+    to_alice.send(founding.clone()).unwrap();
+    to_bob.send(founding).unwrap();
+    tokio::time::timeout(SOON, alice.catalogue.ready())
+        .await
+        .unwrap();
+    tokio::time::timeout(SOON, bob.catalogue.ready())
+        .await
+        .unwrap();
+
+    let chapters = [[11u8; 32], [12u8; 32]];
+    // The id is the fingerprint of the content files, which is what makes two
+    // members adding the same files converge on one item (§5.2, P0-7).
+    let mut item = Item::new(ItemId::from_content_hashes(&chapters));
+    item.kind = Some(ItemKind::Audiobook);
+    item.title = Some("The Dispossessed".to_owned());
+    item.authors = Some(vec!["Ursula K. Le Guin".to_owned()]);
+    item.year = Some(1974);
+    for (index, chapter) in chapters.iter().enumerate() {
+        item.files.insert(
+            ContentHash::from_bytes(*chapter),
+            FileRecord {
+                role: FileRole::Content,
+                format: "mp3".to_owned(),
+                size: 4_200_000,
+                filename: format!("{:02}.mp3", index + 1),
+                seq: Some(index as u32 + 1),
+                disc: None,
+                title: None,
+                duration: Some(1_800),
+            },
+        );
+    }
+    assert_eq!(item.fingerprint(), Some(item.id), "it is what it contains");
+
+    alice.catalogue.write(&item).await.unwrap();
+
+    let read = tokio::time::timeout(SOON, async {
+        loop {
+            // An item arrives entry by entry, so a read during the crossing is
+            // a partial item rather than a failure — wait for the whole thing.
+            match bob.catalogue.item(item.id).await {
+                Ok(Some(read)) if read == item => return read,
+                Ok(_) => {}
+                Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Err(error) => panic!("reading the catalogue failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the whole item must reach bob");
+
+    assert_eq!(read.title.as_deref(), Some("The Dispossessed"));
+    assert_eq!(read.files.len(), 2);
+
+    // **A second write, after the first has already crossed.** The first one
+    // could ride the reconciliation two nodes do when they start syncing; this
+    // one cannot, so it pins the live path — which is the half that goes
+    // quietly missing when the document's gossip swarm is not connected.
+    let mut correction = Item::new(item.id);
+    correction.description = Some("Two planets, one wall.".to_owned());
+    alice.catalogue.write(&correction).await.unwrap();
+
+    tokio::time::timeout(SOON, async {
+        loop {
+            if let Ok(Some(read)) = bob.catalogue.item(item.id).await
+                && read.description == correction.description
+            {
+                assert_eq!(
+                    read.title.as_deref(),
+                    Some("The Dispossessed"),
+                    "a one-field write must not disturb the fields beside it"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a later edit must reach bob too");
+    assert_eq!(
+        bob.catalogue
+            .item(ItemId::from_bytes([99u8; 32]))
+            .await
+            .unwrap(),
+        None,
+        "an item nobody has written is not an empty item"
+    );
 
     alice.shutdown().await;
     bob.shutdown().await;

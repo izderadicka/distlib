@@ -5,6 +5,7 @@
 //! deliberately has no knowledge of transport, storage or consensus.
 
 pub mod addr;
+pub mod catalogue;
 pub mod config;
 pub mod error;
 pub mod id;
@@ -15,8 +16,9 @@ pub mod ticket;
 pub mod token;
 
 pub use addr::{BadRelayUrl, NodeAddr};
+pub use catalogue::{Absorbed, Field, FileRecord, FileRole, Item, ItemKind, Key, Series};
 pub use config::{ApiConfig, Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;
-pub use id::{GroupId, ItemId, MemberId, RawMemberId};
+pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};
 pub use paths::DataDir;
 pub use ticket::Ticket;

@@ -620,10 +620,16 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > - **2a-2a — the catalogue converges** *(done, deltas P2-11 and P2-12)*. The dependencies,
   >   `distlib-sync`, the derived document, the blob store, both handlers on the process's one
   >   router, `DataDir` accessors for `docs/` and `blobs/`, and two nodes agreeing on a key/value.
-  > - **2a-2b — the catalogue carries items.** §5.2's record types and field-level key encoding in
-  >   `distlib-core`, the typed write path, the projection stream over `LiveEvent`, the address-book
-  >   question below, and the acceptance runs: two followers with relays disabled, and a member
-  >   expelled mid-sync.
+  > - **2a-2b — the catalogue carries items** *(done, delta P2-13)*. §5.2's record types and
+  >   field-level key encoding in `distlib-core`, and the typed write and read path.
+  > - **2a-2c — the catalogue reaches exactly the members.** The address-book question below, and
+  >   the two acceptance runs: two followers with relays disabled, and a member expelled mid-sync.
+  >
+  > **The projection stream moves to 2a-3, with its consumer.** Its shape is decided by what the
+  > SQLite projection needs, and that turns on a question only a consumer can answer: an entry
+  > arrives before its content does, so a stream either emits changes the reader cannot yet read,
+  > or holds them until `ContentReady` and carries the bookkeeping for that. Building it here would
+  > be guessing at which, one PR before the answer exists.
   >
   > The address-book widening keeps its "verify the failure first" instruction, and 2a-2a leaves it
   > verifiable: `start_sync` is given the core group's addresses, which the log always carries, and
