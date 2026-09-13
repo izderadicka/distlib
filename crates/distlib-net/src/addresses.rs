@@ -20,20 +20,33 @@
 //! we cannot reach into how a protocol we did not write dials, but we can
 //! change what its endpoint is able to resolve.
 //!
-//! **It holds core nodes only, and that is enough.** Those are the only
-//! addresses the system records anywhere: a `MemberRecord` carries an id, a name
-//! and a pledge, and Raft's node map — which does carry addresses — holds only
-//! voters. A follower's address is written nowhere. It does not need to be:
-//! iroh-gossip installs a lookup of its own and fills it from the `PeerData`
-//! peers exchange in-band, so once a node is *in* the swarm the swarm supplies
-//! the rest, followers included. A follower dials a core node, the connection is
-//! bidirectional, and the core node broadcasts back down it without ever needing
-//! to dial one.
+//! **It holds core nodes only.** Those are the only addresses the system
+//! records anywhere: a `MemberRecord` carries an id, a name and a pledge, and
+//! Raft's node map — which does carry addresses — holds only voters. A
+//! follower's address is written nowhere.
 //!
 //! So this is bootstrap, and only bootstrap: the first contact, which can only
 //! be a core node, before anybody has told this node anything. That is exactly
 //! what was deadlocked — a node could not join the swarm without resolving an
 //! id, and could not learn an address without joining the swarm.
+//!
+//! **What this does not do, corrected here because this comment used to claim
+//! otherwise.** It said a follower's address need not be recorded, because
+//! iroh-gossip installs a lookup of its own and fills it from the `PeerData`
+//! peers exchange in-band, so being in the swarm was enough. The lookup is
+//! real and is installed on this endpoint — but it is filled only from the
+//! peer data carried on Join and ForwardJoin messages, and two followers that
+//! joined through the same core node do not thereby learn each other. Measured
+//! rather than reasoned about: a follower asked to dial another follower by
+//! bare id answers `No addressing information available`, with the group
+//! converging normally at the time. See `distlib`'s
+//! `two_followers_keep_converging_once_the_core_node_is_gone` and P2-14.
+//!
+//! The consequence is that **a follower reaches the group through core nodes**,
+//! which is where the catalogue's traffic goes. That is not fatal — a group
+//! whose core nodes are all unreachable cannot fetch the membership log either
+//! — but it is a property of the design rather than an accident, and it was
+//! not a decision anybody took.
 //!
 //! Not a security boundary, and it does not need to be. Being resolvable is not
 //! being admitted: [`crate::hooks::AllowlistHooks`] refuses a peer that is not a
