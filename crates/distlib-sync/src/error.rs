@@ -62,7 +62,7 @@ pub enum SyncError {
 
 impl SyncError {
     /// Wraps an iroh-docs failure, saying what was being attempted.
-    pub(crate) fn docs(doing: &'static str) -> impl Fn(anyhow::Error) -> Self + use<> {
+    pub(crate) fn docs(doing: &'static str) -> impl Fn(anyhow::Error) -> Self {
         move |source| Self::Docs {
             doing,
             source: source.into(),

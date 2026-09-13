@@ -199,6 +199,7 @@ impl Catalogue {
         // before this call is seen by the first check rather than waited for.
         while open.borrow_and_update().is_none() {
             if open.changed().await.is_err() {
+                tracing::error!("the catalogue task ended before the catalogue opened");
                 return;
             }
         }
