@@ -412,10 +412,12 @@ async fn a_follower_cannot_resolve_another_follower() {
         .endpoint()
         .connect(group.bob.endpoint().id(), distlib_net::alpn::PING)
         .await;
-    let refused = reached.err().expect(
-        "P2-14 looks fixed: a follower resolved a follower. Write the convergence test \
-                 that belongs here — alice stopped, bob writes, carol reads — and update P2-14.",
-    );
+    let Err(refused) = reached else {
+        panic!(
+            "P2-14 looks fixed: a follower resolved a follower. Write the convergence test \
+             that belongs here — alice stopped, bob writes, carol reads — and update P2-14."
+        )
+    };
     assert!(
         format!("{refused}").contains("No addressing information"),
         "the gap is specifically that there is no address to be had; got {refused}"
