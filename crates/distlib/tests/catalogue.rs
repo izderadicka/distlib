@@ -143,19 +143,36 @@ async fn read(catalogue: &distlib_sync::Catalogue, key: &str) -> Vec<u8> {
 }
 
 /// [`read`] with the bound named, for reads that outlast [`SOON`].
+///
+/// On giving up it says *which* of the two ways it was still waiting, because
+/// they have different causes and a bare timeout sends you log-diving to find
+/// out which: no entry at all means the document did not reach this node, while
+/// an entry whose content has not landed means the document arrived and the
+/// blob behind it did not.
 async fn read_upto(catalogue: &distlib_sync::Catalogue, key: &str, bound: Duration) -> Vec<u8> {
-    tokio::time::timeout(bound, async {
+    let last = std::sync::Arc::new(std::sync::Mutex::new("nothing was read"));
+    let seen = std::sync::Arc::clone(&last);
+    tokio::time::timeout(bound, async move {
         loop {
-            match catalogue.get(key).await {
+            let outcome = match catalogue.get(key).await {
                 Ok(Some(value)) => return value.to_vec(),
-                Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Ok(None) => "no entry for that key has reached this node",
+                Err(distlib_sync::SyncError::MissingContent { .. }) => {
+                    "the entry is here, its content has not arrived"
+                }
                 Err(error) => panic!("reading the catalogue failed: {error}"),
-            }
+            };
+            *seen.lock().expect("not poisoned") = outcome;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("`{key}` never arrived"))
+    .unwrap_or_else(|_| {
+        panic!(
+            "`{key}` never arrived within {bound:?}; last seen: {}",
+            last.lock().expect("not poisoned")
+        )
+    })
 }
 
 /// Whether a key ever shows up, given a window to do it in.

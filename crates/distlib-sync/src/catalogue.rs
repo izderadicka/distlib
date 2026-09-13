@@ -25,8 +25,8 @@ use std::{
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId, NodeAddr};
-use distlib_net::{Protocols, Transport};
+use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
+use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, SecretKey};
 use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
@@ -172,7 +172,7 @@ impl Catalogue {
             membership,
             MemberId::from(key.public()),
             opened,
-            transport.directory.learned(),
+            transport.directory.clone(),
         ));
 
         Ok(Self {
@@ -384,12 +384,13 @@ async fn open_when_founded(
     mut membership: watch::Receiver<MembershipState>,
     me: MemberId,
     opened: watch::Sender<Option<Doc>>,
-    learned: watch::Receiver<u64>,
+    directory: Directory,
 ) {
+    let learned = directory.learned();
     let (group, peers) = loop {
         let seen = membership.borrow_and_update().clone();
         if let Some(group) = seen.group_id() {
-            break (group, sync_with(&seen, me));
+            break (group, sync_with(&seen, me, &directory));
         }
         if membership.changed().await.is_err() {
             return;
@@ -429,7 +430,7 @@ async fn open_when_founded(
     // Offering the set again once an address is learned is what closes that,
     // and `start_sync` is built for it: it skips the open if the document is
     // already syncing and adds whatever peers it is given.
-    offer_peers_as_they_are_learned(doc, membership, me, learned, opened).await;
+    offer_peers_as_they_are_learned(doc, membership, me, learned, opened, directory).await;
 }
 
 /// How often the document's peers are offered again regardless.
@@ -444,6 +445,21 @@ async fn open_when_founded(
 /// connection attempt.
 const OFFER_AGAIN: Duration = Duration::from_secs(15);
 
+/// The least time between two offers of the document's peers.
+///
+/// The learned-address signal fires once per member learned, and a node joining
+/// a group learns several within a moment of each other. Every offer makes
+/// iroh-docs open a sync with *every* peer, and when two nodes sync at each
+/// other one aborts the other's incoming attempt — `AlreadySyncing`, handled
+/// there as "do nothing, our outgoing sync is in progress". So an unthrottled
+/// burst spends the group's time on handshakes that abort each other, which is
+/// worst exactly where it is least affordable: a small, busy machine.
+///
+/// A floor coalesces the burst without losing it. The signal is a watch, which
+/// keeps only its latest value, so what is waiting afterwards is "there was
+/// news" — however much news there was.
+const LEAST_BETWEEN_OFFERS: Duration = Duration::from_secs(2);
+
 /// Re-offers the document's peers, promptly when there is news and slowly
 /// regardless.
 ///
@@ -455,6 +471,7 @@ async fn offer_peers_as_they_are_learned(
     me: MemberId,
     mut learned: watch::Receiver<u64>,
     opened: watch::Sender<Option<Doc>>,
+    directory: Directory,
 ) {
     // Cleared if the directory goes away, which disables that arm rather than
     // stopping: a receiver whose sender is gone reports so immediately and for
@@ -479,41 +496,52 @@ async fn offer_peers_as_they_are_learned(
             () = tokio::time::sleep(OFFER_AGAIN) => {}
         }
 
-        let peers = sync_with(&membership.borrow_and_update().clone(), me);
+        let peers = sync_with(&membership.borrow_and_update().clone(), me, &directory);
         if let Err(error) = doc.start_sync(peers).await {
             // Not fatal: whatever was already syncing goes on, and the next
             // address learned brings this round again.
             tracing::debug!(%error, "could not offer the catalogue's peers again");
         }
+        tokio::time::sleep(LEAST_BETWEEN_OFFERS).await;
     }
 }
 
-/// The members to start syncing with: **everyone**, minus this node.
-///
-/// Core nodes come with an address, because the log carries theirs. Everyone
-/// else is named by id alone — which is meaningful rather than broken, and is
-/// precisely what iroh-docs does with its own remembered peers: it stores them
-/// as bare keys and hands them over with the note that "endpoint address lookup
-/// might find addresses for them". Ours now does, for every member, because
-/// members announce where they are (P2-14). Before that, naming a follower here
-/// would have been naming somebody unreachable.
+/// The members to start syncing with: everyone this node can actually reach.
 ///
 /// The whole membership rather than the core group, because the core group is
 /// not the shape of the catalogue: what one follower writes has to reach
 /// another, and it used to do so only by passing through a core node. Handing
 /// the document every member is what lets two followers find each other, and
 /// what keeps them in touch when the node that introduced them goes away.
-fn sync_with(membership: &MembershipState, me: MemberId) -> Vec<EndpointAddr> {
+///
+/// **But only members there is an address for**, which is the part that had to
+/// be learned. iroh-docs will accept a peer named by id alone — it does that
+/// with its own remembered peers — and passing one costs a dial that cannot
+/// succeed, a gossip join that cannot complete, and the retries under both. At
+/// the moment a node opens its catalogue that is *every* follower, since
+/// addresses arrive by announcement afterwards. Handing them over anyway made
+/// the group slower to converge at exactly the moment it had the most to do,
+/// which showed up as a test that passed alone and failed on a loaded
+/// two-core machine.
+///
+/// So the set grows instead: the core group at first, because the log carries
+/// their addresses, and every other member as its address is heard. That is
+/// what [`offer_peers_as_they_are_learned`] is for.
+fn sync_with(
+    membership: &MembershipState,
+    me: MemberId,
+    directory: &Directory,
+) -> Vec<EndpointAddr> {
     let core = membership.core();
-    let by_id_alone = NodeAddr::default();
     membership
         .allowlist()
         .filter(|member| *member != me)
         .filter_map(|member| {
-            core.get(&member)
-                .unwrap_or(&by_id_alone)
-                .to_endpoint_addr(member)
-                .ok()
+            let addr = core
+                .get(&member)
+                .cloned()
+                .or_else(|| directory.address_of(member))?;
+            addr.to_endpoint_addr(member).ok()
         })
         .collect()
 }
