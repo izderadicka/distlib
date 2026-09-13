@@ -62,10 +62,7 @@ impl Node {
         // restart, and `FsStore` spawns a runtime of its own per node.
         let blobs = MemStore::new();
         let catalogue = Catalogue::start(
-            Transport {
-                endpoint: endpoint.clone(),
-                gossip: gossip.clone(),
-            },
+            Transport::new(endpoint.clone(), gossip.clone()).unwrap(),
             (*blobs).clone(),
             None,
             &secret,

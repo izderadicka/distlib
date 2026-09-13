@@ -22,15 +22,21 @@
 //! each of them to keep a subscription open, or to poll briskly, does not
 //! survive that. Epidemic broadcast does, which is why the design names it.
 
+use std::time::Duration;
+
 use bytes::Bytes;
-use distlib_core::GroupId;
+use distlib_core::{GroupId, NodeAddr, SignedAddress};
 use futures_lite::StreamExt as _;
+use iroh::{Endpoint, SecretKey, Watcher as _};
 use iroh_gossip::{
     api::{Event, GossipReceiver, GossipSender},
     proto::TopicId,
 };
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
+
+use distlib_net::Directory;
 
 use crate::raft::state_machine::StateMachineStore;
 
@@ -66,6 +72,16 @@ pub type Hints = watch::Receiver<Hint>;
 enum Announcement {
     /// The sender has applied the log up to this index.
     Applied { up_to: u64 },
+
+    /// Where a member says it can be reached.
+    ///
+    /// **Signed, unlike [`Self::Applied`] beside it**, and the asymmetry is the
+    /// point. Lying about the log costs a peer one wasted fetch; an address is
+    /// the thing other nodes will *dial*. And the check that would otherwise be
+    /// free is unavailable — `Message::delivered_from` names the neighbour that
+    /// relayed a message, not the member that made it, so an epidemic broadcast
+    /// cannot attribute anything by itself. See [`SignedAddress`].
+    ReachableAt(Box<SignedAddress>),
 }
 
 /// The gossip topic a group talks on.
@@ -81,7 +97,7 @@ pub fn topic_for(group: GroupId) -> TopicId {
 /// Runs on core nodes. Triggered by the membership rather than by every entry,
 /// because that is what a follower is waiting to hear about — Raft's blank
 /// entries move the log without moving anything a follower would derive.
-pub async fn announce(state_machine: StateMachineStore, sender: GossipSender) {
+pub async fn announce_log(state_machine: StateMachineStore, sender: &GossipSender) {
     let mut memberships = state_machine.subscribe();
     loop {
         // Read before waiting, so a node that applied entries before this task
@@ -89,18 +105,7 @@ pub async fn announce(state_machine: StateMachineStore, sender: GossipSender) {
         // change.
         let up_to = state_machine.last_applied_index();
         if up_to > 0 {
-            match postcard::to_stdvec(&Announcement::Applied { up_to }) {
-                Ok(encoded) => {
-                    if let Err(error) = sender.broadcast(Bytes::from(encoded)).await {
-                        // Not fatal and not retried: the followers' own poll is
-                        // the guarantee, and this is the optimisation on top.
-                        tracing::debug!(%error, "could not announce the log");
-                    } else {
-                        tracing::debug!(up_to, "announced the log");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "could not encode an announcement"),
-            }
+            broadcast(sender, &Announcement::Applied { up_to }).await;
         }
 
         if memberships.changed().await.is_err() {
@@ -114,20 +119,137 @@ pub async fn announce(state_machine: StateMachineStore, sender: GossipSender) {
     }
 }
 
-/// Wakes the follow loop whenever somebody announces a longer log.
+/// The least time between two address announcements from this node.
 ///
-/// Runs on followers. Deliberately ignores what the announcement *says* beyond
-/// "there may be more": the follow loop knows its own cursor, and acting on a
-/// number a peer supplied would be trusting one.
-pub async fn listen(mut receiver: GossipReceiver, hints: watch::Sender<Hint>) {
+/// A floor rather than a schedule: nothing announces on a timer. It exists
+/// because one of the triggers is a neighbour arriving, and in a group the size
+/// §2 allows for — thousands of members against three to seven core nodes —
+/// neighbours arrive in bursts. Without the floor, a node joining a busy swarm
+/// would broadcast once per neighbour it acquires.
+const LEAST_BETWEEN_ANNOUNCEMENTS: Duration = Duration::from_secs(5);
+
+/// Tells the group where this node can be reached, and keeps telling it.
+///
+/// Runs on **every** member, core and follower alike, which is new: a follower
+/// used to hold only the receiving half of the topic and never say anything.
+/// It has to now, because a follower's address is the one thing the log cannot
+/// carry — `MemberRecord` has no address field and Raft's node map holds voters
+/// — so if a follower does not say where it is, nobody can find out (P2-14).
+///
+/// **Three triggers, no timer.** Joining the topic; this endpoint's own address
+/// changing; and **hearing where somebody new is**.
+///
+/// That last one is what carries a late joiner, and it took a failing test to
+/// find out. A neighbour arriving sounds like the answer and is not — that was
+/// tried first: two members who cannot yet resolve each other never *become*
+/// neighbours, so in a group whose swarm is a star around one core node, nobody
+/// downstream ever sees the newcomer arrive. Deleting that trigger broke no
+/// test, so it is not here.
+///
+/// What does reach everyone is the newcomer's own announcement, relayed. So
+/// hearing about somebody is taken as a reason to say where we are: somebody
+/// this node has only just heard of has probably not heard of this node either.
+///
+/// Deliberately symmetric, and it terminates — an announcement is worth relaying
+/// once, a member is new once, and the floor below bounds the rate regardless.
+pub async fn announce_address(
+    endpoint: &Endpoint,
+    secret: &SecretKey,
+    state_machine: &StateMachineStore,
+    sender: &GossipSender,
+    mut newcomers: watch::Receiver<u64>,
+) {
+    let mut addresses = endpoint.watch_addr().stream();
+
+    loop {
+        // iroh's own answer about where this node is, which is not the same as
+        // what it bound: a bound socket may be `0.0.0.0`, and what peers need
+        // is what iroh has actually discovered about itself.
+        let addr = NodeAddr::from(&endpoint.addr());
+        if !addr.is_empty() {
+            match SignedAddress::sign(secret, addr, state_machine.position()) {
+                Ok(signed) => broadcast(sender, &Announcement::ReachableAt(Box::new(signed))).await,
+                // Signing is an ed25519 operation over a short message and the
+                // encoding cannot realistically fail, so this is not a
+                // condition to handle — but it would leave this node
+                // unreachable, which is too quiet a way to fail.
+                Err(error) => tracing::error!(%error, "could not sign this node's address"),
+            }
+        }
+
+        // The floor comes before the wait, not after it, so a reason arriving
+        // once the floor has passed is acted on at once rather than delayed by
+        // it. Both channels keep their latest value, so a reason that arrives
+        // *during* the floor is still waiting afterwards.
+        tokio::time::sleep(LEAST_BETWEEN_ANNOUNCEMENTS).await;
+        tokio::select! {
+            moved = addresses.next() => if moved.is_none() {
+                tracing::debug!("the endpoint stopped reporting its address; announcing no more");
+                return;
+            },
+            newcomer = newcomers.changed() => if newcomer.is_err() {
+                tracing::debug!("nothing is learning addresses any more; announcing no more");
+                return;
+            },
+        }
+    }
+}
+
+/// Encodes and sends one announcement, saying so if it cannot.
+///
+/// Neither failure is retried: gossip is best-effort by design, the follow
+/// loop's own timer is the guarantee behind `Applied`, and the next arrival is
+/// the guarantee behind `ReachableAt`.
+async fn broadcast(sender: &GossipSender, announcement: &Announcement) {
+    let encoded = match postcard::to_stdvec(announcement) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            tracing::warn!(%error, "could not encode an announcement");
+            return;
+        }
+    };
+    match sender.broadcast(Bytes::from(encoded)).await {
+        Ok(()) => tracing::debug!(?announcement, "announced"),
+        Err(error) => tracing::debug!(%error, "could not announce"),
+    }
+}
+
+/// Hears what the group says: where its members are, and how far the log goes.
+///
+/// **Runs on every member now.** A core node used to drop the receiving half
+/// entirely, because everything `Applied` could tell it was something Raft had
+/// already told it. It has to listen now, since `ReachableAt` is the only way
+/// any node learns where a follower is — including a core node, which has to
+/// know in order to serve the group's directory.
+///
+/// The cost of that is worth naming rather than discovering: every core node
+/// now decodes every announcement from every member, and §2 allows for
+/// thousands of members against three to seven core nodes. So `Applied` is
+/// discarded on a core node *at the point of decoding*, and no hint is derived
+/// from anything on one.
+pub async fn listen(
+    mut receiver: GossipReceiver,
+    hints: watch::Sender<Hint>,
+    directory: Directory,
+    is_core: bool,
+) {
     while let Some(event) = receiver.next().await {
         let hint = match event {
             Ok(Event::Received(message)) => {
                 match postcard::from_bytes::<Announcement>(&message.content) {
+                    Ok(Announcement::ReachableAt(signed)) => {
+                        note_where_a_member_is(&directory, &signed, message.delivered_from);
+                        continue;
+                    }
+
+                    // A core node learns the log through Raft, so this says
+                    // nothing it does not already know.
+                    Ok(Announcement::Applied { .. }) if is_core => continue,
                     Ok(Announcement::Applied { up_to }) => {
                         tracing::debug!(up_to, from = %message.delivered_from, "heard an announcement");
                         Hint::Reaches(up_to)
                     }
+
                     // A member running something else, or a future version.
                     // Worth a line: a group where this happens constantly is
                     // one running two versions of the protocol.
@@ -152,17 +274,13 @@ pub async fn listen(mut receiver: GossipReceiver, hints: watch::Sender<Hint>) {
 
             // The first moment this node can hear a given peer. Anything
             // announced before now went past it, and there is no way to know
-            // what — so look. Narrows the window between joining a topic and
-            // being reachable on it, which the loop's own timer otherwise
-            // covers at thirty seconds.
+            // what — so look.
             Ok(Event::NeighborUp(_)) => Hint::MayHaveMissed,
 
             // A neighbour has gone. Whatever it would have relayed goes
             // unheard, so this is the same "look" as any other gap — and it is
             // what an expelled member sees first, since the group closing its
-            // connections is how it finds out at all. Waiting out the timer
-            // instead would leave it asking refused questions for half a
-            // minute before noticing.
+            // connections is how it finds out at all.
             Ok(Event::NeighborDown(_)) => Hint::MayHaveMissed,
 
             Err(error) => {
@@ -173,9 +291,38 @@ pub async fn listen(mut receiver: GossipReceiver, hints: watch::Sender<Hint>) {
             }
         };
 
+        // Nothing on a core node follows the log, so there is nobody to tell.
+        if is_core {
+            continue;
+        }
         if hints.send(hint).is_err() {
             tracing::debug!("nothing is following the log any more; stopping");
             return;
         }
+    }
+}
+
+/// Folds one address announcement into the directory.
+///
+/// Nothing here fails the listener. A statement that does not verify is data —
+/// these arrive relayed, by whoever happened to carry them — and one that is
+/// merely older than what is held is ordinary on a best-effort broadcast.
+fn note_where_a_member_is(
+    directory: &Directory,
+    signed: &SignedAddress,
+    relayed_by: iroh::EndpointId,
+) {
+    match directory.learn(signed) {
+        Ok(true) => tracing::debug!(member = %signed.member(), "learned where a member is"),
+        Ok(false) => {
+            tracing::trace!(member = %signed.member(), "nothing new about where a member is")
+        }
+        // Worth a warning rather than a debug line: somebody on this topic is
+        // announcing addresses for a member that did not sign them.
+        Err(error) => tracing::warn!(
+            %error,
+            from = %relayed_by,
+            "ignoring an address announcement that did not verify"
+        ),
     }
 }

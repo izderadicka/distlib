@@ -75,10 +75,11 @@ impl Runtime {
         // to the other.
         let swarm = Gossip::builder().spawn(endpoint.clone());
 
-        let transport = Transport {
-            endpoint: endpoint.clone(),
-            gossip: swarm,
-        };
+        // `Transport::new` installs the directory on the endpoint, so the
+        // thing consensus fills and the thing iroh resolves against cannot be
+        // two different objects.
+        let transport = Transport::new(endpoint.clone(), swarm)
+            .context("could not install the address directory")?;
         let node = Arc::new(
             MembershipNode::start(
                 transport.clone(),

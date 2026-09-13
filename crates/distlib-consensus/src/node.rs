@@ -15,8 +15,8 @@ use std::{
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use distlib_net::{
-    AddressBook, AllowlistHooks, AllowlistWriter, Connections, Protocols, Transport, alpn,
-    ping::PingProtocol,
+    AddressBook, AllowlistHooks, AllowlistWriter, Connections, Directory, Protocols, Transport,
+    alpn, ping::PingProtocol,
 };
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::GOSSIP_ALPN, net::Gossip};
@@ -203,6 +203,13 @@ pub struct MembershipNode {
     sources: SharedSources,
     state_machine: StateMachineStore,
     endpoint: Endpoint,
+    /// Where members have said they can be reached.
+    ///
+    /// Held so the node can report it. Nothing here reads it to dial with —
+    /// it is installed on the endpoint and iroh consults it — but "who can
+    /// this node actually reach" is a question worth being able to answer,
+    /// and the only way to answer it is to ask.
+    known_addresses: Directory,
     /// The handlers this node needs served, kept so [`Self::protocols`] can
     /// hand them out after the node exists. All three are cheap clones over
     /// the state they answer from.
@@ -304,6 +311,7 @@ impl MembershipNode {
         let Transport {
             endpoint,
             gossip: swarm,
+            directory,
         } = transport;
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
@@ -332,6 +340,10 @@ impl MembershipNode {
         // configured core group — which is also a ticket's core group — and
         // added to as the log and the core nodes say more.
         let addresses = AddressBook::install(&endpoint).map_err(|_| NodeError::EndpointClosed)?;
+        // The other half of "where is everyone": the book above holds the core
+        // group, because that is all the log records, and this holds what
+        // members announce about themselves. See `distlib_net::Directory`.
+        let known_addresses = directory.clone();
         addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
 
         let memberlog =
@@ -414,6 +426,14 @@ impl MembershipNode {
             id,
             is_core,
             hints,
+            TopicParts {
+                endpoint: endpoint.clone(),
+                // The endpoint's key *is* this member's key — it is what the
+                // allowlist checks on every connection — so an announcement is
+                // signed by the same identity the group already authenticates.
+                secret: endpoint.secret_key().clone(),
+                directory: directory.clone(),
+            },
         ));
 
         let allowlist_updates = tokio::spawn(follow_membership(
@@ -465,6 +485,7 @@ impl MembershipNode {
             sources,
             state_machine,
             endpoint,
+            known_addresses,
             raft_protocol,
             memberlog_protocol,
             swarm,
@@ -554,6 +575,15 @@ impl MembershipNode {
     ///
     /// Read from the seat rather than remembered, for the same reason: a
     /// follower promoted a moment ago votes, and nothing restarted.
+    /// Where members have announced they can be reached.
+    ///
+    /// Distinct from the core group's addresses, which come from the log: this
+    /// is what members said about *themselves*, and it is the only source for
+    /// a follower's address — see [`distlib_net::Directory`] and P2-14.
+    pub fn known_addresses(&self) -> &Directory {
+        &self.known_addresses
+    }
+
     pub fn is_core(&self) -> bool {
         self.seat.is_taken()
     }
@@ -1134,13 +1164,29 @@ async fn take_the_seat(role: &Role, log: LogStore) -> bool {
 /// Bootstrapping is the interesting part: gossip needs somebody to talk to
 /// before it can find anybody else. The members this node already knows of come
 /// from the log it has just folded, which is why this waits for one.
+/// What [`join_topic`] needs beyond the log, bundled because the parameter list
+/// would otherwise run past what CLAUDE.md allows — and because these three
+/// travel together: they are what it takes to say where this node is and to
+/// write down where everyone else is.
+struct TopicParts {
+    endpoint: Endpoint,
+    secret: SecretKey,
+    directory: Directory,
+}
+
 async fn join_topic(
     swarm: Gossip,
     state_machine: StateMachineStore,
     me: MemberId,
     is_core: bool,
     hints: watch::Sender<gossip::Hint>,
+    joining: TopicParts,
 ) {
+    let TopicParts {
+        endpoint,
+        secret,
+        directory,
+    } = joining;
     let mut memberships = state_machine.subscribe();
     let group = loop {
         if let Some(group) = memberships.borrow_and_update().group_id() {
@@ -1172,23 +1218,32 @@ async fn join_topic(
     };
     tracing::debug!(%group, "joined the group's gossip topic");
 
-    // Each role drops the half it does not use. Safe either way round: the
-    // topic stays subscribed while *either* half is held — iroh-gossip
-    // unsubscribes only once publishers and subscribers are both gone — so a
-    // core node keeping the sender and a follower keeping the receiver each
-    // hold their own subscription open.
+    // **Both halves, on both roles**, which is a change. A core node used to
+    // drop the receiver and a follower the sender, because the only thing on
+    // this topic was the log's index: a core node had nothing to learn from it
+    // and a follower nothing to say. Addresses are the other way round —
+    // everyone has something to say, because a follower's address is written
+    // down nowhere else, and everyone has something to learn, core nodes
+    // included, since they are the ones who will answer for the group.
     let (sender, receiver) = topic.split();
-    if is_core {
-        // A core node learns the log through Raft; the events say nothing it
-        // does not already know.
-        drop(receiver);
-        gossip::announce(state_machine, sender).await;
-    } else {
-        // A follower never broadcasts. It only listens, and acts on its own
-        // cursor rather than on anything an announcement claims.
-        drop(sender);
-        gossip::listen(receiver, hints).await;
-    }
+
+    // None of these three returns while the node is running; the task is
+    // stopped by being aborted, like the rest of the node's tasks.
+    tokio::join!(
+        gossip::announce_address(
+            &endpoint,
+            &secret,
+            &state_machine,
+            &sender,
+            directory.learned(),
+        ),
+        async {
+            if is_core {
+                gossip::announce_log(state_machine.clone(), &sender).await;
+            }
+        },
+        gossip::listen(receiver, hints, directory, is_core),
+    );
 }
 
 /// Carries every membership change from the log to the allowlist.

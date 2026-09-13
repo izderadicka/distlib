@@ -626,9 +626,9 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   >   runs pass: two followers with relays disabled, and a member expelled mid-sync stopping.
   >   **The address book was not widened**, because verifying the failure first — as instructed —
   >   showed the predicted one does not exist and a different one does: two followers converge
-  >   (through a core node), but a follower can never *resolve* a follower. Pinned by
-  >   `a_follower_cannot_resolve_another_follower`, which passes today; that test failing is
-  >   the acceptance for the widening, should it be wanted.
+  >   (through a core node), but a follower can never *resolve* a follower. **Closed in the PR
+  >   after this one (P2-15):** every member announces where it is, signed, on the group's
+  >   existing topic, and the catalogue syncs with the whole membership.
   >
   > **The projection stream moves to 2a-3, with its consumer.** Its shape is decided by what the
   > SQLite projection needs, and that turns on a question only a consumer can answer: an entry
