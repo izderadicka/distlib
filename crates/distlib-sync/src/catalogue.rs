@@ -227,14 +227,11 @@ impl Catalogue {
 
     /// Reads one entry: the latest value any member wrote at `key`.
     ///
-    /// **An entry and its content arrive separately**, and the distinction is
-    /// visible here: set reconciliation brings the key and the hash of its
-    /// value, and the engine's downloader fetches the value afterwards — which
-    /// is why `LiveEvent` has both `InsertRemote { content_status }` and a
-    /// later `ContentReady`. So `Ok(None)` means nobody has written that key,
-    /// while [`SyncError::MissingContent`] means somebody has and the bytes
-    /// have not landed on this node yet. A caller that is polling should treat
-    /// the second as "not yet" rather than as a failure.
+    /// `Ok(None)` means nobody has written that key.
+    /// [`SyncError::MissingContent`] means somebody has and the bytes have not
+    /// landed here yet — see `content` below for why those are two answers
+    /// and not one. A caller polling for an entry to appear treats the second
+    /// as "not yet" rather than as a failure.
     pub async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<bytes::Bytes>> {
         let doc = self.document()?;
         let query = Query::single_latest_per_key().key_exact(key.as_ref());
@@ -245,34 +242,29 @@ impl Catalogue {
         else {
             return Ok(None);
         };
-        // Asked, rather than inferred from a failed read. `get_bytes` reports
-        // seven kinds of trouble and only one of them is "we do not have this
-        // yet"; a caller polling for an entry to arrive would wait for ever on
-        // the other six. So the state comes from the store's own answer, and
-        // anything that goes wrong on the way stays an error.
-        let blobs = self.inner.blobs.store().blobs();
-        let hash = entry.content_hash();
-        let status = blobs.status(hash).await.map_err(SyncError::content(
-            "asked whether an entry's content is here",
-        ))?;
-        if !matches!(status, BlobStatus::Complete { .. }) {
-            return Err(SyncError::MissingContent {
-                hash: hash.to_string(),
-            });
-        }
-
-        let content = blobs
-            .get_bytes(hash)
-            .await
-            .map_err(SyncError::content("reading an entry's content"))?;
-        Ok(Some(content))
+        self.content(&entry)
+            .await?
+            .ok_or_else(|| SyncError::MissingContent {
+                hash: entry.content_hash().to_string(),
+            })
+            .map(Some)
     }
 
     /// The content of one entry, or `None` if it has not arrived here yet.
     ///
-    /// The same question [`Self::get`] asks, answered without the error:
-    /// reading a whole item, a field that is still on its way is one the item
-    /// does not have yet, which is an ordinary state rather than a failure.
+    /// **An entry and its content arrive separately.** Set reconciliation
+    /// brings the key and the hash of its value, and the engine's downloader
+    /// fetches the value afterwards — which is why `LiveEvent` has both
+    /// `InsertRemote { content_status }` and a later `ContentReady`.
+    ///
+    /// So the store is *asked*, rather than the answer inferred from a failed
+    /// read: `get_bytes` reports seven kinds of trouble and only one of them is
+    /// "we do not have this yet", so a caller polling for content to arrive
+    /// would wait for ever on the other six. `None` is that one state. Anything
+    /// that goes wrong on the way stays an error, here as much as in
+    /// [`Self::get`] — the two differ only in how they say "not yet", because
+    /// reading a whole item treats a field still on its way as a field the item
+    /// does not have, while reading one key by name has a caller waiting on it.
     async fn content(&self, entry: &Entry) -> Result<Option<bytes::Bytes>> {
         let blobs = self.inner.blobs.store().blobs();
         let hash = entry.content_hash();
