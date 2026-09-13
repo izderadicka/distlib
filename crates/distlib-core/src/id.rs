@@ -286,6 +286,24 @@ impl ItemId {
 }
 
 hex_id!(GroupId, "group id");
+/// A 32-byte content hash: one file, named by what is in it.
+///
+/// The same bytes iroh-blobs calls a `Hash`, in a type this crate can own —
+/// the rule Phase 2 rests on is that only `distlib-sync` depends on
+/// iroh-blobs, and an item's file list is not a sync concept. Both spell the
+/// hash as blake3 hex, so the conversion at that seam is the raw bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContentHash(#[serde(with = "hex32")] [u8; 32]);
+
+impl ContentHash {
+    /// The raw bytes, for whoever has to hand them to a blob store.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+hex_id!(ContentHash, "content hash");
 hex_id!(ItemId, "item id");
 hex_id!(RawMemberId, "raw member id");
 

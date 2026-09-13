@@ -21,6 +21,9 @@ postcard = { workspace = true }
 secrecy = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true }
+# Catalogue values are JSON: one encoding for every field, so the reader has
+# one code path. See `catalogue`.
+serde_json = { workspace = true }
 figment = { workspace = true }
 directories = { workspace = true }
 thiserror = { workspace = true }
