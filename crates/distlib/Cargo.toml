@@ -27,11 +27,15 @@ distlib-core = { workspace = true }
 distlib-net = { workspace = true }
 distlib-consensus = { workspace = true }
 distlib-api = { workspace = true }
+distlib-sync = { workspace = true }
 serde_json = { workspace = true }
 iroh = { workspace = true }
 # The one gossip instance in the process: the memberlog announces on it, and
 # from 2a-2 iroh-docs is handed the same one.
 iroh-gossip = { workspace = true }
+# The content store the catalogue is built on; opened here because the process
+# owns it, like the endpoint and the gossip.
+iroh-blobs = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

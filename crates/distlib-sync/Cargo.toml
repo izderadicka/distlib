@@ -1,0 +1,41 @@
+[package]
+name = "distlib-sync"
+description = "The group's catalogue: iroh-docs replication, wrapped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# See `distlib-consensus`: gates this crate's own slower test binaries.
+default = ["slow-tests"]
+slow-tests = []
+
+[dependencies]
+distlib-core = { workspace = true }
+distlib-net = { workspace = true }
+# For `MembershipState`: what the catalogue is derived from and synced with is
+# the group, and the group is the membership projection. The dependency goes
+# this way and never the other — consensus knows nothing about documents.
+distlib-consensus = { workspace = true }
+iroh = { workspace = true }
+iroh-docs = { workspace = true }
+iroh-blobs = { workspace = true }
+iroh-gossip = { workspace = true }
+# Only to convert what iroh-docs reports into this crate's own error type at
+# the edge; nothing here returns an `anyhow::Error`.
+anyhow = { workspace = true }
+bytes = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+data-encoding = { workspace = true }
+
+[lints]
+workspace = true

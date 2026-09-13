@@ -4,6 +4,7 @@ members = [
     "crates/distlib-core",
     "crates/distlib-net",
     "crates/distlib-consensus",
+    "crates/distlib-sync",
     "crates/distlib-api",
     "crates/distlib",
 ]
@@ -22,11 +23,26 @@ authors = ["Ivan Zderadicka <ivan.zderadicka@gmail.com>"]
 [workspace.dependencies]
 # --- p2p stack -------------------------------------------------------------
 iroh = "=1.0.3"
+# The catalogue: iroh-docs replicates the entries, and it cannot be built without a
+# blobs store, because an entry's value *is* a blob. Both are pinned to the set
+# iroh-docs 0.101 requires, which is the set already in the graph.
+#
+# `redb-v2-migration` is off deliberately: it exists to read stores written by
+# iroh-docs 0.94-0.98, which we have never written, and it pulls a second redb major
+# into the graph. Opening such a store without it fails loudly, naming the feature.
+# `rpc` is off too — it gates cross-process transport we do not use and drags in a TLS
+# stack. **Watch `constant_time_eq`**: iroh-blobs requires it with an upper bound only,
+# in a workspace that `=`-pins everything, so `cargo update` can move it.
+iroh-blobs = { version = "=0.103.0", default-features = false, features = [
+    "fs-store",
+    "hide-proto-docs",
+] }
+iroh-docs = { version = "=0.101.0", default-features = false, features = [
+    "fs-store",
+    "metrics",
+] }
 # Reserved for later phases; the compatible set as of iroh 1.0.3. Uncomment when the
 # phase that needs them lands, so Cargo.lock only grows with code that uses it.
-# iroh-blobs  = "=0.103.0"   # phase 2, content transfer
-# iroh-gossip = "=0.101.0"   # phase 4, heartbeats
-# iroh-docs   = "=0.101.0"   # phase 2, metadata sync
 # irpc        = "=0.17.0"    # phase 1, request/response over iroh connections
 
 # --- runtime & errors ------------------------------------------------------
@@ -105,6 +121,7 @@ distlib-net = { path = "crates/distlib-net" }
 # would silently do nothing.
 distlib-consensus = { path = "crates/distlib-consensus", default-features = false }
 distlib-api = { path = "crates/distlib-api", default-features = false }
+distlib-sync = { path = "crates/distlib-sync", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -583,7 +583,7 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > every harness that called `node.shutdown()` had to grow the router half; `Peer::shutdown`
   > and its equivalents do it in production's order.
 
-- **2a-2 — `distlib-sync`.** iroh-docs + blobs store wired into `Runtime`; `NamespaceCreated` (D1);
+- **2a-2 — `distlib-sync`.** *(split while building it — see the note below.)* iroh-docs + blobs store wired into `Runtime`; the catalogue document (D1, amended);
   the catalogue namespace opened from the log; `start_sync` against the members it should sync with;
   catalogue record types and key encode/decode in `distlib-core` (§5.2 field-level keys, per-file
   keys under `file/{blob_hash}`); a typed write path and a projection event stream over `LiveEvent`.
@@ -605,6 +605,30 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
   **Note for the reviewer of 2b-1:** this acceptance already moves blobs, because docs entry values
   *are* blobs. What it exercises is iroh-docs' internal downloader, not our code.
+
+  > **D1 is amended, and the amendment deletes work rather than adding it.** The plan had the
+  > namespace secret distributed through the membership log as a `NamespaceCreated` event. That
+  > was built (PR #39) and closed unmerged: a secret every member reads out of the log is not a
+  > secret from any member, and a non-member is refused at the endpoint long before the key would
+  > matter. The catalogue's document key is now `blake3("distlib.catalogue.v1" || group_id)` —
+  > derived by every member from what it already has — and the three namespaces collapse to one
+  > document with key prefixes, because the conflict-freedom §5.3 relies on is key shape, not
+  > document boundaries. Delta P2-11 carries the reasoning and the one thing it forecloses.
+  >
+  > **Split in two.** Whole, this was the largest PR of the phase.
+  >
+  > - **2a-2a — the catalogue converges** *(done, deltas P2-11 and P2-12)*. The dependencies,
+  >   `distlib-sync`, the derived document, the blob store, both handlers on the process's one
+  >   router, `DataDir` accessors for `docs/` and `blobs/`, and two nodes agreeing on a key/value.
+  > - **2a-2b — the catalogue carries items.** §5.2's record types and field-level key encoding in
+  >   `distlib-core`, the typed write path, the projection stream over `LiveEvent`, the address-book
+  >   question below, and the acceptance runs: two followers with relays disabled, and a member
+  >   expelled mid-sync.
+  >
+  > The address-book widening keeps its "verify the failure first" instruction, and 2a-2a leaves it
+  > verifiable: `start_sync` is given the core group's addresses, which the log always carries, and
+  > anything beyond that comes from the gossip swarm iroh-docs runs for the document. Whether that
+  > reaches a follower under `relay_mode = "disabled"` is now a question a test can answer.
 
 - **2a-3 — `distlib-store`.** SQLite schema (`items`, `item_files`, `members`) + the projection task
   consuming 2a-2's stream + tantivy index + `admin.reindex`. Projection must be **idempotent**

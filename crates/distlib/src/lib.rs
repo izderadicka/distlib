@@ -8,4 +8,4 @@ pub mod cli;
 pub mod commands;
 pub mod runtime;
 
-pub use runtime::Runtime;
+pub use runtime::{Runtime, alpns};
