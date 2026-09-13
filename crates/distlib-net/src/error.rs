@@ -62,6 +62,19 @@ pub enum NetError {
     #[error("invalid relay url {url}")]
     InvalidRelayUrl { url: String },
 
+    /// A member's announced address is not signed by that member.
+    ///
+    /// Separate from the transport failures above because it is a statement
+    /// about the *group*, not about reaching anyone: these arrive over gossip
+    /// relayed by whoever carried them, so one that does not verify says
+    /// somebody is announcing addresses they have no business announcing.
+    #[error("an address announced for {member} did not verify")]
+    BadAddress {
+        member: MemberId,
+        #[source]
+        source: distlib_core::CoreError,
+    },
+
     /// `relay_mode = "custom"` was set with no relays listed.
     #[error("relay_mode is \"custom\" but relay_urls is empty")]
     NoCustomRelays,

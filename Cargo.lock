@@ -1117,6 +1117,7 @@ dependencies = [
  "iroh",
  "iroh-gossip",
  "iroh-relay",
+ "postcard",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

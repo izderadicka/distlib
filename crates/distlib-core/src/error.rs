@@ -64,6 +64,18 @@ pub enum CoreError {
     #[error("secret key {path} already exists; pass --force to replace it")]
     KeyExists { path: PathBuf },
 
+    /// A member's announced address is not signed by the member it names.
+    ///
+    /// Data rather than a bug: these arrive over gossip, relayed by whoever
+    /// happened to carry them, so a bad one says something about the group
+    /// rather than about this node.
+    #[error("the address announced for {member} is not signed by them")]
+    BadAddressSignature { member: crate::id::MemberId },
+
+    /// An address statement could not be encoded for signing or checking.
+    #[error("could not encode an address statement")]
+    AddressEncoding(#[from] postcard::Error),
+
     /// A command that must not invent an identity was pointed at a data
     /// directory that holds none.
     #[error(
