@@ -36,6 +36,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use tokio::sync::watch;
+
 use distlib_core::{MemberId, NodeAddr, SignedAddress};
 use iroh::{Endpoint, address_lookup::memory::MemoryLookup};
 
@@ -47,7 +49,7 @@ use crate::error::{NetError, Result};
 /// [`crate::AddressBook`] and [`crate::Allowlist`], for the same reason:
 /// several tasks learn addresses and they must all land where the endpoint
 /// reads.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Directory {
     lookup: MemoryLookup,
     /// The latest statement held for each member.
@@ -57,6 +59,24 @@ pub struct Directory {
     /// which answers belong there, plus what this node can say about itself
     /// when asked who it can reach.
     heard: Arc<RwLock<BTreeMap<MemberId, u64>>>,
+    /// Bumped whenever something new is learned.
+    ///
+    /// Because knowing where somebody is only matters to whoever wanted to
+    /// reach them, and they have usually already given up: iroh-docs hands its
+    /// document's peers to gossip once, and a peer that could not be resolved
+    /// at that moment is not retried. So this is the signal to offer the peer
+    /// set again — see `distlib_sync`, which is the subscriber that exists.
+    learned: Arc<watch::Sender<u64>>,
+}
+
+impl Default for Directory {
+    fn default() -> Self {
+        Self {
+            lookup: MemoryLookup::default(),
+            heard: Arc::default(),
+            learned: Arc::new(watch::channel(0).0),
+        }
+    }
 }
 
 impl Directory {
@@ -129,7 +149,21 @@ impl Directory {
         self.lookup.remove_endpoint_info(member.endpoint_id());
         self.lookup.add_endpoint_info(endpoint_addr);
         heard.insert(member, announced.applied());
+        // `send_modify` rather than `send`: there may be no subscriber, and a
+        // directory that refused to record anything because nobody was
+        // listening would be a strange thing indeed.
+        self.learned
+            .send_modify(|learned| *learned = learned.wrapping_add(1));
         Ok(true)
+    }
+
+    /// Fires whenever this node learns where somebody is.
+    ///
+    /// Carries a count rather than what was learned, because the only question
+    /// a subscriber asks is "is there anything new to try" — and a subscriber
+    /// that was busy while three announcements landed should wake once.
+    pub fn learned(&self) -> watch::Receiver<u64> {
+        self.learned.subscribe()
     }
 
     /// The log position of what is held for `member`, if anything.

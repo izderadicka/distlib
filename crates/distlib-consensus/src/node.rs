@@ -311,6 +311,7 @@ impl MembershipNode {
         let Transport {
             endpoint,
             gossip: swarm,
+            directory,
         } = transport;
         let id = MemberId::from(endpoint.id());
         let path = data_dir.join(RAFT_DB);
@@ -342,7 +343,6 @@ impl MembershipNode {
         // The other half of "where is everyone": the book above holds the core
         // group, because that is all the log records, and this holds what
         // members announce about themselves. See `distlib_net::Directory`.
-        let directory = Directory::install(&endpoint).map_err(|_| NodeError::EndpointClosed)?;
         let known_addresses = directory.clone();
         addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
 

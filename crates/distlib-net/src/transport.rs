@@ -15,6 +15,8 @@
 use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 
+use crate::{Directory, error::Result};
+
 /// The endpoint a node answers on, and the gossip over it.
 ///
 /// Cheap to clone: both halves are handles to something spawned once, and
@@ -32,4 +34,29 @@ pub struct Transport {
     /// Spawned by the caller rather than by whoever subscribes first, because
     /// a topic joined on one instance is invisible to another.
     pub gossip: Gossip,
+    /// Where members have said they can be reached.
+    ///
+    /// Here for the same reason the other two are: it is one per process,
+    /// installed on the endpoint above, and shared by subsystems that neither
+    /// know about each other. Consensus fills it, from what members announce on
+    /// the group's topic; `distlib-sync` waits on it, because a document's
+    /// peers are offered to gossip once and a peer that could not be resolved
+    /// at that moment is never retried.
+    pub directory: Directory,
+}
+
+impl Transport {
+    /// Assembles a transport over an endpoint that is already bound.
+    ///
+    /// Installs the directory on the way, so that no caller can assemble one
+    /// whose directory is not the one the endpoint resolves against — which
+    /// would fail by silently resolving nothing.
+    pub fn new(endpoint: Endpoint, gossip: Gossip) -> Result<Self> {
+        let directory = Directory::install(&endpoint)?;
+        Ok(Self {
+            endpoint,
+            gossip,
+            directory,
+        })
+    }
 }

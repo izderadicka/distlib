@@ -71,10 +71,7 @@ impl Harness {
         let swarm = Gossip::builder().spawn(endpoint.clone());
         let node = Arc::new(
             MembershipNode::start(
-                Transport {
-                    endpoint: endpoint.clone(),
-                    gossip: swarm,
-                },
+                Transport::new(endpoint.clone(), swarm).unwrap(),
                 hooks,
                 writer,
                 dir.path(),
@@ -173,10 +170,7 @@ impl Harness {
             let swarm = Gossip::builder().spawn(endpoint.clone());
             let node = Arc::new(
                 MembershipNode::start(
-                    Transport {
-                        endpoint: endpoint.clone(),
-                        gossip: swarm,
-                    },
+                    Transport::new(endpoint.clone(), swarm).unwrap(),
                     hooks,
                     writer,
                     &{

@@ -122,13 +122,29 @@ fn following(core: MemberId, addr: &NodeAddr) -> Config {
     config
 }
 
+/// For waiting on something whose guarantee is a node's own timer.
+///
+/// Deliberately longer than [`SOON`], and longer than `distlib-sync`'s
+/// `OFFER_AGAIN`. A document's peers are offered again promptly when an address
+/// is learned, but the thing that recovers a document stranded by the departure
+/// of the node that introduced its members is the timer behind that. A test
+/// bounded at [`SOON`] would be asserting a promptness the design does not
+/// offer — the same reasoning as the consensus harness's `PATIENTLY`, which
+/// sits above the follow loop's idle poll for exactly this reason.
+const PATIENTLY: Duration = Duration::from_secs(60);
+
 /// Reads one key, waiting out the window where the entry is here and its
 /// content is not.
 ///
 /// `MissingContent` is that window and this poll is meant to sit through it —
 /// see `Catalogue::get`. Anything else is a real failure and is not retried.
 async fn read(catalogue: &distlib_sync::Catalogue, key: &str) -> Vec<u8> {
-    tokio::time::timeout(SOON, async {
+    read_upto(catalogue, key, SOON).await
+}
+
+/// [`read`] with the bound named, for reads that outlast [`SOON`].
+async fn read_upto(catalogue: &distlib_sync::Catalogue, key: &str, bound: Duration) -> Vec<u8> {
+    tokio::time::timeout(bound, async {
         loop {
             match catalogue.get(key).await {
                 Ok(Some(value)) => return value.to_vec(),
@@ -478,7 +494,7 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         .await
         .unwrap();
     assert_eq!(
-        &read(group.carol.catalogue(), "item/3/year").await[..],
+        &read_upto(group.carol.catalogue(), "item/3/year", PATIENTLY).await[..],
         b"1974",
         "a follower must reach a follower without the core node in the middle"
     );

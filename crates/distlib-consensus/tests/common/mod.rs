@@ -98,10 +98,7 @@ impl Peer {
         // what it serves. See `distlib::Runtime`.
         let swarm = Gossip::builder().spawn(endpoint.clone());
         let node = MembershipNode::start(
-            Transport {
-                endpoint: endpoint.clone(),
-                gossip: swarm,
-            },
+            Transport::new(endpoint.clone(), swarm).unwrap(),
             hooks.clone(),
             writer,
             dir.path(),
