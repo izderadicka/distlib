@@ -39,6 +39,7 @@ pub enum ItemKind {
     Ebook,
     Audiobook,
     Video,
+    Other,
 }
 
 /// What one file is *to* its item.
@@ -86,54 +87,73 @@ pub struct FileRecord {
     pub duration: Option<u64>,
 }
 
-/// One field of an item — one key in the document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Field {
-    Kind,
-    Title,
-    Authors,
-    Genres,
-    Series,
-    Year,
-    Lang,
-    Description,
-    Replicas,
+/// The item's fields, stated once: the variant, the name the key gives it,
+/// and the member of [`Item`] that holds it.
+///
+/// Four things follow from every row — a variant, a key name, an entry that
+/// gets written, a value that gets read — and **two of them are silent when
+/// they go missing**. `as_str` and `absorb_field` are exhaustive matches, so a
+/// variant added without them does not compile; a variant missing from `parse`
+/// simply never reads back, and one missing from `entries` is never written.
+/// Neither is a compile error, and both are the kind of thing noticed a
+/// release later. One table, and the question cannot arise.
+macro_rules! fields {
+    ($($variant:ident => $name:literal, $member:ident;)+) => {
+        /// One field of an item — one key in the document.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Field {
+            $($variant,)+
+        }
+
+        impl Field {
+            /// Every field there is, in the order an item writes them.
+            pub const ALL: &[Self] = &[$(Self::$variant,)+];
+
+            /// The name this field has in a key.
+            ///
+            /// [`Field::Kind`] is `type`, because the key is the wire format
+            /// and §5.2 named it; `kind` is only what Rust can spell.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            fn parse(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl Item {
+            /// One entry per field this item has something to say about.
+            fn field_entries(&self) -> impl Iterator<Item = (String, Vec<u8>)> {
+                [$(self.field_entry(Field::$variant, self.$member.as_ref()),)+]
+                    .into_iter()
+                    .flatten()
+            }
+
+            fn absorb_field(&mut self, field: Field, value: &[u8]) -> Absorbed {
+                match field {
+                    $(Field::$variant => take(&mut self.$member, value),)+
+                }
+            }
+        }
+    };
 }
 
-impl Field {
-    /// The name this field has in a key.
-    ///
-    /// `type` rather than `kind`, because the key is the wire format and §5.2
-    /// named it; `kind` is only what Rust can spell.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Kind => "type",
-            Self::Title => "title",
-            Self::Authors => "authors",
-            Self::Genres => "genres",
-            Self::Series => "series",
-            Self::Year => "year",
-            Self::Lang => "lang",
-            Self::Description => "description",
-            Self::Replicas => "replicas",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Self> {
-        [
-            Self::Kind,
-            Self::Title,
-            Self::Authors,
-            Self::Genres,
-            Self::Series,
-            Self::Year,
-            Self::Lang,
-            Self::Description,
-            Self::Replicas,
-        ]
-        .into_iter()
-        .find(|field| field.as_str() == name)
-    }
+fields! {
+    Kind        => "type",        kind;
+    Title       => "title",       title;
+    Authors     => "authors",     authors;
+    Genres      => "genres",      genres;
+    Series      => "series",      series;
+    Year        => "year",        year;
+    Lang        => "lang",        lang;
+    Description => "description", description;
+    Replicas    => "replicas",    replicas;
 }
 
 /// A key in the catalogue document.
@@ -258,43 +278,33 @@ impl Item {
     /// title somebody else had just filled in. An `Item` with one field set is
     /// a one-key update.
     pub fn entries(&self) -> Vec<(String, Vec<u8>)> {
-        let mut entries = Vec::new();
-        let mut field = |field: Field, value: Option<Vec<u8>>| {
-            if let Some(value) = value {
-                entries.push((
-                    Key::Field {
-                        item: self.id,
-                        field,
-                    }
-                    .encode(),
-                    value,
-                ));
-            }
-        };
+        let files = self.files.iter().filter_map(|(blob, record)| {
+            Some((
+                Key::File {
+                    item: self.id,
+                    blob: *blob,
+                }
+                .encode(),
+                encode(Some(record))?,
+            ))
+        });
+        self.field_entries().chain(files).collect()
+    }
 
-        field(Field::Kind, encode(self.kind.as_ref()));
-        field(Field::Title, encode(self.title.as_ref()));
-        field(Field::Authors, encode(self.authors.as_ref()));
-        field(Field::Genres, encode(self.genres.as_ref()));
-        field(Field::Series, encode(self.series.as_ref()));
-        field(Field::Year, encode(self.year.as_ref()));
-        field(Field::Lang, encode(self.lang.as_ref()));
-        field(Field::Description, encode(self.description.as_ref()));
-        field(Field::Replicas, encode(self.replicas.as_ref()));
-
-        for (blob, record) in &self.files {
-            if let Some(value) = encode(Some(record)) {
-                entries.push((
-                    Key::File {
-                        item: self.id,
-                        blob: *blob,
-                    }
-                    .encode(),
-                    value,
-                ));
+    /// One field's entry, or nothing at all when the field is not set.
+    fn field_entry<T: Serialize>(
+        &self,
+        field: Field,
+        value: Option<&T>,
+    ) -> Option<(String, Vec<u8>)> {
+        Some((
+            Key::Field {
+                item: self.id,
+                field,
             }
-        }
-        entries
+            .encode(),
+            encode(value)?,
+        ))
     }
 
     /// Folds one entry in, reporting what it turned out to be.
@@ -336,31 +346,20 @@ impl Item {
             .collect();
         (!content.is_empty()).then(|| ItemId::from_content_hashes(&content))
     }
+}
 
-    fn absorb_field(&mut self, field: Field, value: &[u8]) -> Absorbed {
-        fn take<T: serde::de::DeserializeOwned>(into: &mut Option<T>, value: &[u8]) -> Absorbed {
-            match serde_json::from_slice(value) {
-                Ok(parsed) => {
-                    *into = Some(parsed);
-                    Absorbed::Took
-                }
-                // Left as it was, deliberately: a value this build cannot read
-                // is not a reason to forget the one it could.
-                Err(_) => Absorbed::Unreadable,
-            }
+/// Reads one field's value, or reports that this build cannot.
+///
+/// The field is left exactly as it was when the value cannot be read,
+/// deliberately: a value this build does not understand is not a reason to
+/// forget the one it did.
+fn take<T: serde::de::DeserializeOwned>(into: &mut Option<T>, value: &[u8]) -> Absorbed {
+    match serde_json::from_slice(value) {
+        Ok(parsed) => {
+            *into = Some(parsed);
+            Absorbed::Took
         }
-
-        match field {
-            Field::Kind => take(&mut self.kind, value),
-            Field::Title => take(&mut self.title, value),
-            Field::Authors => take(&mut self.authors, value),
-            Field::Genres => take(&mut self.genres, value),
-            Field::Series => take(&mut self.series, value),
-            Field::Year => take(&mut self.year, value),
-            Field::Lang => take(&mut self.lang, value),
-            Field::Description => take(&mut self.description, value),
-            Field::Replicas => take(&mut self.replicas, value),
-        }
+        Err(_) => Absorbed::Unreadable,
     }
 }
 

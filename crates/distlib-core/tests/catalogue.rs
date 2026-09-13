@@ -206,3 +206,42 @@ fn an_item_with_nothing_in_it_has_no_fingerprint() {
     item.files.insert(hash(1), a_file(FileRole::Cover, "c.jpg"));
     assert_eq!(item.fingerprint(), None, "a cover alone is not an item");
 }
+
+/// Every field an item can hold is a field it writes.
+///
+/// The silent half of what the `fields!` table exists to prevent: a field
+/// missing from the write path is never an error anywhere — it simply never
+/// reaches another member, and the item reads back short on every node but the
+/// one that set it. Counted against `Field::ALL` rather than against a literal
+/// nine, so adding a row to the table is the only thing this needs.
+#[test]
+fn a_fully_populated_item_writes_every_field_there_is() {
+    let written: Vec<Field> = an_item()
+        .entries()
+        .iter()
+        .filter_map(|(key, _)| match Key::parse(key.as_bytes()) {
+            Some(Key::Field { field, .. }) => Some(field),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(written, Field::ALL, "every field, in the table's order");
+}
+
+/// And every field reads back under the name it wrote.
+///
+/// The other silent half: a field the key encoder can write and the key parser
+/// cannot recognise is absorbed as `Unknown` and dropped on the floor, on the
+/// reading node only.
+#[test]
+fn every_field_survives_its_own_key() {
+    let item = ItemId::from_content_hashes(&[[7u8; 32]]);
+    for &field in Field::ALL {
+        let key = Key::Field { item, field };
+        assert_eq!(
+            Key::parse(key.encode().as_bytes()),
+            Some(key),
+            "`{}` is written but not read back",
+            field.as_str()
+        );
+    }
+}
