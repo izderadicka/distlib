@@ -18,19 +18,23 @@
 //! nothing asks for that yet. A later phase that wants it derives a second
 //! key beside this one; nothing here has to move.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use distlib_consensus::MembershipState;
-use distlib_core::{GroupId, MemberId};
+use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
 use distlib_net::{Protocols, Transport};
+use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, SecretKey};
 use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
 use iroh_docs::{
-    Author, AuthorId, Capability, NamespaceSecret,
+    Author, AuthorId, Capability, Entry, NamespaceSecret,
     api::Doc,
     engine::{DefaultAuthorStorage, Engine},
     protocol::Docs,
-    store::Store as DocumentStore,
+    store::{Query, Store as DocumentStore},
 };
 use tokio::{sync::watch, task::JoinHandle};
 
@@ -44,6 +48,15 @@ const CATALOGUE_TAG: &[u8] = b"distlib.catalogue.v1";
 const REPLICAS: &str = "docs.redb";
 
 /// What this subsystem needs advertised on the endpoint.
+///
+/// **Gossip is not in here, and the catalogue does not work without it.** A
+/// document's live updates travel over the process's gossip swarm, so a node
+/// that does not serve `iroh-gossip` gets whatever the first reconciliation
+/// brought and then never hears another word — quietly, with no error on
+/// either side. One ALPN has one owner (a router keeps the last handler
+/// registered for one, silently), and gossip's owner is the membership node,
+/// which needs it for the log. Anything assembling a process therefore serves
+/// both lists, which is what `distlib::alpns` does.
 ///
 /// Declared apart from the handlers for the same reason
 /// [`distlib_consensus::alpns`] is: the endpoint is bound before any handler
@@ -90,8 +103,6 @@ struct Inner {
     /// Waiting for the group, then opening and syncing. Aborted on shutdown.
     task: Mutex<Option<JoinHandle<()>>>,
 }
-
-use std::sync::Mutex;
 
 impl Catalogue {
     /// Starts the catalogue on `transport`, storing documents under `store`.
@@ -226,7 +237,7 @@ impl Catalogue {
     /// the second as "not yet" rather than as a failure.
     pub async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<bytes::Bytes>> {
         let doc = self.document()?;
-        let query = iroh_docs::store::Query::single_latest_per_key().key_exact(key.as_ref());
+        let query = Query::single_latest_per_key().key_exact(key.as_ref());
         let Some(entry) = doc
             .get_one(query)
             .await
@@ -255,6 +266,90 @@ impl Catalogue {
             .await
             .map_err(SyncError::content("reading an entry's content"))?;
         Ok(Some(content))
+    }
+
+    /// The content of one entry, or `None` if it has not arrived here yet.
+    ///
+    /// The same question [`Self::get`] asks, answered without the error:
+    /// reading a whole item, a field that is still on its way is one the item
+    /// does not have yet, which is an ordinary state rather than a failure.
+    async fn content(&self, entry: &Entry) -> Result<Option<bytes::Bytes>> {
+        let blobs = self.inner.blobs.store().blobs();
+        let hash = entry.content_hash();
+        let status = blobs.status(hash).await.map_err(SyncError::content(
+            "asked whether an entry's content is here",
+        ))?;
+        if !matches!(status, BlobStatus::Complete { .. }) {
+            return Ok(None);
+        }
+        blobs
+            .get_bytes(hash)
+            .await
+            .map(Some)
+            .map_err(SyncError::content("reading an entry's content"))
+    }
+
+    /// Writes what `item` says, and only that.
+    ///
+    /// One entry per field the item has, so two members improving the same
+    /// item at once do not clobber each other: iroh-docs resolves
+    /// last-writer-wins per key, and a field nobody touched is a key nobody
+    /// wrote. An `Item` with one field set is a one-key update — see
+    /// [`Item::entries`].
+    pub async fn write(&self, item: &Item) -> Result<()> {
+        for (key, value) in item.entries() {
+            self.put(key, value).await?;
+        }
+        Ok(())
+    }
+
+    /// Reads one item back out of the entries that make it up.
+    ///
+    /// `None` when this node holds no entry for it at all. Otherwise the item
+    /// as far as this node knows it: **an item is its entries**, so one that
+    /// is still arriving reads as a partial item rather than as an error, and
+    /// a field whose content has not landed yet is left out the same way. A
+    /// caller that needs to know the difference watches for it to fill in.
+    pub async fn item(&self, id: ItemId) -> Result<Option<Item>> {
+        let doc = self.document()?;
+        let query = Query::single_latest_per_key().key_prefix(Key::prefix_of(id));
+        let entries = doc
+            .get_many(query)
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut item = Item::new(id);
+        let mut found = false;
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            found = true;
+            let Some(value) = self.content(&entry).await? else {
+                tracing::debug!(
+                    key = %String::from_utf8_lossy(entry.key()),
+                    "the content of this entry has not arrived yet; leaving the field out"
+                );
+                continue;
+            };
+            match item.absorb(entry.key(), &value) {
+                Absorbed::Took | Absorbed::Unknown => {}
+                // Both worth saying out loud and neither worth failing for:
+                // the first means somebody wrote something this build cannot
+                // read, the second means the prefix query answered with a key
+                // about another item, which would be a bug in either the
+                // query or the key encoding.
+                Absorbed::Unreadable => tracing::warn!(
+                    key = %String::from_utf8_lossy(entry.key()),
+                    "a catalogue entry holds a value this build cannot read"
+                ),
+                Absorbed::NotThisItem => tracing::warn!(
+                    key = %String::from_utf8_lossy(entry.key()),
+                    %id,
+                    "a prefix search for one item answered with another"
+                ),
+            }
+        }
+        Ok(found.then_some(item))
     }
 
     /// This node's author id, which is its member id.

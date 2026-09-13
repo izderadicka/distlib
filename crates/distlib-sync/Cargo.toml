@@ -28,6 +28,8 @@ iroh-gossip = { workspace = true }
 # the edge; nothing here returns an `anyhow::Error`.
 anyhow = { workspace = true }
 bytes = { workspace = true }
+# For reading a stream of entries; the one iroh-docs' own api uses.
+futures-lite = { workspace = true }
 blake3 = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
