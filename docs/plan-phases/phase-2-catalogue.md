@@ -622,8 +622,13 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   >   router, `DataDir` accessors for `docs/` and `blobs/`, and two nodes agreeing on a key/value.
   > - **2a-2b — the catalogue carries items** *(done, delta P2-13)*. §5.2's record types and
   >   field-level key encoding in `distlib-core`, and the typed write and read path.
-  > - **2a-2c — the catalogue reaches exactly the members.** The address-book question below, and
-  >   the two acceptance runs: two followers with relays disabled, and a member expelled mid-sync.
+  > - **2a-2c — the catalogue reaches exactly the members** *(done, delta P2-14)*. Both acceptance
+  >   runs pass: two followers with relays disabled, and a member expelled mid-sync stopping.
+  >   **The address book was not widened**, because verifying the failure first — as instructed —
+  >   showed the predicted one does not exist and a different one does: two followers converge
+  >   (through a core node), but a follower can never *resolve* a follower. Pinned by
+  >   `a_follower_cannot_resolve_another_follower`, which passes today; that test failing is
+  >   the acceptance for the widening, should it be wanted.
   >
   > **The projection stream moves to 2a-3, with its consumer.** Its shape is decided by what the
   > SQLite projection needs, and that turns on a question only a consumer can answer: an entry
