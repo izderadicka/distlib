@@ -93,6 +93,26 @@ impl NodeAddr {
     }
 }
 
+/// The inverse of [`NodeAddr::to_endpoint_addr`], losing the member id.
+///
+/// Needed wherever iroh's own answer has to be written down or sent on — a node
+/// reporting where it can be reached, or a directory reporting where it thinks
+/// somebody else is. Here rather than at either of those call sites so the two
+/// cannot disagree about what a relay url or a direct address is.
+///
+/// **Only the first relay url survives**, because a [`NodeAddr`] holds one and
+/// an [`EndpointAddr`] may carry several. That matches what the rest of the
+/// system stores — a config entry, a ticket and a log entry each name one relay
+/// — so nothing downstream could use the others.
+impl From<&EndpointAddr> for NodeAddr {
+    fn from(addr: &EndpointAddr) -> Self {
+        Self {
+            relay: addr.relay_urls().next().map(ToString::to_string),
+            direct: addr.ip_addrs().copied().collect(),
+        }
+    }
+}
+
 /// A [`NodeAddr`] whose relay URL no longer parses.
 ///
 /// Its own error because the URL is stored as a `String` — a log entry or a

@@ -167,6 +167,26 @@ impl StateMachineStore {
         self.lock().last_applied.map_or(0, |log_id| log_id.index)
     }
 
+    /// How far this node has got through the log, whichever way it gets it.
+    ///
+    /// A core node advances `last_applied` through Raft and never follows; a
+    /// follower advances `followed_upto` by fetching and never applies. Taking
+    /// the larger needs no knowledge of which this node is, and is monotonic
+    /// either way — including across a promotion, when a node stops doing one
+    /// and starts doing the other.
+    ///
+    /// Used as the freshness of an address announcement, where what matters is
+    /// exactly that: a number that only ever goes up for a given node, and that
+    /// survives a restart because it is derived from a log this node has
+    /// already written down. See [`distlib_core::SignedAddress::applied`].
+    pub fn position(&self) -> u64 {
+        let state = self.lock();
+        state
+            .last_applied
+            .map_or(0, |log_id| log_id.index)
+            .max(state.followed_upto)
+    }
+
     /// How far this node has followed a log it does not vote on.
     pub fn followed_upto(&self) -> u64 {
         self.lock().followed_upto

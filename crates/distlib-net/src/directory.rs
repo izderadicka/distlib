@@ -151,9 +151,6 @@ impl Directory {
     /// exists to prevent.
     pub fn address_of(&self, member: MemberId) -> Option<NodeAddr> {
         let held = iroh::EndpointAddr::from(self.lookup.get_endpoint_info(member.endpoint_id())?);
-        Some(NodeAddr {
-            relay: held.relay_urls().next().map(ToString::to_string),
-            direct: held.ip_addrs().copied().collect(),
-        })
+        Some(NodeAddr::from(&held))
     }
 }
