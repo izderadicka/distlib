@@ -59,13 +59,21 @@ pub struct Directory {
     /// which answers belong there, plus what this node can say about itself
     /// when asked who it can reach.
     heard: Arc<RwLock<BTreeMap<MemberId, u64>>>,
-    /// Bumped whenever something new is learned.
+    /// Bumped whenever an answer here *changes* — never when one is restated.
     ///
     /// Because knowing where somebody is only matters to whoever wanted to
     /// reach them, and they have usually already given up: iroh-docs hands its
     /// document's peers to gossip once, and a peer that could not be resolved
     /// at that moment is not retried. So this is the signal to offer the peer
-    /// set again — see `distlib_sync`, which is the subscriber that exists.
+    /// set again, and to say where this node is to somebody who has evidently
+    /// only just heard of it.
+    ///
+    /// **Both of those are expensive enough that "we already knew that" must
+    /// not fire them.** One offer dials every peer in the set, and one
+    /// announcement is a broadcast that every neighbour receives whether or not
+    /// it is worth anything. Restating an address we hold is news to nobody, and
+    /// a node that took it as news would give its neighbours a reason to restate
+    /// theirs — which is a group that never stops talking.
     learned: Arc<watch::Sender<u64>>,
 }
 
@@ -97,9 +105,15 @@ impl Directory {
 
     /// Records what `announced` says, if it is not older than what is held.
     ///
-    /// Answers whether it was taken, which is what a caller logs or counts —
-    /// not an error, because a statement arriving out of order is ordinary on a
-    /// best-effort broadcast rather than a fault.
+    /// Answers whether this node's picture of the group **changed** — not
+    /// whether the statement was acceptable. Those differ for the commonest
+    /// statement there is: a member restating an address we already hold, which
+    /// is accepted (it must be — see [`SignedAddress::applied`], where an equal
+    /// position ties rather than losing) and tells us nothing. Saying "changed"
+    /// to that would wake everything waiting on [`Self::learned`] for no reason.
+    ///
+    /// Not an error either way: a statement arriving out of order is ordinary on
+    /// a best-effort broadcast rather than a fault.
     ///
     /// **Verification happens here**, so there is no way into the directory
     /// that skips it: the address is only reachable through
@@ -140,6 +154,28 @@ impl Directory {
             .get(&member)
             .is_some_and(|held| announced.applied() < *held)
         {
+            return Ok(false);
+        }
+
+        // **Is this actually news?** Compared as `EndpointAddr`s — the form the
+        // lookup stores and the form iroh resolves — rather than as `NodeAddr`s:
+        // a relay url that went in as a string and came back through `RelayUrl`
+        // can be normalised on the way, and an address that compared unequal to
+        // itself would defeat the whole point of asking. `EndpointAddr` is `Eq`
+        // over a `BTreeSet`, so this is exact and does not care about order.
+        //
+        // Read back out of the lookup for the reason `address_of` is: that is
+        // what iroh would answer, and bookkeeping kept beside it would agree
+        // with itself while the lookup held something else.
+        let held = self
+            .lookup
+            .get_endpoint_info(member.endpoint_id())
+            .map(iroh::EndpointAddr::from);
+        if held.as_ref() == Some(&endpoint_addr) {
+            // The position still advances: it is what supersession is judged on,
+            // and letting it go stale would make a later statement from this
+            // member look older than it is.
+            heard.insert(member, announced.applied());
             return Ok(false);
         }
 

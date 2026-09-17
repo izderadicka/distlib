@@ -150,8 +150,25 @@ const LEAST_BETWEEN_ANNOUNCEMENTS: Duration = Duration::from_secs(5);
 /// hearing about somebody is taken as a reason to say where we are: somebody
 /// this node has only just heard of has probably not heard of this node either.
 ///
-/// Deliberately symmetric, and it terminates — an announcement is worth relaying
-/// once, a member is new once, and the floor below bounds the rate regardless.
+/// **Deliberately symmetric, which is why it has to be shown to terminate.**
+/// Every node speaking makes every other node speak, so the question is not
+/// whether the rate is bounded — the floor below does that — but whether it ever
+/// reaches zero. It does, and the reason is one line down in
+/// [`Directory::learn`]: a member restating an address we already hold is *not*
+/// a change, so it does not wake this loop. A late joiner is news once, to each
+/// node, and after that round nobody has anything to say.
+///
+/// **It was not always ours to claim.** Before that check, every accepted
+/// statement counted — including the repeats — and this loop would have run for
+/// as long as the group was up. What hid it is that iroh-gossip discards a
+/// message whose id it has already seen, and a repeat *is* byte-identical: the
+/// signature is deterministic and the payload carries no clock. So the cascade
+/// died in the broadcast layer, on a 90-second cache whose retention is a
+/// default in somebody else's crate, and a duplicate still crossed the wire to
+/// every neighbour before being dropped — each of which answers `Prune` and
+/// moves this node to its lazy set, so the *next* real announcement reaches it
+/// the slow way. None of that is a property to build on. See
+/// [`distlib_core::SignedAddress`] for the other half of the trap.
 pub async fn announce_address(
     endpoint: &Endpoint,
     secret: &SecretKey,

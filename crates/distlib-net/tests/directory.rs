@@ -80,6 +80,71 @@ fn the_same_position_is_still_heard() {
     );
 }
 
+/// Saying again what we already hold is not news.
+///
+/// The commonest statement on the topic, and the one that must cost nothing: a
+/// member re-announces because it heard of somebody new, and everyone who
+/// already knew where it is hears that too. Taking it as news would wake the
+/// catalogue into dialling every peer it has, and would give this node a reason
+/// to announce in turn — which is a reason for its neighbours to announce, and
+/// so on, for as long as the group is up.
+///
+/// The statement is still *accepted* — it has to be, since an equal position
+/// ties rather than losing. Accepted and "something changed" are different
+/// answers, and this is the case that separates them.
+#[test]
+fn hearing_again_what_we_already_hold_changes_nothing() {
+    let key = SecretKey::generate();
+    let directory = Directory::default();
+    let member = distlib_core::MemberId::from(key.public());
+
+    directory
+        .learn(&SignedAddress::sign(&key, somewhere(5012), 4).unwrap())
+        .unwrap();
+    let changed = directory
+        .learn(&SignedAddress::sign(&key, somewhere(5012), 4).unwrap())
+        .unwrap();
+
+    assert!(!changed, "an address we already hold is not news");
+    assert_eq!(
+        directory.address_of(member),
+        Some(somewhere(5012)),
+        "and the answer is unchanged, not erased on the way to saying so"
+    );
+}
+
+/// ...and neither is saying it again from further along the log.
+///
+/// A member whose group has moved on re-announces the same address at a higher
+/// position. Nothing about where it is has changed, so nothing wakes — but the
+/// position must still be recorded, because it is what the next statement is
+/// judged against, and a stale one would make that statement look older than it
+/// is.
+#[test]
+fn a_later_position_alone_changes_nothing_but_is_still_recorded() {
+    let key = SecretKey::generate();
+    let directory = Directory::default();
+    let member = distlib_core::MemberId::from(key.public());
+
+    directory
+        .learn(&SignedAddress::sign(&key, somewhere(5013), 4).unwrap())
+        .unwrap();
+    let changed = directory
+        .learn(&SignedAddress::sign(&key, somewhere(5013), 9).unwrap())
+        .unwrap();
+
+    assert!(
+        !changed,
+        "the same place, said later, is still the same place"
+    );
+    assert_eq!(
+        directory.position_of(member),
+        Some(9),
+        "but the position has to advance, or the next statement is judged \
+         against a stale one"
+    );
+}
+
 /// Positions are never compared between members.
 #[test]
 fn one_member_cannot_drown_out_another() {

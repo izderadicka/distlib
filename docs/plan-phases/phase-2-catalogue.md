@@ -650,6 +650,28 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   verbatim), `distlib search` and `distlib item` on the CLI, reading SQLite/tantivy only.
   **Acceptance:** by hand — two nodes, add metadata on one, search by author on the other.
 
+- **2a-5 — Core nodes answer for the group.** The other half of P2-15, and the only part of it not
+  yet written. A core node accumulates every `SignedAddress` it hears and serves it on request:
+  `Request::Directory` / `Response::Directory(Vec<SignedAddress>)` on `distlib/memberlog/0`, asked
+  on startup after the first log fetch and whenever a member cannot be resolved. **In memory only**
+  — addresses are ephemeral, and a restarted core node's directory refills from the announcements
+  its reappearance provokes. The asking node **verifies every entry**, so a core node relays
+  self-authenticating statements rather than being believed; no new trust is placed anywhere.
+
+  This is what covers the case announcements cannot: a node that was not listening when an address
+  was announced, and is past the window in which the broadcast layer would still repair a dropped
+  message, has no other way to find out. Gossip carries news; this answers questions.
+
+  **`Directory::learn` reporting *change* rather than acceptance is a prerequisite here**, not a
+  nicety. A directory response is a batch of addresses the asking node mostly already holds, and
+  nothing deduplicates an RPC reply the way the broadcast layer deduplicates a repeated message —
+  so without that check, every answer would wake the catalogue into re-offering its peers once per
+  entry.
+
+  Wire-format note: `Request`/`Response` gain variants, so nodes of different versions cannot talk.
+  No stored format changes, and no group is deployed.
+  **Acceptance:** carol joins after bob announced, hears nothing, and still resolves him.
+
 ### 2b — Content moves (3 PRs)
 
 - **2b-1 — Media blobs.** `distlib-net::blobs`: the `BlobsProtocol` on the router, and fetch by hash
@@ -693,6 +715,7 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
 | Item | Standing |
 |---|---|
+| **A full peer offer is O(N²) dials group-wide.** `sync_with` hands iroh-docs the whole allowlist and `start_sync` dials every peer in it, not just the ones it has not seen; every node does this on the `OFFER_AGAIN` timer whether or not anything has changed. | **Open.** Narrowed, not closed: since P2-15's follow-up the *reaction* path offers only the member it just learned about, so this is now the repair sweep alone. Fine at any size anything is tested at, and wrong at the thousands §2 allows, where a group would spend its time on handshakes. Not guessed at now, on the P1-35 precedent — nobody has watched a group big enough to say what the sweep should be scoped to (nearest N, the core group plus a sample, or something the swarm already knows). Revisit when it shows up in a measurement rather than in an argument. |
 | **P2-6** — `PENDING_EXPIRY` is one fixed count for every group | **Open.** Raised reviewing 2.2-3: groups differ in how fast they move, and one number is wrong in *opposite* directions at the two ends. A group with heavy membership churn burns 128 entries quickly, so a real deliberation can be swept while it is still being had; a settled group of three may never reach 128, so the abandoned slot the rule exists to clear is never cleared for them. Three candidate answers, none obviously right yet. **A policy event in the log** (core-majority, deterministic) lets each group choose — §5.5's weight cap needs exactly that machinery, so it gets built once, there, and this joins it; but it only moves the choice, it does not say what to choose. **Changing the unit** so the count ticks with governance activity rather than with every membership entry helps the busy end and does nothing for the quiet one. **Committed timestamps** turn out to be deterministic after all — `at` is signed, so every node reads the same bytes — but nothing verifies them, and the fold's only available "now" is another self-reported timestamp, so a single member with a fast clock would sweep the whole pending set. Not an attack under §2, just a misconfiguration, and those are ordinary. **Deferred rather than tuned blind**, on the P1-35 precedent: nobody has yet watched a real group's membership-event rate, so a better number chosen now would be guessing with extra steps. Revisit when there is a group that has been running long enough to have one. |
 | The **fast lane is not fast**: `cargo test-fast` is about 37 seconds, not the ~5 this document claims below. It is not the feature-unification trap — `--no-default-features` is applied — but ungated multi-node tests, `three_founders_converge_on_one_group` (7.8 s) among them, against this document's own rule that everything with more than one node belongs in the slow lane. | Noticed in 2.3-1 while measuring what `tests/moved.rs` added (4.2 s). Not fixed there, because gating tests changes what CI runs on every push and that is a decision rather than a tidy-up: some of these may be in the fast lane deliberately. What is wanted first is the list — which multi-node tests are ungated, and how much of the 37 seconds each is — and then one decision about all of them. |
 | **A core node that is demoted keeps running as a voter.** A node the log drops from the core group keeps the Raft in its seat, goes on answering `distlib/raft/0` to whoever will still speak it, and never starts a follow loop — the mirror of the promotion gap 2.3-2 closed. | **Closed** by the review-findings PR, as MEM-04. `stand_down` is the mirror of `take_the_seat` and the two are now one task per node, strictly alternating: stop the reconciler, empty the seat and shut the Raft down (in that order, so the moment a peer can no longer be answered is the moment this node stops voting rather than a window in which it answers with errors), point the follow cursor at what was applied, start following. **What is left open is the round trip.** Promotion is once and demotion is once; a demoted node's Raft log is no longer the empty one a new learner should have, so handing it back to `Raft::new` is untested and the node needs a restart to be promoted again. A restart re-reads the projection, comes up as a follower, and the promotion path is available from there — so nothing is stuck, it is a restart that should not be needed. |

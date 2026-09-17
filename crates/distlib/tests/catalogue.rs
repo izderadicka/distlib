@@ -27,6 +27,10 @@ use tempfile::TempDir;
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
 
+/// Two floors between one node's announcements: the silence a settled group
+/// must manage before it is believed to be settled.
+const QUIET: Duration = Duration::from_secs(10);
+
 /// The window a negative assertion gets before it is believed.
 ///
 /// Deliberately longer than an entry has ever taken to cross in these tests —
@@ -410,8 +414,10 @@ async fn what_one_follower_writes_the_other_follower_reads() {
 /// and Raft's node map holds voters, so bob's whereabouts reach carol only
 /// because bob *said* where he is, on the group's gossip topic, signed by his
 /// own key. Carol was not there to hear him say it the first time; she learns
-/// it because her arrival made her bob's neighbour, and a neighbour arriving is
-/// one of the three things that makes a node speak up.
+/// it because *her* announcement reached bob, and hearing of somebody he did
+/// not know is what makes bob say where he is again. Not because she became his
+/// neighbour — `announce_address` explains why that trigger was tried and
+/// deleted.
 ///
 /// Waited for rather than probed once, because that last step is the point: the
 /// guarantee is eventual, bounded by the floor between one node's
@@ -451,6 +457,83 @@ async fn a_follower_learns_where_another_follower_is() {
         .connect(group.bob.endpoint().id(), distlib_net::alpn::PING)
         .await
         .expect("a resolvable follower must be dialable by id alone");
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// And then everybody shuts up.
+///
+/// The triggers are events — joining, moving, and hearing of somebody new — so a
+/// group that has finished converging should have nothing left to say. That did
+/// not hold. `Directory::learn` answered "taken" for a statement that told us
+/// nothing we did not already hold, because an equal log position must not be
+/// rejected; every node therefore read its neighbours' repeats as news, and news
+/// is a reason to announce. Three nodes with nothing happening announced at the
+/// floor for ever, and each announcement made every receiver re-offer its
+/// catalogue's peers — which dials all of them.
+///
+/// Asserted as *quiet* rather than as a count, and only after the group has
+/// converged: the cascade that carries a late joiner is supposed to happen, and
+/// what is being pinned is that it ends. Without the fix the silence never
+/// arrives and this fails on the timeout.
+#[tokio::test]
+async fn a_settled_group_stops_talking_about_addresses() {
+    let group = a_group_with_two_followers().await;
+    let everyone = [
+        ("alice", &group.alice),
+        ("bob", &group.bob),
+        ("carol", &group.carol),
+    ];
+
+    let heard = || {
+        everyone
+            .iter()
+            .map(|(_, runtime)| *runtime.node().known_addresses().learned().borrow())
+            .collect::<Vec<u64>>()
+    };
+    let everyone_knows_everyone = || {
+        everyone.iter().all(|(_, runtime)| {
+            everyone
+                .iter()
+                .filter(|(_, other)| other.endpoint().id() != runtime.endpoint().id())
+                .all(|(_, other)| {
+                    runtime
+                        .node()
+                        .known_addresses()
+                        .address_of(MemberId::from(other.endpoint().id()))
+                        .is_some()
+                })
+        })
+    };
+
+    // Converged first: silence before that would be the wrong kind.
+    tokio::time::timeout(SOON, async {
+        while !everyone_knows_everyone() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("every member must learn where the others are");
+
+    let settled = tokio::time::timeout(SOON, async {
+        loop {
+            let before = heard();
+            tokio::time::sleep(QUIET).await;
+            if heard() == before {
+                return before;
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        settled.is_ok(),
+        "a group with nothing happening must stop announcing, and this one was \
+         still learning addresses after {SOON:?} — counts now {:?}",
+        heard()
+    );
 
     group.carol.shutdown().await;
     group.bob.shutdown().await;

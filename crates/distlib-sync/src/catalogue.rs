@@ -19,6 +19,7 @@
 //! key beside this one; nothing here has to move.
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -28,7 +29,7 @@ use distlib_consensus::MembershipState;
 use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
-use iroh::{EndpointAddr, SecretKey};
+use iroh::{EndpointAddr, EndpointId, SecretKey};
 use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
@@ -37,7 +38,7 @@ use iroh_docs::{
     protocol::Docs,
     store::{Query, Store as DocumentStore},
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{sync::watch, task::JoinHandle, time::Instant};
 
 use crate::error::{Result, SyncError};
 
@@ -427,9 +428,11 @@ async fn open_when_founded(
     // group is and nowhere else, because a follower's address arrives later, by
     // announcement. So the followers named above were named and dropped.
     //
-    // Offering the set again once an address is learned is what closes that,
-    // and `start_sync` is built for it: it skips the open if the document is
-    // already syncing and adds whatever peers it is given.
+    // Offering the peer again once its address is learned is what closes that,
+    // and `start_sync` is the only way to say it: it skips the open if the
+    // document is already syncing and takes whatever peers it is given. What it
+    // does *not* do is take only the new ones — it dials every peer in the list,
+    // which is why what it is handed is kept narrow.
     offer_peers_as_they_are_learned(doc, membership, me, learned, opened, directory).await;
 }
 
@@ -443,25 +446,40 @@ async fn open_when_founded(
 /// neighbour in. Nothing is broadcast here; it is a local call that re-offers
 /// peers to this node's own engine, so the cost of it being wrong is a
 /// connection attempt.
+///
+/// The longest the whole set can go un-offered, rather than the longest the
+/// loop can sit idle — which are the same thing only while every wake-up offers
+/// everything, and one of them no longer does.
 const OFFER_AGAIN: Duration = Duration::from_secs(15);
 
 /// The least time between two offers of the document's peers.
 ///
 /// The learned-address signal fires once per member learned, and a node joining
-/// a group learns several within a moment of each other. Every offer makes
-/// iroh-docs open a sync with *every* peer, and when two nodes sync at each
-/// other one aborts the other's incoming attempt — `AlreadySyncing`, handled
-/// there as "do nothing, our outgoing sync is in progress". So an unthrottled
-/// burst spends the group's time on handshakes that abort each other, which is
-/// worst exactly where it is least affordable: a small, busy machine.
+/// a group learns several within a moment of each other. An offer makes
+/// iroh-docs dial each peer it is handed, and when two nodes sync at each other
+/// one aborts the other's incoming attempt — `AlreadySyncing`, handled there as
+/// "do nothing, our outgoing sync is in progress". So an unthrottled burst
+/// spends the group's time on handshakes that abort each other, which is worst
+/// exactly where it is least affordable: a small, busy machine.
 ///
 /// A floor coalesces the burst without losing it. The signal is a watch, which
 /// keeps only its latest value, so what is waiting afterwards is "there was
 /// news" — however much news there was.
+///
+/// Still needed now that a reaction offers only what it learned. It bounds the
+/// *arrival* rate, not the size of one offer, and arrivals come in bursts by
+/// their nature: a node joining a group of twenty hears about twenty members
+/// inside a second.
 const LEAST_BETWEEN_OFFERS: Duration = Duration::from_secs(2);
 
 /// Re-offers the document's peers, promptly when there is news and slowly
 /// regardless.
+///
+/// **Two kinds of round, and they want different things.** Hearing where one
+/// member is says nothing about the others, so it offers that member alone. A
+/// membership change or the idle timer says the set itself may be wrong — the
+/// node that introduced two members may have gone — so those re-offer
+/// everything, which is what repairs a stranded document.
 ///
 /// Ends when the node shuts down, which is when `opened`'s receivers go — the
 /// same condition that used to hold this task open.
@@ -478,30 +496,92 @@ async fn offer_peers_as_they_are_learned(
     // ever, and selecting on it again would spin.
     let mut still_learning = true;
 
+    // What has already been handed over, so that learning where *one* member is
+    // does not re-offer the rest. `start_sync` is not an add: it dials every
+    // peer in the list it is given, new or not, and appends the document's own
+    // remembered peers on top — so the cost of an offer follows the size of the
+    // group rather than the size of the news.
+    let mut offered: HashMap<EndpointId, EndpointAddr> = HashMap::new();
+
+    // When everything was last offered. The timer arm below is restarted by
+    // every other arm, so on its own it measures an *idle* gap — and now that a
+    // learned address offers only that address, a group whose members keep
+    // moving would push the sweep out for ever and never repair anything. This
+    // makes `OFFER_AGAIN` what its own docs say it is: the longest the whole set
+    // can go un-offered, whatever else happens in between.
+    let mut last_full = Instant::now();
+
     loop {
-        tokio::select! {
+        // Whether this round is a repair or a reaction. The two arms that mean
+        // "the set itself may be wrong" — a membership change, and the timer —
+        // re-offer everything; learning one address offers that one.
+        let mut repair = tokio::select! {
             // Held so the receivers stay open for the life of the node;
             // dropping the sender would make `ready()` return on a catalogue
             // that never opened.
             () = opened.closed() => return,
-            heard = learned.changed(), if still_learning => if heard.is_err() {
-                // Nothing fills the directory any more. The timer below still
-                // stands, so this is not a reason to stop.
-                still_learning = false;
-                tracing::debug!("no longer learning addresses; offering on the timer alone");
-            },
-            changed = membership.changed() => if changed.is_err() {
-                return;
-            },
-            () = tokio::time::sleep(OFFER_AGAIN) => {}
-        }
+            heard = learned.changed(), if still_learning => {
+                if heard.is_err() {
+                    // Nothing fills the directory any more. The timer below
+                    // still stands, so this is not a reason to stop.
+                    still_learning = false;
+                    tracing::debug!("no longer learning addresses; offering on the timer alone");
+                }
+                false
+            }
+            changed = membership.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                true
+            }
+            // Deadline rather than delay: a plain `sleep` is built afresh on
+            // every iteration, so any other arm firing at T+14 would push the
+            // sweep out to T+29 and the bound below would be twice what it
+            // says.
+            () = tokio::time::sleep_until(last_full + OFFER_AGAIN) => true,
+        };
+        // The deadline above can come due at the same moment as a learned
+        // address, and `select!` picks between two ready arms at random. This
+        // makes the sweep win that race rather than losing it half the time.
+        repair |= last_full.elapsed() >= OFFER_AGAIN;
 
-        let peers = sync_with(&membership.borrow_and_update().clone(), me, &directory);
-        if let Err(error) = doc.start_sync(peers).await {
-            // Not fatal: whatever was already syncing goes on, and the next
-            // address learned brings this round again.
+        let reachable = sync_with(&membership.borrow_and_update().clone(), me, &directory);
+        let peers = if repair {
+            // Rebuilt rather than extended, so a member that left and came back
+            // is offered again without anything here knowing that it did.
+            last_full = Instant::now();
+            offered = reachable
+                .iter()
+                .map(|peer| (peer.id, peer.clone()))
+                .collect();
+            reachable
+        } else {
+            let news: Vec<EndpointAddr> = reachable
+                .into_iter()
+                .filter(|peer| offered.get(&peer.id) != Some(peer))
+                .collect();
+            offered.extend(news.iter().map(|peer| (peer.id, peer.clone())));
+            news
+        };
+
+        if peers.is_empty() {
+            // Nothing was learned that this document did not already have —
+            // somebody else's address changed, or a core node moved and the log
+            // is the authority on where those are. An empty offer is not a free
+            // one: `start_sync` would still read the remembered peers out of the
+            // store and dial them.
+            tracing::trace!("nothing new to offer the catalogue");
+        } else if let Err(error) = doc.start_sync(peers).await {
+            // Not fatal: whatever was already syncing goes on, and the sweep
+            // above offers these again within `OFFER_AGAIN`. Not the next
+            // address learned — that is a reaction, and these peers are already
+            // written down as offered.
             tracing::debug!(%error, "could not offer the catalogue's peers again");
         }
+        // Unconditional, including after a round that offered nothing. The floor
+        // is there to coalesce a burst of arrivals, and a burst is exactly when
+        // some of the rounds in it have nothing in them.
         tokio::time::sleep(LEAST_BETWEEN_OFFERS).await;
     }
 }
