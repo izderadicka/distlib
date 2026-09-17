@@ -7,11 +7,18 @@
 //!
 //! It is also the shape `[consensus] core` carries in the config file, so
 //! keeping the two in one place is what stops them drifting.
+//!
+//! [`signed_addr`] holds the same answer as a member's own signed statement,
+//! for the case where it is heard rather than configured or committed.
+
+pub mod signed_addr;
 
 use std::{collections::BTreeSet, net::SocketAddr};
 
 use iroh::{EndpointAddr, RelayUrl};
 use serde::{Deserialize, Serialize};
+
+pub use signed_addr::SignedAddress;
 
 use crate::id::MemberId;
 

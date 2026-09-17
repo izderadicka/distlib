@@ -1,4 +1,9 @@
-//! A member's own statement of where it can be reached.
+//! A [`NodeAddr`] that was *heard* rather than configured or committed.
+//!
+//! The parent module's addresses arrive from somewhere already trusted —
+//! the config file, or the replicated log. These arrive over an epidemic
+//! broadcast, from whoever happened to relay them, so they carry the
+//! member's own signature and are worth nothing without it.
 //!
 //! **Why this is signed when the log announcement beside it is not.** Both
 //! travel on the group's gossip topic, and `Announcement::Applied` is
@@ -18,8 +23,8 @@
 use iroh::{SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
+use super::NodeAddr;
 use crate::{
-    addr::NodeAddr,
     error::{CoreError, Result},
     id::MemberId,
 };
@@ -34,6 +39,21 @@ use crate::{
 const SIGNING_DOMAIN: &[u8] = b"distlib.address.v1";
 
 /// Where a member says it is, signed by that member.
+///
+/// **Nothing here may vary between two statements of the same fact.** The four
+/// fields below, and the signature over them, are why a member restating an
+/// unchanged address produces the same bytes twice — ed25519 signs
+/// deterministically, so the same pre-image is the same signature. Add a
+/// timestamp, a nonce, a counter, anything that moves on its own, and every
+/// repeat becomes a distinct message: the broadcast layer stops recognising it
+/// as one it has seen, every neighbour receives it and forwards it, and the
+/// group talks for as long as it is up. That was measured, not feared — signing
+/// each announcement one position further along makes
+/// `a_settled_group_stops_talking_about_addresses` fail with the counters still
+/// climbing.
+///
+/// [`Self::applied`] is the exception that proves it: it moves, but only when
+/// the log does, which is exactly when a statement is genuinely a new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedAddress {
     member: MemberId,
