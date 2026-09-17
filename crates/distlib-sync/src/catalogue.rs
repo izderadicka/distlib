@@ -19,7 +19,7 @@
 //! key beside this one; nothing here has to move.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -30,7 +30,12 @@ use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
-use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
+use iroh_blobs::{
+    BlobsProtocol, Hash, HashAndFormat,
+    api::Store as BlobStore,
+    api::downloader::{Downloader, Shuffled},
+    api::proto::BlobStatus,
+};
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
     api::Doc,
@@ -147,13 +152,17 @@ impl Catalogue {
         // a second copy of this node's identity and hard-errors when the two
         // disagree. The author is the node key, derived every start, so there
         // is nothing to persist and nothing to fall out of step.
+        // Cloned rather than built twice: `downloader` spawns an actor, and a
+        // second one would be a second pool of connections to the same peers.
+        // The engine drives it for the content it knows to ask for; the task
+        // below drives the same one for the content it never asked for.
         let downloader = blobs.downloader(&transport.endpoint);
         let engine = Engine::spawn(
             transport.endpoint.clone(),
             transport.gossip.clone(),
             replicas,
             blobs.clone(),
-            downloader,
+            downloader.clone(),
             DefaultAuthorStorage::Mem,
             None,
         )
@@ -168,13 +177,15 @@ impl Catalogue {
             .map_err(SyncError::docs("given this node's author key"))?;
 
         let (opened, open) = watch::channel(None);
-        let task = tokio::spawn(open_when_founded(
-            docs.clone(),
+        let task = tokio::spawn(open_when_founded(Opening {
+            docs: docs.clone(),
+            blobs: blobs.clone(),
+            downloader,
             membership,
-            MemberId::from(key.public()),
+            me: MemberId::from(key.public()),
             opened,
-            transport.directory.clone(),
-        ));
+            directory: transport.directory.clone(),
+        }));
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -380,13 +391,30 @@ impl Catalogue {
 /// The same shape as the gossip task next door: the identity of the thing to
 /// join comes from the log, so the task waits for one rather than every
 /// caller having to order startup around it.
-async fn open_when_founded(
+/// What opening the catalogue needs, gathered rather than passed one by one.
+///
+/// Seven values, and the two loops the task ends in want overlapping subsets of
+/// them — which is the case the house rule on parameter counts names.
+struct Opening {
     docs: Docs,
-    mut membership: watch::Receiver<MembershipState>,
+    blobs: BlobStore,
+    downloader: Downloader,
+    membership: watch::Receiver<MembershipState>,
     me: MemberId,
     opened: watch::Sender<Option<Doc>>,
     directory: Directory,
-) {
+}
+
+async fn open_when_founded(opening: Opening) {
+    let Opening {
+        docs,
+        blobs,
+        downloader,
+        mut membership,
+        me,
+        opened,
+        directory,
+    } = opening;
     let learned = directory.learned();
     let (group, peers) = loop {
         let seen = membership.borrow_and_update().clone();
@@ -433,7 +461,19 @@ async fn open_when_founded(
     // document is already syncing and takes whatever peers it is given. What it
     // does *not* do is take only the new ones — it dials every peer in the list,
     // which is why what it is handed is kept narrow.
-    offer_peers_as_they_are_learned(doc, membership, me, learned, opened, directory).await;
+    // Both until shutdown, which only the first can see: it holds `opened`, so
+    // when its receivers go it returns and the other is dropped with it.
+    tokio::select! {
+        () = offer_peers_as_they_are_learned(
+            doc.clone(),
+            membership.clone(),
+            me,
+            learned,
+            opened,
+            directory.clone(),
+        ) => {}
+        () = fetch_content_nobody_offered(doc, blobs, downloader, membership, me, directory) => {}
+    }
 }
 
 /// How often the document's peers are offered again regardless.
@@ -584,6 +624,144 @@ async fn offer_peers_as_they_are_learned(
         // some of the rounds in it have nothing in them.
         tokio::time::sleep(LEAST_BETWEEN_OFFERS).await;
     }
+}
+
+/// How often this node asks for content that nobody offered it.
+///
+/// A repair path rather than the way content normally arrives, so it is paced
+/// against the cost of being wrong. On a node that has everything a round is a
+/// document scan and nothing on the wire: a hash whose bytes are here is never
+/// asked for. What it is paced *against* is the opposite case — content nobody
+/// reachable will ever serve, which an expelled member can be left holding the
+/// key to. There is no backoff, so that node asks again on every round for as
+/// long as it runs; slower than the burst floor next door for that reason, and
+/// still prompt against the tens of seconds a stranded entry used to cost.
+const FETCH_AGAIN: Duration = Duration::from_secs(5);
+
+/// The longest one download is waited on before the sweep moves past it.
+///
+/// Not a limit on how long a transfer may take — it is a limit on how long one
+/// unreachable hash may hold up every other. Without it a single peer that
+/// accepts a connection and then says nothing would stop this loop for good,
+/// which would be a worse fault than the one it is here to repair.
+const FETCH_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Asks for the content of entries this node holds and was never sent.
+///
+/// **This repairs a one-shot in iroh-docs, and the gap is structural.** An
+/// entry and its content travel separately, and when an entry arrives over
+/// gossip the sender's content is assumed present *only if the message came
+/// straight from its publisher*: `engine/gossip.rs` reads
+/// `msg.scope.is_direct()` and records `ContentStatus::Missing` for anything
+/// relayed. A relayed entry therefore starts no download and remembers no
+/// provider — the hash goes into the engine's `missing_hashes` and stays there.
+///
+/// What is supposed to rescue it is `Op::ContentReady`, which a node broadcasts
+/// when its own download finishes. That message is sent **once**, to **direct
+/// neighbours only**, and never by the author — a local write emits `Op::Put`
+/// and nothing else. So a node that is not a neighbour of whoever completes
+/// first, at the moment they complete, holds the key for ever and never the
+/// value. Nothing retries: a failed download is put back in `missing_hashes`
+/// with no timer, and the engine's provider list is a snapshot taken when the
+/// download started, so a peer learned afterwards is not tried either.
+///
+/// Measured, both before this existed and on the branch before this PR: the
+/// group converges, then `catalogue.get` answers `MissingContent` until the
+/// test gives up — *the entry is here, its content has not arrived*.
+///
+/// **It can only work because of the other half of this PR.** The downloader is
+/// given bare [`EndpointId`]s and has to resolve them, and a follower's address
+/// is in no log. Before members announced where they are, this retry would have
+/// failed exactly the way the download it repairs did.
+async fn fetch_content_nobody_offered(
+    doc: Doc,
+    blobs: BlobStore,
+    downloader: Downloader,
+    mut membership: watch::Receiver<MembershipState>,
+    me: MemberId,
+    directory: Directory,
+) {
+    loop {
+        // At the top, so the first sweep does not race the opening sync that
+        // will usually make it unnecessary.
+        tokio::time::sleep(FETCH_AGAIN).await;
+
+        // The same set the document is offered as peers, which is the right
+        // one: a member this node cannot reach cannot serve it content either.
+        let providers: Vec<EndpointId> =
+            sync_with(&membership.borrow_and_update().clone(), me, &directory)
+                .into_iter()
+                .map(|peer| peer.id)
+                .collect();
+        if providers.is_empty() {
+            continue;
+        }
+
+        let wanted = match content_not_here(&doc, &blobs).await {
+            Ok(wanted) => wanted,
+            Err(error) => {
+                tracing::debug!(%error, "could not look for content that has not arrived");
+                continue;
+            }
+        };
+
+        for hash in wanted {
+            // One at a time, which is what keeps this from asking twice for the
+            // same hash: the next sweep reads the store again, and anything
+            // that landed in the meantime is no longer wanted. Shuffled so that
+            // a group of readers repairing at once does not all ask one member.
+            let asked = tokio::time::timeout(
+                FETCH_DEADLINE,
+                downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.clone())),
+            )
+            .await;
+            match asked {
+                Ok(Ok(())) => tracing::debug!(%hash, "fetched content nobody offered"),
+                // Ordinary rather than alarming: nobody reachable has it yet.
+                // The next sweep asks again, which is the whole point.
+                Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
+                Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
+            }
+        }
+    }
+}
+
+/// The hashes of entries this node holds whose bytes are not in its store.
+///
+/// Read from the document every time rather than remembered, so nothing has to
+/// stay in step with it: an entry that arrived while this was not looking is
+/// found on the next sweep, and one whose content landed drops out by itself.
+///
+/// Entries of zero length are skipped. Their hash is the hash of no bytes,
+/// which every store can answer for without asking anybody — and a deletion
+/// looks exactly like one, so asking for it would dial the group on behalf of
+/// an entry that has no content by design.
+async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<Vec<Hash>> {
+    let entries = doc
+        .get_many(Query::all())
+        .await
+        .map_err(SyncError::docs("read from"))?;
+    tokio::pin!(entries);
+
+    let mut wanted = HashSet::new();
+    while let Some(entry) = entries.next().await {
+        let entry = entry.map_err(SyncError::docs("read from"))?;
+        let hash = entry.content_hash();
+        if entry.content_len() == 0 || wanted.contains(&hash) {
+            continue;
+        }
+        let status = blobs
+            .blobs()
+            .status(hash)
+            .await
+            .map_err(SyncError::content(
+                "asked whether an entry's content is here",
+            ))?;
+        if !matches!(status, BlobStatus::Complete { .. }) {
+            wanted.insert(hash);
+        }
+    }
+    Ok(wanted.into_iter().collect())
 }
 
 /// The members to start syncing with: everyone this node can actually reach.
