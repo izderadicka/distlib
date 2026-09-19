@@ -78,6 +78,20 @@ pub enum NetError {
     /// `relay_mode = "custom"` was set with no relays listed.
     #[error("relay_mode is \"custom\" but relay_urls is empty")]
     NoCustomRelays,
+
+    /// A blob could not be fetched from any provider offered.
+    ///
+    /// Covers both a provider answering "I do not have this" and none
+    /// answering in time — [`crate::blobs::Blobs::fetch`] does not
+    /// distinguish them, for the same reason [`Self::Peer`] does not split by
+    /// which call failed: a caller cannot act differently either way, and the
+    /// underlying cause stays reachable through `source`.
+    #[error("could not fetch {hash} from any of the offered providers")]
+    Fetch {
+        hash: iroh_blobs::Hash,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 // `BindError` is large enough that returning it unboxed would bloat every

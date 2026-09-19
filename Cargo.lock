@@ -1225,6 +1225,7 @@ version = "0.1.0"
 dependencies = [
  "distlib-core",
  "iroh",
+ "iroh-blobs",
  "iroh-gossip",
  "iroh-relay",
  "postcard",
