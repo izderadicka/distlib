@@ -15,7 +15,9 @@ use std::{
 };
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
-use distlib_core::{ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr};
+use distlib_core::{
+    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr, SignedAddress,
+};
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, catalogue_key};
 use iroh::{
@@ -34,6 +36,9 @@ struct Node {
     /// Kept so one test can break the content store without touching the
     /// document store beside it.
     blobs: MemStore,
+    /// Kept so one test can tell a node where a member is, the way an
+    /// announcement would.
+    directory: distlib_net::Directory,
     router: Router,
 }
 
@@ -69,18 +74,15 @@ impl Node {
         };
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
+        let transport = Transport::new(endpoint.clone(), gossip.clone()).unwrap();
+        let directory = transport.directory.clone();
         // In memory: this test is about convergence, not about what survives a
         // restart, and `FsStore` spawns a runtime of its own per node.
         let blobs = MemStore::new();
-        let catalogue = Catalogue::start(
-            Transport::new(endpoint.clone(), gossip.clone()).unwrap(),
-            (*blobs).clone(),
-            documents,
-            &secret,
-            membership,
-        )
-        .await
-        .unwrap();
+        let catalogue =
+            Catalogue::start(transport, (*blobs).clone(), documents, &secret, membership)
+                .await
+                .unwrap();
         // **Gossip is served here, not by the catalogue.** A document's live
         // updates ride the process's gossip swarm — without it a node gets
         // only what the first reconciliation brought and never hears another
@@ -102,6 +104,7 @@ impl Node {
             catalogue,
             addr,
             blobs,
+            directory,
             router,
         }
     }
@@ -110,6 +113,15 @@ impl Node {
         self.catalogue.shutdown();
         let _ = self.router.shutdown().await;
     }
+}
+
+/// The same projection with one more member admitted, folded by hand.
+fn admitting(founded: &MembershipState, member: MemberRecord, by: &SecretKey) -> MembershipState {
+    let event = MembershipEvent::MemberAdded { member };
+    let signed = SignedEvent::sign(by, event, Timestamp::from_millis(2), 1).unwrap();
+    let mut state = founded.clone();
+    state.apply(2, &signed).unwrap();
+    state
 }
 
 /// The projection a founded two-member group produces, folded by hand.
@@ -469,4 +481,149 @@ fn the_catalogue_key_derivation_is_fixed() {
         "f3f1f6bdd8d025d7bfb4ebe346d0d83a123ff3b0e9006da69512fdb260cba882",
         "changing this splits every existing group's catalogue in two"
     );
+}
+
+/// A member joining is what makes this node ask again for content nobody had.
+///
+/// The sweep asks about a hash **once per generation** — otherwise a node
+/// holding an entry whose bytes no reachable member has dials the whole group
+/// for it on every round for as long as it runs, and, worse, every freshly
+/// stranded entry queues behind the ones that have already failed.
+///
+/// That rule is only safe because of the reset this test pins. Somebody who has
+/// just joined is the likeliest holder of bytes nobody here had, so a sweep
+/// that slept through a membership change would be one that backed off from its
+/// own answer. The other reset is a five-minute timer, and if the timer were
+/// what carried this the test would take five minutes.
+///
+/// **Carol is given the bytes directly rather than by writing the entry**, and
+/// the difference is the whole test. A write would publish a new entry straight
+/// from its author, which is the one case iroh-docs *does* fetch content for —
+/// so it would pass with the reset removed and prove nothing.
+#[tokio::test]
+async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
+    let alice_key = SecretKey::generate();
+    let bob_key = SecretKey::generate();
+    let carol_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let bob_id = MemberId::from(bob_key.public());
+    let carol_id = MemberId::from(carol_key.public());
+
+    let alice_docs = tempfile::TempDir::new().unwrap();
+    let bob_docs = tempfile::TempDir::new().unwrap();
+
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let alice = Node::start_storing(
+        alice_key.clone(),
+        alice_sees,
+        Some(alice_docs.path().to_path_buf()),
+    )
+    .await;
+    let bob = Node::start_storing(
+        bob_key.clone(),
+        bob_sees,
+        Some(bob_docs.path().to_path_buf()),
+    )
+    .await;
+
+    let founding = founded(
+        vec![
+            (record(alice_id, "alice"), alice.addr.clone()),
+            (record(bob_id, "bob"), bob.addr.clone()),
+        ],
+        &alice_key,
+    );
+    to_alice.send(founding.clone()).unwrap();
+    to_bob.send(founding.clone()).unwrap();
+    for node in [&alice, &bob] {
+        tokio::time::timeout(SOON, node.catalogue.ready())
+            .await
+            .unwrap();
+    }
+
+    alice.catalogue.put("item/1/title", "Dune").await.unwrap();
+    tokio::time::timeout(SOON, async {
+        while bob
+            .catalogue
+            .get("item/1/title")
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob reads it the ordinary way first");
+
+    // Both come back holding the entry and no bytes at all, so the group is a
+    // place where this content does not exist. Bob asks, alice cannot answer,
+    // and that is bob's generation spent.
+    alice.shutdown().await;
+    bob.shutdown().await;
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let alice = Node::start_storing(
+        alice_key.clone(),
+        alice_sees,
+        Some(alice_docs.path().to_path_buf()),
+    )
+    .await;
+    let bob = Node::start_storing(bob_key, bob_sees, Some(bob_docs.path().to_path_buf())).await;
+    to_alice.send(founding.clone()).unwrap();
+    to_bob.send(founding.clone()).unwrap();
+    for node in [&alice, &bob] {
+        tokio::time::timeout(SOON, node.catalogue.ready())
+            .await
+            .unwrap();
+    }
+    assert!(
+        matches!(
+            bob.catalogue.get("item/1/title").await,
+            Err(distlib_sync::SyncError::MissingContent { .. })
+        ),
+        "neither node may hold the bytes, or the rest of this proves nothing"
+    );
+
+    // Long enough for several sweeps to have asked and failed.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    // Carol holds the bytes without ever having written the entry.
+    let (to_carol, carol_sees) = watch::channel(MembershipState::new());
+    let carol = Node::start(carol_key.clone(), carol_sees).await;
+    carol.blobs.add_bytes(&b"Dune"[..]).await.unwrap();
+
+    // Where she is arrives by announcement, and that she is a member arrives by
+    // the log — two channels, as in production.
+    let announced = SignedAddress::sign(&carol_key, carol.addr.clone(), 1).unwrap();
+    for node in [&alice, &bob] {
+        node.directory.learn(&announced).unwrap();
+    }
+    let with_carol = admitting(&founding, record(carol_id, "carol"), &alice_key);
+    to_alice.send(with_carol.clone()).unwrap();
+    to_bob.send(with_carol.clone()).unwrap();
+    to_carol.send(with_carol).unwrap();
+    tokio::time::timeout(SOON, carol.catalogue.ready())
+        .await
+        .unwrap();
+
+    let read = tokio::time::timeout(SOON, async {
+        loop {
+            match bob.catalogue.get("item/1/title").await {
+                Ok(Some(value)) => return value,
+                Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Err(error) => panic!("reading the catalogue failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a member arriving with the bytes must make bob ask again, not wait out the timer");
+    assert_eq!(&read[..], b"Dune");
+
+    carol.shutdown().await;
+    alice.shutdown().await;
+    bob.shutdown().await;
 }
