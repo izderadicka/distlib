@@ -22,6 +22,16 @@ test-threads = 4
 # 22-40s, since the cluster tests stop thrashing each other while the fast
 # tests keep the other threads busy.
 #
+# `distlib::catalogue` joined this list when its tests grew from two nodes to
+# three and four, each a whole `Runtime` — and `iroh-blobs`' `FsStore` spawns a
+# multi-threaded runtime of its own per node, so four threads of these is a
+# dozen runtimes plus a dozen more. It earned its place the way the note below
+# asks for: `an_expelled_member_stops_receiving_entries` failed on a two-core
+# machine under the full suite and passed alone on the same machine, which is
+# the signature of the runner rather than the code. Note the `binary_id` —
+# there is a `distlib-core::catalogue` too, and those are pure unit tests that
+# must stay on the fast threads.
+#
 # It is **not** what fixed `three_friends_found_a_group`, though it was
 # introduced believing that. That test was failing about one run in ten because
 # it pinned ports drawn from the kernel's ephemeral range and something else was
@@ -35,5 +45,5 @@ test-threads = 4
 cluster = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(founding) or binary(acceptance) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
+filter = 'binary(founding) or binary(acceptance) or binary_id(distlib::catalogue) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
 test-group = 'cluster'

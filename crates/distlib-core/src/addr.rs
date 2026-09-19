@@ -7,11 +7,18 @@
 //!
 //! It is also the shape `[consensus] core` carries in the config file, so
 //! keeping the two in one place is what stops them drifting.
+//!
+//! [`signed_addr`] holds the same answer as a member's own signed statement,
+//! for the case where it is heard rather than configured or committed.
+
+pub mod signed_addr;
 
 use std::{collections::BTreeSet, net::SocketAddr};
 
 use iroh::{EndpointAddr, RelayUrl};
 use serde::{Deserialize, Serialize};
+
+pub use signed_addr::SignedAddress;
 
 use crate::id::MemberId;
 
@@ -90,6 +97,26 @@ impl NodeAddr {
             addr = addr.with_relay_url(relay);
         }
         Ok(addr)
+    }
+}
+
+/// The inverse of [`NodeAddr::to_endpoint_addr`], losing the member id.
+///
+/// Needed wherever iroh's own answer has to be written down or sent on — a node
+/// reporting where it can be reached, or a directory reporting where it thinks
+/// somebody else is. Here rather than at either of those call sites so the two
+/// cannot disagree about what a relay url or a direct address is.
+///
+/// **Only the first relay url survives**, because a [`NodeAddr`] holds one and
+/// an [`EndpointAddr`] may carry several. That matches what the rest of the
+/// system stores — a config entry, a ticket and a log entry each name one relay
+/// — so nothing downstream could use the others.
+impl From<&EndpointAddr> for NodeAddr {
+    fn from(addr: &EndpointAddr) -> Self {
+        Self {
+            relay: addr.relay_urls().next().map(ToString::to_string),
+            direct: addr.ip_addrs().copied().collect(),
+        }
     }
 }
 

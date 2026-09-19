@@ -63,10 +63,7 @@ impl Group {
         };
         let swarm = Gossip::builder().spawn(endpoint.clone());
         let node = MembershipNode::start(
-            Transport {
-                endpoint: endpoint.clone(),
-                gossip: swarm,
-            },
+            Transport::new(endpoint.clone(), swarm).unwrap(),
             hooks,
             writer,
             dir.path(),
@@ -281,10 +278,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
     };
     let swarm = Gossip::builder().spawn(endpoint.clone());
     let unfounded = MembershipNode::start(
-        Transport {
-            endpoint: endpoint.clone(),
-            gossip: swarm,
-        },
+        Transport::new(endpoint.clone(), swarm).unwrap(),
         hooks,
         writer,
         dir.path(),

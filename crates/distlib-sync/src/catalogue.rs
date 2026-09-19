@@ -19,16 +19,23 @@
 //! key beside this one; nothing here has to move.
 
 use std::{
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use distlib_consensus::MembershipState;
 use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
-use distlib_net::{Protocols, Transport};
+use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
-use iroh::{EndpointAddr, SecretKey};
-use iroh_blobs::{BlobsProtocol, api::Store as BlobStore, api::proto::BlobStatus};
+use iroh::{EndpointAddr, EndpointId, SecretKey};
+use iroh_blobs::{
+    BlobsProtocol, Hash, HashAndFormat,
+    api::Store as BlobStore,
+    api::downloader::{Downloader, Shuffled},
+    api::proto::BlobStatus,
+};
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
     api::Doc,
@@ -36,7 +43,7 @@ use iroh_docs::{
     protocol::Docs,
     store::{Query, Store as DocumentStore},
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{sync::watch, task::JoinHandle, time::Instant};
 
 use crate::error::{Result, SyncError};
 
@@ -145,13 +152,17 @@ impl Catalogue {
         // a second copy of this node's identity and hard-errors when the two
         // disagree. The author is the node key, derived every start, so there
         // is nothing to persist and nothing to fall out of step.
+        // Cloned rather than built twice: `downloader` spawns an actor, and a
+        // second one would be a second pool of connections to the same peers.
+        // The engine drives it for the content it knows to ask for; the task
+        // below drives the same one for the content it never asked for.
         let downloader = blobs.downloader(&transport.endpoint);
         let engine = Engine::spawn(
             transport.endpoint.clone(),
             transport.gossip.clone(),
             replicas,
             blobs.clone(),
-            downloader,
+            downloader.clone(),
             DefaultAuthorStorage::Mem,
             None,
         )
@@ -166,12 +177,15 @@ impl Catalogue {
             .map_err(SyncError::docs("given this node's author key"))?;
 
         let (opened, open) = watch::channel(None);
-        let task = tokio::spawn(open_when_founded(
-            docs.clone(),
+        let task = tokio::spawn(open_when_founded(Opening {
+            docs: docs.clone(),
+            blobs: blobs.clone(),
+            downloader,
             membership,
-            MemberId::from(key.public()),
+            me: MemberId::from(key.public()),
             opened,
-        ));
+            directory: transport.directory.clone(),
+        }));
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -377,16 +391,35 @@ impl Catalogue {
 /// The same shape as the gossip task next door: the identity of the thing to
 /// join comes from the log, so the task waits for one rather than every
 /// caller having to order startup around it.
-async fn open_when_founded(
+/// What opening the catalogue needs, gathered rather than passed one by one.
+///
+/// Seven values, and the two loops the task ends in want overlapping subsets of
+/// them — which is the case the house rule on parameter counts names.
+struct Opening {
     docs: Docs,
-    mut membership: watch::Receiver<MembershipState>,
+    blobs: BlobStore,
+    downloader: Downloader,
+    membership: watch::Receiver<MembershipState>,
     me: MemberId,
     opened: watch::Sender<Option<Doc>>,
-) {
+    directory: Directory,
+}
+
+async fn open_when_founded(opening: Opening) {
+    let Opening {
+        docs,
+        blobs,
+        downloader,
+        mut membership,
+        me,
+        opened,
+        directory,
+    } = opening;
+    let learned = directory.learned();
     let (group, peers) = loop {
         let seen = membership.borrow_and_update().clone();
         if let Some(group) = seen.group_id() {
-            break (group, sync_with(&seen, me));
+            break (group, sync_with(&seen, me, &directory));
         }
         if membership.changed().await.is_err() {
             return;
@@ -414,18 +447,359 @@ async fn open_when_founded(
         return;
     }
 
-    let _ = opened.send(Some(doc));
-    // Held so the receivers stay open for the life of the node; dropping the
-    // sender would make `ready()` return on a catalogue that never opened.
-    opened.closed().await;
+    let _ = opened.send(Some(doc.clone()));
+
+    // The peer set is not a one-off, and finding that out cost a day. A
+    // document's peers are handed to gossip once, and **a peer that could not
+    // be resolved at that moment is never retried** — iroh-docs has no timer
+    // for it. At the moment a node opens its catalogue it knows where the core
+    // group is and nowhere else, because a follower's address arrives later, by
+    // announcement. So the followers named above were named and dropped.
+    //
+    // Offering the peer again once its address is learned is what closes that,
+    // and `start_sync` is the only way to say it: it skips the open if the
+    // document is already syncing and takes whatever peers it is given. What it
+    // does *not* do is take only the new ones — it dials every peer in the list,
+    // which is why what it is handed is kept narrow.
+    // Both until shutdown, which only the first can see: it holds `opened`, so
+    // when its receivers go it returns and the other is dropped with it.
+    tokio::select! {
+        () = offer_peers_as_they_are_learned(
+            doc.clone(),
+            membership.clone(),
+            me,
+            learned,
+            opened,
+            directory.clone(),
+        ) => {}
+        () = fetch_content_nobody_offered(doc, blobs, downloader, membership, me, directory) => {}
+    }
 }
 
-/// The members to start syncing with: the core group, minus this node.
-fn sync_with(membership: &MembershipState, me: MemberId) -> Vec<EndpointAddr> {
+/// How often the document's peers are offered again regardless.
+///
+/// The same shape as the follow loop's idle poll, and for the same reason
+/// (§4.2): the prompt path is an event, and a timer behind it is what makes the
+/// guarantee. Learning an address is the event, but it is not the only thing
+/// that strands a document — the node that introduced two members can go away
+/// afterwards, and gossip does not repair a swarm it has lost its last
+/// neighbour in. Nothing is broadcast here; it is a local call that re-offers
+/// peers to this node's own engine, so the cost of it being wrong is a
+/// connection attempt.
+///
+/// The longest the whole set can go un-offered, rather than the longest the
+/// loop can sit idle — which are the same thing only while every wake-up offers
+/// everything, and one of them no longer does.
+const OFFER_AGAIN: Duration = Duration::from_secs(15);
+
+/// The least time between two offers of the document's peers.
+///
+/// The learned-address signal fires once per member learned, and a node joining
+/// a group learns several within a moment of each other. An offer makes
+/// iroh-docs dial each peer it is handed, and when two nodes sync at each other
+/// one aborts the other's incoming attempt — `AlreadySyncing`, handled there as
+/// "do nothing, our outgoing sync is in progress". So an unthrottled burst
+/// spends the group's time on handshakes that abort each other, which is worst
+/// exactly where it is least affordable: a small, busy machine.
+///
+/// A floor coalesces the burst without losing it. The signal is a watch, which
+/// keeps only its latest value, so what is waiting afterwards is "there was
+/// news" — however much news there was.
+///
+/// Still needed now that a reaction offers only what it learned. It bounds the
+/// *arrival* rate, not the size of one offer, and arrivals come in bursts by
+/// their nature: a node joining a group of twenty hears about twenty members
+/// inside a second.
+const LEAST_BETWEEN_OFFERS: Duration = Duration::from_secs(2);
+
+/// Re-offers the document's peers, promptly when there is news and slowly
+/// regardless.
+///
+/// **Two kinds of round, and they want different things.** Hearing where one
+/// member is says nothing about the others, so it offers that member alone. A
+/// membership change or the idle timer says the set itself may be wrong — the
+/// node that introduced two members may have gone — so those re-offer
+/// everything, which is what repairs a stranded document.
+///
+/// Ends when the node shuts down, which is when `opened`'s receivers go — the
+/// same condition that used to hold this task open.
+async fn offer_peers_as_they_are_learned(
+    doc: Doc,
+    mut membership: watch::Receiver<MembershipState>,
+    me: MemberId,
+    mut learned: watch::Receiver<u64>,
+    opened: watch::Sender<Option<Doc>>,
+    directory: Directory,
+) {
+    // Cleared if the directory goes away, which disables that arm rather than
+    // stopping: a receiver whose sender is gone reports so immediately and for
+    // ever, and selecting on it again would spin.
+    let mut still_learning = true;
+
+    // What has already been handed over, so that learning where *one* member is
+    // does not re-offer the rest. `start_sync` is not an add: it dials every
+    // peer in the list it is given, new or not, and appends the document's own
+    // remembered peers on top — so the cost of an offer follows the size of the
+    // group rather than the size of the news.
+    let mut offered: HashMap<EndpointId, EndpointAddr> = HashMap::new();
+
+    // When everything was last offered. The timer arm below is restarted by
+    // every other arm, so on its own it measures an *idle* gap — and now that a
+    // learned address offers only that address, a group whose members keep
+    // moving would push the sweep out for ever and never repair anything. This
+    // makes `OFFER_AGAIN` what its own docs say it is: the longest the whole set
+    // can go un-offered, whatever else happens in between.
+    let mut last_full = Instant::now();
+
+    loop {
+        // Whether this round is a repair or a reaction. The two arms that mean
+        // "the set itself may be wrong" — a membership change, and the timer —
+        // re-offer everything; learning one address offers that one.
+        let mut repair = tokio::select! {
+            // Held so the receivers stay open for the life of the node;
+            // dropping the sender would make `ready()` return on a catalogue
+            // that never opened.
+            () = opened.closed() => return,
+            heard = learned.changed(), if still_learning => {
+                if heard.is_err() {
+                    // Nothing fills the directory any more. The timer below
+                    // still stands, so this is not a reason to stop.
+                    still_learning = false;
+                    tracing::debug!("no longer learning addresses; offering on the timer alone");
+                }
+                false
+            }
+            changed = membership.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                true
+            }
+            // Deadline rather than delay: a plain `sleep` is built afresh on
+            // every iteration, so any other arm firing at T+14 would push the
+            // sweep out to T+29 and the bound below would be twice what it
+            // says.
+            () = tokio::time::sleep_until(last_full + OFFER_AGAIN) => true,
+        };
+        // The deadline above can come due at the same moment as a learned
+        // address, and `select!` picks between two ready arms at random. This
+        // makes the sweep win that race rather than losing it half the time.
+        repair |= last_full.elapsed() >= OFFER_AGAIN;
+
+        let reachable = sync_with(&membership.borrow_and_update().clone(), me, &directory);
+        let peers = if repair {
+            // Rebuilt rather than extended, so a member that left and came back
+            // is offered again without anything here knowing that it did.
+            last_full = Instant::now();
+            offered = reachable
+                .iter()
+                .map(|peer| (peer.id, peer.clone()))
+                .collect();
+            reachable
+        } else {
+            let news: Vec<EndpointAddr> = reachable
+                .into_iter()
+                .filter(|peer| offered.get(&peer.id) != Some(peer))
+                .collect();
+            offered.extend(news.iter().map(|peer| (peer.id, peer.clone())));
+            news
+        };
+
+        if peers.is_empty() {
+            // Nothing was learned that this document did not already have —
+            // somebody else's address changed, or a core node moved and the log
+            // is the authority on where those are. An empty offer is not a free
+            // one: `start_sync` would still read the remembered peers out of the
+            // store and dial them.
+            tracing::trace!("nothing new to offer the catalogue");
+        } else if let Err(error) = doc.start_sync(peers).await {
+            // Not fatal: whatever was already syncing goes on, and the sweep
+            // above offers these again within `OFFER_AGAIN`. Not the next
+            // address learned — that is a reaction, and these peers are already
+            // written down as offered.
+            tracing::debug!(%error, "could not offer the catalogue's peers again");
+        }
+        // Unconditional, including after a round that offered nothing. The floor
+        // is there to coalesce a burst of arrivals, and a burst is exactly when
+        // some of the rounds in it have nothing in them.
+        tokio::time::sleep(LEAST_BETWEEN_OFFERS).await;
+    }
+}
+
+/// How often this node asks for content that nobody offered it.
+///
+/// A repair path rather than the way content normally arrives, so it is paced
+/// against the cost of being wrong. On a node that has everything a round is a
+/// document scan and nothing on the wire: a hash whose bytes are here is never
+/// asked for. What it is paced *against* is the opposite case — content nobody
+/// reachable will ever serve, which an expelled member can be left holding the
+/// key to. There is no backoff, so that node asks again on every round for as
+/// long as it runs; slower than the burst floor next door for that reason, and
+/// still prompt against the tens of seconds a stranded entry used to cost.
+const FETCH_AGAIN: Duration = Duration::from_secs(5);
+
+/// The longest one download is waited on before the sweep moves past it.
+///
+/// Not a limit on how long a transfer may take — it is a limit on how long one
+/// unreachable hash may hold up every other. Without it a single peer that
+/// accepts a connection and then says nothing would stop this loop for good,
+/// which would be a worse fault than the one it is here to repair.
+const FETCH_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Asks for the content of entries this node holds and was never sent.
+///
+/// **This repairs a one-shot in iroh-docs, and the gap is structural.** An
+/// entry and its content travel separately, and when an entry arrives over
+/// gossip the sender's content is assumed present *only if the message came
+/// straight from its publisher*: `engine/gossip.rs` reads
+/// `msg.scope.is_direct()` and records `ContentStatus::Missing` for anything
+/// relayed. A relayed entry therefore starts no download and remembers no
+/// provider — the hash goes into the engine's `missing_hashes` and stays there.
+///
+/// What is supposed to rescue it is `Op::ContentReady`, which a node broadcasts
+/// when its own download finishes. That message is sent **once**, to **direct
+/// neighbours only**, and never by the author — a local write emits `Op::Put`
+/// and nothing else. So a node that is not a neighbour of whoever completes
+/// first, at the moment they complete, holds the key for ever and never the
+/// value. Nothing retries: a failed download is put back in `missing_hashes`
+/// with no timer, and the engine's provider list is a snapshot taken when the
+/// download started, so a peer learned afterwards is not tried either.
+///
+/// Measured, both before this existed and on the branch before this PR: the
+/// group converges, then `catalogue.get` answers `MissingContent` until the
+/// test gives up — *the entry is here, its content has not arrived*.
+///
+/// **It can only work because of the other half of this PR.** The downloader is
+/// given bare [`EndpointId`]s and has to resolve them, and a follower's address
+/// is in no log. Before members announced where they are, this retry would have
+/// failed exactly the way the download it repairs did.
+async fn fetch_content_nobody_offered(
+    doc: Doc,
+    blobs: BlobStore,
+    downloader: Downloader,
+    mut membership: watch::Receiver<MembershipState>,
+    me: MemberId,
+    directory: Directory,
+) {
+    loop {
+        // At the top, so the first sweep does not race the opening sync that
+        // will usually make it unnecessary.
+        tokio::time::sleep(FETCH_AGAIN).await;
+
+        // The same set the document is offered as peers, which is the right
+        // one: a member this node cannot reach cannot serve it content either.
+        let providers: Vec<EndpointId> =
+            sync_with(&membership.borrow_and_update().clone(), me, &directory)
+                .into_iter()
+                .map(|peer| peer.id)
+                .collect();
+        if providers.is_empty() {
+            continue;
+        }
+
+        let wanted = match content_not_here(&doc, &blobs).await {
+            Ok(wanted) => wanted,
+            Err(error) => {
+                tracing::debug!(%error, "could not look for content that has not arrived");
+                continue;
+            }
+        };
+
+        for hash in wanted {
+            // One at a time, which is what keeps this from asking twice for the
+            // same hash: the next sweep reads the store again, and anything
+            // that landed in the meantime is no longer wanted. Shuffled so that
+            // a group of readers repairing at once does not all ask one member.
+            let asked = tokio::time::timeout(
+                FETCH_DEADLINE,
+                downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.clone())),
+            )
+            .await;
+            match asked {
+                Ok(Ok(())) => tracing::debug!(%hash, "fetched content nobody offered"),
+                // Ordinary rather than alarming: nobody reachable has it yet.
+                // The next sweep asks again, which is the whole point.
+                Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
+                Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
+            }
+        }
+    }
+}
+
+/// The hashes of entries this node holds whose bytes are not in its store.
+///
+/// Read from the document every time rather than remembered, so nothing has to
+/// stay in step with it: an entry that arrived while this was not looking is
+/// found on the next sweep, and one whose content landed drops out by itself.
+///
+/// Entries of zero length are skipped. Their hash is the hash of no bytes,
+/// which every store can answer for without asking anybody — and a deletion
+/// looks exactly like one, so asking for it would dial the group on behalf of
+/// an entry that has no content by design.
+async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<Vec<Hash>> {
+    let entries = doc
+        .get_many(Query::all())
+        .await
+        .map_err(SyncError::docs("read from"))?;
+    tokio::pin!(entries);
+
+    let mut wanted = HashSet::new();
+    while let Some(entry) = entries.next().await {
+        let entry = entry.map_err(SyncError::docs("read from"))?;
+        let hash = entry.content_hash();
+        if entry.content_len() == 0 || wanted.contains(&hash) {
+            continue;
+        }
+        let status = blobs
+            .blobs()
+            .status(hash)
+            .await
+            .map_err(SyncError::content(
+                "asked whether an entry's content is here",
+            ))?;
+        if !matches!(status, BlobStatus::Complete { .. }) {
+            wanted.insert(hash);
+        }
+    }
+    Ok(wanted.into_iter().collect())
+}
+
+/// The members to start syncing with: everyone this node can actually reach.
+///
+/// The whole membership rather than the core group, because the core group is
+/// not the shape of the catalogue: what one follower writes has to reach
+/// another, and it used to do so only by passing through a core node. Handing
+/// the document every member is what lets two followers find each other, and
+/// what keeps them in touch when the node that introduced them goes away.
+///
+/// **But only members there is an address for**, which is the part that had to
+/// be learned. iroh-docs will accept a peer named by id alone — it does that
+/// with its own remembered peers — and passing one costs a dial that cannot
+/// succeed, a gossip join that cannot complete, and the retries under both. At
+/// the moment a node opens its catalogue that is *every* follower, since
+/// addresses arrive by announcement afterwards. Handing them over anyway made
+/// the group slower to converge at exactly the moment it had the most to do,
+/// which showed up as a test that passed alone and failed on a loaded
+/// two-core machine.
+///
+/// So the set grows instead: the core group at first, because the log carries
+/// their addresses, and every other member as its address is heard. That is
+/// what [`offer_peers_as_they_are_learned`] is for.
+fn sync_with(
+    membership: &MembershipState,
+    me: MemberId,
+    directory: &Directory,
+) -> Vec<EndpointAddr> {
+    let core = membership.core();
     membership
-        .core()
-        .iter()
-        .filter(|(member, _)| **member != me)
-        .filter_map(|(member, addr)| addr.to_endpoint_addr(*member).ok())
+        .allowlist()
+        .filter(|member| *member != me)
+        .filter_map(|member| {
+            let addr = core
+                .get(&member)
+                .cloned()
+                .or_else(|| directory.address_of(member))?;
+            addr.to_endpoint_addr(member).ok()
+        })
         .collect()
 }

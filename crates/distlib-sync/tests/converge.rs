@@ -10,6 +10,7 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -38,6 +39,16 @@ struct Node {
 
 impl Node {
     async fn start(secret: SecretKey, membership: watch::Receiver<MembershipState>) -> Self {
+        Self::start_storing(secret, membership, None).await
+    }
+
+    /// [`Self::start`] with the document store named, so one test can stop a
+    /// node and bring it back holding the entries it had.
+    async fn start_storing(
+        secret: SecretKey,
+        membership: watch::Receiver<MembershipState>,
+        documents: Option<PathBuf>,
+    ) -> Self {
         let endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .secret_key(secret.clone())
@@ -62,12 +73,9 @@ impl Node {
         // restart, and `FsStore` spawns a runtime of its own per node.
         let blobs = MemStore::new();
         let catalogue = Catalogue::start(
-            Transport {
-                endpoint: endpoint.clone(),
-                gossip: gossip.clone(),
-            },
+            Transport::new(endpoint.clone(), gossip.clone()).unwrap(),
             (*blobs).clone(),
-            None,
+            documents,
             &secret,
             membership,
         )
@@ -337,6 +345,117 @@ async fn a_broken_store_is_not_reported_as_content_on_its_way() {
     }
 
     node.shutdown().await;
+}
+
+/// A node that keeps its entries and loses their content asks for it again.
+///
+/// **This is the state iroh-docs has no way out of, staged so that it is
+/// certain rather than occasional.** An entry and its content replicate
+/// separately, and the engine fetches content only when an entry *arrives*. A
+/// node holding an entry whose bytes are not in its store is therefore finished
+/// as far as the engine is concerned: set reconciliation finds nothing to send,
+/// so there is no insert, so there is no download, ever.
+///
+/// The same dead end is reached by ordinary means and much less predictably. An
+/// entry that arrives over gossip is credited with content at its sender only
+/// when it came straight from the publisher — `engine/gossip.rs` checks
+/// `msg.scope.is_direct()` — so a *relayed* entry starts no download at all and
+/// waits on `Op::ContentReady`, which is sent once, to direct neighbours only,
+/// and never by the author. Whoever is not a neighbour of the first node to
+/// finish downloading keeps the key and never gets the value. That is the flake
+/// this repairs, and the reason it is staged this way instead is that provoking
+/// it for real means dictating a gossip topology, which no test can do.
+///
+/// Losing a content store is not a contrivance either: an in-memory store on a
+/// node that restarts is exactly this, and so is a backup that kept the
+/// documents and not the blobs.
+#[tokio::test]
+async fn a_node_that_lost_its_content_asks_for_it_again() {
+    let alice_key = SecretKey::generate();
+    let bob_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let bob_id = MemberId::from(bob_key.public());
+
+    // Bob's documents outlive his process; his content store does not.
+    let documents = tempfile::TempDir::new().unwrap();
+
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let alice = Node::start(alice_key.clone(), alice_sees).await;
+    let bob = Node::start_storing(
+        bob_key.clone(),
+        bob_sees,
+        Some(documents.path().to_path_buf()),
+    )
+    .await;
+
+    let founding = founded(
+        vec![
+            (record(alice_id, "alice"), alice.addr.clone()),
+            (record(bob_id, "bob"), bob.addr.clone()),
+        ],
+        &alice_key,
+    );
+    to_alice.send(founding.clone()).unwrap();
+    to_bob.send(founding.clone()).unwrap();
+    tokio::time::timeout(SOON, alice.catalogue.ready())
+        .await
+        .unwrap();
+    tokio::time::timeout(SOON, bob.catalogue.ready())
+        .await
+        .unwrap();
+
+    alice.catalogue.put("item/1/title", "Dune").await.unwrap();
+    tokio::time::timeout(SOON, async {
+        while bob
+            .catalogue
+            .get("item/1/title")
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob reads it the ordinary way first");
+
+    // Bob comes back with the same entries and an empty content store. Nothing
+    // in the engine will ever ask for those bytes again.
+    bob.shutdown().await;
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let bob = Node::start_storing(bob_key, bob_sees, Some(documents.path().to_path_buf())).await;
+    to_bob.send(founding).unwrap();
+    tokio::time::timeout(SOON, bob.catalogue.ready())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            bob.catalogue.get("item/1/title").await,
+            Err(distlib_sync::SyncError::MissingContent { .. })
+        ),
+        "the entry must survive the restart and its content must not — \
+         otherwise this test proves nothing about fetching it back"
+    );
+
+    let read = tokio::time::timeout(SOON, async {
+        loop {
+            match bob.catalogue.get("item/1/title").await {
+                Ok(Some(value)) => return value,
+                Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Err(error) => panic!("reading the catalogue failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob must ask alice for the content he is missing and get it");
+    assert_eq!(&read[..], b"Dune");
+
+    alice.shutdown().await;
+    bob.shutdown().await;
 }
 
 /// The document key is a wire fact: two nodes that compute it differently see

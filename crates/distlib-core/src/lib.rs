@@ -15,7 +15,7 @@ pub mod private_file;
 pub mod ticket;
 pub mod token;
 
-pub use addr::{BadRelayUrl, NodeAddr};
+pub use addr::{BadRelayUrl, NodeAddr, SignedAddress};
 pub use catalogue::{Absorbed, Field, FileRecord, FileRole, Item, ItemKind, Key, Series};
 pub use config::{ApiConfig, Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;

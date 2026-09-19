@@ -19,6 +19,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Only to forge a `SignedAddress` on the wire, which is what the directory's
+# signature check exists to refuse.
+postcard = { workspace = true }
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay = { workspace = true }
 
