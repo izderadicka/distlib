@@ -725,13 +725,19 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
 ### 2b — Content moves (3 PRs)
 
-- **2b-1 — Media blobs.** `distlib-net::blobs`: the `BlobsProtocol` on the router, and fetch by hash
+- **2b-1 — Media blobs. *(done, delta P2-22)*** `distlib-net::blobs`: the `BlobsProtocol` on the router, and fetch by hash
   from a set of member providers — **our** path, `Store::downloader` driven by a provider list we
   choose. Blobs already moved in 2a-2, but that was iroh-docs fetching its own entry values through
   machinery we do not call. Do not let this acceptance pass on that path: the test must add a blob
   that is *not* a docs entry value and fetch it through `distlib-net::blobs`.
   **Acceptance:** a media blob added on A is fetched by B with `relay_mode = "disabled"` and no
   address supplied at the call site.
+
+  > **The `BlobsProtocol` registration half is not new** — `distlib_sync::Catalogue::protocols()`
+  > has owned it since 2a-2, on the same store this crate's fetch reads from and writes into. Raised
+  > with Ivan before writing any of this: relocating that registration into `distlib-net` would touch
+  > a working, already-reviewed design across two crates' boundaries for a change the acceptance does
+  > not need. See delta P2-22 for the reasoning and what was built instead — fetch only.
 
 - **2b-2 — `library.add`.** Hash the file set → blobs → `ItemId::from_content_hashes` over the
   `role: content` files only (D4) → catalogue entry. Exact-dup guard: compute the fingerprint before

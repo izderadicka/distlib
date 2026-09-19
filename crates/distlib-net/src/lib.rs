@@ -15,6 +15,7 @@
 pub mod addresses;
 pub mod allowlist;
 pub mod alpn;
+pub mod blobs;
 pub mod connections;
 pub mod directory;
 pub mod endpoint;
@@ -27,6 +28,7 @@ pub mod transport;
 
 pub use addresses::AddressBook;
 pub use allowlist::{Allowlist, AllowlistWriter, allowlist};
+pub use blobs::Blobs;
 pub use connections::Connections;
 pub use directory::Directory;
 pub use endpoint::build_endpoint;
