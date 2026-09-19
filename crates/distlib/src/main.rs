@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use distlib::{
     cli::{AdminCommand, Cli, Command, CoreCommand},
-    commands::{self, Paths},
+    commands::{self, AddArgs, Paths},
 };
 use distlib_core::DataDir;
 use tracing_subscriber::EnvFilter;
@@ -44,6 +44,35 @@ async fn main() -> Result<()> {
         },
         Command::Search { query, limit } => commands::search(&paths, &query, limit).await,
         Command::Item { item_id } => commands::item(&paths, item_id).await,
+        Command::Add {
+            files,
+            kind,
+            title,
+            authors,
+            genres,
+            series,
+            series_index,
+            year,
+            lang,
+            description,
+        } => {
+            commands::add(
+                &paths,
+                AddArgs {
+                    files,
+                    kind,
+                    title,
+                    authors,
+                    genres,
+                    series,
+                    series_index,
+                    year,
+                    lang,
+                    description,
+                },
+            )
+            .await
+        }
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,
         Command::Join { ticket } => commands::join(&paths, &ticket),

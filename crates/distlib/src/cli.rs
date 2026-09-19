@@ -230,6 +230,76 @@ pub enum Command {
         /// The item to show, as `distlib search` prints it.
         item_id: ItemId,
     },
+
+    /// Add a file set to the catalogue as one item (2b-2, §6.1).
+    ///
+    /// Every file given is `role: content` — the set §5.2's `item_id`
+    /// fingerprints. Covers, subtitles and the rest of a file's possible
+    /// roles are not wired into this command yet; add them straight to an
+    /// existing item's files once there is a caller that needs to.
+    ///
+    /// If the identical file set is already an item — anywhere in the group,
+    /// not only on this node — its metadata is left exactly as it is and
+    /// only the files here that it was missing are contributed. Two members
+    /// adding the same files at the same time need no coordination: they
+    /// compute the same item, whichever's metadata lands first is what the
+    /// other's write leaves alone.
+    Add {
+        /// The files that make up the item.
+        files: Vec<PathBuf>,
+
+        /// What kind of thing this is.
+        #[arg(long, value_enum)]
+        kind: Kind,
+
+        /// Title.
+        #[arg(long)]
+        title: Option<String>,
+
+        /// An author. May be repeated.
+        #[arg(long = "author")]
+        authors: Vec<String>,
+
+        /// A genre. May be repeated.
+        #[arg(long = "genre")]
+        genres: Vec<String>,
+
+        /// The series this item belongs to.
+        #[arg(long)]
+        series: Option<String>,
+
+        /// Where in the series, e.g. `2.5` for a novella between books two
+        /// and three. Only meaningful with `--series`.
+        #[arg(long)]
+        series_index: Option<f32>,
+
+        /// Year of publication or release.
+        #[arg(long)]
+        year: Option<i32>,
+
+        /// Language, as a code (`en`, `de`) or however this group prefers it.
+        #[arg(long)]
+        lang: Option<String>,
+
+        /// A longer description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
+/// `distlib add --kind ...`
+///
+/// A small enum of clap's own rather than [`distlib_core::ItemKind`]: this
+/// crate is the only one that needs `ItemKind` to be choosable on a command
+/// line, and giving the domain type a `clap` dependency for one caller would
+/// run the wrong way — vocabulary crates do not know about the CLI that
+/// happens to sit on top of them.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum Kind {
+    Ebook,
+    Audiobook,
+    Video,
+    Other,
 }
 
 /// `distlib admin <...>`

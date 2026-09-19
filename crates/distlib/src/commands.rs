@@ -12,7 +12,7 @@ use distlib_core::{
 };
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 
-use crate::Runtime;
+use crate::{Runtime, cli::Kind};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 use serde_json::{Value, json};
 
@@ -118,11 +118,15 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
             serve_api(
                 paths,
                 &config,
-                Arc::clone(&node),
-                secret.clone(),
-                runtime.projection().reindex_handle(),
-                runtime.store().clone(),
-                runtime.search().clone(),
+                Api {
+                    node: Arc::clone(&node),
+                    secret: secret.clone(),
+                    net: config.net.clone(),
+                    reindex_handle: runtime.projection().reindex_handle(),
+                    catalogue: runtime.catalogue().clone(),
+                    store: runtime.store().clone(),
+                    search: runtime.search().clone(),
+                },
             )
             .await?,
         )
@@ -560,6 +564,93 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     Ok(())
 }
 
+/// `distlib add`'s arguments, gathered rather than passed one by one — nine
+/// fields is well past the point where positional parameters stop reading as
+/// one thing.
+pub struct AddArgs {
+    pub files: Vec<std::path::PathBuf>,
+    pub kind: Kind,
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub genres: Vec<String>,
+    pub series: Option<String>,
+    pub series_index: Option<f32>,
+    pub year: Option<i32>,
+    pub lang: Option<String>,
+    pub description: Option<String>,
+}
+
+/// `distlib add`
+pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
+    if args.files.is_empty() {
+        bail!("give at least one file to add");
+    }
+    if args.series_index.is_some() && args.series.is_none() {
+        bail!("--series-index needs --series to say which series it is an index into");
+    }
+
+    // Canonicalised here, not on the node: the API is loopback (§7.1,
+    // P1-25), so "this machine" is the same machine either way, but the
+    // caller's own working directory is not the node's, and a relative path
+    // sent as given would be read relative to whichever one the node
+    // happened to start in.
+    let files: Vec<std::path::PathBuf> = args
+        .files
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .with_context(|| format!("could not find {}", path.display()))
+        })
+        .collect::<Result<_>>()?;
+
+    let series = args
+        .series
+        .map(|name| json!({ "name": name, "index": args.series_index }));
+
+    let answer = ask(
+        paths,
+        "library.add",
+        json!({
+            "kind": kind_str(args.kind),
+            "files": files,
+            "title": args.title,
+            "authors": args.authors,
+            "genres": args.genres,
+            "series": series,
+            "year": args.year,
+            "lang": args.lang,
+            "description": args.description,
+        }),
+    )
+    .await?;
+
+    let item_id = answer["item_id"].as_str().unwrap_or("?");
+    let title = answer["title"].as_str().unwrap_or("(no title)");
+    if answer["created"].as_bool().unwrap_or(false) {
+        println!("added       {item_id}  {title}");
+    } else {
+        let contributed = answer["contributed_files"].as_array().map_or(0, Vec::len);
+        println!("exists      {item_id}  {title}");
+        if contributed == 0 {
+            println!("            nothing here that it did not already have");
+        } else {
+            println!("            contributed {contributed} file(s) it was missing");
+        }
+    }
+    Ok(())
+}
+
+/// [`Kind`] as `library.add` spells it — §5.2's `type`, in `ItemKind`'s own
+/// lowercase serde form.
+fn kind_str(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Ebook => "ebook",
+        Kind::Audiobook => "audiobook",
+        Kind::Video => "video",
+        Kind::Other => "other",
+    }
+}
+
 /// A JSON array of strings, comma-joined — `authors` and `genres` render the
 /// same way in both `distlib search` and `distlib item`, so there is one
 /// place that decides how.
@@ -988,26 +1079,10 @@ fn founders(
 ///
 /// The token is created on first run rather than at `init`, so a data
 /// directory made before this existed grows one when it is next started.
-async fn serve_api(
-    paths: &Paths,
-    config: &Config,
-    node: Arc<MembershipNode>,
-    secret: SecretKey,
-    reindex_handle: distlib_store::ReindexHandle,
-    store: distlib_store::Store,
-    search: distlib_store::SearchIndex,
-) -> Result<Server> {
+async fn serve_api(paths: &Paths, config: &Config, api: Api) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
-    let api = Api {
-        node,
-        secret,
-        net: config.net.clone(),
-        reindex_handle,
-        store,
-        search,
-    };
     let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await
         .with_context(|| {

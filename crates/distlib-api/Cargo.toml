@@ -19,6 +19,7 @@ slow-tests = []
 distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }
 distlib-store = { workspace = true }
+distlib-sync = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -35,6 +36,9 @@ tracing = { workspace = true }
 distlib-net = { workspace = true }
 # The tests assemble a node the way production does, gossip and all.
 iroh-gossip = { workspace = true }
+# For `MemStore`: the harness's own catalogue needs a blob store to open, and
+# an in-memory one costs nothing these tests need to pay for.
+iroh-blobs = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

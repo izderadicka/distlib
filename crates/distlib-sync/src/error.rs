@@ -62,6 +62,20 @@ pub enum SyncError {
     /// to open. [`crate::Catalogue::ready`] is how a caller waits instead.
     #[error("this node is in no group yet, so it has no catalogue")]
     NoGroupYet,
+
+    /// A local file offered to [`crate::Catalogue::add_file`] could not be
+    /// read.
+    ///
+    /// Distinct from [`Self::Content`]: the store this crate wraps is not
+    /// involved yet, and reporting a filesystem failure through it — "the
+    /// catalogue's content store failed" — would send whoever reads the
+    /// message looking in the wrong place.
+    #[error("could not read {path} to add it as a blob")]
+    LocalFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl SyncError {

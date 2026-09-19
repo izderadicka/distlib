@@ -20,13 +20,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{Absorbed, GroupId, Item, ItemId, Key, MemberId};
+use distlib_core::{Absorbed, ContentHash, GroupId, Item, ItemId, Key, MemberId};
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
@@ -314,6 +314,38 @@ impl Catalogue {
             .await
             .map(Some)
             .map_err(SyncError::content("reading an entry's content"))
+    }
+
+    /// Hashes and stores `path`'s bytes as one blob backing this catalogue,
+    /// without writing any entry that points at it.
+    ///
+    /// **Copies the bytes in** (iroh-blobs' `ImportMode::Copy`, what
+    /// [`iroh_blobs::api::blobs::Blobs::add_path`] defaults to) rather than
+    /// referencing the file where it sits, so the caller's own copy can move
+    /// or be deleted the moment this returns — a file `library.add` was
+    /// pointed at is not this node's responsibility to keep in place.
+    ///
+    /// Into the *same* store [`Self::protocols`] serves
+    /// [`iroh_blobs::ALPN`] from, which is what makes the result fetchable by
+    /// anyone the moment an entry names it — there is only one blob store
+    /// backing one catalogue, the one 2a-2 wired in at construction.
+    pub async fn add_file(&self, path: &Path) -> Result<(ContentHash, u64)> {
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| SyncError::LocalFile {
+                path: path.to_owned(),
+                source,
+            })?
+            .len();
+        let tag = self
+            .inner
+            .blobs
+            .store()
+            .blobs()
+            .add_path(path)
+            .await
+            .map_err(SyncError::content("importing a local file"))?;
+        Ok((ContentHash::from_bytes(*tag.hash.as_bytes()), size))
     }
 
     /// Writes what `item` says, and only that.
