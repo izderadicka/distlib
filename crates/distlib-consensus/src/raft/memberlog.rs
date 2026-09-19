@@ -17,9 +17,10 @@
 //! Phase 1b adds the other half — fetching the log — on this same ALPN, which
 //! is where §4.2's non-core followers get their copy.
 
-use distlib_core::{MemberId, NodeAddr};
+use distlib_core::{MemberId, NodeAddr, SignedAddress};
 use distlib_net::{
-    AddressBook, Connections, IsRejection, NOT_A_VOTER_REASON, NetError, alpn, close_code,
+    AddressBook, Connections, Directory, IsRejection, NOT_A_VOTER_REASON, NetError, alpn,
+    close_code,
 };
 use iroh::{
     Endpoint,
@@ -97,6 +98,19 @@ enum Request {
     /// §4.2's non-core members hold the whole log and derive from it; this is
     /// how they get it. A cursor of zero asks for the group from its founding.
     From { cursor: u64 },
+
+    /// Where the rest of the group said it can be reached.
+    ///
+    /// A core node hears every member's announcement on the gossip topic, so it
+    /// accumulates what a node that has just arrived — or has just restarted —
+    /// has no way to hear: an announcement is made once, to whoever was
+    /// listening at the time (P2-14, 2a-5).
+    ///
+    /// **Asking a core node places no new trust in it.** What comes back is the
+    /// members' own signed statements, verified one by one by whoever asked, so
+    /// a core node that made something up is a core node whose answer is
+    /// discarded. It relays; it is not believed.
+    Directory,
 }
 
 /// What the core node answers.
@@ -104,6 +118,17 @@ enum Request {
 enum Response {
     Proposed(ProposeOutcome),
     Fetched(Fetched),
+    /// Every address the answering node has heard, minus anyone the log no
+    /// longer admits.
+    ///
+    /// Unpaged, unlike [`Fetched`]: this is one statement per *member* rather
+    /// than one per log entry, so it is bounded by the group's size and not by
+    /// its age. A statement measures 139 bytes with one direct socket and no
+    /// relay url, and the unit test holds it under 320 so a real one has room
+    /// for both — at which [`MAX_RPC_BYTES`] is reached somewhere past fifty
+    /// thousand members, an order beyond the thousands §2 allows for. A cursor
+    /// here would be machinery for a limit nothing is near.
+    Directory(Vec<SignedAddress>),
 }
 
 /// What came back from asking for the log.
@@ -234,6 +259,12 @@ pub struct MemberlogProtocol {
     /// serving a follower cannot slow consensus down.
     log: LogStore,
     state_machine: StateMachineStore,
+    /// What this node has heard members say about where they are.
+    ///
+    /// Shared with the gossip listener that fills it — the same handle, not a
+    /// copy. A core node listens to `ReachableAt` for no other reason than to
+    /// be able to answer this.
+    directory: Directory,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it.
@@ -245,11 +276,17 @@ impl std::fmt::Debug for MemberlogProtocol {
 
 impl MemberlogProtocol {
     /// Serves the log backed by `raft`.
-    pub(crate) fn new(seat: Seat, log: LogStore, state_machine: StateMachineStore) -> Self {
+    pub(crate) fn new(
+        seat: Seat,
+        log: LogStore,
+        state_machine: StateMachineStore,
+        directory: Directory,
+    ) -> Self {
         Self {
             seat,
             log,
             state_machine,
+            directory,
         }
     }
 
@@ -257,7 +294,30 @@ impl MemberlogProtocol {
         match request {
             Request::Propose(event) => Response::Proposed(self.propose(raft, event).await),
             Request::From { cursor } => Response::Fetched(self.fetch(raft, cursor)),
+            Request::Directory => Response::Directory(self.serve_directory()),
         }
+    }
+
+    /// What this node has heard, minus anyone the log no longer admits.
+    ///
+    /// The filter is how an expelled member stops being findable through a core
+    /// node, and it is applied **here rather than by forgetting**: the directory
+    /// holds what was *said*, the log holds who is *admitted*, and letting the
+    /// second edit the first would put an eviction race into a type whose whole
+    /// job is to record statements. Read at serve time, so it is current by
+    /// construction.
+    ///
+    /// Being resolvable was never admission anyway — `AllowlistHooks` refuses a
+    /// non-member in both directions and reads the log, not this. What the
+    /// filter buys is that a core node does not *hand out* an address the group
+    /// has voted to be rid of.
+    fn serve_directory(&self) -> Vec<SignedAddress> {
+        let membership = self.state_machine.membership();
+        self.directory
+            .everything()
+            .into_iter()
+            .filter(|signed| membership.is_member(&signed.member()))
+            .collect()
     }
 
     /// Everything committed since `cursor`.
@@ -421,15 +481,28 @@ pub struct MemberlogClient {
     /// `StoredMembership`, so the core group it is told about in every reply is
     /// its whole picture of where the group lives.
     addresses: AddressBook,
+    /// Where members said *they* are, as opposed to where the log says the core
+    /// group is.
+    ///
+    /// Held here for the reason `addresses` is: a directory answer arrives in
+    /// this type and nowhere else, and a caller that forgot to record it would
+    /// leave the group unresolvable by id with nothing to show why.
+    directory: Directory,
 }
 
 impl MemberlogClient {
     /// Dials core nodes from `endpoint`, reusing the node's connections.
-    pub fn new(endpoint: Endpoint, connections: Connections, addresses: AddressBook) -> Self {
+    pub fn new(
+        endpoint: Endpoint,
+        connections: Connections,
+        addresses: AddressBook,
+        directory: Directory,
+    ) -> Self {
         Self {
             endpoint,
             connections,
             addresses,
+            directory,
         }
     }
 
@@ -449,8 +522,8 @@ impl MemberlogClient {
             .map_err(|rebuffed| unreachable(rebuffed.message))?;
 
         match answer {
-            Response::Fetched(_) => Err(ProposeError::NotCommitted(
-                "the peer answered a fetch to a proposal".to_owned(),
+            Response::Fetched(_) | Response::Directory(_) => Err(ProposeError::NotCommitted(
+                "the peer answered something other than a proposal".to_owned(),
             )),
             Response::Proposed(ProposeOutcome::Applied { index }) => Ok(index),
             Response::Proposed(ProposeOutcome::Rejected(error)) => {
@@ -499,9 +572,42 @@ impl MemberlogClient {
                 }
                 Ok(fetched)
             }
-            Response::Proposed(_) => {
-                Err(failed("the peer answered a proposal to a fetch".to_owned()))
-            }
+            Response::Proposed(_) | Response::Directory(_) => Err(failed(
+                "the peer answered something other than a fetch".to_owned(),
+            )),
+        }
+    }
+
+    /// Asks `member` where the rest of the group is, and records what it says.
+    ///
+    /// Answers how many statements were *news* — the count `Directory::learn`
+    /// reports, so a node that already knew everything gets zero. Worth
+    /// returning rather than logging: it is the difference between "a core node
+    /// answered and had nothing" and "a core node answered and we were behind",
+    /// and only the caller can tell which one it was expecting.
+    ///
+    /// Failure is per-source, like [`Self::fetch`]: a core node that refuses or
+    /// is unreachable is one to move on from, not an error to hand upwards.
+    pub async fn directory(&self, member: MemberId, addr: &NodeAddr) -> Result<usize, FetchFailed> {
+        let failed = |message: String| FetchFailed {
+            member,
+            message,
+            refused: false,
+        };
+        let exchange = self.exchange(member, addr, Request::Directory);
+
+        match tokio::time::timeout(FETCH_TIMEOUT, exchange)
+            .await
+            .map_err(|_| failed(format!("no answer within {FETCH_TIMEOUT:?}")))?
+            .map_err(|rebuffed| FetchFailed {
+                member,
+                message: rebuffed.message,
+                refused: rebuffed.refused,
+            })? {
+            Response::Directory(addresses) => Ok(learn_all(&self.directory, member, addresses)),
+            Response::Fetched(_) | Response::Proposed(_) => Err(failed(
+                "the peer answered something other than a directory".to_owned(),
+            )),
         }
     }
 
@@ -565,6 +671,39 @@ impl MemberlogClient {
     }
 }
 
+/// Verifies and records each relayed statement, and answers how many changed
+/// anything.
+///
+/// **One bad entry costs only itself.** The point of relaying signed statements
+/// is that the relaying node cannot forge one — but it *can* slip a forgery
+/// into an otherwise honest batch, and a loop that gave up at the first bad
+/// signature would let one forgery cost the asker every address behind it. So
+/// each is judged alone and the rest still land.
+///
+/// A free function rather than a method because that is all it needs: it is the
+/// only part of asking that has no network in it, which is what makes the
+/// paragraph above testable.
+fn learn_all(directory: &Directory, from: MemberId, addresses: Vec<SignedAddress>) -> usize {
+    addresses
+        .into_iter()
+        .filter(|signed| match directory.learn(signed) {
+            Ok(changed) => changed,
+            // A warning rather than a debug line: a core node relaying a
+            // statement whose signature does not check out is either running
+            // something else or making things up, and neither is ordinary.
+            Err(error) => {
+                tracing::warn!(
+                    %from,
+                    member = %signed.member(),
+                    %error,
+                    "ignoring a relayed address that did not verify"
+                );
+                false
+            }
+        })
+        .count()
+}
+
 /// Why an exchange failed, and whether the peer refused us outright.
 ///
 /// Everything but a refusal is one thing — "we could not complete this" — and
@@ -624,4 +763,95 @@ impl From<String> for Rebuffed {
 /// is running something else.
 fn failed<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> String {
     move |error| format!("{what}: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    fn somewhere(port: u16) -> NodeAddr {
+        NodeAddr {
+            relay: None,
+            direct: [SocketAddr::from((Ipv4Addr::LOCALHOST, port))]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// A statement about `claimant` carrying somebody else's signature.
+    ///
+    /// postcard writes fields in order, so replacing the leading member id
+    /// yields bytes that decode as a `SignedAddress` about the wrong member —
+    /// which is exactly what a core node inventing an address would have to
+    /// produce, and what verification is for.
+    fn forged(claimant: MemberId, by: &SecretKey, port: u16) -> SignedAddress {
+        let honest = SignedAddress::sign(by, somewhere(port), 1).expect("signing must work");
+        let encoded = postcard::to_stdvec(&honest).expect("encoding must work");
+        let skip = postcard::to_stdvec(&honest.member())
+            .expect("encoding must work")
+            .len();
+        let mut bytes = postcard::to_stdvec(&claimant).expect("encoding must work");
+        bytes.extend_from_slice(&encoded[skip..]);
+        postcard::from_bytes(&bytes).expect("a forgery still decodes")
+    }
+
+    /// The claim `learn_all`'s doc makes: a core node cannot make its forgery
+    /// cost the asker the honest entries around it.
+    #[test]
+    fn one_forged_entry_does_not_cost_the_others() {
+        let relaying = MemberId::from(SecretKey::generate().public());
+        let alice = SecretKey::generate();
+        let bob = SecretKey::generate();
+        let liar = SecretKey::generate();
+        let impersonated = MemberId::from(SecretKey::generate().public());
+
+        let batch = vec![
+            SignedAddress::sign(&alice, somewhere(7101), 1).expect("signing must work"),
+            forged(impersonated, &liar, 7102),
+            SignedAddress::sign(&bob, somewhere(7103), 1).expect("signing must work"),
+        ];
+
+        // The arithmetic behind serving these unpaged, pinned rather than
+        // estimated. Measured at 139 bytes for one direct socket and no relay
+        // url; the bound leaves room for a real address, which carries both.
+        // Even at this bound `MAX_RPC_BYTES` is reached somewhere past fifty
+        // thousand members — an order beyond the thousands §2 allows for.
+        for signed in &batch {
+            let encoded = postcard::to_stdvec(signed).expect("encoding must work");
+            assert!(
+                encoded.len() < 320,
+                "a statement is {} bytes; the unpaged answer's size argument \
+                 assumes a few hundred",
+                encoded.len()
+            );
+        }
+
+        let directory = Directory::default();
+        assert_eq!(learn_all(&directory, relaying, batch), 2);
+
+        // Both honest members landed — including bob, who was *behind* the
+        // forgery in the batch and is the one an aborting loop would lose.
+        assert!(
+            directory
+                .address_of(MemberId::from(alice.public()))
+                .is_some()
+        );
+        assert!(directory.address_of(MemberId::from(bob.public())).is_some());
+        assert_eq!(directory.address_of(impersonated), None);
+    }
+
+    /// The count is of *changes*, not of entries: a node asking a second core
+    /// node must not be told it learned everything again.
+    #[test]
+    fn hearing_the_same_batch_twice_learns_nothing_the_second_time() {
+        let relaying = MemberId::from(SecretKey::generate().public());
+        let alice = SecretKey::generate();
+        let batch = || vec![SignedAddress::sign(&alice, somewhere(7104), 1).expect("signing")];
+
+        let directory = Directory::default();
+        assert_eq!(learn_all(&directory, relaying, batch()), 1);
+        assert_eq!(learn_all(&directory, relaying, batch()), 0);
+    }
 }

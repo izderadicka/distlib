@@ -58,7 +58,16 @@ pub struct Directory {
     /// question — "where is this id" — and this is the bookkeeping that decides
     /// which answers belong there, plus what this node can say about itself
     /// when asked who it can reach.
-    heard: Arc<RwLock<BTreeMap<MemberId, u64>>>,
+    ///
+    /// **The whole statement, not just the position it carries.** A core node
+    /// answers [`Self::everything`] for the group (2a-5), and what it hands over
+    /// has to be checkable by whoever asked — a signature the asker verifies
+    /// itself, not a claim it has to take on trust. Keeping only `applied` here
+    /// would mean a core node could only relay bare addresses, and believing a
+    /// core node about where a *follower* is is precisely the trust this design
+    /// does not ask for. Still O(members): one statement each, replaced in
+    /// place.
+    heard: Arc<RwLock<BTreeMap<MemberId, SignedAddress>>>,
     /// Bumped whenever an answer here *changes* — never when one is restated.
     ///
     /// Because knowing where somebody is only matters to whoever wanted to
@@ -152,7 +161,7 @@ impl Directory {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if heard
             .get(&member)
-            .is_some_and(|held| announced.applied() < *held)
+            .is_some_and(|held| announced.applied() < held.applied())
         {
             return Ok(false);
         }
@@ -175,7 +184,7 @@ impl Directory {
             // The position still advances: it is what supersession is judged on,
             // and letting it go stale would make a later statement from this
             // member look older than it is.
-            heard.insert(member, announced.applied());
+            heard.insert(member, announced.clone());
             return Ok(false);
         }
 
@@ -184,7 +193,7 @@ impl Directory {
         // has ever had.
         self.lookup.remove_endpoint_info(member.endpoint_id());
         self.lookup.add_endpoint_info(endpoint_addr);
-        heard.insert(member, announced.applied());
+        heard.insert(member, announced.clone());
         // `send_modify` rather than `send`: there may be no subscriber, and a
         // directory that refused to record anything because nobody was
         // listening would be a strange thing indeed.
@@ -208,7 +217,28 @@ impl Directory {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&member)
-            .copied()
+            .map(SignedAddress::applied)
+    }
+
+    /// Every statement this node currently holds, for relaying to somebody who
+    /// has none.
+    ///
+    /// The statements themselves, so the answer stands on its own: whoever
+    /// receives this verifies each signature and is believing the member, not
+    /// the node that passed it along. See the memberlog protocol's
+    /// `Request::Directory`, which is the only caller — a core node answering
+    /// for the group.
+    ///
+    /// Everything held, unfiltered. Who is still a member is a question about
+    /// the log, and the log is not this type's business: the caller intersects
+    /// this with the allowlist it already has open.
+    pub fn everything(&self) -> Vec<SignedAddress> {
+        self.heard
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Where `member` was last heard to be — **read back out of the lookup**,

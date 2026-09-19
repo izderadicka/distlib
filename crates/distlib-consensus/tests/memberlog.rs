@@ -15,9 +15,9 @@ use std::{
 use distlib_consensus::{
     Fetched, MemberRecord, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
 };
-use distlib_core::{MemberId, NodeAddr};
+use distlib_core::{MemberId, NodeAddr, SignedAddress};
 use distlib_net::{
-    AddressBook, AllowlistHooks, Connections, Transport, allowlist, endpoint::configure,
+    AddressBook, AllowlistHooks, Connections, Directory, Transport, allowlist, endpoint::configure,
 };
 use iroh::{
     Endpoint, SecretKey,
@@ -111,6 +111,12 @@ impl Group {
     /// Admitted first, because the allowlist refuses a stranger's connection
     /// long before this protocol is reached.
     async fn admitted_asker(&self) -> (MemberId, MemberlogClient) {
+        let (id, client, _directory) = self.admitted_asker_with_directory().await;
+        (id, client)
+    }
+
+    /// The same, keeping a handle on the directory the client records into.
+    async fn admitted_asker_with_directory(&self) -> (MemberId, MemberlogClient, Directory) {
         let secret = SecretKey::generate();
         let id = MemberId::from(secret.public());
         self.admit(id, "asker").await;
@@ -128,10 +134,31 @@ impl Group {
         .await
         .unwrap();
 
+        let directory = Directory::default();
         (
             id,
-            MemberlogClient::new(endpoint, Connections::new(), AddressBook::default()),
+            MemberlogClient::new(
+                endpoint,
+                Connections::new(),
+                AddressBook::default(),
+                directory.clone(),
+            ),
+            directory,
         )
+    }
+
+    /// Expels `member`, so the log no longer admits them.
+    async fn expel(&self, member: MemberId) {
+        self.node
+            .propose(
+                MembershipEvent::MemberExpelled {
+                    member,
+                    reason: "test".to_owned(),
+                },
+                &self.secret,
+            )
+            .await
+            .unwrap();
     }
 }
 
@@ -300,10 +327,15 @@ async fn a_node_with_no_group_hands_over_nothing() {
     .await
     .unwrap();
 
-    let fetched = MemberlogClient::new(asking, Connections::new(), AddressBook::default())
-        .fetch(id, &addr, 0)
-        .await
-        .unwrap();
+    let fetched = MemberlogClient::new(
+        asking,
+        Connections::new(),
+        AddressBook::default(),
+        Directory::default(),
+    )
+    .fetch(id, &addr, 0)
+    .await
+    .unwrap();
 
     assert!(
         matches!(fetched, Fetched::NoGroup),
@@ -335,6 +367,70 @@ async fn an_unreachable_node_is_a_failure_rather_than_an_answer() {
         .expect_err("there is nobody there");
 
     assert_eq!(failed.member, absent);
+
+    group.shutdown().await;
+}
+
+/// A reachable address for a test member, distinct per port.
+fn somewhere(port: u16) -> NodeAddr {
+    NodeAddr {
+        relay: None,
+        direct: [SocketAddr::from((Ipv4Addr::LOCALHOST, port))]
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// 2a-5: a core node answers for the group, and what it answers with stands on
+/// its own.
+///
+/// Bob announced on the gossip topic; the asker was not there to hear it and
+/// never will be, because an announcement is made once. So the only way it
+/// resolves bob is by asking somebody who was listening.
+#[tokio::test]
+async fn a_core_node_says_where_a_member_it_heard_from_is() {
+    let group = Group::found().await;
+    let (_asker, client, directory) = group.admitted_asker_with_directory().await;
+
+    let bob_key = SecretKey::generate();
+    let bob = MemberId::from(bob_key.public());
+    group.admit(bob, "bob").await;
+
+    // What the founder's gossip listener would have done with bob's
+    // announcement. Reaching into the node's directory rather than standing up
+    // a topic: this test is about the answer, not about how it got there.
+    let announced = SignedAddress::sign(&bob_key, somewhere(6101), 1).unwrap();
+    assert!(group.node.known_addresses().learn(&announced).unwrap());
+
+    assert_eq!(directory.address_of(bob), None, "nothing is known yet");
+    assert_eq!(client.directory(group.id, &group.addr).await.unwrap(), 1);
+    assert_eq!(directory.address_of(bob), Some(somewhere(6101)));
+
+    group.shutdown().await;
+}
+
+/// The filter that stands in for forgetting: what the log no longer admits does
+/// not go on the wire, even though the directory still holds it.
+#[tokio::test]
+async fn an_expelled_members_address_is_not_relayed() {
+    let group = Group::found().await;
+
+    let bob_key = SecretKey::generate();
+    let bob = MemberId::from(bob_key.public());
+    group.admit(bob, "bob").await;
+    let announced = SignedAddress::sign(&bob_key, somewhere(6102), 1).unwrap();
+    assert!(group.node.known_addresses().learn(&announced).unwrap());
+
+    group.expel(bob).await;
+    assert!(
+        group.node.known_addresses().address_of(bob).is_some(),
+        "the directory records what was said; expulsion is the log's business"
+    );
+
+    // Admitted after the expulsion, so it hears the group as it stands now.
+    let (_asker, client, directory) = group.admitted_asker_with_directory().await;
+    assert_eq!(client.directory(group.id, &group.addr).await.unwrap(), 0);
+    assert_eq!(directory.address_of(bob), None);
 
     group.shutdown().await;
 }

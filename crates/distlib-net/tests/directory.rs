@@ -236,3 +236,47 @@ fn a_member_that_moves_leaves_nothing_behind() {
         "the latest statement replaces the last, rather than joining it"
     );
 }
+
+/// What a core node hands over when it answers for the group: the members' own
+/// statements, not a summary of them.
+#[test]
+fn everything_hands_over_the_statements_themselves() {
+    let alice = SecretKey::generate();
+    let bob = SecretKey::generate();
+    let directory = Directory::default();
+
+    let by_alice = SignedAddress::sign(&alice, somewhere(5101), 3).unwrap();
+    let by_bob = SignedAddress::sign(&bob, somewhere(5102), 7).unwrap();
+    assert!(directory.learn(&by_alice).unwrap());
+    assert!(directory.learn(&by_bob).unwrap());
+
+    // Byte-identical to what was learned. This is the property the relay rests
+    // on: a node that received these can check the signatures itself, so it is
+    // believing alice and bob rather than whoever passed them along.
+    let mut held = directory.everything();
+    held.sort_by_key(|signed| signed.member().to_string());
+    let mut expected = vec![by_alice, by_bob];
+    expected.sort_by_key(|signed| signed.member().to_string());
+    assert_eq!(held, expected);
+}
+
+/// One member, one statement — the latest. A directory that grew with every
+/// announcement would make the answer above O(messages) instead of O(members).
+#[test]
+fn everything_holds_one_statement_per_member() {
+    let alice = SecretKey::generate();
+    let directory = Directory::default();
+
+    for (port, position) in [(5103, 1), (5104, 2), (5105, 3)] {
+        assert!(
+            directory
+                .learn(&SignedAddress::sign(&alice, somewhere(port), position).unwrap())
+                .unwrap()
+        );
+    }
+
+    let held = directory.everything();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].applied(), 3);
+    assert_eq!(held[0].addr().unwrap(), &somewhere(5105));
+}

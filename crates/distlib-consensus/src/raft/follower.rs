@@ -158,8 +158,28 @@ pub async fn follow(following: Following, mut hints: Hints) {
         expelled,
     } = following;
 
+    // Set once the core group has told this node where everyone is. Once,
+    // because an announcement is what keeps it current afterwards: this exists
+    // for what a node *missed*, which is everything said while it was not
+    // listening. See [`ask_for_the_directory`].
+    let mut addresses_asked_for = false;
+
     loop {
-        let delay = match ask_around(me, &state_machine, &client, &sources).await {
+        let progress = ask_around(me, &state_machine, &client, &sources).await;
+
+        // Not before the first answer: until then `sources` holds what
+        // configuration named, and a node that has not been admitted yet is
+        // refused by every core node anyway. After one, it holds the core group
+        // the log itself named, with addresses.
+        //
+        // `UpToDate` counts as well as `Fetched`, and that is not a detail: a
+        // node that restarts with its log already current never sees `Fetched`,
+        // and a restart is the case this matters most for — see P2-17.
+        if !addresses_asked_for && matches!(progress, Progress::Fetched | Progress::UpToDate) {
+            addresses_asked_for = ask_for_the_directory(me, &client, &sources).await;
+        }
+
+        let delay = match progress {
             // A source hands over everything it has applied in one answer, so
             // there is nothing waiting behind a successful fetch. Asking again
             // at once would buy an empty round trip per change.
@@ -280,6 +300,49 @@ enum Progress {
     /// Configuration, not the network: `[consensus] core` named nobody
     /// reachable, or named only this node.
     NoSources,
+}
+
+/// Asks the core group where the rest of the group said it can be reached.
+///
+/// **Why a node cannot work this out for itself.** An address is announced on
+/// the gossip topic, once, to whoever was listening at that moment — there is
+/// no timer behind it and there must not be one, because every node announcing
+/// on a schedule is a group that never goes quiet (see `Directory::learned`).
+/// So a node that joins late, or restarts, has simply missed what was said, and
+/// nothing will say it again: a member restating an address its neighbours
+/// already hold is not news to them, so it wakes nothing and provokes no
+/// reply.
+///
+/// A core node has been listening the whole time, which is the only reason it
+/// can answer. It is **not trusted** for it: what it hands over is the members'
+/// own signatures, checked one at a time by [`MemberlogClient::directory`], so
+/// the worst a dishonest core node can do is be ignored.
+///
+/// Answers whether anybody replied. One answer is enough — every core node
+/// hears the same topic — so this stops at the first, and a caller that gets
+/// `false` asks again after the next fetch rather than retrying here.
+async fn ask_for_the_directory(
+    me: MemberId,
+    client: &MemberlogClient,
+    sources: &SharedSources,
+) -> bool {
+    for (member, addr) in read(sources).candidates(me) {
+        match client.directory(member, &addr).await {
+            Ok(learned) => {
+                tracing::debug!(%member, learned, "a core node said where the group is");
+                return true;
+            }
+            // Debug rather than a warning: a core node that has gone is the
+            // ordinary case this loop exists to survive, and the next one down
+            // the list is about to be asked.
+            Err(failed) => tracing::debug!(
+                %member,
+                message = %failed.message,
+                "a core node did not say where the group is"
+            ),
+        }
+    }
+    false
 }
 
 /// Tries each known source until one answers.

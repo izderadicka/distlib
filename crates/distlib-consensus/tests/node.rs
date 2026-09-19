@@ -641,6 +641,7 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
         bystander.node.endpoint().clone(),
         bystander.node.connections().clone(),
         distlib_net::AddressBook::default(),
+        distlib_net::Directory::default(),
     )
     .propose(founder.id, &founder_addr, signed)
     .await
@@ -1010,6 +1011,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
         bystander.node.endpoint().clone(),
         bystander.node.connections().clone(),
         distlib_net::AddressBook::default(),
+        distlib_net::Directory::default(),
     )
     .propose(founder.id, &founder_addr, event)
     .await
