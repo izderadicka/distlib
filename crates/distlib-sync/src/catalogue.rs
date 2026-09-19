@@ -737,6 +737,7 @@ async fn fetch_content_nobody_offered(
                 // off from its own answer.
                 changed = membership.changed() => {
                     if changed.is_err() {
+                        tracing::error!("the membership log is gone; stopping the catalogue's repair task");
                         return;
                     }
                     tracing::debug!("the group changed; asking again for content that is missing");
