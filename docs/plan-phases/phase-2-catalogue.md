@@ -678,9 +678,15 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > property worth having anyway: it is what makes a schema change a deletion rather than a
   > migration.
 
-- **2a-4 — Query surface.** *(depends on 2a-3b, not on 2a-3a.)* `library.search` and `library.item` as JSON-RPC methods (§7.1 names
-  verbatim), `distlib search` and `distlib item` on the CLI, reading SQLite/tantivy only.
+- **2a-4 — Query surface. *(done, delta P2-21)*** *(depends on 2a-3b, not on 2a-3a.)* `library.search` and `library.item` as
+  JSON-RPC methods (§7.1 names verbatim), `distlib search` and `distlib item` on the CLI, reading SQLite/tantivy only.
   **Acceptance:** by hand — two nodes, add metadata on one, search by author on the other.
+
+  > **The acceptance as stated needs `library.add`, which does not exist yet** — see delta P2-21 for what stood in for it: a
+  > single-node test writing through the real catalogue and reading back through the real `Api::call` dispatch, plus the
+  > `distlib-api` unit tests seeding `Store`/`SearchIndex` directly to pin the dispatch and error codes on their own. `filters`
+  > and `page` from §7.1's sketch are not implemented — the sketch calls itself exactly that, a shape to be fleshed out, and the
+  > same delta says why each was left for whoever needs the first real one.
 
 - **2a-5 — Core nodes answer for the group. Done** (P2-17). The other half of P2-15. A core node
   accumulates every `SignedAddress` it hears and serves it on request: `Request::Directory` /

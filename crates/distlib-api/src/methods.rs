@@ -7,8 +7,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
-use distlib_core::{MemberId, NetConfig, NodeAddr, Ticket};
-use distlib_store::ReindexHandle;
+use distlib_core::{ItemId, MemberId, NetConfig, NodeAddr, Ticket};
+use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -17,6 +17,15 @@ use crate::rpc::Error;
 
 /// Everything the methods need: the running node and the key it signs with.
 ///
+/// A ceiling on `library.search`'s `limit`, whatever a caller asks for.
+///
+/// This listener is loopback and token-gated (§7.1, P1-25), so this is a
+/// guard against a mistake rather than an attacker — but tantivy's
+/// `TopDocs::with_limit` allocates a heap sized to it, and no legitimate
+/// caller of a personal library's search needs a single page bigger than
+/// this.
+const MAX_SEARCH_RESULTS: usize = 500;
+
 /// The node is shared rather than owned: whoever started it keeps serving the
 /// group with it while this answers questions about it.
 pub struct Api {
@@ -30,6 +39,11 @@ pub struct Api {
     /// `admin.reindex`'s way of asking the projection task to run, without
     /// this struct owning the task itself.
     pub reindex_handle: ReindexHandle,
+    /// What `library.item` and `library.search` read the record fields from.
+    pub store: Store,
+    /// What `library.search` ranks against. Only a ranking — see its own doc
+    /// comment — so a hit's fields still come from `store`.
+    pub search: SearchIndex,
 }
 
 impl Api {
@@ -47,6 +61,8 @@ impl Api {
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
             "group.ticket" => self.ticket(),
             "admin.reindex" => self.reindex().await,
+            "library.search" => self.search(parse(params)?).await,
+            "library.item" => self.item(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -318,6 +334,70 @@ impl Api {
         Ok(json!({}))
     }
 
+    /// `library.search` — ranks items in the search index for `query`, then
+    /// reads each hit's fields back from the read model to show for it.
+    ///
+    /// **Two reads, not one, and deliberately.** `SearchIndex::search`'s own
+    /// doc comment says why: it stores only enough to rank and identify a hit,
+    /// not a second copy of the row to go stale in one of the two places.
+    /// Hits are read in the order the index returned them, one at a time
+    /// rather than a single `IN (...)`, because that order *is* the ranking —
+    /// a batched query would have to be reassembled into it afterwards for no
+    /// saving at the sizes a `limit` here ever asks for.
+    ///
+    /// **No `filters` and no paging**, though the plan's own sketch names
+    /// both (`{query, filters{type,genre,lang,author,series}, page}`) — see
+    /// [`Search`]'s doc comment for why each is left for whoever needs the
+    /// first real one.
+    async fn search(&self, params: Search) -> Result<Value, Error> {
+        let ids = self
+            .search
+            .search(&params.query, params.limit.min(MAX_SEARCH_RESULTS))
+            .await
+            .map_err(query_error)?;
+
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            // `item_fields`, not `item`: a hit is shown a summary, and reading
+            // every file row along with it would be a query this response
+            // never uses the answer to — `library.item` is where a caller
+            // reads those.
+            if let Some(stored) = self
+                .store
+                .item_fields(id)
+                .await
+                .map_err(|error| Error::failed(error.to_string()))?
+            {
+                results.push(summary(&stored));
+            }
+        }
+        Ok(json!({ "results": results }))
+    }
+
+    /// `library.item` — the full record the read model holds for one item.
+    ///
+    /// **No ratings or availability**, though the plan's sketch promises both
+    /// in this answer: nothing populates either yet. `schema.rs` gives the
+    /// same reason for leaving the `reviews` table out of `distlib-store`
+    /// altogether — a field nothing fills is a commitment made before the
+    /// thing it describes exists.
+    async fn item(&self, params: ItemParams) -> Result<Value, Error> {
+        let stored = self
+            .store
+            .item(params.item_id)
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .ok_or_else(|| Error::failed(format!("no such item: {}", params.item_id)))?;
+
+        let mut record = summary(&stored);
+        record["lang"] = json!(stored.item.lang);
+        record["description"] = json!(stored.item.description);
+        record["replicas"] = json!(stored.item.replicas);
+        record["files"] = json!(stored.item.files);
+        record["last_modified"] = json!(stored.last_modified);
+        Ok(record)
+    }
+
     /// Commits an event, and reports what became of it.
     ///
     /// **`applied` is the field that matters**, and the reason this returns
@@ -368,6 +448,32 @@ impl Api {
             "applied": waiting.is_none(),
             "waiting": waiting,
         })
+    }
+}
+
+/// The fields shown for a search hit — a summary, not `library.item`'s full
+/// record. Also that record's starting point, patched with the fields a
+/// summary leaves out, so the two answers cannot say different things about
+/// the fields they share.
+fn summary(stored: &StoredItem) -> Value {
+    let item = &stored.item;
+    json!({
+        "item_id": item.id,
+        "kind": item.kind,
+        "title": item.title,
+        "authors": item.authors,
+        "genres": item.genres,
+        "series": item.series,
+        "year": item.year,
+    })
+}
+
+/// A malformed query is the caller's mistake; anything else out of
+/// `distlib-store` is this method failing for its own reasons.
+fn query_error(error: StoreError) -> Error {
+    match error {
+        StoreError::Query { .. } => Error::invalid_params(error.to_string()),
+        other => Error::failed(other.to_string()),
     }
 }
 
@@ -512,6 +618,46 @@ struct PledgeSet {
 #[serde(deny_unknown_fields)]
 struct Proposal {
     proposal: u64,
+}
+
+/// `library.search`'s params.
+///
+/// **Flat, where §7.1's own sketch nests `page`** — `{query,
+/// filters{type,genre,lang,author,series}, page}`. The plan calls the whole
+/// `library.*` group "a sketch" and leaves the request and response shapes to
+/// be filled in, so `limit` follows this file's existing style
+/// (`Proposal`, `PledgeSet`) rather than adding a nested object this crate has
+/// no other one of.
+///
+/// **Neither `filters` nor an `offset` is implemented.** `authors`, `genres`
+/// and `series` are already free-text fields a query can point at directly —
+/// `authors:herbert` is valid tantivy syntax today — so a `filters` object
+/// would either duplicate that or paper over `kind` and `lang`, which tantivy
+/// never indexes at all: they live in SQLite only, and filtering by them needs
+/// a real design, not a parameter nobody reads. Paging has the same shape of
+/// gap: tantivy supports an offset natively, but nothing in 2a-4's acceptance
+/// asks for a second page, and `SearchIndex::search` would have to grow the
+/// parameter — and every existing call to it — for a caller that does not
+/// exist yet. Left for whoever writes the first one.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Search {
+    query: String,
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+}
+
+/// `library.search` without an explicit `limit`. Small enough to read in one
+/// screen, generous enough that "did my one test item show up" never needs one.
+fn default_search_limit() -> usize {
+    20
+}
+
+/// `library.item`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ItemParams {
+    item_id: ItemId,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.

@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
-use distlib_core::MemberId;
+use distlib_core::{ItemId, MemberId};
 
 /// Distributed community media library for closed, trusted groups.
 #[derive(Debug, Parser)]
@@ -206,6 +206,29 @@ pub enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
+    },
+
+    /// Search the read model for items matching `query`.
+    ///
+    /// Reads `title`, `authors`, `series`, `genres` and `description` — the
+    /// same fields and boosts `library.search` ranks against (§5.4). Needs the
+    /// node running: the index lives in its process, the same way the log
+    /// does for `distlib members`.
+    Search {
+        /// The text to search for. Tantivy's own syntax works here too —
+        /// `authors:herbert`, say — for pointing at one field instead of all
+        /// five.
+        query: String,
+
+        /// Maximum results to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Print one item's record.
+    Item {
+        /// The item to show, as `distlib search` prints it.
+        item_id: ItemId,
     },
 }
 

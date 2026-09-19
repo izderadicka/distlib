@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, CoreMember, DataDir, MemberId, NodeAddr, Ticket,
+    Config, CoreMember, DataDir, ItemId, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -121,6 +121,8 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                 Arc::clone(&node),
                 secret.clone(),
                 runtime.projection().reindex_handle(),
+                runtime.store().clone(),
+                runtime.search().clone(),
             )
             .await?,
         )
@@ -479,6 +481,94 @@ pub async fn reindex(paths: &Paths) -> Result<()> {
     ask(paths, "admin.reindex", Value::Null).await?;
     println!("reindexed   the read model and search index match the document");
     Ok(())
+}
+
+/// `distlib search`
+pub async fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
+    let answer = ask(
+        paths,
+        "library.search",
+        json!({ "query": query, "limit": limit }),
+    )
+    .await?;
+    let hits = answer["results"].as_array().map_or(&[][..], |v| v);
+
+    if hits.is_empty() {
+        println!("no matches for {query:?}");
+        return Ok(());
+    }
+
+    for hit in hits {
+        println!(
+            "{}  {}",
+            hit["item_id"].as_str().unwrap_or("?"),
+            hit["title"].as_str().unwrap_or("(no title)")
+        );
+        if let Some(authors) = hit["authors"].as_array().filter(|list| !list.is_empty()) {
+            println!("  {}", join_strings(authors));
+        }
+    }
+    Ok(())
+}
+
+/// `distlib item`
+pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
+    let answer = ask(paths, "library.item", json!({ "item_id": item_id })).await?;
+
+    println!("id          {item_id}");
+    println!("kind        {}", answer["kind"].as_str().unwrap_or("?"));
+    println!(
+        "title       {}",
+        answer["title"].as_str().unwrap_or("(no title)")
+    );
+    if let Some(authors) = answer["authors"].as_array().filter(|list| !list.is_empty()) {
+        println!("authors     {}", join_strings(authors));
+    }
+    if let Some(series) = answer["series"].as_object() {
+        println!(
+            "series      {} #{}",
+            series["name"].as_str().unwrap_or("?"),
+            series["index"]
+                .as_f64()
+                .map_or_else(|| "?".to_owned(), |index| index.to_string())
+        );
+    }
+    if let Some(genres) = answer["genres"].as_array().filter(|list| !list.is_empty()) {
+        println!("genres      {}", join_strings(genres));
+    }
+    if let Some(year) = answer["year"].as_i64() {
+        println!("year        {year}");
+    }
+    if let Some(lang) = answer["lang"].as_str() {
+        println!("language    {lang}");
+    }
+    if let Some(description) = answer["description"].as_str() {
+        println!("description {description}");
+    }
+
+    let files = answer["files"].as_object().map_or(0, |files| files.len());
+    println!("files       {files}");
+    if let Some(files) = answer["files"].as_object() {
+        for (blob, file) in files {
+            println!(
+                "  {blob}  {} ({} bytes)",
+                file["filename"].as_str().unwrap_or("?"),
+                file["size"].as_u64().unwrap_or(0)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A JSON array of strings, comma-joined — `authors` and `genres` render the
+/// same way in both `distlib search` and `distlib item`, so there is one
+/// place that decides how.
+fn join_strings(values: &[Value]) -> String {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `distlib ticket`
@@ -904,6 +994,8 @@ async fn serve_api(
     node: Arc<MembershipNode>,
     secret: SecretKey,
     reindex_handle: distlib_store::ReindexHandle,
+    store: distlib_store::Store,
+    search: distlib_store::SearchIndex,
 ) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
@@ -913,6 +1005,8 @@ async fn serve_api(
         secret,
         net: config.net.clone(),
         reindex_handle,
+        store,
+        search,
     };
     let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await
