@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
         Command::Admin { command } => match command {
             AdminCommand::Reindex => commands::reindex(&paths).await,
         },
+        Command::Search { query, limit } => commands::search(&paths, &query, limit).await,
+        Command::Item { item_id } => commands::item(&paths, item_id).await,
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,
         Command::Join { ticket } => commands::join(&paths, &ticket),

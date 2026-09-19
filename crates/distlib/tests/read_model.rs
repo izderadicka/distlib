@@ -18,11 +18,14 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use distlib::Runtime;
+use distlib_api::Api;
 use distlib_core::{
-    Config, ContentHash, DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, Series,
+    Config, ContentHash, DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
+    NetConfig, Series,
 };
 use distlib_store::StoredItem;
 use iroh::SecretKey;
+use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
@@ -413,6 +416,82 @@ async fn admin_reindex_does_not_hang_before_a_group_exists() {
         .await
         .expect("admin.reindex hung on a node with no group yet");
     assert!(reindexed.is_ok());
+
+    runtime.shutdown().await;
+}
+
+/// 2a-4's acceptance, the part of it that does not need `library.add`: an
+/// item written through the catalogue — not seeded into `store`/`search`
+/// directly, the way the `distlib-api` unit tests do it — becomes findable
+/// and readable through `library.search` and `library.item`, over the same
+/// `Api::call` dispatch `distlib-api serve` runs in production.
+///
+/// **What this does not cover.** The phase names its acceptance "two nodes,
+/// add metadata on one, search by author on the other" — this is one node,
+/// because the write path and the read path are the same code however many
+/// nodes are running, and `Runtime`'s two-node convergence is already what
+/// `a_restarted_node_holds_what_a_node_that_never_restarted_holds` and its
+/// neighbours pin. What is new here, and untested until now, is the second
+/// half: that `library.*` actually reads what the projection wrote, over the
+/// real dispatch a caller uses — not `Store`/`SearchIndex` called directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_search_and_item_read_what_the_catalogue_wrote() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let config = config(&[id]);
+    let runtime = Runtime::start(&key, &config, &DataDir::new(dir.path().join("solo")))
+        .await
+        .unwrap();
+    runtime
+        .node()
+        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .await
+        .unwrap();
+
+    let item_id = ItemId::from_bytes([9; 32]);
+    runtime.catalogue().ready().await;
+    runtime
+        .catalogue()
+        .write(&an_item(9, "Dune"))
+        .await
+        .unwrap();
+    tokio::time::timeout(SOON, async {
+        loop {
+            if runtime.search().search("Dune", 10).await.unwrap() == vec![item_id] {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the item becomes searchable");
+
+    let api = Api {
+        node: std::sync::Arc::clone(runtime.node()),
+        secret: key,
+        net: NetConfig::default(),
+        reindex_handle: runtime.projection().reindex_handle(),
+        store: runtime.store().clone(),
+        search: runtime.search().clone(),
+    };
+
+    let found = api
+        .call("library.search", Some(json!({ "query": "Herbert" })))
+        .await
+        .unwrap();
+    let hits = found["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    assert_eq!(hits[0]["item_id"], json!(item_id));
+    assert_eq!(hits[0]["title"], json!("Dune"));
+
+    let record = api
+        .call("library.item", Some(json!({ "item_id": item_id })))
+        .await
+        .unwrap();
+    assert_eq!(record["title"], json!("Dune"));
+    assert_eq!(record["authors"], json!(["Frank Herbert", "Brian Herbert"]));
+    assert_eq!(record["files"].as_object().unwrap().len(), 1);
 
     runtime.shutdown().await;
 }

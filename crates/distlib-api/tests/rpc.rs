@@ -14,9 +14,9 @@ use std::{
 
 use distlib_api::{Api, Server, serve};
 use distlib_consensus::{MemberRecord, MembershipNode};
-use distlib_core::{MemberId, NodeAddr, Ticket};
+use distlib_core::{Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
-use distlib_store::ReindexHandle;
+use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
@@ -51,6 +51,11 @@ struct Harness {
     /// an endpoint open — so the harness keeps them and [`Harness::shutdown`]
     /// closes every one, including the routers of nodes a test stops itself.
     routers: Vec<Router>,
+    /// In memory, and empty until a `library.*` test writes into it directly
+    /// — there is no catalogue or projection here to fill it the real way.
+    store: Store,
+    /// Same reasoning, same emptiness, for `library.search`.
+    search: SearchIndex,
     _dir: TempDir,
 }
 
@@ -64,6 +69,8 @@ impl Harness {
     /// for the tests that need to control what answers `admin.reindex`
     /// rather than have nothing behind it.
     async fn start_with(reindex_handle: ReindexHandle) -> Self {
+        let store = Store::open(None).await.unwrap();
+        let search = SearchIndex::open(None).await.unwrap();
         let secret = SecretKey::generate();
         let id = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
@@ -122,6 +129,8 @@ impl Harness {
                 secret,
                 net: distlib_core::NetConfig::default(),
                 reindex_handle,
+                store: store.clone(),
+                search: search.clone(),
             },
             SecretString::from(token.clone()),
         )
@@ -132,6 +141,8 @@ impl Harness {
             server,
             token,
             routers: vec![router],
+            store,
+            search,
             _dir: dir,
         }
     }
@@ -232,6 +243,8 @@ impl Harness {
             .expect("the founding entry must reach every founder");
         }
 
+        let store = Store::open(None).await.unwrap();
+        let search = SearchIndex::open(None).await.unwrap();
         let token = "0123456789abcdef".repeat(4);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -240,6 +253,8 @@ impl Harness {
                 secret: secrets[0].clone(),
                 net: distlib_core::NetConfig::default(),
                 reindex_handle: no_reindex(),
+                store: store.clone(),
+                search: search.clone(),
             },
             SecretString::from(token.clone()),
         )
@@ -251,6 +266,8 @@ impl Harness {
             server,
             token,
             routers,
+            store,
+            search,
             _dir: dir,
         };
         (harness, nodes, secrets)
@@ -851,6 +868,102 @@ async fn admin_reindex_reports_a_projection_that_is_gone() {
 
     let refused = harness.refuse("admin.reindex", Value::Null).await;
     assert_eq!(code(&refused), -32000);
+
+    harness.shutdown().await;
+}
+
+/// `library.item` reads the read model over the real RPC dispatch, not the
+/// `Store` directly — pinning `Api::call`'s routing the same way the
+/// `admin.reindex` pair above pins its own.
+///
+/// Written straight into `harness.store` rather than through a catalogue and
+/// a projection, which this harness has neither of: what is being checked is
+/// that `library.item` reads a row correctly, not that one arrives there.
+#[tokio::test]
+async fn library_item_reads_the_stored_record() {
+    let harness = Harness::start().await;
+    let id = ItemId::from_bytes([7; 32]);
+    harness
+        .store
+        .upsert_item(StoredItem {
+            item: Item {
+                title: Some("Dune".to_owned()),
+                authors: Some(vec!["Frank Herbert".to_owned()]),
+                ..Item::new(id)
+            },
+            last_modified: 1,
+        })
+        .await
+        .unwrap();
+
+    let answer = harness.call("library.item", json!({ "item_id": id })).await;
+    assert_eq!(answer["item_id"], json!(id));
+    assert_eq!(answer["title"], json!("Dune"));
+    assert_eq!(answer["authors"], json!(["Frank Herbert"]));
+
+    harness.shutdown().await;
+}
+
+/// An id the read model has nothing for is a call failure, not a null result
+/// a caller could mistake for "found, and empty".
+#[tokio::test]
+async fn library_item_reports_no_such_item() {
+    let harness = Harness::start().await;
+    let refused = harness
+        .refuse(
+            "library.item",
+            json!({ "item_id": ItemId::from_bytes([9; 32]) }),
+        )
+        .await;
+    assert_eq!(code(&refused), -32000);
+
+    harness.shutdown().await;
+}
+
+/// `library.search` ranks against `harness.search` and reads the fields to
+/// show back from `harness.store` — the same two-step `SearchIndex::search`'s
+/// own doc comment describes, exercised here over the real RPC dispatch.
+#[tokio::test]
+async fn library_search_ranks_and_reads_hits_back() {
+    let harness = Harness::start().await;
+    let id = ItemId::from_bytes([7; 32]);
+    let item = Item {
+        title: Some("Dune".to_owned()),
+        authors: Some(vec!["Frank Herbert".to_owned()]),
+        ..Item::new(id)
+    };
+    harness
+        .store
+        .upsert_item(StoredItem {
+            item: item.clone(),
+            last_modified: 1,
+        })
+        .await
+        .unwrap();
+    harness.search.index_item(item).await.unwrap();
+    harness.search.commit().await.unwrap();
+
+    let answer = harness
+        .call("library.search", json!({ "query": "Herbert" }))
+        .await;
+    let results = answer["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["item_id"], json!(id));
+    assert_eq!(results[0]["title"], json!("Dune"));
+
+    harness.shutdown().await;
+}
+
+/// A malformed query is the caller's mistake (`-32602`), not this method
+/// failing (`-32000`) — the same distinction `an_unbalanced_query_is_refused`
+/// pins one layer down, in `distlib-store` itself.
+#[tokio::test]
+async fn library_search_refuses_a_malformed_query() {
+    let harness = Harness::start().await;
+    let refused = harness
+        .refuse("library.search", json!({ "query": "\"unterminated" }))
+        .await;
+    assert_eq!(code(&refused), -32602);
 
     harness.shutdown().await;
 }

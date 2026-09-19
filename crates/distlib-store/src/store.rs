@@ -146,6 +146,26 @@ impl Store {
         .await
     }
 
+    /// One item's own fields, `files` always empty.
+    ///
+    /// [`Store::item`] minus one query — the one that reads `item_files` — for
+    /// a caller that is not going to look at `files` anyway. `library.search`
+    /// is the reason this exists: a page of hits reads this once per hit, and
+    /// `library.item` is the one place a caller reads the file list, so paying
+    /// for it here would be work every search result throws away.
+    pub async fn item_fields(&self, id: ItemId) -> Result<Option<StoredItem>> {
+        self.read(move |conn| {
+            let mut statement =
+                conn.prepare(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = ?1"))?;
+            let mut rows = statement.query(params![id.to_string()])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            row_to_item(row).map(Some)
+        })
+        .await
+    }
+
     /// Every item the projection has written, by id.
     ///
     /// Two queries rather than one per item: the file rows are fetched in a
