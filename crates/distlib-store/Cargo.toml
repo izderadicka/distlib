@@ -19,6 +19,7 @@ distlib-sync = { workspace = true }
 # the document — those members are the only ones anybody agreed on.
 distlib-consensus = { workspace = true }
 rusqlite = { workspace = true }
+tantivy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

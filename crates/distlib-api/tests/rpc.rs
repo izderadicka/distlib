@@ -16,6 +16,7 @@ use distlib_api::{Api, Server, serve};
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
+use distlib_store::ReindexHandle;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
@@ -28,6 +29,16 @@ use iroh_gossip::net::Gossip;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+/// A handle nobody answers.
+///
+/// These tests exercise `group.*` and `node.status` against a bare consensus
+/// node — no catalogue, no read model — so `admin.reindex` has nothing behind
+/// it to call. Good enough here: nothing in this file asks for one.
+fn no_reindex() -> ReindexHandle {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    ReindexHandle::new(sender)
+}
 
 /// A founded one-node group with its API up.
 struct Harness {
@@ -103,6 +114,7 @@ impl Harness {
                 node: Arc::clone(&node),
                 secret,
                 net: distlib_core::NetConfig::default(),
+                reindex_handle: no_reindex(),
             },
             SecretString::from(token.clone()),
         )
@@ -220,6 +232,7 @@ impl Harness {
                 node: Arc::clone(&nodes[0]),
                 secret: secrets[0].clone(),
                 net: distlib_core::NetConfig::default(),
+                reindex_handle: no_reindex(),
             },
             SecretString::from(token.clone()),
         )

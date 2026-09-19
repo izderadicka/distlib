@@ -114,7 +114,16 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     // The local API. Started after founding, so a caller that reaches it finds
     // a node that has finished deciding what it is.
     let api = if config.api.enabled {
-        Some(serve_api(paths, &config, Arc::clone(&node), secret.clone()).await?)
+        Some(
+            serve_api(
+                paths,
+                &config,
+                Arc::clone(&node),
+                secret.clone(),
+                runtime.projection().reindex_handle(),
+            )
+            .await?,
+        )
     } else {
         tracing::info!("the local api is disabled");
         None
@@ -462,6 +471,13 @@ fn where_it_is(addr: &NodeAddr) -> String {
 pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
     ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
     println!("pledged     {bytes} bytes");
+    Ok(())
+}
+
+/// `distlib admin reindex`
+pub async fn reindex(paths: &Paths) -> Result<()> {
+    ask(paths, "admin.reindex", Value::Null).await?;
+    println!("reindexed   the read model and search index match the document");
     Ok(())
 }
 
@@ -887,6 +903,7 @@ async fn serve_api(
     config: &Config,
     node: Arc<MembershipNode>,
     secret: SecretKey,
+    reindex_handle: distlib_store::ReindexHandle,
 ) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
@@ -895,6 +912,7 @@ async fn serve_api(
         node,
         secret,
         net: config.net.clone(),
+        reindex_handle,
     };
     let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await

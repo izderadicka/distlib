@@ -97,6 +97,14 @@ impl DataDir {
         self.0.join("db")
     }
 
+    /// `<root>/index` — the tantivy full-text index over the read model.
+    ///
+    /// Deletable for the same reason `db_dir` is: it holds nothing that is not
+    /// derived from `docs/`, rebuilt by the same replay that rebuilds `db/`.
+    pub fn index_dir(&self) -> PathBuf {
+        self.0.join("index")
+    }
+
     /// Creates the root directory and any parents. Existing directories are fine.
     pub fn create(&self) -> Result<()> {
         std::fs::create_dir_all(&self.0).map_err(CoreError::io("create data directory", &self.0))

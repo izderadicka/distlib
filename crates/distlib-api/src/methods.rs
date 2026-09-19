@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{MemberId, NetConfig, NodeAddr, Ticket};
+use distlib_store::ReindexHandle;
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,6 +27,9 @@ pub struct Api {
     /// Needed for `group.ticket`: a joiner has to reach the group the way this
     /// node does, so the directions have to carry it.
     pub net: NetConfig,
+    /// `admin.reindex`'s way of asking the projection task to run, without
+    /// this struct owning the task itself.
+    pub reindex_handle: ReindexHandle,
 }
 
 impl Api {
@@ -42,6 +46,7 @@ impl Api {
             "group.withdraw" => self.withdraw(parse(params)?).await,
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
             "group.ticket" => self.ticket(),
+            "admin.reindex" => self.reindex().await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -299,6 +304,18 @@ impl Api {
             pledge_bytes: params.bytes,
         })
         .await
+    }
+
+    /// `admin.reindex` — rebuilds the read model from the document, the same
+    /// replay a cold start runs (§5.4, P2-19). Blocks until it has finished,
+    /// which for a settled catalogue is the point: a caller asking to reindex
+    /// wants to know it is done, not that it was queued.
+    async fn reindex(&self) -> Result<Value, Error> {
+        self.reindex_handle
+            .request()
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?;
+        Ok(json!({}))
     }
 
     /// Commits an event, and reports what became of it.

@@ -102,6 +102,32 @@ async fn agree_on(node: &Runtime, against: &Runtime, items: usize, what: &str) {
     );
 }
 
+/// Waits until both nodes' search indexes rank `query` the same way.
+///
+/// Mirrors [`agree_on`]: both sides are re-read on every poll, for the same
+/// reason — a node's own projection is behind its own writes, so reading the
+/// side being compared against just once would snapshot a half-built index.
+async fn agree_on_search(node: &Runtime, against: &Runtime, query: &str, what: &str) {
+    let mut here = Vec::new();
+    let mut there = Vec::new();
+    let caught_up = tokio::time::timeout(SOON, async {
+        loop {
+            here = node.search().search(query, 10).await.unwrap();
+            there = against.search().search(query, 10).await.unwrap();
+            if !here.is_empty() && here == there {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        caught_up.is_ok(),
+        "{what}: the two search indexes never agreed on {query:?} within {SOON:?}\n  here: {here:#?}\n  there: {there:#?}",
+    );
+}
+
 /// Alice and bob, founded as one group, with bob's data directory named so the
 /// test can start a second node on it.
 async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
@@ -232,6 +258,57 @@ async fn a_read_model_that_was_lost_is_rebuilt_from_the_document() {
 
     let bob = Runtime::start(&bob_key, &config, &bobs_dir).await.unwrap();
     agree_on(&bob, &alice, 2, "after the read model is deleted").await;
+
+    bob.shutdown().await;
+    alice.shutdown().await;
+}
+
+/// 2a-3b's half of the acceptance: delete the search index alone, and the
+/// replay that rebuilds `db/` rebuilds `index/` too — because, per P2-19,
+/// a start and a reindex are one operation and there is only the one replay
+/// to run either of them.
+///
+/// `db/` is left in place here, deliberately: this isolates the index's own
+/// rebuild from SQLite's. If the index were instead fed from the tables
+/// rather than from the same catalogue re-read, this would pass by accident
+/// while a cold start of both together still failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
+    let dir = TempDir::new().unwrap();
+    let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
+
+    alice.catalogue().ready().await;
+    alice
+        .catalogue()
+        .write(&an_item(6, "Snow Crash"))
+        .await
+        .unwrap();
+    agree_on_search(
+        &bob,
+        &alice,
+        "Snow Crash",
+        "before the search index is deleted",
+    )
+    .await;
+
+    bob.shutdown().await;
+    drop(bob);
+
+    let bobs_dir = DataDir::new(dir.path().join("bob"));
+    assert!(
+        bobs_dir.index_dir().exists(),
+        "bob had a search index to delete"
+    );
+    std::fs::remove_dir_all(bobs_dir.index_dir()).unwrap();
+
+    let bob = Runtime::start(&bob_key, &config, &bobs_dir).await.unwrap();
+    agree_on_search(
+        &bob,
+        &alice,
+        "Snow Crash",
+        "after the search index is deleted",
+    )
+    .await;
 
     bob.shutdown().await;
     alice.shutdown().await;

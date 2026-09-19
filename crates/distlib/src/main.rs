@@ -5,7 +5,7 @@ use std::{io::IsTerminal as _, time::Duration};
 use anyhow::Result;
 use clap::Parser;
 use distlib::{
-    cli::{Cli, Command, CoreCommand},
+    cli::{AdminCommand, Cli, Command, CoreCommand},
     commands::{self, Paths},
 };
 use distlib_core::DataDir;
@@ -38,6 +38,9 @@ async fn main() -> Result<()> {
                 relay,
             } => commands::core_set(&paths, member, addrs, relay).await,
             CoreCommand::Remove { member } => commands::core_remove(&paths, member).await,
+        },
+        Command::Admin { command } => match command {
+            AdminCommand::Reindex => commands::reindex(&paths).await,
         },
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,

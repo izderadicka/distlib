@@ -201,6 +201,22 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         timeout: u64,
     },
+
+    /// Maintenance operations on a running node.
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
+}
+
+/// `distlib admin <...>`
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Rebuild the read model and search index from the document.
+    ///
+    /// The same replay a restart runs (§5.4, P2-19), run on request rather
+    /// than waited for. Needs the node running — it holds the document.
+    Reindex,
 }
 
 /// `distlib core <...>`

@@ -19,7 +19,7 @@ use anyhow::{Context as _, Result};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Transport, allowlist, build_endpoint};
-use distlib_store::{Projection, Store};
+use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::Catalogue;
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
@@ -34,6 +34,7 @@ pub struct Runtime {
     node: Arc<MembershipNode>,
     catalogue: Catalogue,
     store: Store,
+    search: SearchIndex,
     /// Held rather than detached: dropping it stops the task, so a runtime
     /// that goes away does not leave one writing to a database nobody reads.
     projection: Projection,
@@ -122,7 +123,15 @@ impl Runtime {
         let store = Store::open(Some(data_dir.db_dir()))
             .await
             .with_context(|| format!("could not open {}", data_dir.db_dir().display()))?;
-        let projection = Projection::start(catalogue.clone(), store.clone(), node.subscribe());
+        let search = SearchIndex::open(Some(data_dir.index_dir()))
+            .await
+            .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
+        let projection = Projection::start(
+            catalogue.clone(),
+            store.clone(),
+            search.clone(),
+            node.subscribe(),
+        );
 
         // Nothing is answered until here: the endpoint has been advertising
         // these ALPNs since it bound, and a peer arriving in the window
@@ -140,6 +149,7 @@ impl Runtime {
             node,
             catalogue,
             store,
+            search,
             projection,
             router,
         })
@@ -158,6 +168,16 @@ impl Runtime {
     /// The read model: what every query in §7.1 is answered from.
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// The search index: what `library.search` ranks against.
+    pub fn search(&self) -> &SearchIndex {
+        &self.search
+    }
+
+    /// The task keeping the read model in step — `admin.reindex` drives it.
+    pub fn projection(&self) -> &Projection {
+        &self.projection
     }
 
     /// The endpoint everything in this process is served on.
@@ -183,6 +203,16 @@ impl Runtime {
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.
         self.catalogue.shutdown();
+        // Explicit, and after the projection: tantivy's `IndexWriter` holds a
+        // lockfile for as long as it is alive, and its own `Drop` does not
+        // wait for its merge thread to actually exit — only
+        // `wait_merging_threads` does that, and `close` is what calls it. A
+        // restart in this same process, which reopens `index_dir()` right
+        // after this returns, is exactly what needs that lock gone rather
+        // than merely on its way out.
+        if let Err(error) = self.search.close().await {
+            tracing::warn!(%error, "search index did not close cleanly");
+        }
         if let Err(error) = self.router.shutdown().await {
             tracing::warn!(%error, "router did not shut down cleanly");
         }

@@ -653,10 +653,10 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > - **2a-3a — the catalogue is projected into SQLite** *(done, delta P2-19)*. The `distlib-store`
   >   crate, the three tables, the projection event stream deferred out of 2a-2, the projection task,
   >   the replay, `DataDir::db_dir`, and both restart acceptance runs.
-  > - **2a-3b — the catalogue is searchable.** tantivy over `title, authors, description, genres,
-  >   series` with §5.4's per-field boosts, indexed from the same projection, plus `admin.reindex`
-  >   and `DataDir::index_dir`. **2a-4 depends on this half**, not on 2a-3a: `library.search` has
-  >   nothing to read until the index exists.
+  > - **2a-3b — the catalogue is searchable** *(done, delta P2-20)*. tantivy over `title, authors,
+  >   description, genres, series` with §5.4's per-field boosts, indexed from the same projection,
+  >   plus `admin.reindex` and `DataDir::index_dir`. **2a-4 depends on this half**, not on 2a-3a:
+  >   `library.search` has nothing to read until the index exists.
   >
   > **The projection stream arrived with its consumer, as 2a-2 said it would, and the consumer
   > decided against both shapes that note offered.** It neither emits changes the reader cannot read
