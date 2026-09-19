@@ -292,7 +292,7 @@ async fn project(
     // entirely-failed batch has nothing new to make visible, and a commit is
     // not free.
     if indexed && let Err(error) = index.commit().await {
-        tracing::warn!(%error, "could not commit the search index");
+        tracing::error!(%error, "could not commit the search index");
     }
 }
 
