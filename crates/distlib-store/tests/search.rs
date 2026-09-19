@@ -86,6 +86,24 @@ async fn indexing_an_item_again_replaces_it() {
 /// must outrank one matching only in `description`, because that is the whole
 /// point of setting the boosts at all — the query parser has to actually be
 /// built with them, not just able to run without them.
+///
+/// **Both fields hold the query term alone, and nothing else.** A one-word
+/// field has the same length in both, so BM25's own length normalization and
+/// the term's per-field idf are identical for the two documents — measured
+/// directly against tantivy: without a boost the two score *exactly* equal,
+/// to the last bit. That tie is broken by document order, so `by_description`
+/// is indexed **first** here, putting it ahead on the tie alone; only a
+/// boost that actually favours `title` can move `by_title` past it. A field
+/// length asymmetry (say, a long title) can't be used for this instead — it
+/// stacks BM25's own bias on top of the boost, so a passing test would not
+/// say which one did the work. Confirmed by mutation: this fails, in
+/// `by_description`, `by_title` order, with every boost constant set to
+/// `1.0`.
+///
+/// **That tie-break is not a documented tantivy guarantee** — nothing pins
+/// it beyond this crate's `=0.26.2` version lock. Re-run the same `1.0`
+/// mutation by hand after any tantivy version bump: a changed tie-break would
+/// make this pass unconditionally, silently, regardless of the boosts.
 #[tokio::test]
 async fn a_title_match_outranks_a_description_match() {
     let index = empty().await;
@@ -94,16 +112,15 @@ async fn a_title_match_outranks_a_description_match() {
 
     index
         .index_item(Item {
-            title: Some("The whale hunter's log".to_owned()),
-            ..item(1)
+            description: Some("whale".to_owned()),
+            ..item(2)
         })
         .await
         .unwrap();
     index
         .index_item(Item {
-            title: Some("An unrelated title".to_owned()),
-            description: Some("A long voyage in search of the whale.".to_owned()),
-            ..item(2)
+            title: Some("whale".to_owned()),
+            ..item(1)
         })
         .await
         .unwrap();
@@ -148,6 +165,23 @@ async fn search_stops_at_the_limit() {
     index.commit().await.unwrap();
 
     assert_eq!(index.search("Dune", 3).await.unwrap().len(), 3);
+}
+
+/// `limit: 0` is answered rather than passed through — tantivy's own
+/// `TopDocs::with_limit` panics on `0` instead of returning nothing.
+#[tokio::test]
+async fn a_zero_limit_finds_nothing_without_panicking() {
+    let index = empty().await;
+    index
+        .index_item(Item {
+            title: Some("Dune".to_owned()),
+            ..item(1)
+        })
+        .await
+        .unwrap();
+    index.commit().await.unwrap();
+
+    assert_eq!(index.search("Dune", 0).await.unwrap(), Vec::new());
 }
 
 /// A malformed query is refused rather than panicking or matching everything.

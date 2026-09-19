@@ -168,7 +168,21 @@ async fn run(
     mut membership: watch::Receiver<MembershipState>,
     mut reindex_rx: mpsc::Receiver<oneshot::Sender<()>>,
 ) {
-    catalogue.ready().await;
+    // A node with no group yet — freshly started, not founded or joined —
+    // waits here indefinitely, which `distlib run` warns about on its own. A
+    // reindex asked for in that window is answered at once rather than left
+    // to block on a loop this function has not reached: there is no document
+    // yet, so an empty catalogue reindexes to nothing, and `Ok` is the honest
+    // answer. Without this, `admin.reindex` against such a node is not an
+    // error — it is a request that never returns.
+    loop {
+        tokio::select! {
+            () = catalogue.ready() => break,
+            Some(done) = reindex_rx.recv() => {
+                let _ = done.send(());
+            }
+        }
+    }
 
     // Before the replay. See the module docs: the other order loses whatever
     // arrives while the replay is running.

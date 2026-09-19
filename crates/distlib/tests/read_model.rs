@@ -313,3 +313,106 @@ async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
     bob.shutdown().await;
     alice.shutdown().await;
 }
+
+/// `admin.reindex` actually rebuilds the search index from the document,
+/// rather than being wired to a `replay` nothing here exercises.
+///
+/// The drift is manufactured directly against `SearchIndex`, bypassing the
+/// projection, because that is the only way to get the index to disagree with
+/// the document without waiting on a race: a corruption the projection would
+/// otherwise repair on its own the moment anything touched the item again.
+#[tokio::test(flavor = "multi_thread")]
+async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let config = config(&[id]);
+    let runtime = Runtime::start(&key, &config, &DataDir::new(dir.path().join("solo")))
+        .await
+        .unwrap();
+    runtime
+        .node()
+        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .await
+        .unwrap();
+
+    let item_id = ItemId::from_bytes([9; 32]);
+    runtime.catalogue().ready().await;
+    runtime
+        .catalogue()
+        .write(&an_item(9, "Dune"))
+        .await
+        .unwrap();
+    tokio::time::timeout(SOON, async {
+        loop {
+            if runtime.search().search("Dune", 10).await.unwrap() == vec![item_id] {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the item becomes searchable");
+
+    // Drift the index away from what the document says, directly.
+    runtime
+        .search()
+        .index_item(Item {
+            title: Some("an imposter".to_owned()),
+            ..Item::new(item_id)
+        })
+        .await
+        .unwrap();
+    runtime.search().commit().await.unwrap();
+    assert_eq!(
+        runtime.search().search("Dune", 10).await.unwrap(),
+        Vec::new(),
+        "the drift did not take, so the rest of this test proves nothing"
+    );
+
+    runtime
+        .projection()
+        .reindex()
+        .await
+        .expect("admin.reindex completes");
+
+    assert_eq!(
+        runtime.search().search("Dune", 10).await.unwrap(),
+        vec![item_id],
+        "reindex did not restore the document's own title"
+    );
+    assert_eq!(
+        runtime.search().search("imposter", 10).await.unwrap(),
+        Vec::new(),
+        "the drifted title should not have survived a reindex"
+    );
+
+    runtime.shutdown().await;
+}
+
+/// The regression this is named for: `run` awaits `catalogue.ready()` before
+/// its main loop even starts, and a node that has been started but has not
+/// yet founded or joined a group sits there forever. `admin.reindex` must not
+/// be a hung HTTP request for that entirely ordinary case — `distlib run`
+/// prints exactly this warning on a fresh node — so a request arriving before
+/// the catalogue exists is acknowledged at once: an empty catalogue reindexes
+/// to nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_reindex_does_not_hang_before_a_group_exists() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let runtime = Runtime::start(
+        &key,
+        &config(&[MemberId::from(key.public())]),
+        &DataDir::new(dir.path().join("node")),
+    )
+    .await
+    .unwrap();
+
+    let reindexed = tokio::time::timeout(Duration::from_secs(5), runtime.projection().reindex())
+        .await
+        .expect("admin.reindex hung on a node with no group yet");
+    assert!(reindexed.is_ok());
+
+    runtime.shutdown().await;
+}

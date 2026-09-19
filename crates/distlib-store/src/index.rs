@@ -244,6 +244,14 @@ impl SearchIndex {
     /// tantivy's own query syntax. Reading the actual title back is the
     /// caller's job — this is a ranking, not a second copy of the row.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ItemId>> {
+        // Not a query tantivy can even be asked: `TopDocs::with_limit` panics
+        // on `0` rather than returning nothing. `0` best matches has an
+        // honest answer that does not depend on asking, so it is given here
+        // rather than left for a caller to discover as a panic.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let fields = self.fields;
         let mut parser = QueryParser::for_index(
             &self.index,
