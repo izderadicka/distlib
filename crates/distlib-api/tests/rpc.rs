@@ -16,6 +16,7 @@ use distlib_api::{Api, Server, serve};
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
+use distlib_store::ReindexHandle;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
@@ -28,6 +29,16 @@ use iroh_gossip::net::Gossip;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+/// A handle nobody answers.
+///
+/// These tests exercise `group.*` and `node.status` against a bare consensus
+/// node — no catalogue, no read model — so `admin.reindex` has nothing behind
+/// it to call. Good enough here: nothing in this file asks for one.
+fn no_reindex() -> ReindexHandle {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    ReindexHandle::new(sender)
+}
 
 /// A founded one-node group with its API up.
 struct Harness {
@@ -46,6 +57,13 @@ struct Harness {
 impl Harness {
     /// Founds a group and serves the API on a port the OS picks.
     async fn start() -> Self {
+        Self::start_with(no_reindex()).await
+    }
+
+    /// [`Harness::start`], but with a `reindex_handle` the caller supplies —
+    /// for the tests that need to control what answers `admin.reindex`
+    /// rather than have nothing behind it.
+    async fn start_with(reindex_handle: ReindexHandle) -> Self {
         let secret = SecretKey::generate();
         let id = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
@@ -103,6 +121,7 @@ impl Harness {
                 node: Arc::clone(&node),
                 secret,
                 net: distlib_core::NetConfig::default(),
+                reindex_handle,
             },
             SecretString::from(token.clone()),
         )
@@ -220,6 +239,7 @@ impl Harness {
                 node: Arc::clone(&nodes[0]),
                 secret: secrets[0].clone(),
                 net: distlib_core::NetConfig::default(),
+                reindex_handle: no_reindex(),
             },
             SecretString::from(token.clone()),
         )
@@ -792,6 +812,45 @@ async fn malformed_calls_are_reported_by_kind() {
         )
         .await;
     assert_eq!(raw_code(&wrong_version), -32600);
+
+    harness.shutdown().await;
+}
+
+/// `admin.reindex` actually calls through to the projection, over the real
+/// HTTP dispatch — not just `ReindexHandle::request` on its own, which is all
+/// the `distlib-store` and `distlib` test suites exercise. What is being
+/// pinned here is `Api::call`'s routing: that `"admin.reindex"` reaches
+/// [`distlib_api::Api::call`]'s `reindex` arm and blocks on the same handle a
+/// caller behind it would answer.
+#[tokio::test]
+async fn admin_reindex_reaches_the_projection_through_the_rpc_dispatch() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let harness = Harness::start_with(ReindexHandle::new(sender)).await;
+
+    // Stands in for the projection task: answers the one request this test
+    // sends, the moment it arrives, the way `Projection::run` answers one it
+    // is asked for.
+    tokio::spawn(async move {
+        if let Some(done) = receiver.recv().await {
+            let _ = done.send(());
+        }
+    });
+
+    let result = harness.call("admin.reindex", Value::Null).await;
+    assert_eq!(result, json!({}));
+
+    harness.shutdown().await;
+}
+
+/// The other half: a projection that is gone — dropped, or never started —
+/// is reported as a call failure rather than a request that never returns.
+/// [`no_reindex`] drops its receiver immediately, which is exactly that case.
+#[tokio::test]
+async fn admin_reindex_reports_a_projection_that_is_gone() {
+    let harness = Harness::start_with(no_reindex()).await;
+
+    let refused = harness.refuse("admin.reindex", Value::Null).await;
+    assert_eq!(code(&refused), -32000);
 
     harness.shutdown().await;
 }

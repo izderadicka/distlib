@@ -99,6 +99,12 @@ anyerror = "=0.1.13"
 # of wrapping it. Sizes, durations and entry timestamps are all `u64` here, and a
 # size that came back negative would be far worse than a write that failed.
 rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint"] }
+# The other half of §5.4's read model: SQLite answers `item`, tantivy answers
+# `search`. Default features are kept — `mmap` is what lets a query open the
+# index without loading it into the process, and the on-disk index this
+# writes is, like `db/`, deletable and rebuilt from the document rather than
+# migrated.
+tantivy = "=0.26.2"
 
 # --- hashing ---------------------------------------------------------------
 blake3 = "=1.8.7"

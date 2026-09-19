@@ -18,6 +18,7 @@ slow-tests = []
 [dependencies]
 distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }
+distlib-store = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

@@ -31,10 +31,12 @@
 //! would trade a gap measured in seconds for a divergence with no repair path.
 
 pub mod error;
+pub mod index;
 pub mod projection;
 pub mod schema;
 pub mod store;
 
 pub use error::{Result, StoreError};
-pub use projection::Projection;
+pub use index::SearchIndex;
+pub use projection::{Projection, ReindexHandle};
 pub use store::{Store, StoredItem, StoredMember};
