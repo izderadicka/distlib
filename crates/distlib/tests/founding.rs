@@ -188,18 +188,37 @@ impl Friend {
     }
 
     /// The index of the one change waiting for approval.
+    ///
+    /// **Polled, not asked once.** A proposal is pending on the leader the
+    /// moment `core set` returns, but this is usually called against a
+    /// *different* node — a proposal is only pending there once Raft has
+    /// replicated it, which the proposer's own CLI call returning success
+    /// says nothing about. Asking once is asserting the absence of that
+    /// replication delay, the same reasoning `wait_for_status` gives for
+    /// polling a promotion.
     fn the_pending_one(&self) -> u64 {
-        let output = distlib(self.dir.path()).arg("pending").output().unwrap();
-        assert!(
-            output.status.success(),
-            "pending failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let listed = String::from_utf8(output.stdout).unwrap();
-        listed
-            .lines()
-            .find_map(|line| line.split_whitespace().next()?.parse::<u64>().ok())
-            .unwrap_or_else(|| panic!("expected one proposal waiting; got:\n{listed}"))
+        let deadline = Instant::now() + CONVERGE_TIMEOUT;
+        loop {
+            let output = distlib(self.dir.path()).arg("pending").output().unwrap();
+            assert!(
+                output.status.success(),
+                "pending failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let listed = String::from_utf8(output.stdout).unwrap();
+            if let Some(proposal) = listed
+                .lines()
+                .find_map(|line| line.split_whitespace().next()?.parse::<u64>().ok())
+            {
+                return proposal;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for a proposal to become pending here; last saw:\n{listed}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Waits for this node's own account of itself to satisfy `settled`.
