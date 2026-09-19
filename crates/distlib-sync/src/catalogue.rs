@@ -626,17 +626,41 @@ async fn offer_peers_as_they_are_learned(
     }
 }
 
-/// How often this node asks for content that nobody offered it.
+/// How long between one sweep of the document and the next.
 ///
 /// A repair path rather than the way content normally arrives, so it is paced
 /// against the cost of being wrong. On a node that has everything a round is a
 /// document scan and nothing on the wire: a hash whose bytes are here is never
-/// asked for. What it is paced *against* is the opposite case — content nobody
-/// reachable will ever serve, which an expelled member can be left holding the
-/// key to. There is no backoff, so that node asks again on every round for as
-/// long as it runs; slower than the burst floor next door for that reason, and
-/// still prompt against the tens of seconds a stranded entry used to cost.
+/// asked for.
+///
+/// **This used to be the only thing pacing the opposite case**, and the comment
+/// here claimed that case cost one round of dials every five seconds. Measured,
+/// it did not: two nodes holding entries whose bytes neither has produce a
+/// round every `5s + K × 1.0s` for K stranded hashes — 6.0 s at one, 10.0 s at
+/// five, 25.1 s at twenty. A download that fails against reachable members who
+/// simply lack the bytes costs about a second, so [`FETCH_DEADLINE`] never came
+/// into it and the loop was paced by how much it had already failed at. Which
+/// is the worst shape a backoff can have: the more is stranded, the longer a
+/// *newly* stranded entry waits behind it to be asked even once.
+///
+/// So the pacing is no longer here. It is [`ASK_AGAIN`] and the generation rule
+/// beside it, and this is once again what it says it is: how often the document
+/// is looked at.
 const FETCH_AGAIN: Duration = Duration::from_secs(5);
+
+/// How long before a hash nobody could serve is asked about again.
+///
+/// **The backstop, not the mechanism.** What normally ends a generation is the
+/// membership changing, because a member who has just joined is the likeliest
+/// holder of bytes nobody here had. This covers the other way the answer can
+/// arrive — a member who was already present finishing their own download —
+/// which nothing tells this node about: `Op::ContentReady` reaches direct
+/// neighbours once, which is the very gap this sweep exists to paper over.
+///
+/// Long, because being wrong in this direction costs a wait and being wrong in
+/// the other costs a round of dials to every member for as long as the node
+/// runs. The case it delays is one this node cannot detect and did not cause.
+const ASK_AGAIN: Duration = Duration::from_secs(300);
 
 /// The longest one download is waited on before the sweep moves past it.
 ///
@@ -669,10 +693,22 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(20);
 /// group converges, then `catalogue.get` answers `MissingContent` until the
 /// test gives up — *the entry is here, its content has not arrived*.
 ///
-/// **It can only work because of the other half of this PR.** The downloader is
-/// given bare [`EndpointId`]s and has to resolve them, and a follower's address
-/// is in no log. Before members announced where they are, this retry would have
-/// failed exactly the way the download it repairs did.
+/// **It can only work because of P2-15.** The downloader is given bare
+/// [`EndpointId`]s and has to resolve them, and a follower's address is in no
+/// log. Before members announced where they are, this retry would have failed
+/// exactly the way the download it repairs did.
+///
+/// **A hash is asked about once per generation, and that is the whole of the
+/// pacing.** Without it the loop asked for everything it was missing on every
+/// round, for as long as the node ran — see [`FETCH_AGAIN`] for what that
+/// measured, which was not what its comment claimed. A generation ends when the
+/// membership changes, because that is the event most likely to have produced
+/// somebody holding the bytes, and otherwise after [`ASK_AGAIN`].
+///
+/// The gain worth naming is not the dialing saved. It is that a hash stranded
+/// *now* is asked about on the very next round instead of queueing behind every
+/// hash that has already failed — at twenty stranded hashes that queue was
+/// already twenty seconds long, and it grows with the document.
 async fn fetch_content_nobody_offered(
     doc: Doc,
     blobs: BlobStore,
@@ -681,10 +717,40 @@ async fn fetch_content_nobody_offered(
     me: MemberId,
     directory: Directory,
 ) {
+    // What has been asked about this generation and did not arrive. Pruned to
+    // the want set on every round, so it cannot outlive what it is about:
+    // content that landed and entries that were deleted drop out by themselves.
+    let mut already_asked: HashSet<Hash> = HashSet::new();
+    let mut generation = Instant::now();
+
     loop {
-        // At the top, so the first sweep does not race the opening sync that
-        // will usually make it unnecessary.
-        tokio::time::sleep(FETCH_AGAIN).await;
+        // A deadline rather than a fresh sleep, so a group whose membership
+        // keeps changing cannot hold the scan off for ever — the same rule
+        // `offer_peers_as_they_are_learned` follows, and for the same reason.
+        let next_round = Instant::now() + FETCH_AGAIN;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(next_round) => break,
+                // **The reason the generation rule is safe.** A member who has
+                // just joined is the likeliest holder of bytes nobody here had,
+                // and a sweep that slept through that would be one that backed
+                // off from its own answer.
+                changed = membership.changed() => {
+                    if changed.is_err() {
+                        tracing::error!("the membership log is gone; stopping the catalogue's repair task");
+                        return;
+                    }
+                    tracing::debug!("the group changed; asking again for content that is missing");
+                    already_asked.clear();
+                    generation = Instant::now();
+                }
+            }
+        }
+
+        if generation.elapsed() >= ASK_AGAIN {
+            already_asked.clear();
+            generation = Instant::now();
+        }
 
         // The same set the document is offered as peers, which is the right
         // one: a member this node cannot reach cannot serve it content either.
@@ -704,12 +770,19 @@ async fn fetch_content_nobody_offered(
                 continue;
             }
         };
+        already_asked.retain(|hash| wanted.contains(hash));
 
         for hash in wanted {
-            // One at a time, which is what keeps this from asking twice for the
-            // same hash: the next sweep reads the store again, and anything
-            // that landed in the meantime is no longer wanted. Shuffled so that
-            // a group of readers repairing at once does not all ask one member.
+            if !already_asked.insert(hash) {
+                continue;
+            }
+            // One at a time rather than joined: a node that has just come back
+            // to a document it holds none of the content for would otherwise
+            // open a download per entry at once. Shuffled so that a group of
+            // readers repairing together does not all ask the same member.
+            // Asking twice for one hash is `already_asked`'s job, not this
+            // loop's — it used to be the other way round, and what that cost is
+            // in [`FETCH_AGAIN`].
             let asked = tokio::time::timeout(
                 FETCH_DEADLINE,
                 downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.clone())),
@@ -718,7 +791,8 @@ async fn fetch_content_nobody_offered(
             match asked {
                 Ok(Ok(())) => tracing::debug!(%hash, "fetched content nobody offered"),
                 // Ordinary rather than alarming: nobody reachable has it yet.
-                // The next sweep asks again, which is the whole point.
+                // Asked again when the group changes, or when this generation
+                // runs out — not on the next round.
                 Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
                 Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
             }
@@ -728,6 +802,11 @@ async fn fetch_content_nobody_offered(
 
 /// The hashes of entries this node holds whose bytes are not in its store.
 ///
+/// A set rather than a list because the caller's first use of it is a
+/// membership test — pruning what it has already asked about down to what is
+/// still wanted — and a list would make that quadratic in the size of the
+/// document.
+///
 /// Read from the document every time rather than remembered, so nothing has to
 /// stay in step with it: an entry that arrived while this was not looking is
 /// found on the next sweep, and one whose content landed drops out by itself.
@@ -736,7 +815,7 @@ async fn fetch_content_nobody_offered(
 /// which every store can answer for without asking anybody — and a deletion
 /// looks exactly like one, so asking for it would dial the group on behalf of
 /// an entry that has no content by design.
-async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<Vec<Hash>> {
+async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<HashSet<Hash>> {
     let entries = doc
         .get_many(Query::all())
         .await
@@ -761,7 +840,7 @@ async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<Vec<Hash>> {
             wanted.insert(hash);
         }
     }
-    Ok(wanted.into_iter().collect())
+    Ok(wanted)
 }
 
 /// The members to start syncing with: everyone this node can actually reach.
