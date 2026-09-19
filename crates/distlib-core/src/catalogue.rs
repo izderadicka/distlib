@@ -210,6 +210,16 @@ impl Key {
     pub fn prefix_of(item: ItemId) -> String {
         format!("{ITEMS}/{item}/")
     }
+
+    /// Every item key there is, as a prefix to read or watch.
+    ///
+    /// The whole-catalogue counterpart of [`Self::prefix_of`], and what a read
+    /// model replays. Narrower than reading the document, deliberately: the
+    /// catalogue is one document with key prefixes, and phase 4's ratings live
+    /// beside these.
+    pub fn all_items() -> String {
+        format!("{ITEMS}/")
+    }
 }
 
 /// What happened when an entry was folded into an [`Item`].

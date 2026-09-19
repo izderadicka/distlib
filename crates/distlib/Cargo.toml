@@ -28,6 +28,7 @@ distlib-net = { workspace = true }
 distlib-consensus = { workspace = true }
 distlib-api = { workspace = true }
 distlib-sync = { workspace = true }
+distlib-store = { workspace = true }
 serde_json = { workspace = true }
 iroh = { workspace = true }
 # The one gossip instance in the process: the memberlog announces on it, and

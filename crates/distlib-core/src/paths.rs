@@ -86,6 +86,17 @@ impl DataDir {
         self.0.join("blobs")
     }
 
+    /// `<root>/db` — the SQLite read model projected from the catalogue.
+    ///
+    /// Deletable, unlike everything else under the root: it holds nothing that
+    /// is not derived from `docs/`, and a node that starts without it rebuilds
+    /// it from the document. That is a property worth keeping rather than an
+    /// accident — it is what makes a schema change a deletion rather than a
+    /// migration.
+    pub fn db_dir(&self) -> PathBuf {
+        self.0.join("db")
+    }
+
     /// Creates the root directory and any parents. Existing directories are fine.
     pub fn create(&self) -> Result<()> {
         std::fs::create_dir_all(&self.0).map_err(CoreError::io("create data directory", &self.0))

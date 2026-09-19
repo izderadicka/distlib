@@ -32,6 +32,11 @@ test-threads = 4
 # there is a `distlib-core::catalogue` too, and those are pure unit tests that
 # must stay on the fast threads.
 #
+# `distlib::read_model` joined for the same reason and by the same evidence: its
+# two tests each stand up two runtimes, one of them twice, and they pass
+# individually while failing together under plain `cargo test`, which puts both
+# in one process.
+#
 # It is **not** what fixed `three_friends_found_a_group`, though it was
 # introduced believing that. That test was failing about one run in ten because
 # it pinned ports drawn from the kernel's ephemeral range and something else was
@@ -45,5 +50,5 @@ test-threads = 4
 cluster = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(founding) or binary(acceptance) or binary_id(distlib::catalogue) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
+filter = 'binary(founding) or binary(acceptance) or binary_id(distlib::catalogue) or binary_id(distlib::read_model) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
 test-group = 'cluster'

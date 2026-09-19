@@ -19,6 +19,7 @@ use anyhow::{Context as _, Result};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Transport, allowlist, build_endpoint};
+use distlib_store::{Projection, Store};
 use distlib_sync::Catalogue;
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
@@ -32,6 +33,10 @@ use iroh_gossip::net::Gossip;
 pub struct Runtime {
     node: Arc<MembershipNode>,
     catalogue: Catalogue,
+    store: Store,
+    /// Held rather than detached: dropping it stops the task, so a runtime
+    /// that goes away does not leave one writing to a database nobody reads.
+    projection: Projection,
     router: Router,
 }
 
@@ -109,6 +114,16 @@ impl Runtime {
         .await
         .context("could not start the catalogue")?;
 
+        // The read model, and the task that fills it. After the catalogue
+        // because it is derived from it, and before the router because the
+        // projection should be watching for changes before any peer can start
+        // sending them — it replays the document either way, but a node that
+        // subscribes late does more work than one that does not.
+        let store = Store::open(Some(data_dir.db_dir()))
+            .await
+            .with_context(|| format!("could not open {}", data_dir.db_dir().display()))?;
+        let projection = Projection::start(catalogue.clone(), store.clone(), node.subscribe());
+
         // Nothing is answered until here: the endpoint has been advertising
         // these ALPNs since it bound, and a peer arriving in the window
         // between gets no handler. That window is as short as the node's own
@@ -124,6 +139,8 @@ impl Runtime {
         Ok(Self {
             node,
             catalogue,
+            store,
+            projection,
             router,
         })
     }
@@ -136,6 +153,11 @@ impl Runtime {
     /// The group's catalogue.
     pub fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// The read model: what every query in §7.1 is answered from.
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// The endpoint everything in this process is served on.
@@ -154,6 +176,9 @@ impl Runtime {
     /// that should make it.
     pub async fn shutdown(&self) {
         self.node.shutdown().await;
+        // Before the catalogue, because it reads from it: a projection left
+        // running against a closing document logs failures about a shutdown.
+        self.projection.shutdown();
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.

@@ -5,6 +5,7 @@ members = [
     "crates/distlib-net",
     "crates/distlib-consensus",
     "crates/distlib-sync",
+    "crates/distlib-store",
     "crates/distlib-api",
     "crates/distlib",
 ]
@@ -80,6 +81,24 @@ openraft = { version = "=0.9.25", features = ["storage-v2", "serde"] }
 redb = "=4.2.0"
 # openraft re-exports this in its error payloads; we need it to construct one.
 anyerror = "=0.1.13"
+# The read model of §5.4, as the plan named it (line 97: "rusqlite or sqlx - if
+# async is needed"). `rusqlite` rather than `sqlx`: nothing here needs async at the
+# database, because the queries are local and short and the repo already has the
+# pattern for that — `spawn_blocking`, the same way redb is driven, so a fsync never
+# lands on an async worker.
+#
+# `bundled` compiles SQLite from the amalgamation shipped in the crate. It costs a C
+# compiler at build time, which the graph already requires, and buys the thing that
+# matters more: the schema this writes is checked against one known SQLite version
+# rather than whatever the host distribution ships. `STRICT` tables need 3.37 and
+# some LTS distributions are older.
+#
+# `fallible_uint` is what makes a `u64` storable at all. SQLite's only integer is
+# signed, so rusqlite refuses `u64` by default rather than choosing for us; the
+# feature adds the conversion that **errors** on a value past `i64::MAX` instead
+# of wrapping it. Sizes, durations and entry timestamps are all `u64` here, and a
+# size that came back negative would be far worse than a write that failed.
+rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint"] }
 
 # --- hashing ---------------------------------------------------------------
 blake3 = "=1.8.7"
@@ -122,6 +141,7 @@ distlib-net = { path = "crates/distlib-net" }
 distlib-consensus = { path = "crates/distlib-consensus", default-features = false }
 distlib-api = { path = "crates/distlib-api", default-features = false }
 distlib-sync = { path = "crates/distlib-sync", default-features = false }
+distlib-store = { path = "crates/distlib-store" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
