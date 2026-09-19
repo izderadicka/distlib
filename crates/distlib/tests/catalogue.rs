@@ -741,3 +741,109 @@ async fn a_late_joiner_still_learns_where_the_others_are() {
     group.bob.shutdown().await;
     group.alice.shutdown().await;
 }
+
+/// **2a-5.** A node resolves a member whose announcement it was not there to
+/// hear.
+///
+/// The gap [`a_follower_learns_where_another_follower_is`] closes is the one
+/// where both nodes are up: carol announces, bob hears of somebody new, bob
+/// says where he is again, carol learns. That chain has a link in it that can
+/// be missing — bob — and this is what happens when it is. Bob announces and
+/// then goes; carol starts afterwards. Nothing will ever say where bob is
+/// again: an announcement is made once, to whoever was listening, and there is
+/// deliberately no timer behind it.
+///
+/// Alice was listening. That is the whole of 2a-5 — a core node hears every
+/// member's announcement and can hand them on — and it costs no new trust,
+/// because what she hands over is bob's own signature and carol checks it
+/// herself.
+///
+/// **Bob is shut down on purpose, and it is what makes this test mean
+/// anything.** Leave him running and he announces the moment he hears of
+/// carol, so gossip alone passes this and the directory ask is never exercised.
+/// Verified by removing the ask: carol then never resolves bob and this times
+/// out.
+#[tokio::test]
+async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+    let dir = TempDir::new().unwrap();
+
+    let alice_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let alice = Runtime::start(
+        &alice_key,
+        &config(&[alice_id]),
+        &DataDir::new(dir.path().join("alice")),
+    )
+    .await
+    .unwrap();
+    alice
+        .node()
+        .init_group(vec![(record(alice_id, "alice"), bound(&alice))], &alice_key)
+        .await
+        .unwrap();
+
+    let bob_key = SecretKey::generate();
+    let bob_id = MemberId::from(bob_key.public());
+    let carol_key = SecretKey::generate();
+    for (key, name) in [(&bob_key, "bob"), (&carol_key, "carol")] {
+        alice
+            .node()
+            .propose(
+                MembershipEvent::MemberAdded {
+                    member: record(MemberId::from(key.public()), name),
+                },
+                &alice_key,
+            )
+            .await
+            .unwrap();
+    }
+
+    let joining = following(alice_id, &bound(&alice));
+    let bob = Runtime::start(&bob_key, &joining, &DataDir::new(dir.path().join("bob")))
+        .await
+        .unwrap();
+
+    let where_bob_is = tokio::time::timeout(SOON, async {
+        loop {
+            if let Some(addr) = alice.node().known_addresses().address_of(bob_id) {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("alice must hear bob announce; the rest of this test rests on it");
+
+    // And now the only node that could say it again is gone.
+    bob.shutdown().await;
+
+    let carol = Runtime::start(
+        &carol_key,
+        &joining,
+        &DataDir::new(dir.path().join("carol")),
+    )
+    .await
+    .unwrap();
+
+    let found = tokio::time::timeout(SOON, async {
+        loop {
+            if let Some(addr) = carol.node().known_addresses().address_of(bob_id) {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("carol must resolve bob by asking the core group, having heard nothing");
+
+    assert_eq!(
+        found, where_bob_is,
+        "and it must be what bob himself signed, relayed unaltered"
+    );
+
+    carol.shutdown().await;
+    alice.shutdown().await;
+}

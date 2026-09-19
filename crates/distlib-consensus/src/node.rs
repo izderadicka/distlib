@@ -346,8 +346,12 @@ impl MembershipNode {
         let known_addresses = directory.clone();
         addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
 
-        let memberlog =
-            MemberlogClient::new(endpoint.clone(), connections.clone(), addresses.clone());
+        let memberlog = MemberlogClient::new(
+            endpoint.clone(),
+            connections.clone(),
+            addresses.clone(),
+            directory.clone(),
+        );
 
         // The log decides, once there is one. Before that, configuration does —
         // the same rule the allowlist follows, and for the same reason: a node
@@ -409,8 +413,12 @@ impl MembershipNode {
         // Built here rather than in `protocols`, so that what answers a peer is
         // decided once, at the same moment as the seat it reads.
         let raft_protocol = RaftProtocol::new(seat.clone(), state_machine.clone(), trusted.clone());
-        let memberlog_protocol =
-            MemberlogProtocol::new(seat.clone(), served_log, state_machine.clone());
+        let memberlog_protocol = MemberlogProtocol::new(
+            seat.clone(),
+            served_log,
+            state_machine.clone(),
+            directory.clone(),
+        );
 
         let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
         let follow: RoleTask = Arc::new(Mutex::new(None));
