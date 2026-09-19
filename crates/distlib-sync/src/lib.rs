@@ -7,7 +7,9 @@
 //! hashes, and if either crate has to be replaced, one layer is replaced.
 
 pub mod catalogue;
+pub mod changes;
 pub mod error;
 
-pub use catalogue::{Catalogue, alpns, catalogue_key};
+pub use catalogue::{Catalogue, ReadItem, alpns, catalogue_key};
+pub use changes::{Batch, Changes};
 pub use error::{Result, SyncError};

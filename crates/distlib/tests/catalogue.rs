@@ -13,16 +13,16 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::time::Duration;
 
 use distlib::Runtime;
-use distlib_consensus::{MemberRecord, MembershipEvent};
+use distlib_consensus::MembershipEvent;
 use distlib_core::{Config, CoreMember, DataDir, MemberId, NodeAddr};
 use iroh::SecretKey;
 use tempfile::TempDir;
+
+mod common;
+use common::{bound, config, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -38,44 +38,6 @@ const QUIET: Duration = Duration::from_secs(10);
 /// arrived" and "it is not coming" are the same observation until enough time
 /// has passed. Cheap, since the test only pays it when it passes.
 const AMPLY: Duration = Duration::from_secs(10);
-
-/// A node's configuration: both members in the core group, nothing else on.
-///
-/// The configured addresses are empty on purpose. Before there is a log,
-/// configuration is the only thing that says who votes — but *where* they are
-/// is written into the founding entry a moment later, and every node reads it
-/// from there. The same arrangement the consensus test harness uses.
-fn config(core: &[MemberId]) -> Config {
-    let mut config = Config::default();
-    config.net.bind_addr_v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-    config.net.relay_mode = distlib_core::RelayMode::Disabled;
-    config.api.enabled = false;
-    config.consensus.core = core
-        .iter()
-        .map(|member| CoreMember {
-            member: *member,
-            name: String::new(),
-            addrs: Vec::new(),
-            relay: None,
-        })
-        .collect();
-    config
-}
-
-fn record(id: MemberId, name: &str) -> MemberRecord {
-    MemberRecord {
-        member_id: id,
-        display_name: name.to_owned(),
-        pledge_bytes: 0,
-    }
-}
-
-fn bound(runtime: &Runtime) -> NodeAddr {
-    NodeAddr {
-        relay: None,
-        direct: runtime.endpoint().bound_sockets().into_iter().collect(),
-    }
-}
 
 /// Two runtimes, founded as one group, sharing one catalogue.
 async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {

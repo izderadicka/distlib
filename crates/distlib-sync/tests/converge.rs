@@ -627,3 +627,82 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
     alice.shutdown().await;
     bob.shutdown().await;
 }
+
+/// What the read model is told to re-read is items, not entries.
+///
+/// One item is several entries — one per field, one per file — and a key
+/// belonging to some other part of the document is not an item at all. Both
+/// halves matter to the consumer: the first is what makes a projection that
+/// re-reads whole items affordable, and the second is what stops phase 4's
+/// ratings from waking it for nothing.
+#[tokio::test]
+async fn changes_are_reported_as_items_rather_than_as_entries() {
+    let alice_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let alice = Node::start(alice_key.clone(), alice_sees).await;
+    to_alice
+        .send(founded(
+            vec![(record(alice_id, "alice"), alice.addr.clone())],
+            &alice_key,
+        ))
+        .unwrap();
+    tokio::time::timeout(SOON, alice.catalogue.ready())
+        .await
+        .expect("alice opens her catalogue once she knows the group");
+
+    let mut changes = alice.catalogue.changes().unwrap();
+
+    // A key this build does not recognise, written *first* so that anything
+    // reporting it would be reported before the item is.
+    alice
+        .catalogue
+        .put("rating/something/else", b"{}".to_vec())
+        .await
+        .unwrap();
+
+    let id = ItemId::from_bytes([11; 32]);
+    let item = Item {
+        kind: Some(ItemKind::Ebook),
+        title: Some("Dune".to_owned()),
+        authors: Some(vec!["Frank Herbert".to_owned()]),
+        year: Some(1965),
+        files: [(
+            ContentHash::from_bytes([12; 32]),
+            FileRecord {
+                role: FileRole::Content,
+                format: "epub".to_owned(),
+                size: 42,
+                filename: "dune.epub".to_owned(),
+                seq: None,
+                disc: None,
+                title: None,
+                duration: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Item::new(id)
+    };
+    // Six entries, one item.
+    alice.catalogue.write(&item).await.unwrap();
+
+    // Whether the six arrive in one batch or several is the engine's business
+    // and not something to assert; that every batch names this item and only
+    // this item is the claim.
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.is_empty() {
+        let batch = tokio::time::timeout(SOON, changes.take())
+            .await
+            .expect("the catalogue reports what was just written")
+            .expect("the change stream is still open");
+        assert_eq!(
+            batch.items.iter().copied().collect::<Vec<_>>(),
+            vec![id],
+            "a batch named something other than the one item that was written",
+        );
+        seen.extend(batch.items);
+    }
+
+    alice.shutdown().await;
+}

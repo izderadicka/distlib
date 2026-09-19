@@ -45,7 +45,10 @@ use iroh_docs::{
 };
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
 
-use crate::error::{Result, SyncError};
+use crate::{
+    changes::Changes,
+    error::{Result, SyncError},
+};
 
 /// Domain tag for deriving the catalogue's document key, so it cannot collide
 /// with a group id, an item id or any other BLAKE3 output in the system.
@@ -84,6 +87,24 @@ pub fn catalogue_key(group: GroupId) -> NamespaceSecret {
     hasher.update(CATALOGUE_TAG);
     hasher.update(group.as_bytes());
     NamespaceSecret::from_bytes(hasher.finalize().as_bytes())
+}
+
+/// One item as this node currently holds it, for a reader that projects it.
+///
+/// See [`Catalogue::read_item`] for why the two extra facts are here rather
+/// than on [`Item`]: neither is written by anybody, and both are lost the
+/// moment the entries are folded together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadItem {
+    pub item: Item,
+    /// The newest entry timestamp among the ones it was built from, in
+    /// microseconds since the epoch — iroh-docs' own clock for the record.
+    pub last_modified: u64,
+    /// Whether an entry was left out because its content has not arrived.
+    ///
+    /// The item is still worth projecting: what is here is true, and §5.2's
+    /// catalogue is grow-only, so the rest only adds. This says to come back.
+    pub waiting_for_content: bool,
 }
 
 /// The catalogue subsystem: the document, the stores under it, and the task
@@ -317,6 +338,22 @@ impl Catalogue {
     /// a field whose content has not landed yet is left out the same way. A
     /// caller that needs to know the difference watches for it to fill in.
     pub async fn item(&self, id: ItemId) -> Result<Option<Item>> {
+        Ok(self.read_item(id).await?.map(|read| read.item))
+    }
+
+    /// [`Self::item`], with what a read model needs beside it.
+    ///
+    /// Two extra facts, both of which the fold into an [`Item`] destroys and
+    /// neither of which can be recovered from the result:
+    ///
+    /// * **when it last changed** — the newest timestamp among the entries it
+    ///   was built from, which is §5.2's `last_modified`. It is not a field,
+    ///   because nobody writes it: the document already records when each entry
+    ///   was written, and a field would be a second answer able to disagree.
+    /// * **whether anything was left out** — an item whose content is still
+    ///   arriving reads as a smaller item, and the two are indistinguishable
+    ///   afterwards. A reader that projected one needs to know to come back.
+    pub async fn read_item(&self, id: ItemId) -> Result<Option<ReadItem>> {
         let doc = self.document()?;
         let query = Query::single_latest_per_key().key_prefix(Key::prefix_of(id));
         let entries = doc
@@ -326,11 +363,15 @@ impl Catalogue {
         tokio::pin!(entries);
 
         let mut item = Item::new(id);
+        let mut last_modified = 0;
+        let mut waiting_for_content = false;
         let mut found = false;
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             found = true;
+            last_modified = last_modified.max(entry.timestamp());
             let Some(value) = self.content(&entry).await? else {
+                waiting_for_content = true;
                 tracing::debug!(
                     key = %String::from_utf8_lossy(entry.key()),
                     "the content of this entry has not arrived yet; leaving the field out"
@@ -355,7 +396,41 @@ impl Catalogue {
                 ),
             }
         }
-        Ok(found.then_some(item))
+        Ok(found.then_some(ReadItem {
+            item,
+            last_modified,
+            waiting_for_content,
+        }))
+    }
+
+    /// Every item this node holds an entry for.
+    ///
+    /// `single_latest_per_key` like every other read here, and it matters more
+    /// than usual: the unfiltered query answers with every historical version
+    /// of every key, so a replay would walk the document's whole history to
+    /// arrive at the same set of ids.
+    pub async fn item_ids(&self) -> Result<std::collections::BTreeSet<ItemId>> {
+        let doc = self.document()?;
+        let query = Query::single_latest_per_key().key_prefix(Key::all_items());
+        let entries = doc
+            .get_many(query)
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut keys = Vec::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            keys.push(entry.key().to_vec());
+        }
+        Ok(crate::changes::items_in(keys.iter().map(Vec::as_slice)))
+    }
+
+    /// Watches the catalogue for what a read model has to re-read.
+    ///
+    /// Start this **before** replaying the document: see [`Changes`].
+    pub fn changes(&self) -> Result<Changes> {
+        Ok(Changes::start(self.document()?))
     }
 
     /// This node's author id, which is its member id.
