@@ -38,6 +38,7 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         net: NetConfig::default(),
         reindex_handle: runtime.projection().reindex_handle(),
         catalogue: runtime.catalogue().clone(),
+        blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
     }
@@ -329,6 +330,77 @@ async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fi
         item.fingerprint(),
         Some(item_id),
         "the id it was stored under has to be what the item's own files fingerprint to"
+    );
+
+    runtime.shutdown().await;
+}
+
+/// Two different files under one name are refused where the names are
+/// chosen, rather than later where they are used.
+///
+/// Ivan's review on PR #52: `library.download` refuses to write two of an
+/// item's files to one path, and the point was made that if we care about
+/// this, the place to care is item creation. It is — the person running
+/// `distlib add` is the one who can rename a file, and they are still here.
+/// `library.download` keeps its own check as the second line, because the
+/// catalogue is a shared document and another member's build can write what
+/// this one refuses.
+///
+/// **Keyed on the blob, not the name.** The same file named twice is one
+/// entry and stays legal — that is
+/// [`adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step`]
+/// above, which this must not break.
+///
+/// **Mutation check:** deleting the guard makes this pass with `created`
+/// true, writing an item whose two files are both `track01.mp3` — the
+/// state that used to be reachable and now is not.
+#[tokio::test]
+async fn adding_two_different_files_under_one_name_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let runtime = Runtime::start(&key, &config(&[id]), &DataDir::new(dir.path().join("solo")))
+        .await
+        .unwrap();
+    // Founded, unlike `adding_with_no_files_is_refused` — which needs no
+    // group because it is refused before the catalogue is touched. This one
+    // does need one, and for the mutation check rather than for the
+    // assertion: without a catalogue the guarded call would fail at
+    // `add_file` whatever the guard did, so deleting the guard would turn
+    // this red on the wrong error and prove nothing. With a group, deleting
+    // it makes the call *succeed* and write the item this refuses.
+    runtime
+        .node()
+        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .await
+        .unwrap();
+    runtime.catalogue().ready().await;
+
+    // The ordinary way to arrive here: one audiobook, two discs, and the
+    // track numbering starts again on each. Nothing about it is a mistake
+    // until both files have to live in one directory.
+    std::fs::create_dir_all(dir.path().join("disc1")).unwrap();
+    std::fs::create_dir_all(dir.path().join("disc2")).unwrap();
+    let first = dir.path().join("disc1/track01.mp3");
+    std::fs::write(&first, b"disc one, track one").unwrap();
+    let second = dir.path().join("disc2/track01.mp3");
+    std::fs::write(&second, b"disc two, track one").unwrap();
+
+    let error = api(&runtime, &key)
+        .call(
+            "library.add",
+            Some(json!({
+                "kind": "audiobook",
+                "files": [&first, &second],
+                "title": "Dune",
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("track01.mp3"), "{error}");
+    assert!(
+        error.to_string().contains("rename one"),
+        "the error has to say what to do about it: {error}"
     );
 
     runtime.shutdown().await;

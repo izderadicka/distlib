@@ -14,6 +14,23 @@ use distlib::Runtime;
 use distlib_consensus::MemberRecord;
 use distlib_core::{Config, CoreMember, MemberId, NodeAddr};
 
+/// A follower's configuration: one core node, and where it is.
+///
+/// The address has to be here. A follower has no log yet, so configuration is
+/// the only thing that can say where the group is — and with
+/// `relay_mode = "disabled"` there is no lookup to fall back on. This is the
+/// ticket's job in production; a test hands over the same two facts directly.
+pub fn following(core: MemberId, addr: &NodeAddr) -> Config {
+    let mut config = config(&[core]);
+    config.consensus.core = vec![CoreMember {
+        member: core,
+        name: String::new(),
+        addrs: addr.direct.iter().copied().collect(),
+        relay: None,
+    }];
+    config
+}
+
 /// A node's configuration: `core` in the core group, nothing else on.
 ///
 /// The configured addresses are empty on purpose. Before there is a log,

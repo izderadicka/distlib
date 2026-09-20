@@ -761,6 +761,26 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   needs real processes:** node A adds 3 ebooks; node B joins fresh, syncs the catalogue, searches by
   author, downloads a file, restarts, and still serves it.
 
+  > **Split in two**, on the 2a-2 and 2a-3 precedent. The method and the acceptance are one bullet
+  > here, but the acceptance is a *procedure* driven through the commands, and `founding.rs`'s
+  > process harness — `Friend`, the port probes, `distlib()`, `wait_for_all` — lives inside that
+  > file rather than in `tests/common/`. Sharing it is a mechanical extraction that has nothing to
+  > do with downloading, and doing it in the same PR as the feature makes one large diff out of two
+  > small ones.
+  >
+  > - **2b-3a — `library.download`** *(done, delta P2-24)*. The method, `distlib download`,
+  >   `distlib_net::Blobs` widened with `has` and `export`, and the half of §9's criterion that is a
+  >   claim about the method rather than about the procedure: a node that downloads a file deletes
+  >   its copy, restarts onto a fresh port, and still serves that file to a member who has nowhere
+  >   else to get it. Four departures from §7.1's sketch, all in P2-24.
+  > - **2b-3b — the phase acceptance.** §9's criterion end to end through the commands, the harness
+  >   extraction it needs, and `manual-check.md`'s by-hand §10 (which the Verification section below
+  >   asks for and which is not in this bullet).
+  >
+  > **"Register as a holder" is not a step**, which 2b-3a settled by building it: the fetch lands
+  > the bytes in the store `BlobsProtocol` already serves from, so a node is a holder the moment the
+  > fetch returns. §5.6's heartbeat would *announce* it and is phase 4. See P2-24.
+
 ---
 
 ## Carried forward from Phase 1 — take or defer, explicitly

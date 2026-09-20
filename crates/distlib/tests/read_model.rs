@@ -456,16 +456,44 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         .write(&an_item(9, "Dune"))
         .await
         .unwrap();
+    // **Waits for what the assertions below actually need, which is not the
+    // same thing as "the item is searchable".**
+    //
+    // This gate used to be `search("Dune")` — the *title* — while the first
+    // assertion searches for *Herbert*, an author. Those are two separate
+    // projection passes over the same item: the projection re-reads the whole
+    // item on every change rather than applying what a change said (P2-19), so
+    // a pass that runs while `Catalogue::write` is partway through its per-key
+    // loop indexes an item that genuinely has a title and no authors yet.
+    // That satisfied a title gate and then failed an author assertion, about
+    // one run in seven on an idle machine — measured, after it turned up
+    // twice in CI and was written off the first time as load.
+    //
+    // Nothing is wrong with the projection here: the item converges, and a
+    // reader who asks again gets the whole of it. What was wrong is a test
+    // waiting on one field and asserting another. So both halves of what
+    // follows are waited for by name — the index, under the term the search
+    // below actually uses, and the record's own fields out of SQLite, which
+    // is a different store catching up on its own schedule.
     tokio::time::timeout(SOON, async {
         loop {
-            if runtime.search().search("Dune", 10).await.unwrap() == vec![item_id] {
+            let indexed = runtime.search().search("Herbert", 10).await.unwrap() == vec![item_id];
+            let projected = runtime
+                .store()
+                .item(item_id)
+                .await
+                .unwrap()
+                .is_some_and(|stored| {
+                    stored.item.authors.is_some() && stored.item.files.len() == 1
+                });
+            if indexed && projected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("the item becomes searchable");
+    .expect("the item becomes searchable by author, with its record fully projected");
 
     let api = Api {
         node: std::sync::Arc::clone(runtime.node()),
@@ -473,6 +501,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         net: NetConfig::default(),
         reindex_handle: runtime.projection().reindex_handle(),
         catalogue: runtime.catalogue().clone(),
+        blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
     };

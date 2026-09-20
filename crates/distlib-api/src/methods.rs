@@ -11,6 +11,7 @@ use distlib_core::{
     ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig, NodeAddr,
     Series, Ticket,
 };
+use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
 use distlib_sync::{Catalogue, SyncError};
 use iroh::SecretKey;
@@ -48,6 +49,11 @@ pub struct Api {
     /// because a write has to reach the document itself, and a read model is
     /// downstream of it rather than a second place to put one.
     pub catalogue: Catalogue,
+    /// What `library.download` fetches an item's files with, and writes them
+    /// out of. Against the same blob store `catalogue` hands iroh-docs and
+    /// serves `iroh_blobs::ALPN` from, which is what makes a node that
+    /// downloads a file a provider of it.
+    pub blobs: Blobs,
     /// What `library.item` and `library.search` read the record fields from.
     pub store: Store,
     /// What `library.search` ranks against. Only a ranking — see its own doc
@@ -73,6 +79,7 @@ impl Api {
             "library.search" => self.search(parse(params)?).await,
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
+            "library.download" => self.download(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -455,9 +462,38 @@ impl Api {
         // A placeholder: `fingerprint` reads only `files`, so the real id
         // is not known until every path is hashed into the same
         // deduplicated map the item is actually built from.
+        // **Two different blobs cannot share a filename within one item**,
+        // and this is the place to say so: an item's file names are decided
+        // here, while the person who chose them is still in the room and can
+        // rename one. `library.download` refuses the same collision, because
+        // the catalogue is a shared document and another member's build can
+        // write what this one refuses — but catching it only there means
+        // telling somebody else, later, that an item they did not create
+        // cannot be written into one directory. That is a worse conversation
+        // at a worse moment, and this is the "check it on creation in the
+        // first place" half of it.
+        //
+        // Keyed on the blob, so the *same* file named twice — one path
+        // repeated, or two paths with identical bytes — is one entry and not
+        // a collision. That case is legal and
+        // `adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step`
+        // says so.
+        let mut named: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut item = Item::new(ItemId::from_bytes([0; 32]));
         for path in &params.files {
             let (hash, record) = self.hash_file(path).await?;
+            if !item.files.contains_key(&hash)
+                && let Some(first) = named.get(&record.filename)
+            {
+                return Err(Error::invalid_params(format!(
+                    "{} and {} are two different files both called {} — rename one, since an \
+                     item's files have to be tellable apart by the names they are stored under",
+                    first.display(),
+                    path.display(),
+                    record.filename,
+                )));
+            }
+            named.insert(record.filename.clone(), path.clone());
             item.files.insert(hash, record);
         }
         item.id = item
@@ -523,6 +559,190 @@ impl Api {
             "created": true,
             "title": params.title,
             "contributed_files": Vec::<ContentHash>::new(),
+        }))
+    }
+
+    /// `library.download` — fetch an item's files from whoever has them, and
+    /// write them out to a directory (2b-3).
+    ///
+    /// **Synchronous, where §7.1's sketch answers with a `task_id`.** A task
+    /// id is only useful next to the `download.progress` events §7.2 puts on
+    /// the SSE stream, and that stream is phase 3 — so the id would be a
+    /// handle to nothing, and a caller would have to poll for a completion
+    /// that has no representation either. Returning when the files are on
+    /// disk says the same thing with nothing to build first, and turning it
+    /// into a task later is an addition rather than a change: the answer
+    /// gains a field. The same cut P2-21 made for `library.search`'s
+    /// `filters`.
+    ///
+    /// **`file` names a content hash, where the sketch says `file_index`.**
+    /// An item's files are a map keyed by content hash (§5.2), so the only
+    /// index there is to give is a position in hash order — which is stable,
+    /// meaningless to a human, and silently renumbers the moment a second
+    /// member contributes a missing file. The hash is what `library.item`
+    /// already reports and what the record itself is keyed by.
+    ///
+    /// **Every member is offered as a provider**, minus this node. §5.6's
+    /// availability index is phase 4, so there is nothing to ask *who* holds
+    /// a hash; what makes the naive list workable is that a member who does
+    /// not have it is a provider skipped rather than a download failed, which
+    /// `distlib-net`'s own tests pin. It is O(members) dials in the worst
+    /// case and wrong at the thousands §2 allows — the same shape as the
+    /// peer-offer sweep already carried out of this phase, and it should be
+    /// answered by the availability index rather than guessed at here.
+    ///
+    /// **No deadline.** A media file is as slow as it is big, and a number
+    /// picked here would be a guess about file sizes and links this method
+    /// knows nothing about. The failure this would otherwise guard against
+    /// does not need it: a provider that cannot be reached fails rather than
+    /// hangs (`fetching_from_an_unreachable_provider_fails_rather_than_hangs`).
+    ///
+    /// **A failure partway through a multi-file download leaves the files
+    /// already written where they are**, and the error names only what
+    /// failed. That is deliberate rather than overlooked: those files are
+    /// complete and verified, deleting them would be this method destroying
+    /// something on its way out, and asking again writes the rest — the
+    /// ones already here are refused by name, which is what says so.
+    ///
+    /// **Nothing is "registered".** The fetch lands the bytes in the store
+    /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
+    /// holder from the moment it returns and stays one across a restart,
+    /// because that store is on disk. §5.6's heartbeat is what would announce
+    /// it, and it does not exist yet.
+    async fn download(&self, params: Download) -> Result<Value, Error> {
+        if !params.dest.is_dir() {
+            return Err(Error::invalid_params(format!(
+                "{}: not a directory to write files into",
+                params.dest.display()
+            )));
+        }
+
+        // The read model, like every other `library.*` read. It is derived
+        // from the document rather than a second copy of it, so an item it
+        // does not have yet is one this node has not synced — and answering
+        // "no such item" is then the truth about this node, which is what a
+        // caller about to wait and retry needs to hear.
+        let stored = self
+            .store
+            .item(params.item_id)
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .ok_or_else(|| Error::failed(format!("no such item: {}", params.item_id)))?;
+
+        let wanted: Vec<(ContentHash, FileRecord)> = match params.file {
+            Some(hash) => {
+                let record = stored.item.files.get(&hash).cloned().ok_or_else(|| {
+                    Error::invalid_params(format!("{} has no file {hash}", params.item_id))
+                })?;
+                vec![(hash, record)]
+            }
+            None => stored.item.files.into_iter().collect(),
+        };
+        if wanted.is_empty() {
+            return Err(Error::failed(format!(
+                "{}: this item has no files yet",
+                params.item_id
+            )));
+        }
+
+        // Every target is worked out and checked before anything is fetched,
+        // so a caller who mistyped a destination or asked for something that
+        // cannot be written is not made to wait for a transfer first.
+        //
+        // **Nothing here overwrites anything.** Three ways that could happen
+        // and all three are refused. A file already at the target is the
+        // operator's — they may have edited or replaced it — and a download
+        // is not a reason to assume otherwise; deleting it is an instruction,
+        // overwriting it would be a guess. Two of this item's own files
+        // landing on one path is the same loss by a different route. And a
+        // `filename` is a string some other member's build wrote into the
+        // document, so it is reduced to its last component before it is
+        // joined — §2 says members do not attack the protocol, but
+        // `dest.join("/etc/passwd")` is `/etc/passwd`, and that is a foot-gun
+        // whether or not anybody means it.
+        //
+        // **The name collision is refused at `library.add` as well, and that
+        // is where it is meant to be caught** — by whoever chose the names,
+        // while they can still rename one. This is the second line, and it
+        // is not redundant: the catalogue is one document for the whole
+        // group, so an item's files can be written by a member running an
+        // older build, or by a future one filling the roles `library.add`
+        // does not write yet. What arrives here is data, and a method about
+        // to write files to a disk checks it rather than trusting that
+        // whoever wrote it ran this build.
+        //
+        // The refusal names `file`, which is the way through: a hash says
+        // which of two identically-named files is wanted where their names
+        // cannot. Writing them both under disambiguated names would be the
+        // more useful answer and wants `FileRecord`'s own `disc` and `seq`
+        // to do it with — they are the right disambiguator and nothing fills
+        // them yet (P2-23).
+        let mut taken: BTreeMap<PathBuf, ContentHash> = BTreeMap::new();
+        let mut targets: Vec<(ContentHash, FileRecord, PathBuf)> = Vec::with_capacity(wanted.len());
+        for (hash, record) in wanted {
+            let name = std::path::Path::new(&record.filename)
+                .file_name()
+                .ok_or_else(|| {
+                    Error::failed(format!(
+                        "{hash}: {:?} is not a filename this can write",
+                        record.filename
+                    ))
+                })?;
+            let target = params.dest.join(name);
+            if let Some(other) = taken.get(&target) {
+                return Err(Error::failed(format!(
+                    "{} and {other} are both called {}; download them one at a time with `file`",
+                    hash,
+                    target.display()
+                )));
+            }
+            if target.exists() {
+                return Err(Error::failed(format!(
+                    "{} already exists; move or delete it to download this file again",
+                    target.display()
+                )));
+            }
+            taken.insert(target.clone(), hash);
+            targets.push((hash, record, target));
+        }
+
+        let me = self.node.id();
+        let providers: Vec<MemberId> = self
+            .node
+            .membership()
+            .members()
+            .map(|record| record.member_id)
+            .filter(|member| *member != me)
+            .collect();
+
+        let mut files = Vec::with_capacity(targets.len());
+        for (hash, record, target) in targets {
+            // Asked before the network is: this node may be the one that
+            // added the item, or may have downloaded it before, and in a
+            // group of one there is nobody to ask at all.
+            let already_here = self.blobs.has(hash).await.map_err(net_error)?;
+            if !already_here {
+                self.blobs
+                    .fetch(hash, providers.clone())
+                    .await
+                    .map_err(net_error)?;
+            }
+            self.blobs.export(hash, &target).await.map_err(net_error)?;
+            files.push(json!({
+                "file": hash,
+                "filename": record.filename,
+                "path": target,
+                // Whether it had to come over the network. A caller cannot
+                // act on it, but an operator watching a download of an item
+                // half of which was already here can read it.
+                "fetched": !already_here,
+            }));
+        }
+
+        Ok(json!({
+            "item_id": params.item_id,
+            "title": stored.item.title,
+            "files": files,
         }))
     }
 
@@ -660,6 +880,14 @@ fn query_error(error: StoreError) -> Error {
 /// failing for its own reasons — none of them are the caller's mistake the
 /// way an invalid file path is, which [`Api::hash_file`] reports separately.
 fn sync_error(error: SyncError) -> Error {
+    Error::failed(error.to_string())
+}
+
+/// Every `NetError` `library.download` can meet is this method failing for
+/// its own reasons rather than the caller's mistake: the two the caller could
+/// have made — an item that is not here, a destination that is not a
+/// directory — are both refused before [`Blobs`] is touched at all.
+fn net_error(error: NetError) -> Error {
     Error::failed(error.to_string())
 }
 
@@ -871,6 +1099,26 @@ struct Add {
     lang: Option<String>,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// `library.download`'s params.
+///
+/// `dest` is a directory on the machine this node's API runs on, for the same
+/// reason `library.add`'s `files` are local to it: the listener is loopback
+/// and token-gated (§7.1, P1-25), so the caller's machine and the node's are
+/// the same one. It must already exist — a download is not a reason to
+/// create a directory tree somebody may have typed wrong.
+///
+/// `file` picks one of the item's files by content hash; left out, every file
+/// the item has is downloaded. See [`Api::download`] for why a hash rather
+/// than §7.1's `file_index`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Download {
+    item_id: ItemId,
+    dest: PathBuf,
+    #[serde(default)]
+    file: Option<ContentHash>,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.
