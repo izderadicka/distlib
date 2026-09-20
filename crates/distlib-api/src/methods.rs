@@ -462,9 +462,38 @@ impl Api {
         // A placeholder: `fingerprint` reads only `files`, so the real id
         // is not known until every path is hashed into the same
         // deduplicated map the item is actually built from.
+        // **Two different blobs cannot share a filename within one item**,
+        // and this is the place to say so: an item's file names are decided
+        // here, while the person who chose them is still in the room and can
+        // rename one. `library.download` refuses the same collision, because
+        // the catalogue is a shared document and another member's build can
+        // write what this one refuses — but catching it only there means
+        // telling somebody else, later, that an item they did not create
+        // cannot be written into one directory. That is a worse conversation
+        // at a worse moment, and this is the "check it on creation in the
+        // first place" half of it.
+        //
+        // Keyed on the blob, so the *same* file named twice — one path
+        // repeated, or two paths with identical bytes — is one entry and not
+        // a collision. That case is legal and
+        // `adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step`
+        // says so.
+        let mut named: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut item = Item::new(ItemId::from_bytes([0; 32]));
         for path in &params.files {
             let (hash, record) = self.hash_file(path).await?;
+            if !item.files.contains_key(&hash)
+                && let Some(first) = named.get(&record.filename)
+            {
+                return Err(Error::invalid_params(format!(
+                    "{} and {} are two different files both called {} — rename one, since an \
+                     item's files have to be tellable apart by the names they are stored under",
+                    first.display(),
+                    path.display(),
+                    record.filename,
+                )));
+            }
+            named.insert(record.filename.clone(), path.clone());
             item.files.insert(hash, record);
         }
         item.id = item
@@ -625,14 +654,22 @@ impl Api {
         // operator's — they may have edited or replaced it — and a download
         // is not a reason to assume otherwise; deleting it is an instruction,
         // overwriting it would be a guess. Two of this item's own files
-        // landing on one path is the same loss by a different route, and it
-        // is ordinary rather than exotic: `library.add` takes a filename from
-        // the path it was given, so a two-disc set adds two hashes both
-        // called `track01.mp3`. And a `filename` is a string some other
-        // member's build wrote into the document, so it is reduced to its
-        // last component before it is joined — §2 says members do not attack
-        // the protocol, but `dest.join("/etc/passwd")` is `/etc/passwd`, and
-        // that is a foot-gun whether or not anybody means it.
+        // landing on one path is the same loss by a different route. And a
+        // `filename` is a string some other member's build wrote into the
+        // document, so it is reduced to its last component before it is
+        // joined — §2 says members do not attack the protocol, but
+        // `dest.join("/etc/passwd")` is `/etc/passwd`, and that is a foot-gun
+        // whether or not anybody means it.
+        //
+        // **The name collision is refused at `library.add` as well, and that
+        // is where it is meant to be caught** — by whoever chose the names,
+        // while they can still rename one. This is the second line, and it
+        // is not redundant: the catalogue is one document for the whole
+        // group, so an item's files can be written by a member running an
+        // older build, or by a future one filling the roles `library.add`
+        // does not write yet. What arrives here is data, and a method about
+        // to write files to a disk checks it rather than trusting that
+        // whoever wrote it ran this build.
         //
         // The refusal names `file`, which is the way through: a hash says
         // which of two identically-named files is wanted where their names
@@ -683,8 +720,8 @@ impl Api {
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
-            let fetched = !self.blobs.has(hash).await.map_err(net_error)?;
-            if fetched {
+            let already_here = self.blobs.has(hash).await.map_err(net_error)?;
+            if !already_here {
                 self.blobs
                     .fetch(hash, providers.clone())
                     .await
@@ -698,7 +735,7 @@ impl Api {
                 // Whether it had to come over the network. A caller cannot
                 // act on it, but an operator watching a download of an item
                 // half of which was already here can read it.
-                "fetched": fetched,
+                "fetched": !already_here,
             }));
         }
 

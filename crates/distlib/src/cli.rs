@@ -244,6 +244,11 @@ pub enum Command {
     /// adding the same files at the same time need no coordination: they
     /// compute the same item, whichever's metadata lands first is what the
     /// other's write leaves alone.
+    ///
+    /// Two different files cannot go in under one name — `disc1/track01.mp3`
+    /// and `disc2/track01.mp3` are refused, because an item's files have to
+    /// be tellable apart when they are written back out. Rename one. The
+    /// same file named twice is not this, and is fine.
     Add {
         /// The files that make up the item.
         files: Vec<PathBuf>,

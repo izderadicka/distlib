@@ -22,12 +22,14 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{ContentHash, DataDir, ItemId, MemberId, NetConfig};
+use distlib_core::{
+    ContentHash, DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig,
+};
 use iroh::SecretKey;
 use serde_json::json;
 use tempfile::TempDir;
@@ -502,12 +504,17 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
 /// directory, and the download says so rather than writing one over the
 /// other.
 ///
-/// **Reachable by ordinary use, not an edge case.** `library.add` takes a
-/// file's name from its path, so `disc1/track01.mp3 disc2/track01.mp3` is an
-/// item with two distinct hashes and one filename — which is why
-/// `FileRecord` carries `disc` and `seq` at all. Without this check both
-/// exports resolve to the same path, the second overwrites the first, and
-/// the answer reports two files at one location.
+/// **The item is written straight into the catalogue rather than through
+/// `library.add`, and that is the point.** Since Ivan's review on PR #52,
+/// `library.add` refuses to *create* this item — the names are checked where
+/// they are chosen, by whoever can still rename one. So the only way to meet
+/// a collision here is the way a real node would: the catalogue is one
+/// document for the whole group, and an item's files can be written by a
+/// member running an older build, or by a future one filling roles
+/// `library.add` does not write yet. That is what this seeds, by hand.
+///
+/// Without the check both exports resolve to one path, the second overwrites
+/// the first, and the answer reports two files at one location.
 #[tokio::test]
 async fn downloading_an_item_whose_files_share_a_name_is_refused() {
     let (dir, runtime, key) = a_solo_node().await;
@@ -519,18 +526,32 @@ async fn downloading_an_item_whose_files_share_a_name_is_refused() {
     let second = discs.join("disc2/track01.mp3");
     std::fs::write(&second, b"disc two, track one").unwrap();
 
-    let added = api(&runtime, &key)
-        .call(
-            "library.add",
-            Some(json!({
-                "kind": "audiobook",
-                "files": [&first, &second],
-                "title": "Dune",
-            })),
-        )
+    let (first_hash, first_size) = runtime.catalogue().add_file(&first).await.unwrap();
+    let (second_hash, second_size) = runtime.catalogue().add_file(&second).await.unwrap();
+    let item = ItemId::from_content_hashes(&[*first_hash.as_bytes(), *second_hash.as_bytes()]);
+    let track = |size| FileRecord {
+        role: FileRole::Content,
+        format: "mp3".to_owned(),
+        size,
+        filename: "track01.mp3".to_owned(),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    runtime
+        .catalogue()
+        .write(&Item {
+            kind: Some(ItemKind::Audiobook),
+            title: Some("Dune".to_owned()),
+            files: BTreeMap::from([
+                (first_hash, track(first_size)),
+                (second_hash, track(second_size)),
+            ]),
+            ..Item::new(item)
+        })
         .await
         .unwrap();
-    let item: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
     until_projected(&runtime, item, 2, "the solo node").await;
 
     let dest = dest(dir.path(), "me");
