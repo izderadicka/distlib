@@ -466,6 +466,20 @@ impl Api {
         let id = item.id;
 
         if let Some(existing) = self.catalogue.item(id).await.map_err(sync_error)? {
+            // In today's code, `contributed` is rarely non-empty. `id` is
+            // the fingerprint of exactly `item.files`' key set, so a hit
+            // here means some earlier write already produced an item at
+            // this same id from what must have been (barring a hash
+            // collision) that identical set — `existing.files` should
+            // already hold every hash `item.files` does. The exception,
+            // and the reason this stays rather than becoming an assert, is
+            // the case the guard exists for: an earlier `Catalogue::write`
+            // interrupted partway through its per-key loop, leaving
+            // `existing` with fewer file entries than its own id implies.
+            // Every file `library.add` writes is `role: content` today, so
+            // there is no *other* way for this to end up non-empty — that
+            // changes the moment a role that does not take part in the
+            // fingerprint (a cover, say) is wired in here too.
             let contributed: Vec<ContentHash> = item
                 .files
                 .keys()
