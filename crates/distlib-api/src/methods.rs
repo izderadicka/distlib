@@ -4,11 +4,15 @@
 //! than renaming it: `library.*` and the SSE stream land beside these, and a
 //! caller written against `group.members` today keeps working.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
-use distlib_core::{ItemId, MemberId, NetConfig, NodeAddr, Ticket};
+use distlib_core::{
+    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig, NodeAddr,
+    Series, Ticket,
+};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
+use distlib_sync::{Catalogue, SyncError};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +43,11 @@ pub struct Api {
     /// `admin.reindex`'s way of asking the projection task to run, without
     /// this struct owning the task itself.
     pub reindex_handle: ReindexHandle,
+    /// What `library.add` writes into. Every other `library.*` method reads
+    /// `store`/`search` instead — the read model a projection keeps in step —
+    /// because a write has to reach the document itself, and a read model is
+    /// downstream of it rather than a second place to put one.
+    pub catalogue: Catalogue,
     /// What `library.item` and `library.search` read the record fields from.
     pub store: Store,
     /// What `library.search` ranks against. Only a ranking — see its own doc
@@ -63,6 +72,7 @@ impl Api {
             "admin.reindex" => self.reindex().await,
             "library.search" => self.search(parse(params)?).await,
             "library.item" => self.item(parse(params)?).await,
+            "library.add" => self.add(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -398,6 +408,175 @@ impl Api {
         Ok(record)
     }
 
+    /// `library.add` — hash a file set, store it as blobs, and write a
+    /// catalogue entry for it (2b-2; §6.1's "v1 — exact" dedup).
+    ///
+    /// **`files` are all `role: content`.** They are what §5.2's `item_id`
+    /// fingerprints (D4), and it is the only role this surface writes —
+    /// covers, subtitles and the rest of [`distlib_core::FileRole`] are left
+    /// for whoever needs the first caller that wants one, the way `filters`
+    /// and paging were left out of `library.search` (P2-21).
+    ///
+    /// **The dedup guard runs before anything is written.** The fingerprint
+    /// is known before the catalogue is asked anything (§6.1's "add-time
+    /// assist"). A hit means somebody's copy of this exact file set is
+    /// already an item: **metadata already there is left alone** — this call
+    /// never overwrites a `title` or `kind` a hit already holds, so a second
+    /// caller with a worse guess at the title cannot clobber a better one —
+    /// and only the files this call brought that the item did not already
+    /// have are written, which is the "offering to contribute any files it
+    /// is missing" half of the same rule. A miss creates the item with every
+    /// field this call was given.
+    ///
+    /// **This is also what makes the phase's own acceptance hold without any
+    /// coordination.** `item_id` is a pure function of the content hashes
+    /// (§5.2), so two nodes adding the identical file set independently
+    /// compute the same id and converge on one item by construction — the
+    /// guard here only decides what a *second* write to that id is allowed
+    /// to change, not whether the two nodes end up looking at the same
+    /// item.
+    ///
+    /// **The id is `item.fingerprint()`, not a hash list of its own.**
+    /// `files` is keyed by content hash, so two paths given that hash the
+    /// same — literal duplicates, or two different files with identical
+    /// bytes — collapse to one entry before the id is ever computed;
+    /// [`Item::fingerprint`] reads exactly that map. Hashing `params.files`
+    /// into a separate `Vec` alongside it, the way an earlier version of
+    /// this did, can disagree with `files`' own key set the moment a caller
+    /// repeats a path — the id it stored under would then differ from the
+    /// item's own fingerprint of what it actually holds, which
+    /// `converge.rs`'s `it is what it contains` pins as an invariant nothing
+    /// upstream of the domain type should be able to break twice.
+    async fn add(&self, params: Add) -> Result<Value, Error> {
+        if params.files.is_empty() {
+            return Err(Error::invalid_params("library.add needs at least one file"));
+        }
+
+        // A placeholder: `fingerprint` reads only `files`, so the real id
+        // is not known until every path is hashed into the same
+        // deduplicated map the item is actually built from.
+        let mut item = Item::new(ItemId::from_bytes([0; 32]));
+        for path in &params.files {
+            let (hash, record) = self.hash_file(path).await?;
+            item.files.insert(hash, record);
+        }
+        item.id = item
+            .fingerprint()
+            .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
+        let id = item.id;
+
+        if let Some(existing) = self.catalogue.item(id).await.map_err(sync_error)? {
+            // In today's code, `contributed` is rarely non-empty. `id` is
+            // the fingerprint of exactly `item.files`' key set, so a hit
+            // here means some earlier write already produced an item at
+            // this same id from what must have been (barring a hash
+            // collision) that identical set — `existing.files` should
+            // already hold every hash `item.files` does. The exception,
+            // and the reason this stays rather than becoming an assert, is
+            // the case the guard exists for: an earlier `Catalogue::write`
+            // interrupted partway through its per-key loop, leaving
+            // `existing` with fewer file entries than its own id implies.
+            // Every file `library.add` writes is `role: content` today, so
+            // there is no *other* way for this to end up non-empty — that
+            // changes the moment a role that does not take part in the
+            // fingerprint (a cover, say) is wired in here too.
+            let contributed: Vec<ContentHash> = item
+                .files
+                .keys()
+                .filter(|hash| !existing.files.contains_key(hash))
+                .copied()
+                .collect();
+            if !contributed.is_empty() {
+                let files = item
+                    .files
+                    .into_iter()
+                    .filter(|(hash, _)| contributed.contains(hash))
+                    .collect();
+                self.catalogue
+                    .write(&Item {
+                        files,
+                        ..Item::new(id)
+                    })
+                    .await
+                    .map_err(sync_error)?;
+            }
+            return Ok(json!({
+                "item_id": id,
+                "created": false,
+                "title": existing.title,
+                "contributed_files": contributed,
+            }));
+        }
+
+        item.kind = Some(params.kind);
+        item.title = params.title.clone();
+        item.authors = (!params.authors.is_empty()).then_some(params.authors);
+        item.genres = (!params.genres.is_empty()).then_some(params.genres);
+        item.series = params.series;
+        item.year = params.year;
+        item.lang = params.lang;
+        item.description = params.description;
+        self.catalogue.write(&item).await.map_err(sync_error)?;
+
+        Ok(json!({
+            "item_id": id,
+            "created": true,
+            "title": params.title,
+            "contributed_files": Vec::<ContentHash>::new(),
+        }))
+    }
+
+    /// Hashes and stores one local file for `library.add`, and describes it
+    /// the way §5.2's per-file record does.
+    ///
+    /// **`format` is the file's extension, lower-cased.** Sniffing the actual
+    /// container would be more honest, but nothing here reads file contents
+    /// beyond hashing them, and an operator naming a `.epub` file is not a
+    /// case worth a parsing dependency over. `seq`, `disc` and `duration` are
+    /// left `None` for the same reason `library.add` takes no per-file
+    /// arguments for them yet — chaptered audiobooks are real, but nothing
+    /// calls this with that shape today.
+    async fn hash_file(&self, path: &std::path::Path) -> Result<(ContentHash, FileRecord), Error> {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::invalid_params(format!("{}: not a file path", path.display())))?
+            .to_owned();
+        let format = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_lowercase)
+            .ok_or_else(|| {
+                Error::invalid_params(format!(
+                    "{}: no file extension to record as its format",
+                    path.display()
+                ))
+            })?;
+
+        let (hash, size) = self
+            .catalogue
+            .add_file(path)
+            .await
+            .map_err(|error| match error {
+                SyncError::LocalFile { .. } => Error::invalid_params(error.to_string()),
+                other => Error::failed(other.to_string()),
+            })?;
+
+        Ok((
+            hash,
+            FileRecord {
+                role: FileRole::Content,
+                format,
+                size,
+                filename,
+                seq: None,
+                disc: None,
+                title: None,
+                duration: None,
+            },
+        ))
+    }
+
     /// Commits an event, and reports what became of it.
     ///
     /// **`applied` is the field that matters**, and the reason this returns
@@ -475,6 +654,13 @@ fn query_error(error: StoreError) -> Error {
         StoreError::Query { .. } => Error::invalid_params(error.to_string()),
         other => Error::failed(other.to_string()),
     }
+}
+
+/// Every `SyncError` a catalogue read or write can fail with is this method
+/// failing for its own reasons — none of them are the caller's mistake the
+/// way an invalid file path is, which [`Api::hash_file`] reports separately.
+fn sync_error(error: SyncError) -> Error {
+    Error::failed(error.to_string())
 }
 
 /// A one-line description of a proposal, for an operator deciding about it.
@@ -658,6 +844,33 @@ fn default_search_limit() -> usize {
 #[serde(deny_unknown_fields)]
 struct ItemParams {
     item_id: ItemId,
+}
+
+/// `library.add`'s params.
+///
+/// `files` are local paths on the machine this node's API runs on — the
+/// listener is loopback and token-gated (§7.1, P1-25), so "local to the
+/// caller" and "local to this node" are the same machine. Every one is
+/// `role: content`; see [`Api::add`] for why the surface stops there for now.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Add {
+    kind: ItemKind,
+    files: Vec<PathBuf>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    genres: Vec<String>,
+    #[serde(default)]
+    series: Option<Series>,
+    #[serde(default)]
+    year: Option<i32>,
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.

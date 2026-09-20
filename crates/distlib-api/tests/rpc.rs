@@ -17,6 +17,7 @@ use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
+use distlib_sync::Catalogue;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
@@ -94,9 +95,10 @@ impl Harness {
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
         let swarm = Gossip::builder().spawn(endpoint.clone());
+        let transport = Transport::new(endpoint.clone(), swarm).unwrap();
         let node = Arc::new(
             MembershipNode::start(
-                Transport::new(endpoint.clone(), swarm).unwrap(),
+                transport.clone(),
                 hooks,
                 writer,
                 dir.path(),
@@ -105,7 +107,25 @@ impl Harness {
             .await
             .unwrap(),
         );
-        let router = distlib_net::serve(endpoint, node.protocols());
+        // In memory: nothing here exercises `library.add`, so this exists
+        // only to give `Api` a catalogue to hold — see `Api::catalogue`'s own
+        // doc comment for why the field cannot be optional.
+        let catalogue = Catalogue::start(
+            transport,
+            (*iroh_blobs::store::mem::MemStore::new()).clone(),
+            None,
+            &secret,
+            node.subscribe(),
+        )
+        .await
+        .unwrap();
+        let router = distlib_net::serve(
+            endpoint,
+            node.protocols()
+                .into_iter()
+                .chain(catalogue.protocols())
+                .collect(),
+        );
 
         node.init_group(
             vec![(
@@ -129,6 +149,7 @@ impl Harness {
                 secret,
                 net: distlib_core::NetConfig::default(),
                 reindex_handle,
+                catalogue,
                 store: store.clone(),
                 search: search.clone(),
             },
@@ -172,6 +193,10 @@ impl Harness {
         let mut nodes = Vec::new();
         let mut routers = Vec::new();
         let mut addrs = Vec::new();
+        // Only node 0 ends up serving the API, so only it gets a catalogue —
+        // building one for the others would be work spent on something
+        // nothing here asks of them.
+        let mut catalogue = None;
         for (index, secret) in secrets.iter().enumerate() {
             let others = ids
                 .iter()
@@ -198,9 +223,10 @@ impl Harness {
             });
             let core = ids.iter().map(|id| (*id, NodeAddr::default())).collect();
             let swarm = Gossip::builder().spawn(endpoint.clone());
+            let transport = Transport::new(endpoint.clone(), swarm).unwrap();
             let node = Arc::new(
                 MembershipNode::start(
-                    Transport::new(endpoint.clone(), swarm).unwrap(),
+                    transport.clone(),
                     hooks,
                     writer,
                     &{
@@ -213,7 +239,27 @@ impl Harness {
                 .await
                 .unwrap(),
             );
-            routers.push(distlib_net::serve(endpoint, node.protocols()));
+            let protocols = if index == 0 {
+                let started = Catalogue::start(
+                    transport,
+                    (*iroh_blobs::store::mem::MemStore::new()).clone(),
+                    None,
+                    secret,
+                    node.subscribe(),
+                )
+                .await
+                .unwrap();
+                let protocols = node
+                    .protocols()
+                    .into_iter()
+                    .chain(started.protocols())
+                    .collect();
+                catalogue = Some(started);
+                protocols
+            } else {
+                node.protocols()
+            };
+            routers.push(distlib_net::serve(endpoint, protocols));
             nodes.push(node);
         }
 
@@ -253,6 +299,7 @@ impl Harness {
                 secret: secrets[0].clone(),
                 net: distlib_core::NetConfig::default(),
                 reindex_handle: no_reindex(),
+                catalogue: catalogue.expect("node 0 built one above"),
                 store: store.clone(),
                 search: search.clone(),
             },

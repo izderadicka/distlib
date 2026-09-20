@@ -739,12 +739,19 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   > a working, already-reviewed design across two crates' boundaries for a change the acceptance does
   > not need. See delta P2-22 for the reasoning and what was built instead — fetch only.
 
-- **2b-2 — `library.add`.** Hash the file set → blobs → `ItemId::from_content_hashes` over the
+- **2b-2 — `library.add`. *(done, delta P2-23)*** Hash the file set → blobs → `ItemId::from_content_hashes` over the
   `role: content` files only (D4) → catalogue entry. Exact-dup guard: compute the fingerprint before
   creating, and on a hit report the existing item and offer to contribute missing files rather than
   creating a second one (§6.1). `distlib add`.
   **Acceptance:** adding the identical file set twice on two nodes converges on one item, with no
   coordination.
+
+  > Only `role: content` files are wired in — covers and subtitles are left for the first caller that
+  > needs them, the same scope cut P2-21 made for `library.search`'s `filters`. `format` is the file
+  > extension, not sniffed content. `Api` gains a `catalogue` field, its first for a `library.*`
+  > write rather than a read of the projection — see P2-23 for what that cost the `distlib-api` test
+  > harness, and for a doc/behaviour mismatch found by hand in `config.toml`'s "found alone" comment
+  > and left unfixed as out of scope.
 
 - **2b-3 — `library.download` + the phase acceptance.** Provider selection from the availability we
   have (members holding the blob; §5.6's gossip index is phase 4, so v1 asks the members it knows),
