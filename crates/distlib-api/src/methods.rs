@@ -568,6 +568,13 @@ impl Api {
     /// does not need it: a provider that cannot be reached fails rather than
     /// hangs (`fetching_from_an_unreachable_provider_fails_rather_than_hangs`).
     ///
+    /// **A failure partway through a multi-file download leaves the files
+    /// already written where they are**, and the error names only what
+    /// failed. That is deliberate rather than overlooked: those files are
+    /// complete and verified, deleting them would be this method destroying
+    /// something on its way out, and asking again writes the rest — the
+    /// ones already here are refused by name, which is what says so.
+    ///
     /// **Nothing is "registered".** The fetch lands the bytes in the store
     /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
     /// holder from the moment it returns and stays one across a restart,
@@ -609,26 +616,58 @@ impl Api {
             )));
         }
 
-        // Refused before anything is fetched, so a caller who mistyped a
-        // destination is not made to wait for a transfer first.
+        // Every target is worked out and checked before anything is fetched,
+        // so a caller who mistyped a destination or asked for something that
+        // cannot be written is not made to wait for a transfer first.
         //
-        // **Refused rather than overwritten.** The exported file is the
+        // **Nothing here overwrites anything.** Three ways that could happen
+        // and all three are refused. A file already at the target is the
         // operator's — they may have edited or replaced it — and a download
-        // is not a reason to assume otherwise. Whoever wants the file
-        // replaced deletes it, which is an instruction rather than a guess.
-        let targets: Vec<(ContentHash, FileRecord, PathBuf)> = wanted
-            .into_iter()
-            .map(|(hash, record)| {
-                let target = params.dest.join(&record.filename);
-                if target.exists() {
-                    return Err(Error::failed(format!(
-                        "{} already exists; move or delete it to download this file again",
-                        target.display()
-                    )));
-                }
-                Ok((hash, record, target))
-            })
-            .collect::<Result<_, Error>>()?;
+        // is not a reason to assume otherwise; deleting it is an instruction,
+        // overwriting it would be a guess. Two of this item's own files
+        // landing on one path is the same loss by a different route, and it
+        // is ordinary rather than exotic: `library.add` takes a filename from
+        // the path it was given, so a two-disc set adds two hashes both
+        // called `track01.mp3`. And a `filename` is a string some other
+        // member's build wrote into the document, so it is reduced to its
+        // last component before it is joined — §2 says members do not attack
+        // the protocol, but `dest.join("/etc/passwd")` is `/etc/passwd`, and
+        // that is a foot-gun whether or not anybody means it.
+        //
+        // The refusal names `file`, which is the way through: a hash says
+        // which of two identically-named files is wanted where their names
+        // cannot. Writing them both under disambiguated names would be the
+        // more useful answer and wants `FileRecord`'s own `disc` and `seq`
+        // to do it with — they are the right disambiguator and nothing fills
+        // them yet (P2-23).
+        let mut taken: BTreeMap<PathBuf, ContentHash> = BTreeMap::new();
+        let mut targets: Vec<(ContentHash, FileRecord, PathBuf)> = Vec::with_capacity(wanted.len());
+        for (hash, record) in wanted {
+            let name = std::path::Path::new(&record.filename)
+                .file_name()
+                .ok_or_else(|| {
+                    Error::failed(format!(
+                        "{hash}: {:?} is not a filename this can write",
+                        record.filename
+                    ))
+                })?;
+            let target = params.dest.join(name);
+            if let Some(other) = taken.get(&target) {
+                return Err(Error::failed(format!(
+                    "{} and {other} are both called {}; download them one at a time with `file`",
+                    hash,
+                    target.display()
+                )));
+            }
+            if target.exists() {
+                return Err(Error::failed(format!(
+                    "{} already exists; move or delete it to download this file again",
+                    target.display()
+                )));
+            }
+            taken.insert(target.clone(), hash);
+            targets.push((hash, record, target));
+        }
 
         let me = self.node.id();
         let providers: Vec<MemberId> = self

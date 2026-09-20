@@ -497,3 +497,76 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
         .unwrap();
     (dir, runtime, key)
 }
+
+/// Two files of one item that share a basename cannot both be written to one
+/// directory, and the download says so rather than writing one over the
+/// other.
+///
+/// **Reachable by ordinary use, not an edge case.** `library.add` takes a
+/// file's name from its path, so `disc1/track01.mp3 disc2/track01.mp3` is an
+/// item with two distinct hashes and one filename — which is why
+/// `FileRecord` carries `disc` and `seq` at all. Without this check both
+/// exports resolve to the same path, the second overwrites the first, and
+/// the answer reports two files at one location.
+#[tokio::test]
+async fn downloading_an_item_whose_files_share_a_name_is_refused() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let discs = dir.path().join("discs");
+    std::fs::create_dir_all(discs.join("disc1")).unwrap();
+    std::fs::create_dir_all(discs.join("disc2")).unwrap();
+    let first = discs.join("disc1/track01.mp3");
+    std::fs::write(&first, b"disc one, track one").unwrap();
+    let second = discs.join("disc2/track01.mp3");
+    std::fs::write(&second, b"disc two, track one").unwrap();
+
+    let added = api(&runtime, &key)
+        .call(
+            "library.add",
+            Some(json!({
+                "kind": "audiobook",
+                "files": [&first, &second],
+                "title": "Dune",
+            })),
+        )
+        .await
+        .unwrap();
+    let item: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    until_projected(&runtime, item, 2, "the solo node").await;
+
+    let dest = dest(dir.path(), "me");
+    let error = api(&runtime, &key)
+        .call(
+            "library.download",
+            Some(json!({ "item_id": item, "dest": &dest })),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("track01.mp3"), "{error}");
+    assert!(
+        std::fs::read_dir(&dest).unwrap().next().is_none(),
+        "refused before anything was written"
+    );
+
+    // And the way through: one at a time, which is what the refusal points
+    // at. Named by hash, so which of the two is unambiguous even though
+    // their filenames are not.
+    let files = runtime
+        .store()
+        .item(item)
+        .await
+        .unwrap()
+        .unwrap()
+        .item
+        .files;
+    let one = *files.keys().next().unwrap();
+    api(&runtime, &key)
+        .call(
+            "library.download",
+            Some(json!({ "item_id": item, "dest": &dest, "file": one })),
+        )
+        .await
+        .unwrap();
+    assert!(dest.join("track01.mp3").exists());
+
+    runtime.shutdown().await;
+}
