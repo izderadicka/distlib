@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use distlib_core::MemberId;
+use distlib_core::{ContentHash, MemberId};
 use iroh::endpoint::{
     BindError, ClosedStream, ConnectError, ConnectWithOptsError, ConnectionError, ReadError,
     ReadToEndError, WriteError,
@@ -88,7 +88,33 @@ pub enum NetError {
     /// underlying cause stays reachable through `source`.
     #[error("could not fetch {hash} from any of the offered providers")]
     Fetch {
-        hash: iroh_blobs::Hash,
+        hash: ContentHash,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The local blob store could not be asked about a hash.
+    ///
+    /// Not "the blob is not here" — that is an answer, and
+    /// [`crate::blobs::Blobs::has`] returns it as `false`. This is the store
+    /// itself failing to answer.
+    #[error("could not ask the blob store about {hash}")]
+    Blob {
+        hash: ContentHash,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A blob could not be written out to a file.
+    ///
+    /// Carries the target as well as the hash because every likely cause is
+    /// about the target rather than the blob — a directory that does not
+    /// exist, a path that is not writable — and an error naming only the hash
+    /// would send whoever reads it to the wrong half of the operation.
+    #[error("could not write {hash} to {}", target.display())]
+    Export {
+        hash: ContentHash,
+        target: std::path::PathBuf,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },

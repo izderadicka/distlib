@@ -28,6 +28,8 @@ tracing = { workspace = true }
 postcard = { workspace = true }
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay = { workspace = true }
+# For `blobs`: somewhere to export a blob to that is not the source tree.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

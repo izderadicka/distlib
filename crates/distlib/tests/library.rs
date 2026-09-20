@@ -38,6 +38,7 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         net: NetConfig::default(),
         reindex_handle: runtime.projection().reindex_handle(),
         catalogue: runtime.catalogue().clone(),
+        blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
     }

@@ -20,6 +20,11 @@ distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }
 distlib-store = { workspace = true }
 distlib-sync = { workspace = true }
+# For `library.download`: fetching a media blob from the members who might
+# hold it, and writing it out to a file. The whole of this crate's contact
+# with iroh-blobs goes through `distlib_net::Blobs` and `distlib_sync`, per
+# §5.1's wrap-don't-expose rule.
+distlib-net = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

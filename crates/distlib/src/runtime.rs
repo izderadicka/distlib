@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, MemberId, NodeAddr, identity::member_id};
-use distlib_net::{AllowlistHooks, Transport, allowlist, build_endpoint};
+use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::Catalogue;
 use iroh::{Endpoint, SecretKey, protocol::Router};
@@ -33,6 +33,13 @@ use iroh_gossip::net::Gossip;
 pub struct Runtime {
     node: Arc<MembershipNode>,
     catalogue: Catalogue,
+    /// Media in and out of the same store the catalogue hands iroh-docs and
+    /// `BlobsProtocol` serves from — so what `library.download` fetches is
+    /// held, and served, by this node from the moment the fetch returns.
+    ///
+    /// Built once and kept because it owns a connection pool; see
+    /// [`Blobs`]'s own doc comment.
+    blobs: Blobs,
     store: Store,
     search: SearchIndex,
     /// Held rather than detached: dropping it stops the task, so a runtime
@@ -105,6 +112,12 @@ impl Runtime {
         let blobs = FsStore::load(data_dir.blobs_dir())
             .await
             .with_context(|| format!("could not open {}", data_dir.blobs_dir().display()))?;
+        // One store, two users of it, and the sharing is the point rather
+        // than an economy: `library.download` fetching a media blob has to
+        // land it in the very store `Catalogue::protocols`' `BlobsProtocol`
+        // answers from, or a node would download a file and still not be a
+        // provider of it.
+        let media = Blobs::new(&blobs, &endpoint);
         let catalogue = Catalogue::start(
             transport,
             (*blobs).clone(),
@@ -148,6 +161,7 @@ impl Runtime {
         Ok(Self {
             node,
             catalogue,
+            blobs: media,
             store,
             search,
             projection,
@@ -163,6 +177,11 @@ impl Runtime {
     /// The group's catalogue.
     pub fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// Media transfer: what `library.download` fetches and exports with.
+    pub fn blobs(&self) -> &Blobs {
+        &self.blobs
     }
 
     /// The read model: what every query in §7.1 is answered from.

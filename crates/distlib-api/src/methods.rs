@@ -11,6 +11,7 @@ use distlib_core::{
     ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig, NodeAddr,
     Series, Ticket,
 };
+use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
 use distlib_sync::{Catalogue, SyncError};
 use iroh::SecretKey;
@@ -48,6 +49,11 @@ pub struct Api {
     /// because a write has to reach the document itself, and a read model is
     /// downstream of it rather than a second place to put one.
     pub catalogue: Catalogue,
+    /// What `library.download` fetches an item's files with, and writes them
+    /// out of. Against the same blob store `catalogue` hands iroh-docs and
+    /// serves `iroh_blobs::ALPN` from, which is what makes a node that
+    /// downloads a file a provider of it.
+    pub blobs: Blobs,
     /// What `library.item` and `library.search` read the record fields from.
     pub store: Store,
     /// What `library.search` ranks against. Only a ranking — see its own doc
@@ -73,6 +79,7 @@ impl Api {
             "library.search" => self.search(parse(params)?).await,
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
+            "library.download" => self.download(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -526,6 +533,143 @@ impl Api {
         }))
     }
 
+    /// `library.download` — fetch an item's files from whoever has them, and
+    /// write them out to a directory (2b-3).
+    ///
+    /// **Synchronous, where §7.1's sketch answers with a `task_id`.** A task
+    /// id is only useful next to the `download.progress` events §7.2 puts on
+    /// the SSE stream, and that stream is phase 3 — so the id would be a
+    /// handle to nothing, and a caller would have to poll for a completion
+    /// that has no representation either. Returning when the files are on
+    /// disk says the same thing with nothing to build first, and turning it
+    /// into a task later is an addition rather than a change: the answer
+    /// gains a field. The same cut P2-21 made for `library.search`'s
+    /// `filters`.
+    ///
+    /// **`file` names a content hash, where the sketch says `file_index`.**
+    /// An item's files are a map keyed by content hash (§5.2), so the only
+    /// index there is to give is a position in hash order — which is stable,
+    /// meaningless to a human, and silently renumbers the moment a second
+    /// member contributes a missing file. The hash is what `library.item`
+    /// already reports and what the record itself is keyed by.
+    ///
+    /// **Every member is offered as a provider**, minus this node. §5.6's
+    /// availability index is phase 4, so there is nothing to ask *who* holds
+    /// a hash; what makes the naive list workable is that a member who does
+    /// not have it is a provider skipped rather than a download failed, which
+    /// `distlib-net`'s own tests pin. It is O(members) dials in the worst
+    /// case and wrong at the thousands §2 allows — the same shape as the
+    /// peer-offer sweep already carried out of this phase, and it should be
+    /// answered by the availability index rather than guessed at here.
+    ///
+    /// **No deadline.** A media file is as slow as it is big, and a number
+    /// picked here would be a guess about file sizes and links this method
+    /// knows nothing about. The failure this would otherwise guard against
+    /// does not need it: a provider that cannot be reached fails rather than
+    /// hangs (`fetching_from_an_unreachable_provider_fails_rather_than_hangs`).
+    ///
+    /// **Nothing is "registered".** The fetch lands the bytes in the store
+    /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
+    /// holder from the moment it returns and stays one across a restart,
+    /// because that store is on disk. §5.6's heartbeat is what would announce
+    /// it, and it does not exist yet.
+    async fn download(&self, params: Download) -> Result<Value, Error> {
+        if !params.dest.is_dir() {
+            return Err(Error::invalid_params(format!(
+                "{}: not a directory to write files into",
+                params.dest.display()
+            )));
+        }
+
+        // The read model, like every other `library.*` read. It is derived
+        // from the document rather than a second copy of it, so an item it
+        // does not have yet is one this node has not synced — and answering
+        // "no such item" is then the truth about this node, which is what a
+        // caller about to wait and retry needs to hear.
+        let stored = self
+            .store
+            .item(params.item_id)
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .ok_or_else(|| Error::failed(format!("no such item: {}", params.item_id)))?;
+
+        let wanted: Vec<(ContentHash, FileRecord)> = match params.file {
+            Some(hash) => {
+                let record = stored.item.files.get(&hash).cloned().ok_or_else(|| {
+                    Error::invalid_params(format!("{} has no file {hash}", params.item_id))
+                })?;
+                vec![(hash, record)]
+            }
+            None => stored.item.files.into_iter().collect(),
+        };
+        if wanted.is_empty() {
+            return Err(Error::failed(format!(
+                "{}: this item has no files yet",
+                params.item_id
+            )));
+        }
+
+        // Refused before anything is fetched, so a caller who mistyped a
+        // destination is not made to wait for a transfer first.
+        //
+        // **Refused rather than overwritten.** The exported file is the
+        // operator's — they may have edited or replaced it — and a download
+        // is not a reason to assume otherwise. Whoever wants the file
+        // replaced deletes it, which is an instruction rather than a guess.
+        let targets: Vec<(ContentHash, FileRecord, PathBuf)> = wanted
+            .into_iter()
+            .map(|(hash, record)| {
+                let target = params.dest.join(&record.filename);
+                if target.exists() {
+                    return Err(Error::failed(format!(
+                        "{} already exists; move or delete it to download this file again",
+                        target.display()
+                    )));
+                }
+                Ok((hash, record, target))
+            })
+            .collect::<Result<_, Error>>()?;
+
+        let me = self.node.id();
+        let providers: Vec<MemberId> = self
+            .node
+            .membership()
+            .members()
+            .map(|record| record.member_id)
+            .filter(|member| *member != me)
+            .collect();
+
+        let mut files = Vec::with_capacity(targets.len());
+        for (hash, record, target) in targets {
+            // Asked before the network is: this node may be the one that
+            // added the item, or may have downloaded it before, and in a
+            // group of one there is nobody to ask at all.
+            let fetched = !self.blobs.has(hash).await.map_err(net_error)?;
+            if fetched {
+                self.blobs
+                    .fetch(hash, providers.clone())
+                    .await
+                    .map_err(net_error)?;
+            }
+            self.blobs.export(hash, &target).await.map_err(net_error)?;
+            files.push(json!({
+                "file": hash,
+                "filename": record.filename,
+                "path": target,
+                // Whether it had to come over the network. A caller cannot
+                // act on it, but an operator watching a download of an item
+                // half of which was already here can read it.
+                "fetched": fetched,
+            }));
+        }
+
+        Ok(json!({
+            "item_id": params.item_id,
+            "title": stored.item.title,
+            "files": files,
+        }))
+    }
+
     /// Hashes and stores one local file for `library.add`, and describes it
     /// the way §5.2's per-file record does.
     ///
@@ -660,6 +804,14 @@ fn query_error(error: StoreError) -> Error {
 /// failing for its own reasons — none of them are the caller's mistake the
 /// way an invalid file path is, which [`Api::hash_file`] reports separately.
 fn sync_error(error: SyncError) -> Error {
+    Error::failed(error.to_string())
+}
+
+/// Every `NetError` `library.download` can meet is this method failing for
+/// its own reasons rather than the caller's mistake: the two the caller could
+/// have made — an item that is not here, a destination that is not a
+/// directory — are both refused before [`Blobs`] is touched at all.
+fn net_error(error: NetError) -> Error {
     Error::failed(error.to_string())
 }
 
@@ -871,6 +1023,26 @@ struct Add {
     lang: Option<String>,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// `library.download`'s params.
+///
+/// `dest` is a directory on the machine this node's API runs on, for the same
+/// reason `library.add`'s `files` are local to it: the listener is loopback
+/// and token-gated (§7.1, P1-25), so the caller's machine and the node's are
+/// the same one. It must already exist — a download is not a reason to
+/// create a directory tree somebody may have typed wrong.
+///
+/// `file` picks one of the item's files by content hash; left out, every file
+/// the item has is downloaded. See [`Api::download`] for why a hash rather
+/// than §7.1's `file_index`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Download {
+    item_id: ItemId,
+    dest: PathBuf,
+    #[serde(default)]
+    file: Option<ContentHash>,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.

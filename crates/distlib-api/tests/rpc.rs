@@ -107,18 +107,18 @@ impl Harness {
             .await
             .unwrap(),
         );
-        // In memory: nothing here exercises `library.add`, so this exists
-        // only to give `Api` a catalogue to hold — see `Api::catalogue`'s own
-        // doc comment for why the field cannot be optional.
-        let catalogue = Catalogue::start(
-            transport,
-            (*iroh_blobs::store::mem::MemStore::new()).clone(),
-            None,
-            &secret,
-            node.subscribe(),
-        )
-        .await
-        .unwrap();
+        // In memory: nothing here exercises `library.add` or
+        // `library.download`, so these exist only to give `Api` a catalogue
+        // and a `Blobs` to hold — see `Api::catalogue`'s own doc comment for
+        // why neither field can be optional. One store between them, as in
+        // production: what a download fetches has to land where the
+        // catalogue's own handler serves from.
+        let media = iroh_blobs::store::mem::MemStore::new();
+        let blobs = distlib_net::Blobs::new(&media, &endpoint);
+        let catalogue =
+            Catalogue::start(transport, (*media).clone(), None, &secret, node.subscribe())
+                .await
+                .unwrap();
         let router = distlib_net::serve(
             endpoint,
             node.protocols()
@@ -150,6 +150,7 @@ impl Harness {
                 net: distlib_core::NetConfig::default(),
                 reindex_handle,
                 catalogue,
+                blobs,
                 store: store.clone(),
                 search: search.clone(),
             },
@@ -197,6 +198,7 @@ impl Harness {
         // building one for the others would be work spent on something
         // nothing here asks of them.
         let mut catalogue = None;
+        let mut blobs = None;
         for (index, secret) in secrets.iter().enumerate() {
             let others = ids
                 .iter()
@@ -240,15 +242,12 @@ impl Harness {
                 .unwrap(),
             );
             let protocols = if index == 0 {
-                let started = Catalogue::start(
-                    transport,
-                    (*iroh_blobs::store::mem::MemStore::new()).clone(),
-                    None,
-                    secret,
-                    node.subscribe(),
-                )
-                .await
-                .unwrap();
+                let media = iroh_blobs::store::mem::MemStore::new();
+                blobs = Some(distlib_net::Blobs::new(&media, &endpoint));
+                let started =
+                    Catalogue::start(transport, (*media).clone(), None, secret, node.subscribe())
+                        .await
+                        .unwrap();
                 let protocols = node
                     .protocols()
                     .into_iter()
@@ -300,6 +299,7 @@ impl Harness {
                 net: distlib_core::NetConfig::default(),
                 reindex_handle: no_reindex(),
                 catalogue: catalogue.expect("node 0 built one above"),
+                blobs: blobs.expect("node 0 built one above"),
                 store: store.clone(),
                 search: search.clone(),
             },

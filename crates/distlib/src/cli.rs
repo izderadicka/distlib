@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
-use distlib_core::{ItemId, MemberId};
+use distlib_core::{ContentHash, ItemId, MemberId};
 
 /// Distributed community media library for closed, trusted groups.
 #[derive(Debug, Parser)]
@@ -284,6 +284,33 @@ pub enum Command {
         /// A longer description.
         #[arg(long)]
         description: Option<String>,
+    },
+
+    /// Fetch an item's files from the group and write them out (2b-3).
+    ///
+    /// The bytes are asked for from every member this node knows of; whoever
+    /// has them answers and the rest are skipped. What arrives is verified by
+    /// the transfer itself — the hash *is* the name — so a file that is
+    /// written is a file that is right.
+    ///
+    /// This node keeps its own copy afterwards and serves it to the group
+    /// from then on, across restarts. The file written here is yours: moving,
+    /// renaming or deleting it changes nothing about what the group can still
+    /// get from this node.
+    ///
+    /// An existing file in the way is refused rather than overwritten.
+    Download {
+        /// The item to fetch, as `distlib search` prints it.
+        item_id: ItemId,
+
+        /// Where to write the files. The working directory by default.
+        #[arg(long, default_value = ".")]
+        dest: PathBuf,
+
+        /// Fetch only this one file of the item, by the content hash
+        /// `distlib item` lists it under. Every file by default.
+        #[arg(long)]
+        file: Option<ContentHash>,
     },
 }
 

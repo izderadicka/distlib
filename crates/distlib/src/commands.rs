@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, CoreMember, DataDir, ItemId, MemberId, NodeAddr, Ticket,
+    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -124,6 +124,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                     net: config.net.clone(),
                     reindex_handle: runtime.projection().reindex_handle(),
                     catalogue: runtime.catalogue().clone(),
+                    blobs: runtime.blobs().clone(),
                     store: runtime.store().clone(),
                     search: runtime.search().clone(),
                 },
@@ -636,6 +637,48 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
         } else {
             println!("            contributed {contributed} file(s) it was missing");
         }
+    }
+    Ok(())
+}
+
+/// `distlib download`
+pub async fn download(
+    paths: &Paths,
+    item_id: ItemId,
+    dest: &std::path::Path,
+    file: Option<ContentHash>,
+) -> Result<()> {
+    // Canonicalised for the same reason `add` canonicalises its files: the
+    // API is loopback, so this is the node's machine too, but it is not the
+    // node's working directory — and `--dest .` sent as given would land
+    // wherever the node happens to have been started from.
+    let dest = std::fs::canonicalize(dest)
+        .with_context(|| format!("could not find {}", dest.display()))?;
+
+    let answer = ask(
+        paths,
+        "library.download",
+        json!({ "item_id": item_id, "dest": dest, "file": file }),
+    )
+    .await?;
+
+    println!(
+        "downloaded  {item_id}  {}",
+        answer["title"].as_str().unwrap_or("(no title)")
+    );
+    for file in answer["files"].as_array().map_or(&[][..], |v| v) {
+        println!(
+            "  {}  {}",
+            // A file that was already here is said so rather than passed off
+            // as a transfer: an operator who expected the group to be asked
+            // should be able to tell that it was not.
+            if file["fetched"].as_bool().unwrap_or(false) {
+                "fetched"
+            } else {
+                "had it "
+            },
+            file["path"].as_str().unwrap_or("?")
+        );
     }
     Ok(())
 }

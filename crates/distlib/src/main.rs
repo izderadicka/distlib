@@ -73,6 +73,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Download {
+            item_id,
+            dest,
+            file,
+        } => commands::download(&paths, item_id, &dest, file).await,
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,
         Command::Join { ticket } => commands::join(&paths, &ticket),

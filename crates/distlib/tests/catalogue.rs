@@ -17,12 +17,12 @@ use std::time::Duration;
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{Config, CoreMember, DataDir, MemberId, NodeAddr};
+use distlib_core::{DataDir, MemberId, NodeAddr};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, record};
+use common::{bound, config, following, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -73,21 +73,6 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 /// A follower's configuration: the core group it bootstraps from, *with* an
 /// address, and this node deliberately not in it.
 ///
-/// The address has to be here. A follower has no log yet, so configuration is
-/// the only thing that can say where the group is — and with
-/// `relay_mode = "disabled"` there is no lookup to fall back on. This is the
-/// ticket's job in production; a test hands over the same two facts directly.
-fn following(core: MemberId, addr: &NodeAddr) -> Config {
-    let mut config = config(&[core]);
-    config.consensus.core = vec![CoreMember {
-        member: core,
-        name: String::new(),
-        addrs: addr.direct.iter().copied().collect(),
-        relay: None,
-    }];
-    config
-}
-
 /// For waiting on something whose guarantee is a node's own timer.
 ///
 /// Deliberately longer than [`SOON`], and longer than `distlib-sync`'s
