@@ -24,3 +24,8 @@ We do hold a lot of history to limit duplications -  is it bounded well?
 ## Catalogue sync
 Still not convinced about sync algorithm,  but let it be for now - see later in full experiments how it works.
 I think it bit overcomplicated - Agent is inventing more and more complex constructs like `fetch_content_nobody_offered`
+
+## Tests
+Fast tests are no longer fast - we will need to reclassify some tests, which run longer like `a_member_who_arrives_with_the_content_is_asked_at_once`
+
+Why some tests cannot run in parallel?  If it is about ports or some shared resources we should rather solve that rather then serialize tests
