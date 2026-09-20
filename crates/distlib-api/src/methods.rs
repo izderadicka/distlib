@@ -418,15 +418,14 @@ impl Api {
     /// and paging were left out of `library.search` (P2-21).
     ///
     /// **The dedup guard runs before anything is written.** The fingerprint
-    /// is computed from the hashes alone, so it is known before the
-    /// catalogue is asked anything (§6.1's "add-time assist"). A hit means
-    /// somebody's copy of this exact file set is already an item:
-    /// **metadata already there is left alone** — this call never overwrites
-    /// a `title` or `kind` a hit already holds, so a second caller with a
-    /// worse guess at the title cannot clobber a better one — and only the
-    /// files this call brought that the item did not already have are
-    /// written, which is the "offering to contribute any files it is
-    /// missing" half of the same rule. A miss creates the item with every
+    /// is known before the catalogue is asked anything (§6.1's "add-time
+    /// assist"). A hit means somebody's copy of this exact file set is
+    /// already an item: **metadata already there is left alone** — this call
+    /// never overwrites a `title` or `kind` a hit already holds, so a second
+    /// caller with a worse guess at the title cannot clobber a better one —
+    /// and only the files this call brought that the item did not already
+    /// have are written, which is the "offering to contribute any files it
+    /// is missing" half of the same rule. A miss creates the item with every
     /// field this call was given.
     ///
     /// **This is also what makes the phase's own acceptance hold without any
@@ -436,35 +435,56 @@ impl Api {
     /// guard here only decides what a *second* write to that id is allowed
     /// to change, not whether the two nodes end up looking at the same
     /// item.
+    ///
+    /// **The id is `item.fingerprint()`, not a hash list of its own.**
+    /// `files` is keyed by content hash, so two paths given that hash the
+    /// same — literal duplicates, or two different files with identical
+    /// bytes — collapse to one entry before the id is ever computed;
+    /// [`Item::fingerprint`] reads exactly that map. Hashing `params.files`
+    /// into a separate `Vec` alongside it, the way an earlier version of
+    /// this did, can disagree with `files`' own key set the moment a caller
+    /// repeats a path — the id it stored under would then differ from the
+    /// item's own fingerprint of what it actually holds, which
+    /// `converge.rs`'s `it is what it contains` pins as an invariant nothing
+    /// upstream of the domain type should be able to break twice.
     async fn add(&self, params: Add) -> Result<Value, Error> {
         if params.files.is_empty() {
             return Err(Error::invalid_params("library.add needs at least one file"));
         }
 
-        let mut files = BTreeMap::new();
-        let mut hashes = Vec::with_capacity(params.files.len());
+        // A placeholder: `fingerprint` reads only `files`, so the real id
+        // is not known until every path is hashed into the same
+        // deduplicated map the item is actually built from.
+        let mut item = Item::new(ItemId::from_bytes([0; 32]));
         for path in &params.files {
             let (hash, record) = self.hash_file(path).await?;
-            hashes.push(*hash.as_bytes());
-            files.insert(hash, record);
+            item.files.insert(hash, record);
         }
-        let id = ItemId::from_content_hashes(&hashes);
+        item.id = item
+            .fingerprint()
+            .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
+        let id = item.id;
 
         if let Some(existing) = self.catalogue.item(id).await.map_err(sync_error)? {
-            let contributed: Vec<ContentHash> = files
+            let contributed: Vec<ContentHash> = item
+                .files
                 .keys()
                 .filter(|hash| !existing.files.contains_key(hash))
                 .copied()
                 .collect();
             if !contributed.is_empty() {
-                let item = Item {
-                    files: files
-                        .into_iter()
-                        .filter(|(hash, _)| contributed.contains(hash))
-                        .collect(),
-                    ..Item::new(id)
-                };
-                self.catalogue.write(&item).await.map_err(sync_error)?;
+                let files = item
+                    .files
+                    .into_iter()
+                    .filter(|(hash, _)| contributed.contains(hash))
+                    .collect();
+                self.catalogue
+                    .write(&Item {
+                        files,
+                        ..Item::new(id)
+                    })
+                    .await
+                    .map_err(sync_error)?;
             }
             return Ok(json!({
                 "item_id": id,
@@ -474,18 +494,14 @@ impl Api {
             }));
         }
 
-        let item = Item {
-            kind: Some(params.kind),
-            title: params.title.clone(),
-            authors: (!params.authors.is_empty()).then_some(params.authors),
-            genres: (!params.genres.is_empty()).then_some(params.genres),
-            series: params.series,
-            year: params.year,
-            lang: params.lang,
-            description: params.description,
-            files,
-            ..Item::new(id)
-        };
+        item.kind = Some(params.kind);
+        item.title = params.title.clone();
+        item.authors = (!params.authors.is_empty()).then_some(params.authors);
+        item.genres = (!params.genres.is_empty()).then_some(params.genres);
+        item.series = params.series;
+        item.year = params.year;
+        item.lang = params.lang;
+        item.description = params.description;
         self.catalogue.write(&item).await.map_err(sync_error)?;
 
         Ok(json!({

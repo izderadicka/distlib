@@ -269,3 +269,67 @@ async fn adding_with_no_files_is_refused() {
 
     runtime.shutdown().await;
 }
+
+/// Jules' review on PR #51: two different local paths that hash to the same
+/// content must not let the id `library.add` computes drift from the item's
+/// own [`Item::fingerprint`] — `distlib-sync/tests/converge.rs`'s
+/// `it is what it contains` invariant, pinned here from the write side too.
+///
+/// **Mutation check:** reintroducing a separate `Vec<[u8; 32]>` built one
+/// entry per *path* rather than reading it back off the deduplicated `files`
+/// map turns this red — `ItemId::from_content_hashes(&[H, H])` differs from
+/// `ItemId::from_content_hashes(&[H])`, the fingerprint of the one file
+/// entry the map actually ends up holding.
+#[tokio::test]
+async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step()
+{
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let solo_config = config(&[id]);
+    let runtime = Runtime::start(&key, &solo_config, &DataDir::new(dir.path().join("solo")))
+        .await
+        .unwrap();
+    runtime
+        .node()
+        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .await
+        .unwrap();
+    runtime.catalogue().ready().await;
+
+    // Two different paths, the same bytes — a caller who pointed at one
+    // file twice under different names, not a mistake this method should
+    // have to refuse.
+    let bytes = b"the same file, named twice";
+    let first = dir.path().join("copy-one.epub");
+    std::fs::write(&first, bytes).unwrap();
+    let second = dir.path().join("copy-two.epub");
+    std::fs::write(&second, bytes).unwrap();
+
+    let answer = api(&runtime, &key)
+        .call(
+            "library.add",
+            Some(json!({
+                "kind": "ebook",
+                "files": [&first, &second],
+                "title": "Dune",
+            })),
+        )
+        .await
+        .unwrap();
+    let item_id: ItemId = serde_json::from_value(answer["item_id"].clone()).unwrap();
+
+    let item = runtime.catalogue().item(item_id).await.unwrap().unwrap();
+    assert_eq!(
+        item.files.len(),
+        1,
+        "one blob, hashed twice under two names, is one file entry"
+    );
+    assert_eq!(
+        item.fingerprint(),
+        Some(item_id),
+        "the id it was stored under has to be what the item's own files fingerprint to"
+    );
+
+    runtime.shutdown().await;
+}
