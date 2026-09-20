@@ -129,20 +129,32 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     bob.join(&ticket);
     carol.join(&ticket);
 
-    // **Carol starts before bob, and the order is load bearing.** She is the
-    // one who has to reach bob at the end of this test, and today the only
-    // way she comes to hold his address is by being in the gossip swarm when
-    // he announces himself. Found by hand rather than reasoned about: with
+    // **Carol starts before bob, and the order is load bearing — but it is
+    // not sufficient, which is why this test does not pass yet.**
+    //
+    // Carol has to reach bob at the end of this run, and today the only way
+    // she comes to hold his address is by already being in the gossip swarm
+    // when he announces himself. Established by hand, not by argument: with
     // bob started first, bob learns carol — she announces and he is
     // listening — and carol never learns bob, because his announcement was
-    // made before she arrived and nothing repeats it to a newcomer. The two
-    // mechanisms that should cover that gap are both recorded as open in the
-    // phase doc's carried-out table: a follower asks the core group for the
-    // directory once at startup and latches on whatever it gets, and nothing
-    // asks again when a member cannot be resolved. See delta P2-25 — this
-    // ordering is a way around a real limitation, not a property of the
-    // design, and it is written here so the next person does not shuffle
-    // these two lines and spend an afternoon on it.
+    // made before she arrived and nothing repeats it for a newcomer. It does
+    // not heal: sixty seconds of retries, no change. Both mechanisms that
+    // should cover it are recorded open in the phase doc's carried-out
+    // table — a follower asks the core group for the directory *once* at
+    // startup and latches on whatever came back, and nothing asks again when
+    // a member cannot be resolved. A restarted core node makes it worse
+    // still: its directory comes back empty, so the one ask returns nothing.
+    //
+    // In this order the whole run passes **by hand**. It does not pass here,
+    // because `members=3` says carol has fetched the log, not that she has
+    // joined the gossip topic — so bob can still announce into a swarm she
+    // has not reached. Waiting for the thing that actually matters needs
+    // something that can observe "carol holds an address for bob", and no
+    // command reports that.
+    //
+    // So the ordering is a way around a real limitation rather than a
+    // property of the design, and it is left visible instead of being tuned
+    // until it passes. See delta P2-25.
     let mut carol_node = carol.run(false);
     carol_node.wait_for("members=3");
     let mut bob_node = bob.run(false);
