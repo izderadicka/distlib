@@ -716,12 +716,18 @@ impl Api {
             .collect();
 
         let mut files = Vec::with_capacity(targets.len());
+        // Whether the one directory refresh below has already been spent.
+        let mut asked_where_everybody_is = false;
         for (hash, record, target) in targets {
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
             let already_here = self.blobs.has(hash).await.map_err(net_error)?;
             if !already_here {
+                if !asked_where_everybody_is {
+                    asked_where_everybody_is = true;
+                    self.find_the_providers(&providers).await;
+                }
                 self.blobs
                     .fetch(hash, providers.clone())
                     .await
@@ -744,6 +750,65 @@ impl Api {
             "title": stored.item.title,
             "files": files,
         }))
+    }
+
+    /// Asks a core node where the providers are, if any of them cannot be
+    /// placed — once per `library.download`, and only when something actually
+    /// has to be fetched.
+    ///
+    /// **The gap this closes, found by running §9's own acceptance.** A
+    /// follower asks the core group for the directory exactly once, at
+    /// startup, and latches on whatever came back. Two followers that start
+    /// close together lose that race in one direction: the one already in the
+    /// gossip swarm hears the other announce and learns it, while the one
+    /// that arrives later hears nothing, because an announcement is an event
+    /// and nothing repeats it for a newcomer. Nothing then asks again. So a
+    /// member who holds the only copy of a file is simply unreachable, for as
+    /// long as both nodes run — measured, not inferred: sixty seconds of
+    /// retries changed nothing, and the group was otherwise healthy. A
+    /// restarted core node makes it worse, since its directory comes back
+    /// empty and the one ask returns nothing at all.
+    ///
+    /// **Why here rather than deeper down.** The phase plan carried this out
+    /// of phase 2 saying what was missing was *a single point where "we had
+    /// no address for this member" is observable* — a dial failure surfaces
+    /// inside iroh, inside iroh-docs' downloader and at each protocol client,
+    /// and none of them agree on what the phrase means. This method is such a
+    /// point: it chose the provider list itself, it can ask the directory
+    /// which of them it cannot place, and it is about to fail in front of
+    /// somebody if it goes ahead regardless.
+    ///
+    /// **Best effort, and deliberately quiet about its own failure.** A core
+    /// node that is down or has nothing to say leaves the download exactly
+    /// where it would have been, and the *fetch's* error is the better one to
+    /// report — "could not fetch X from any of the offered providers" tells
+    /// somebody who asked for a file more than "could not ask about an
+    /// address" does. **Once per call, whatever happens**, so this cannot
+    /// become the thing the plan warned against: a node answering every
+    /// transient failure with an RPC.
+    ///
+    /// **What it cannot do**, said here because the acceptance run found it:
+    /// the directory lives on core nodes, so a group whose core is entirely
+    /// unreachable cannot learn anything new about where anybody is. A
+    /// follower holding a stale address for a peer, with no core node to ask,
+    /// stays stuck until one comes back. That is a bigger question than this
+    /// method — see delta P2-25.
+    async fn find_the_providers(&self, providers: &[MemberId]) -> bool {
+        let unplaced = providers
+            .iter()
+            .filter(|member| self.node.known_addresses().address_of(**member).is_none())
+            .count();
+        tracing::debug!(
+            unplaced,
+            of = providers.len(),
+            "a fetch failed; asking a core node where the providers are"
+        );
+
+        let answered = self.node.refresh_addresses().await;
+        if !answered {
+            tracing::debug!("no core node said where the providers are");
+        }
+        answered
     }
 
     /// Hashes and stores one local file for `library.add`, and describes it

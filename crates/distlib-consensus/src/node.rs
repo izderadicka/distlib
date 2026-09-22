@@ -592,6 +592,30 @@ impl MembershipNode {
         &self.known_addresses
     }
 
+    /// Asks a core node, once, where the group's members are — and answers
+    /// whether one replied.
+    ///
+    /// The other half of 2a-5, which built only the startup ask. The phase
+    /// plan carried the rest out of phase 2 with the reason it was left:
+    /// *"There is no single place that detects it"* — a dial failure surfaces
+    /// inside iroh, inside iroh-docs' downloader and at each protocol client
+    /// separately, and the three do not agree on what "cannot be resolved"
+    /// even means. So what was wanted first was *a single point where "we had
+    /// no address for this member" is observable*, and `library.download` is
+    /// one: it picks its own provider list, can see which of them
+    /// [`Self::known_addresses`] cannot place, and is about to fail visibly if
+    /// it goes ahead anyway.
+    ///
+    /// **A refresh, not a retry loop.** One ask of one core node, made by a
+    /// caller that has already decided it needs one — which is what keeps this
+    /// from becoming the thing that note warned against, a node answering
+    /// every transient failure with an RPC. The follow loop's own startup ask
+    /// is this same function; see `ask_for_the_directory` for why one answer
+    /// is enough.
+    pub async fn refresh_addresses(&self) -> bool {
+        follower::ask_for_the_directory(self.id, &self.memberlog, &self.sources).await
+    }
+
     pub fn is_core(&self) -> bool {
         self.seat.is_taken()
     }

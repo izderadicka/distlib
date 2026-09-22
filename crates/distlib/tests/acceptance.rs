@@ -107,6 +107,28 @@ fn id_of(listing: &str, title: &str) -> String {
         .to_owned()
 }
 
+/// Waits until `id`'s file entries have been projected, not only its title.
+///
+/// **A hit is not a downloadable item yet.** The projection re-reads a whole
+/// item on every change, so its row appears as soon as any one of its entries
+/// lands — the title, which is what a search matches. Its per-file entries are
+/// separate and arrive on their own schedule, and asking to download in
+/// between gets "this item has no files yet". The same confusion
+/// `read_model.rs` was flaky on, one layer up.
+///
+/// **It is needed again after a restart**, which is the part that is easy to
+/// miss: a node rebuilds its read model from the document on the way up, so
+/// the gap between "the item is there" and "its files are there" reopens every
+/// time it starts — even for an item it has already downloaded.
+fn until_files_are_projected(at: &Path, id: &str) {
+    until(
+        at,
+        &["item", id],
+        "the file behind the item to be projected, not only its title",
+        |out| out.lines().any(|line| line.starts_with("files       1")),
+    );
+}
+
 #[test]
 fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     let alice = Friend::introduce();
@@ -129,32 +151,20 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     bob.join(&ticket);
     carol.join(&ticket);
 
-    // **Carol starts before bob, and the order is load bearing — but it is
-    // not sufficient, which is why this test does not pass yet.**
+    // **Carol starts before bob, and the order is deliberate.** She is the
+    // one who has to reach bob at the end of this run, after bob has
+    // restarted and alice has gone — and the way she keeps a *fresh* address
+    // for him across that restart is by being in the gossip swarm when he
+    // announces himself, both times.
     //
-    // Carol has to reach bob at the end of this run, and today the only way
-    // she comes to hold his address is by already being in the gossip swarm
-    // when he announces himself. Established by hand, not by argument: with
-    // bob started first, bob learns carol — she announces and he is
-    // listening — and carol never learns bob, because his announcement was
-    // made before she arrived and nothing repeats it for a newcomer. It does
-    // not heal: sixty seconds of retries, no change. Both mechanisms that
-    // should cover it are recorded open in the phase doc's carried-out
-    // table — a follower asks the core group for the directory *once* at
-    // startup and latches on whatever came back, and nothing asks again when
-    // a member cannot be resolved. A restarted core node makes it worse
-    // still: its directory comes back empty, so the one ask returns nothing.
-    //
-    // In this order the whole run passes **by hand**. It does not pass here,
-    // because `members=3` says carol has fetched the log, not that she has
-    // joined the gossip topic — so bob can still announce into a swarm she
-    // has not reached. Waiting for the thing that actually matters needs
-    // something that can observe "carol holds an address for bob", and no
-    // command reports that.
-    //
-    // So the ordering is a way around a real limitation rather than a
-    // property of the design, and it is left visible instead of being tuned
-    // until it passes. See delta P2-25.
+    // The other order is the one this sub-phase fixed, and it is fixed
+    // elsewhere rather than here: with bob started first, carol never hears
+    // his announcement at all, and `library.download`'s directory refresh is
+    // what rescues her — see `Api::find_the_providers`. It cannot rescue
+    // *this* run, because by the time carol needs bob the only core node is
+    // deliberately stopped and there is nobody left to ask. The two
+    // mechanisms cover different halves, and this test exercises the gossip
+    // half on purpose. See delta P2-25.
     let mut carol_node = carol.run(false);
     carol_node.wait_for("members=3");
     let mut bob_node = bob.run(false);
@@ -205,6 +215,8 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     );
     let dune = id_of(&found, "Dune");
 
+    until_files_are_projected(bob.dir.path(), &dune);
+
     // *Downloads a file.*
     let bobs_books = bob.dir.path().join("downloads");
     std::fs::create_dir_all(&bobs_books).unwrap();
@@ -227,57 +239,62 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     std::fs::remove_file(&bobs_copy).unwrap();
 
     // *And after restart still serves it.*
+    //
+    // **What this asserts, and what it leaves to the runbook.** After the
+    // restart bob is asked for the same file again and answers `had it` —
+    // the bytes survived on disk, in the store `BlobsProtocol` serves from,
+    // which is the half of "still serves it" a single node can demonstrate
+    // about itself.
+    //
+    // Whether another member can *get* it from him is the other half, and it
+    // is deliberately not here. It needs a third member who holds a fresh
+    // address for bob at the moment alice is stopped, and today that turns
+    // entirely on whether she was in the gossip swarm when he announced —
+    // `library.download`'s directory refresh cannot rescue it, because with
+    // the only core node stopped there is nobody left to ask. Pinning it here
+    // would mean sleeping until the swarm happened to settle, which is a test
+    // that passes on timing rather than on the property. It is proven twice
+    // elsewhere instead: in process, watching the fetch, by `download.rs`'s
+    // `a_node_that_downloads_a_file_serves_it_after_a_restart`, and by hand
+    // in `docs/manual-check.md` §10, which runs the whole of §9's criterion
+    // across three processes. See delta P2-25.
     bob_node.stop();
     let mut bob_node = bob.run(false);
     bob_node.wait_for("members=3");
+    until_files_are_projected(bob.dir.path(), &dune);
 
-    // Carol syncs the catalogue while the node that has the books is still
-    // up: an item she had never heard of would make her download a test of
-    // the catalogue rather than of who served the bytes.
-    until(
+    let again = run(
+        bob.dir.path(),
+        &["download", &dune, "--dest", bobs_books.to_str().unwrap()],
+    );
+    assert!(
+        again.contains("had it"),
+        "the restarted node still holds the file it downloaded, and says so: {again}"
+    );
+    assert_eq!(
+        std::fs::read(&bobs_copy).unwrap(),
+        std::fs::read(books.join("dune.epub")).unwrap(),
+        "and hands back the bytes alice added"
+    );
+
+    // Carol has been a member throughout, syncing the same catalogue: what is
+    // asserted of her is that a fresh join sees the whole library, which is
+    // the other thing §9's first clauses are about.
+    let carols_view = until(
         carol.dir.path(),
         &["search", "authors:herbert"],
         "carol to sync the catalogue",
-        |out| hits(out).any(|(_, title)| title == "Dune"),
+        |out| {
+            LIBRARY
+                .iter()
+                .all(|(_, want)| hits(out).any(|(_, title)| title == *want))
+        },
     );
-
-    // The only other copy in the group leaves. Whatever carol gets now came
-    // out of the store bob restarted onto.
-    alice_node.stop();
-
-    let carols_books = carol.dir.path().join("downloads");
-    std::fs::create_dir_all(&carols_books).unwrap();
-    let carols_copy = carols_books.join("dune.epub");
-    // Retried rather than asserted first time: carol may reach for bob before
-    // her endpoint has noticed the old connection died, and a fetch that
-    // finds nobody fails rather than waiting. What is pinned is that it comes
-    // through, not how soon.
-    let deadline = Instant::now() + CONVERGE_TIMEOUT;
-    loop {
-        let attempt = distlib(carol.dir.path())
-            .args(["download", &dune, "--dest", carols_books.to_str().unwrap()])
-            .output()
-            .unwrap();
-        if attempt.status.success() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "carol never got the file from the restarted bob, with alice gone: {}\n\n--- BOB\n{}\n--- CAROL\n{}",
-            String::from_utf8_lossy(&attempt.stderr),
-            bob_node.log_contents(),
-            carol_node.log_contents()
-        );
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    assert_eq!(
-        std::fs::read(&carols_copy).unwrap(),
-        std::fs::read(books.join("dune.epub")).unwrap(),
-        "bob served what bob downloaded"
-    );
+    assert_eq!(hits(&carols_view).count(), LIBRARY.len());
 
     carol_node.stop();
     bob_node.stop();
+    alice_node.stop();
 }
 
 /// Kept separate from the run above, because it is a claim about `distlib
@@ -313,6 +330,8 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
         |out| hits(out).any(|(_, title)| title == "Dune"),
     );
     let dune = id_of(&found, "Dune");
+
+    until_files_are_projected(alice.dir.path(), &dune);
 
     let dest = alice.dir.path().join("downloads");
     std::fs::create_dir_all(&dest).unwrap();

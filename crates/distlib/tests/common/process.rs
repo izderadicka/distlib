@@ -27,6 +27,13 @@ use tempfile::TempDir;
 /// that a hang fails the suite rather than stalling it.
 pub const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a node gets to act on Ctrl-C before it is killed outright.
+///
+/// Generous, because what it is waiting for is the blob store's metadata
+/// reaching disk and a restart depends on that having happened; short enough
+/// that a node which ignores the signal does not hold the suite up.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// One friend's node: a data directory, a pinned port, and an identity.
 pub struct Friend {
     pub dir: TempDir,
@@ -369,22 +376,58 @@ impl Running {
         text
     }
 
-    /// Stops the node so its database can be opened by `members`.
+    /// Stops the node the way an operator does, and waits for it to be gone.
     ///
-    /// A kill rather than a signal: redb releases its lock when the process
-    /// dies, and everything committed is already durable, so what `members`
-    /// reads afterwards is exactly what replication delivered.
+    /// **Ctrl-C rather than a kill**, which the acceptance run made necessary
+    /// rather than tidy. The membership log survives either way — redb commits
+    /// per entry and releases its lock when the process dies — but the blob
+    /// store does not: its metadata is flushed when the router closes it on the
+    /// way out, and a killed node comes back with every downloaded blob's
+    /// *data* still on disk and no record that it holds any of them. A node
+    /// stopped that way re-fetches what it already has, which is the opposite
+    /// of what "after restart still serves it" is asking about.
+    ///
+    /// So the signal is the one `distlib run` listens for, and this waits for
+    /// the process to actually exit before returning — a restart that reopens
+    /// the same data directory needs the old process gone, not merely asked.
     pub fn stop(self) {
-        // The work is in `Drop`, so that a failing assertion above kills these
-        // too. Without that a panic leaves nodes running — holding ports and
-        // their databases — until somebody notices them in `ps` much later.
         drop(self);
+    }
+
+    /// Asks the node to stop, and says whether it did within the bound.
+    fn interrupt(&mut self) -> bool {
+        // Through `kill(1)` rather than a signalling crate: one command in one
+        // test harness is not worth a dependency, and every platform this runs
+        // its process tests on has it.
+        let _ = Command::new("kill")
+            .arg("-INT")
+            .arg(self.child.id().to_string())
+            .status();
+
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.exited().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // In `Drop` so that a failing assertion stops these too. Without that a
+        // panic leaves nodes running — holding ports and their databases —
+        // until somebody notices them in `ps` much later.
+        //
+        // The kill is the fallback for a node that ignored the interrupt, and
+        // the one that runs when a panic brings us here: there is nothing left
+        // to read out of a test that has already failed, so it is not worth
+        // waiting on.
+        if !self.interrupt() {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
