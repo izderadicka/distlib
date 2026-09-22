@@ -773,9 +773,13 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
   >   claim about the method rather than about the procedure: a node that downloads a file deletes
   >   its copy, restarts onto a fresh port, and still serves that file to a member who has nowhere
   >   else to get it. Four departures from §7.1's sketch, all in P2-24.
-  > - **2b-3b — the phase acceptance.** §9's criterion end to end through the commands, the harness
-  >   extraction it needs, and `manual-check.md`'s by-hand §10 (which the Verification section below
-  >   asks for and which is not in this bullet).
+  > - **2b-3b — the phase acceptance** *(done, delta P2-25)*. §9's criterion end to end through the
+  >   commands, the harness extraction it needs, and `manual-check.md`'s by-hand §10 (which the
+  >   Verification section below asks for and which is not in this bullet). Two things it took that
+  >   the bullet did not anticipate: a one-shot directory refresh when a fetch fails, because
+  >   offering the whole membership as providers only works if the ids resolve; and a *graceful*
+  >   restart, because a killed node loses the blob store's record of what it holds. Both in P2-25,
+  >   along with the one clause of the criterion that is left to §10 rather than automated.
   >
   > **"Register as a holder" is not a step**, which 2b-3a settled by building it: the fetch lands
   > the bytes in the store `BlobsProtocol` already serves from, so a node is a holder the moment the

@@ -1,6 +1,11 @@
-# Manual check: the phase 1 acceptance criteria, by hand
+# Manual check: the acceptance criteria, by hand
 
-§9's acceptance sentence, run through the CLI in five separate processes:
+Sections 1–6 are phase 1's acceptance sentence, run through the CLI in five separate
+processes. **[§10](#10-a-fresh-member-syncs-searches-downloads-and-still-serves--phase-2)
+is phase 2's**, and it stands on its own: three nodes, its own setup, nothing carried
+over from what is below.
+
+Phase 1's sentence:
 
 > 3-core-node cluster + 2 follower nodes; add a member → it can connect; expel it →
 > open connection drops, reconnect refused; kill one core node → group still admits
@@ -471,6 +476,194 @@ rm -rf $DL
 
 ---
 
+## 10. A fresh member syncs, searches, downloads — and still serves — (phase 2)
+
+> *Node A adds 3 ebooks; node B (fresh join) syncs the catalogue, searches by author,
+> downloads a file, and after restart still serves it.*
+
+`crates/distlib/tests/acceptance.rs` runs most of this on every commit, through the same
+commands. What it deliberately leaves here is the last clause taken literally: **another
+member fetching the file from B after B restarted and A is gone.** The automated run
+asserts only that B still holds the bytes, because making a third member reliably hold a
+*fresh* address for B at that moment means waiting on the gossip swarm, and a test that
+passes on timing is not testing the property. By hand you can watch it instead.
+
+Independent of §§1–6 — stop everything and start clean:
+
+```sh
+pgrep -af distlib       # must be empty
+rm -rf $DL
+```
+
+### Setup
+
+Three nodes. **Alice is the only core member**, which is what makes the last step mean
+something: stopping her is the group losing the only node that can answer anything, so
+bytes that reach carol afterwards came from bob.
+
+```sh
+for n in a b c; do dl -d $DL/$n init; done
+for n in a b c; do
+  eval "$(echo $n | tr a-c A-C)=$(dl -d $DL/$n whoami | awk '/^identity/{print $2}')"
+done
+
+i=4
+for n in a b c; do
+  case $n in a) core="core = [ { member = \"$A\", name = \"alice\", addrs = [\"127.0.0.1:11204\"] } ]" ;;
+             *) core="core = []" ;; esac
+  cat > $DL/$n/config.toml <<EOF
+[net]
+bind_addr_v4 = "127.0.0.1:1120$i"
+relay_mode = "disabled"
+relay_urls = []
+
+[consensus]
+$core
+
+[api]
+enabled = true
+bind_addr = "127.0.0.1:1128$((i-4))"
+EOF
+  i=$((i+1))
+done
+```
+
+### Found, admit, join
+
+Terminal a:
+
+```sh
+dl -d $DL/a -v run --found-group      # wait for members=1
+```
+
+Terminal 0:
+
+```sh
+dl -d $DL/a admit $B --name bob
+dl -d $DL/a admit $C --name carol
+TICKET=$(dl -d $DL/a ticket | head -1)
+dl -d $DL/b join $TICKET
+dl -d $DL/c join $TICKET
+```
+
+**Start carol before bob, and the order matters.** She is the one who has to reach bob at
+the end, after alice has stopped, and the way she gets a usable address for him is by
+being in the gossip swarm when he announces himself — which he does at startup, and only
+then. Started the other way round she never hears it, and `library.download`'s directory
+refresh cannot rescue her either: it asks a core node, and by that point the only core
+node is deliberately off. Started in this order she hears both of his announcements, the
+first one and the one after his restart.
+
+Terminal c, then terminal b:
+
+```sh
+dl -d $DL/c -v run                    # wait for members=3
+dl -d $DL/b -v run                    # wait for members=3
+```
+
+### Alice adds three ebooks
+
+**Make them bigger than about 16 KiB.** Below that the blob store keeps the bytes inline
+in its own database rather than as a file, and the next two steps stop being about the
+thing they are named for — a real book is well over it, and a three-line test file is
+not.
+
+```sh
+mkdir -p $DL/books
+for t in "Dune:dune" "Dune Messiah:dune-messiah" "Children of Dune:children-of-dune"; do
+  title=${t%%:*}; file=${t##*:}
+  yes "$title, in full" | head -20000 > $DL/books/$file.epub
+  dl -d $DL/a add $DL/books/$file.epub --kind ebook --title "$title" --author "Frank Herbert"
+done
+```
+
+### Bob syncs and searches by author
+
+By author, not by title. The projection re-reads a whole item whenever any part of it
+arrives, so its row shows up as soon as the *first* field lands — a title search can
+match an item whose author has not been indexed yet, and match nothing about
+replication. Repeat until all three are listed:
+
+```sh
+dl -d $DL/b search authors:herbert
+# Split on the two spaces the listing uses, not on whitespace: split on
+# whitespace, `$2` is "Dune" for *Dune Messiah* as well and this picks two items.
+DUNE=$(dl -d $DL/b search authors:herbert | awk -F'  +' '$2=="Dune"{print $1}')
+```
+
+Then wait for the item's *file* to be projected, which is separate again and arrives on
+its own schedule. `files       1`, not `files       0`:
+
+```sh
+dl -d $DL/b item $DUNE
+```
+
+Asking to download in between is the one confusing failure in this run: `this item has
+no files yet`, about an item the search just listed.
+
+### Bob downloads it
+
+```sh
+mkdir -p $DL/b-books
+dl -d $DL/b download $DUNE --dest $DL/b-books      # expect: fetched
+cmp $DL/b-books/dune.epub $DL/books/dune.epub
+```
+
+Then bob reads it and tidies up, which is load-bearing: with the exported file still
+lying there, bob would appear to go on serving the blob even if the export had *moved*
+it out of his store rather than copied it.
+
+```sh
+rm $DL/b-books/dune.epub
+```
+
+### Bob restarts
+
+**Ctrl-C, not `kill -9`.** The membership log survives either, but the blob store writes
+its metadata when the node closes it on the way out — a killed node comes back with the
+downloaded blob's bytes still on disk and no record that it holds them, and re-fetches
+what it already has. See P2-25.
+
+In terminal b: Ctrl-C, wait for `shutting down` and the prompt, then:
+
+```sh
+dl -d $DL/b -v run                    # wait for members=3
+dl -d $DL/b item $DUNE                # wait for files       1 again: the read model
+                                      # is rebuilt on the way up, so the gap between
+                                      # "item is here" and "its files are here" reopens
+dl -d $DL/b download $DUNE --dest $DL/b-books     # expect: had it
+```
+
+`had it` rather than `fetched` is the whole of this step: bob answered out of his own
+store, having restarted.
+
+### Alice leaves, and carol fetches from bob
+
+Ctrl-C terminal a. Then:
+
+```sh
+rm $DL/b-books/dune.epub
+mkdir -p $DL/c-books
+dl -d $DL/c download $DUNE --dest $DL/c-books     # expect: fetched
+cmp $DL/c-books/dune.epub $DL/books/dune.epub
+```
+
+**Pass**: `fetched`, and `cmp` is silent. The only node left holding those bytes is bob,
+restarted, so that is where they came from — §9's sentence, all of it.
+
+**If it hangs instead**, carol has no working address for bob. With alice stopped there
+is nothing to fix it with, and the log says so: `no core node said where the providers
+are`. Start over and check that carol was running before bob.
+
+### After
+
+```sh
+pgrep -af distlib
+rm -rf $DL
+```
+
+---
+
 ## Watch for, beyond pass/fail
 
 - Does any error leave you without a next step?
@@ -486,3 +679,7 @@ rm -rf $DL
   it?
 - Is there anything that tells you a core node is unreachable *before* you notice it
   has stopped keeping up?
+- Does `download` say enough about *where* the bytes came from, or only that they came?
+- Is "this item has no files yet" readable as "wait a moment", or as "something is
+  broken"?
+- Is there anything that tells you a fetch is in progress on a large file?

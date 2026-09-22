@@ -421,11 +421,11 @@ impl Drop for Running {
         // panic leaves nodes running — holding ports and their databases —
         // until somebody notices them in `ps` much later.
         //
-        // The kill is the fallback for a node that ignored the interrupt, and
-        // the one that runs when a panic brings us here: there is nothing left
-        // to read out of a test that has already failed, so it is not worth
-        // waiting on.
-        if !self.interrupt() {
+        // A test that has already failed has nothing left to read out of these
+        // nodes, so it does not pay the shutdown wait — three of them would be
+        // half a minute added to every panic. Otherwise the kill is only the
+        // fallback for a node that ignored the interrupt.
+        if std::thread::panicking() || !self.interrupt() {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();

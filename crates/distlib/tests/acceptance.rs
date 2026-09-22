@@ -125,7 +125,7 @@ fn until_files_are_projected(at: &Path, id: &str) {
         at,
         &["item", id],
         "the file behind the item to be projected, not only its title",
-        |out| out.lines().any(|line| line.starts_with("files       1")),
+        |out| out.lines().any(|line| line.trim_end() == "files       1"),
     );
 }
 
@@ -245,6 +245,13 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // the bytes survived on disk, in the store `BlobsProtocol` serves from,
     // which is the half of "still serves it" a single node can demonstrate
     // about itself.
+    //
+    // **An orderly restart**, and the word is load-bearing rather than
+    // decorative. The blob store's metadata reaches disk when the router
+    // closes it, so a node that is killed comes back holding a downloaded
+    // blob's bytes with no record that it holds them, and `had it` becomes
+    // `fetched`. That is what `Running::stop` sending Ctrl-C is for, and it
+    // is a real property of the system rather than a test detail — P2-25.
     //
     // Whether another member can *get* it from him is the other half, and it
     // is deliberately not here. It needs a third member who holds a fresh
