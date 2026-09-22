@@ -619,10 +619,12 @@ rm $DL/b-books/dune.epub
 
 ### Bob restarts
 
-**Ctrl-C, not `kill -9`.** The membership log survives either, but the blob store writes
-its metadata when the node closes it on the way out — a killed node comes back with the
-downloaded blob's bytes still on disk and no record that it holds them, and re-fetches
-what it already has. See P2-25.
+**Ctrl-C or `systemctl stop`, not `kill -9`.** The membership log survives any of them,
+but the blob store writes its metadata when the node closes it on the way out — a node
+that never got to shut down comes back with the downloaded blob's bytes still on disk
+and no record that it holds them, and re-fetches what it already has. `SIGINT` and
+`SIGTERM` are both answered, so a supervisor's ordinary stop is fine; `kill -9` is not,
+and nothing can make it so. See P2-25.
 
 In terminal b: Ctrl-C, wait for `shutting down` and the prompt, then:
 

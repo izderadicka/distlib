@@ -195,7 +195,16 @@ fn a_core_node_that_moves_is_told_to_the_group_and_comes_back() {
     // different port, and the other two are still looking for it on the old
     // one — which under `relay_mode = "disabled"` is the whole of the problem:
     // there is no lookup to fall back on.
-    third.stop();
+    //
+    // **Crashed rather than stopped, and that is the scenario rather than a
+    // shortcut.** A machine that is renumbered does not first close its
+    // connections and tell its peers it is going. If it did, they would drop
+    // the path they hold for it and adopt the new one the moment it dialled
+    // them again — which the catalogue's own document sync does within
+    // milliseconds of startup, healing the address change without anybody
+    // running the command this test is named for. Measured at roughly one run
+    // in five; see P2-25.
+    third.crash();
     let moved_port = a_free_port(Protocol::Udp);
     friends[2].move_to(&everyone, moved_port);
     let mut third = friends[2].run(false);
@@ -323,4 +332,48 @@ fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
     for node in [first, second, third, joined] {
         node.stop();
     }
+}
+
+#[test]
+fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
+    // A node run by hand is stopped with Ctrl-C, and that was the only signal
+    // `run` listened for. A node run by systemd, Docker or any other
+    // supervisor is stopped with SIGTERM, which without a handler kills the
+    // process where it stands — and what that costs here is specific rather
+    // than general untidiness: the blob store writes its metadata when the
+    // router closes it, so a node that never shut down comes back holding
+    // every *downloaded* blob's bytes with no record that it holds them, and
+    // fetches the lot again. (Imported blobs survive it; the asymmetry is
+    // measured in P2-25.)
+    //
+    // A group of one is enough. What is in question is whether the signal is
+    // answered rather than fatal — what the shutdown then does is the same
+    // thing Ctrl-C has always run, and there is no second path to check.
+    let friend = Friend::introduce();
+    friend.agree_on(&[(friend.id.clone(), friend.port)]);
+    let mut node = friend.run(true);
+    node.wait_for("members=1");
+
+    node.signal("TERM");
+    let status = node
+        .wait_until_gone()
+        .expect("a node asked to stop should stop");
+
+    // Both halves are needed, and the first one alone would be a test that
+    // passes on the behaviour it is meant to close: an unhandled SIGTERM also
+    // makes the process go away, rather faster. `success()` is what separates
+    // running the shutdown from being killed by the signal.
+    let log = node.log_contents();
+    assert!(
+        status.success(),
+        "a node killed by the signal rather than answering it exits {status}; its log was:\n{log}"
+    );
+    assert!(
+        log.contains("SIGTERM"),
+        "the log should say which signal stopped it; got:\n{log}"
+    );
+    assert!(
+        log.contains("shutting down"),
+        "the node should reach its own shutdown; got:\n{log}"
+    );
 }

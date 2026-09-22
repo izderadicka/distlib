@@ -27,7 +27,7 @@ use tempfile::TempDir;
 /// that a hang fails the suite rather than stalling it.
 pub const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a node gets to act on Ctrl-C before it is killed outright.
+/// How long a node gets to act on a stop signal before it is killed outright.
 ///
 /// Generous, because what it is waiting for is the blob store's metadata
 /// reaching disk and a restart depends on that having happened; short enough
@@ -394,24 +394,56 @@ impl Running {
         drop(self);
     }
 
-    /// Asks the node to stop, and says whether it did within the bound.
-    fn interrupt(&mut self) -> bool {
-        // Through `kill(1)` rather than a signalling crate: one command in one
-        // test harness is not worth a dependency, and every platform this runs
-        // its process tests on has it.
+    /// Sends `signal` — `"INT"`, `"TERM"` — to this node.
+    ///
+    /// Through `kill(1)` rather than a signalling crate: one command in one
+    /// test harness is not worth a dependency, and every platform this runs its
+    /// process tests on has it.
+    pub fn signal(&mut self, signal: &str) {
         let _ = Command::new("kill")
-            .arg("-INT")
+            .arg(format!("-{signal}"))
             .arg(self.child.id().to_string())
             .status();
+    }
 
+    /// Waits for the node to exit of its own accord, within the bound.
+    pub fn wait_until_gone(&mut self) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         while Instant::now() < deadline {
-            if self.exited().is_some() {
-                return true;
+            if let Some(status) = self.exited() {
+                return Some(status);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        false
+        None
+    }
+
+    /// Stops the node the way a machine that vanished does: no signal, no
+    /// shutdown, no goodbye to its peers.
+    ///
+    /// For the tests whose scenario *is* an abrupt disappearance — a renumbered
+    /// machine, a pulled cable — where [`Self::stop`] would be modelling the
+    /// wrong thing. It matters more than it looks: a node that closes cleanly
+    /// tells its peers so, and they then adopt the new address it dials them
+    /// from when it comes back, which is the group healing an address change by
+    /// itself. A machine that was renumbered did no such thing.
+    ///
+    /// Not the default, and not interchangeable with [`Self::stop`]: an abrupt
+    /// stop loses the blob store's record of what this node fetched (P2-25).
+    pub fn crash(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Asks the node to stop, and says whether it did within the bound.
+    fn interrupt(&mut self) -> bool {
+        // A node that has already gone is not signalled: its pid is free to
+        // have been handed to something else by now.
+        if self.exited().is_some() {
+            return true;
+        }
+        self.signal("INT");
+        self.wait_until_gone().is_some()
     }
 }
 

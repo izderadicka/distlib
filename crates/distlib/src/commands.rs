@@ -86,6 +86,14 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         "starting"
     );
 
+    // Installed before anything is started, and that is the point rather than
+    // tidiness: until a handler exists the default disposition for `SIGTERM` is
+    // to die on the spot, so a supervisor that stops this node while it is
+    // still coming up would get exactly the abrupt exit this type exists to
+    // avoid. Installed here, the signal is remembered and acted on as soon as
+    // there is something to shut down.
+    let mut stop = StopSignals::install()?;
+
     let config = load_config(&paths.config_file)?;
     // Refuses an empty data directory rather than minting an identity in it —
     // see `load_secret_key`. `init` and `whoami` are how a node comes to have
@@ -156,8 +164,11 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     // there is nothing left for it to do but say so and go — carrying on would
     // mean asking nodes that will not answer, roughly once a second, forever.
     let expelled = tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            result.context("could not listen for ctrl-c")?;
+        signal = stop.requested() => {
+            // Which one, because "why did the node stop" is the first question
+            // asked of a log that ends, and the two answers mean different
+            // things: a person was at the keyboard, or a supervisor was not.
+            tracing::info!(signal, "stop requested");
             false
         }
         () = node.expelled() => true,
@@ -177,6 +188,70 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The ways an operator asks this node to stop.
+///
+/// **Both signals, not only Ctrl-C.** A node run by hand is stopped with
+/// Ctrl-C; a node run by systemd, Docker or any other supervisor is stopped
+/// with `SIGTERM`, and until something handles it that kills the process
+/// outright. What an abrupt exit costs here is specific and larger than it
+/// looks: the membership log survives it — redb commits per entry — but the
+/// blob store writes its metadata when the router closes it, so a node that
+/// never got to shut down comes back holding every downloaded blob's bytes
+/// with no record that it holds any of them, and fetches the lot again. See
+/// P2-25.
+///
+/// Held as a value rather than awaited where it is needed, because a handler
+/// only catches what arrives after it is installed — see [`Self::install`]'s
+/// caller.
+#[cfg(unix)]
+struct StopSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl StopSignals {
+    fn install() -> Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt()).context("could not listen for SIGINT")?,
+            terminate: signal(SignalKind::terminate()).context("could not listen for SIGTERM")?,
+        })
+    }
+
+    /// Resolves with the name of whichever signal arrived first.
+    async fn requested(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.interrupt.recv() => "SIGINT",
+            _ = self.terminate.recv() => "SIGTERM",
+        }
+    }
+}
+
+/// The same, where there are no unix signals and Ctrl-C is what there is.
+#[cfg(not(unix))]
+struct StopSignals;
+
+#[cfg(not(unix))]
+impl StopSignals {
+    fn install() -> Result<Self> {
+        Ok(Self)
+    }
+
+    async fn requested(&mut self) -> &'static str {
+        // The error case is a platform that cannot report Ctrl-C at all, where
+        // there is nothing better to do than go on running: a node that exited
+        // because it could not install a handler would be stopping for the one
+        // reason nobody asked it to.
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "could not listen for ctrl-c");
+            std::future::pending::<()>().await;
+        }
+        "ctrl-c"
+    }
 }
 
 /// `distlib whoami`
