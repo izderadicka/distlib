@@ -716,16 +716,25 @@ impl Api {
             .collect();
 
         let mut files = Vec::with_capacity(targets.len());
-        // Whether the one directory refresh has already been spent.
-        let mut asked_where_everybody_is = false;
+        let mut refresh = OneRefresh::of(self, &providers);
         for (hash, record, target) in targets {
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
             let already_here = self.blobs.has(hash).await.map_err(net_error)?;
-            if !already_here {
-                self.fetch(hash, &providers, &mut asked_where_everybody_is)
-                    .await?;
+            if !already_here && let Err(failure) = self.blobs.fetch(hash, providers.clone()).await {
+                // A fetch that failed is the first evidence that this node's
+                // idea of where everybody is might be out of date, so it is
+                // worth one question and one more attempt. The second error
+                // is the one that surfaces: it is the more recent account of
+                // the same thing, and the refresh happened in between.
+                if !refresh.spend().await {
+                    return Err(net_error(failure));
+                }
+                self.blobs
+                    .fetch(hash, providers.clone())
+                    .await
+                    .map_err(net_error)?;
             }
             self.blobs.export(hash, &target).await.map_err(net_error)?;
             files.push(json!({
@@ -746,41 +755,10 @@ impl Api {
         }))
     }
 
-    /// Fetches one blob from `providers`, and on failure asks a core node
-    /// where they are and tries once more.
+    /// Asks a core node where the providers are.
     ///
-    /// `asked` is the one refresh this call is allowed, spent across the whole
-    /// download rather than per file — see [`Self::find_the_providers`] for
-    /// what that buys and why the retry is worth a second attempt at all.
-    ///
-    /// The retry's own error is what surfaces if it fails too: it is the more
-    /// recent account of the same thing, and having refreshed in between, the
-    /// more informative one.
-    async fn fetch(
-        &self,
-        hash: ContentHash,
-        providers: &[MemberId],
-        asked: &mut bool,
-    ) -> Result<(), Error> {
-        let failure = match self.blobs.fetch(hash, providers.to_vec()).await {
-            Ok(()) => return Ok(()),
-            Err(failure) => failure,
-        };
-        if *asked {
-            return Err(net_error(failure));
-        }
-        *asked = true;
-        if !self.find_the_providers(providers).await {
-            return Err(net_error(failure));
-        }
-        self.blobs
-            .fetch(hash, providers.to_vec())
-            .await
-            .map_err(net_error)
-    }
-
-    /// Asks a core node where the providers are — once per `library.download`,
-    /// and only after a fetch has already failed.
+    /// Called by [`OneRefresh`], which is what holds it to once per
+    /// `library.download` and to only after a fetch has already failed.
     ///
     /// **The gap this closes, found by running §9's own acceptance.** A
     /// follower asks the core group for the directory exactly once, at
@@ -827,10 +805,7 @@ impl Api {
     /// where it would have been, and the *fetch's* error is the better one to
     /// report — "could not fetch X from any of the offered providers" tells
     /// somebody who asked for a file more than "could not ask about an
-    /// address" does. **Once per call, whatever happens**, so this cannot
-    /// become the thing the plan warned against: a node answering every
-    /// transient failure with an RPC — and because a refresh that did not help
-    /// the first file will not help the fifth either.
+    /// address" does.
     ///
     /// **What it cannot do**, said here because the acceptance run found it:
     /// the directory lives on core nodes, so a group whose core is entirely
@@ -990,6 +965,44 @@ fn query_error(error: StoreError) -> Error {
     match error {
         StoreError::Query { .. } => Error::invalid_params(error.to_string()),
         other => Error::failed(other.to_string()),
+    }
+}
+
+/// The single directory refresh a `library.download` is allowed, and whether
+/// it has been used.
+///
+/// Exists so that "once per call" is a property of a thing with a name rather
+/// than a flag passed around and checked. A download offers every member as a
+/// provider, so a fetch that fails is the first evidence that this node's idea
+/// of where anybody is may be out of date — worth one question to a core node,
+/// and worth it for whichever file fails first rather than only for the first
+/// file, which is why the state outlives any one fetch.
+struct OneRefresh<'a> {
+    api: &'a Api,
+    providers: &'a [MemberId],
+    spent: bool,
+}
+
+impl<'a> OneRefresh<'a> {
+    fn of(api: &'a Api, providers: &'a [MemberId]) -> Self {
+        Self {
+            api,
+            providers,
+            spent: false,
+        }
+    }
+
+    /// Spends the refresh, and answers whether the fetch that just failed is
+    /// worth trying again.
+    ///
+    /// `false` once it has been spent, whatever the answer was that time: the
+    /// directory is then as fresh as this node can make it, so a fetch failing
+    /// afterwards is failing for a reason no amount of asking will move. That
+    /// is also what keeps this from becoming the thing the phase plan warned
+    /// against — a node answering every transient failure with an RPC.
+    async fn spend(&mut self) -> bool {
+        !std::mem::replace(&mut self.spent, true)
+            && self.api.find_the_providers(self.providers).await
     }
 }
 
