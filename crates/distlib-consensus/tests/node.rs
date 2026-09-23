@@ -660,6 +660,9 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
     founder.shutdown().await;
 }
 
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
 /// MEM-04: a core node the log demotes gives up its seat and starts following.
 ///
 /// Before this it kept the Raft, went on answering `distlib/raft/0` to anyone
@@ -1366,6 +1369,9 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
     founder.shutdown().await;
 }
 
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
 #[tokio::test]
 async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
     // What gossip buys. The follow loop's idle timer is 30 seconds — long on

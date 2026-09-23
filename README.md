@@ -330,7 +330,7 @@ there are two lanes, both defined in `.cargo/config.toml`:
 
 | | | |
 |---|---|---|
-| `cargo test-fast` | ~30s | everything except the slow four |
+| `cargo test-fast` | ~7s | everything except the slow tests |
 | `cargo test-all` | ~2min | all of it — what CI runs |
 
 Measured warm on a 12-core machine at the end of phase 2, and they move with it:
@@ -339,10 +339,9 @@ test binaries concurrently rather than one after another, which is most of the
 difference from `cargo test`. The fast lane is for the edit-compile-test loop;
 run the full one before pushing, since that is what CI will do.
 
-The fast lane is not as fast as its name, and that is a known thing rather than
-a measurement gone stale: multi-node tests that belong in the slow lane are not
-gated into it. Which ones, and what each costs, is written down in the phase-2
-plan's carried-forward list.
+A test that waits out a real timer belongs in the slow lane whatever else it is,
+and the ones that did not say so have been moved there — CI still runs every
+one of them, and only the edit-compile-test loop skips them.
 
 `.config/nextest.toml` caps it at four tests at a time. Most of these tests are
 clusters of nodes waiting on real timers rather than CPU work, and a dozen at

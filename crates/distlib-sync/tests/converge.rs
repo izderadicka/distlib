@@ -359,6 +359,9 @@ async fn a_broken_store_is_not_reported_as_content_on_its_way() {
     node.shutdown().await;
 }
 
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
 /// A node that keeps its entries and loses their content asks for it again.
 ///
 /// **This is the state iroh-docs has no way out of, staged so that it is
@@ -483,6 +486,9 @@ fn the_catalogue_key_derivation_is_fixed() {
     );
 }
 
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
 /// A member joining is what makes this node ask again for content nobody had.
 ///
 /// The sweep asks about a hash **once per generation** — otherwise a node

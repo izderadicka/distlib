@@ -139,11 +139,11 @@ proptest = "=1.11.0"
 
 # --- internal --------------------------------------------------------------
 distlib-core = { path = "crates/distlib-core" }
-distlib-net = { path = "crates/distlib-net" }
 # `default-features = false` keeps `slow-tests` off this edge. The feature
 # gates that crate's own test binaries and nothing else, so a dependency
 # asking for defaults would unify it back on and `--no-default-features`
 # would silently do nothing.
+distlib-net = { path = "crates/distlib-net", default-features = false }
 distlib-consensus = { path = "crates/distlib-consensus", default-features = false }
 distlib-api = { path = "crates/distlib-api", default-features = false }
 distlib-sync = { path = "crates/distlib-sync", default-features = false }

@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["slow-tests"]
+slow-tests = []
+
 [dependencies]
 distlib-core = { workspace = true }
 iroh = { workspace = true }

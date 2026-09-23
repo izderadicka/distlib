@@ -118,6 +118,9 @@ async fn can_reach(from: &Endpoint, id: EndpointId, port: u16) -> bool {
         .is_ok_and(|connection| connection.is_some())
 }
 
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
 #[tokio::test]
 async fn a_peer_that_moved_is_out_of_reach_until_the_old_connection_is_let_go() {
     let mover_key = SecretKey::generate();

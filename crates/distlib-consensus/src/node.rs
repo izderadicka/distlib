@@ -177,6 +177,32 @@ fn stop(task: &RoleTask) {
 }
 
 /// Hands a role's task over to be held for the life of the node.
+/// A core node asks another core node where the group is, once, at startup.
+///
+/// **The half of 2a-5 that was missing** (carried item C4). A follower asks for
+/// the directory in its follow loop; a core node runs `core_group::enact`
+/// instead and never that loop, so a core node that restarted came back with an
+/// empty directory and answered `Request::Directory` with an empty list — for
+/// as long as it ran, because announcements are events and a settled group
+/// makes none. The other core nodes still answered, so this was a degradation
+/// rather than a break, which is why it was recorded rather than rushed.
+///
+/// **At startup and nowhere else**, which is the decision the item was waiting
+/// on. The alternative on the table — also ask when this node notices it is
+/// answering with fewer addresses than the group has members — is a second
+/// trigger wanting a rule about how often, and it treats a symptom this one
+/// removes at the source. A core node that has just started is the only core
+/// node whose directory is empty for a reason nothing else will fix.
+///
+/// Best effort and quiet about failing, like every other use of this ask: a
+/// group of one core node has nobody to ask and says so at `debug`, and a node
+/// whose peers are all down is no worse off than before it tried.
+async fn ask_once_for_the_directory(me: MemberId, client: MemberlogClient, sources: SharedSources) {
+    if !follower::ask_for_the_directory(me, &client, &sources).await {
+        tracing::debug!("no other core node said where the group is");
+    }
+}
+
 fn start(task: &RoleTask, handle: JoinHandle<()>) {
     *task.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
 }
@@ -480,9 +506,17 @@ impl MembershipNode {
                 tokio::spawn(follower::follow(role.following(), listens)),
             );
         } else if let Some(raft) = seat.raft() {
+            let asking = ask_once_for_the_directory(id, memberlog.clone(), Arc::clone(&sources));
+            let enacting = core_group::enact(raft, state_machine.clone());
             start(
                 &core_group,
-                tokio::spawn(core_group::enact(raft, state_machine.clone())),
+                // Joined rather than spawned beside it, so the one-shot ask
+                // lives and dies with the task that is already tracked here.
+                // `enact` never returns, so the join's only effect is to hold
+                // both under one handle.
+                tokio::spawn(async move {
+                    tokio::join!(enacting, asking);
+                }),
             );
         }
         let role = tokio::spawn(serve_role(role));

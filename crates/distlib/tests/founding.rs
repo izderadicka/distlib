@@ -377,3 +377,93 @@ fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
         "the node should reach its own shutdown; got:\n{log}"
     );
 }
+
+#[test]
+fn a_restarted_core_node_asks_the_others_where_everybody_is() {
+    // Carried item C4, and the half of 2a-5 that was missing. A follower asks
+    // for the directory in its follow loop; a core node runs the enactment
+    // loop instead and never that one, so a core node that restarted came back
+    // with an empty directory and answered for the group with an empty list —
+    // for as long as it ran, because an announcement is an event and a settled
+    // group makes none.
+    //
+    // **Driven through the processes rather than in the library**, because the
+    // restart is the whole of the scenario: what is being checked is what a
+    // node does on the way up, and an in-process node that never went down
+    // cannot be asked to do it.
+    let friends: Vec<Friend> = (0..3).map(|_| Friend::introduce()).collect();
+    let everyone: Vec<(String, u16)> = friends
+        .iter()
+        .map(|friend| (friend.id.clone(), friend.port))
+        .collect();
+    for friend in &friends {
+        friend.agree_on(&everyone);
+    }
+
+    // Both of the nodes that might be asked run at `debug`, because the test
+    // has to see that each of them heard the announcement before it takes the
+    // one away — `candidates` decides which of the two the restarted node
+    // asks, and this test does not get to choose.
+    let mut second = friends[1].run_verbosely(false);
+    let mut third = friends[2].run(false);
+    let mut first = friends[0].run_verbosely(true);
+    wait_for_all(
+        &mut [&mut first, &mut second, &mut third],
+        "members=3 core=3",
+    );
+
+    // **A follower has to exist for any of this to mean anything**, which the
+    // first draft of this test got wrong and the run said so plainly: with
+    // three core nodes and nobody else, every directory in the group is empty,
+    // because a directory is filled by announcements and only a follower makes
+    // them. The restarted node asked, was told nothing, and was right to be.
+    // So somebody joins and announces, and *both* of the nodes that could be
+    // asked are watched until they have heard them.
+    let newcomer = Friend::introduce();
+    friends[0].admit(&newcomer.id);
+    newcomer.join(&friends[1].ticket());
+    let mut joined = newcomer.run(false);
+    joined.wait_for("members=4");
+    first.wait_for("learned where a member is");
+    second.wait_for("learned where a member is");
+
+    // Crashed rather than stopped, which is the case this is about: a node that
+    // shut down cleanly and one that fell over both come back with an empty
+    // directory, and the abrupt one is the version nobody arranged.
+    third.crash();
+    // At `debug`, because the ask says what it learned there — see
+    // `Friend::run_verbosely`.
+    let mut third = friends[2].run_verbosely(false);
+    // Four, not three: the newcomer above joined while this node was down, so
+    // `members=3` is the line it prints on the way past rather than the one it
+    // settles on.
+    third.wait_for("members=4 core=3");
+    // **Waited for, not read once.** The ask runs alongside the enactment loop
+    // rather than before it, so a node can be caught up on the membership
+    // while the ask is still in flight — which is a race this test lost on CI
+    // and won on the machine it was written on. The membership line says
+    // nothing about the ask having finished; only the ask does.
+    third.wait_for("a core node said where the group is");
+
+    // What it learned, from whom, said by the ask itself. The count is the
+    // assertion rather than the line: a core node that asked and was told
+    // nothing logs the same sentence with `learned=0`, and that is the state
+    // this closes rather than the one it reaches.
+    let learned = third
+        .log_contents()
+        .lines()
+        .filter_map(|line| line.split("learned=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter_map(|count| count.parse::<usize>().ok())
+        .max();
+    assert!(
+        matches!(learned, Some(count) if count > 0),
+        "a restarted core node should ask another for the directory and be told something; \
+         the most it learned was {learned:?} and its log was:\n{}",
+        third.log_contents()
+    );
+
+    for node in [first, second, third, joined] {
+        node.stop();
+    }
+}
