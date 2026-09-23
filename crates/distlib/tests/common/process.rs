@@ -121,8 +121,24 @@ impl Friend {
 
     /// Starts the node, optionally founding the group.
     pub fn run(&self, found: bool) -> Running {
+        self.spawn(found, false)
+    }
+
+    /// The same, at `debug`, for a test whose subject only says so there.
+    ///
+    /// Not the default: the extra lines are per-connection and make
+    /// `log_contents` a poor thing to search for a phrase that also appears
+    /// inside them.
+    pub fn run_verbosely(&self, found: bool) -> Running {
+        self.spawn(found, true)
+    }
+
+    fn spawn(&self, found: bool, verbose: bool) -> Running {
         let log = self.dir.path().join("node.log");
         let mut command = distlib(self.dir.path());
+        if verbose {
+            command.arg("-v");
+        }
         command.arg("run");
         if found {
             command.arg("--found-group");
