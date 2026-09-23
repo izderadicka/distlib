@@ -157,14 +157,15 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // for him across that restart is by being in the gossip swarm when he
     // announces himself, both times.
     //
-    // The other order is the one this sub-phase fixed, and it is fixed
-    // elsewhere rather than here: with bob started first, carol never hears
-    // his announcement at all, and `library.download`'s directory refresh is
-    // what rescues her — see `Api::find_the_providers`. It cannot rescue
-    // *this* run, because by the time carol needs bob the only core node is
-    // deliberately stopped and there is nobody left to ask. The two
-    // mechanisms cover different halves, and this test exercises the gossip
-    // half on purpose. See delta P2-25.
+    // The other order is not simply broken — started after bob, carol would
+    // get his address from the core node's directory when she asks for it at
+    // startup, which by hand she does. What this order avoids is needing that
+    // to have worked: by the time carol reaches bob here the only core node
+    // is deliberately stopped, so nothing can be asked about anybody, and
+    // `library.download`'s refresh cannot rescue it either — see
+    // `Api::find_the_providers`. Gossip is the only mechanism left standing at
+    // that point, and this order is what puts her in the swarm for it. See
+    // delta P2-25.
     let mut carol_node = carol.run(false);
     carol_node.wait_for("members=3");
     let mut bob_node = bob.run(false);

@@ -716,7 +716,7 @@ impl Api {
             .collect();
 
         let mut files = Vec::with_capacity(targets.len());
-        // Whether the one directory refresh below has already been spent.
+        // Whether the one directory refresh has already been spent.
         let mut asked_where_everybody_is = false;
         for (hash, record, target) in targets {
             // Asked before the network is: this node may be the one that
@@ -724,14 +724,8 @@ impl Api {
             // group of one there is nobody to ask at all.
             let already_here = self.blobs.has(hash).await.map_err(net_error)?;
             if !already_here {
-                if !asked_where_everybody_is {
-                    asked_where_everybody_is = true;
-                    self.find_the_providers(&providers).await;
-                }
-                self.blobs
-                    .fetch(hash, providers.clone())
-                    .await
-                    .map_err(net_error)?;
+                self.fetch(hash, &providers, &mut asked_where_everybody_is)
+                    .await?;
             }
             self.blobs.export(hash, &target).await.map_err(net_error)?;
             files.push(json!({
@@ -752,9 +746,41 @@ impl Api {
         }))
     }
 
-    /// Asks a core node where the providers are, if any of them cannot be
-    /// placed — once per `library.download`, and only when something actually
-    /// has to be fetched.
+    /// Fetches one blob from `providers`, and on failure asks a core node
+    /// where they are and tries once more.
+    ///
+    /// `asked` is the one refresh this call is allowed, spent across the whole
+    /// download rather than per file — see [`Self::find_the_providers`] for
+    /// what that buys and why the retry is worth a second attempt at all.
+    ///
+    /// The retry's own error is what surfaces if it fails too: it is the more
+    /// recent account of the same thing, and having refreshed in between, the
+    /// more informative one.
+    async fn fetch(
+        &self,
+        hash: ContentHash,
+        providers: &[MemberId],
+        asked: &mut bool,
+    ) -> Result<(), Error> {
+        let failure = match self.blobs.fetch(hash, providers.to_vec()).await {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if *asked {
+            return Err(net_error(failure));
+        }
+        *asked = true;
+        if !self.find_the_providers(providers).await {
+            return Err(net_error(failure));
+        }
+        self.blobs
+            .fetch(hash, providers.to_vec())
+            .await
+            .map_err(net_error)
+    }
+
+    /// Asks a core node where the providers are — once per `library.download`,
+    /// and only after a fetch has already failed.
     ///
     /// **The gap this closes, found by running §9's own acceptance.** A
     /// follower asks the core group for the directory exactly once, at
@@ -762,12 +788,21 @@ impl Api {
     /// close together lose that race in one direction: the one already in the
     /// gossip swarm hears the other announce and learns it, while the one
     /// that arrives later hears nothing, because an announcement is an event
-    /// and nothing repeats it for a newcomer. Nothing then asks again. So a
-    /// member who holds the only copy of a file is simply unreachable, for as
-    /// long as both nodes run — measured, not inferred: sixty seconds of
-    /// retries changed nothing, and the group was otherwise healthy. A
-    /// restarted core node makes it worse, since its directory comes back
-    /// empty and the one ask returns nothing at all.
+    /// and nothing repeats it for a newcomer. Nothing then asks again, so a
+    /// member who holds the only copy of a file can stay unreachable for as
+    /// long as both nodes run.
+    ///
+    /// **How often that really happens is not settled**, and the honest
+    /// account is worth more here than a confident one. With a core node up,
+    /// the startup ask usually covers it — a follower that arrives late gets
+    /// the earlier one's address from the directory, and a peer that moves
+    /// re-announces to everyone already in the swarm. Both were re-run by hand
+    /// while this was moved onto the failure path, and both reached the holder
+    /// on the first try. What is certain is the shape of the hole: one ask,
+    /// at startup, with nothing that asks again, and a restarted core node
+    /// answering it out of a directory that came back empty. This closes that
+    /// without needing to know how wide it is, because on the path it now sits
+    /// on it costs nothing until something has already gone wrong.
     ///
     /// **Why here rather than deeper down.** The phase plan carried this out
     /// of phase 2 saying what was missing was *a single point where "we had
@@ -778,6 +813,15 @@ impl Api {
     /// which of them it cannot place, and it is about to fail in front of
     /// somebody if it goes ahead regardless.
     ///
+    /// **The trigger is a fetch that failed, not "we hold no address for this
+    /// member".** The second was written first and never fired once: the
+    /// common case is a peer that restarted on a new port, where the address
+    /// lookup answers perfectly well — with somewhere nobody is listening any
+    /// more. A node that cannot be placed at all and a node placed wrongly
+    /// fail identically from here, and only the fetch knows the difference.
+    /// It also means the happy path costs nothing: a download whose providers
+    /// are all reachable never asks anybody anything.
+    ///
     /// **Best effort, and deliberately quiet about its own failure.** A core
     /// node that is down or has nothing to say leaves the download exactly
     /// where it would have been, and the *fetch's* error is the better one to
@@ -785,7 +829,8 @@ impl Api {
     /// somebody who asked for a file more than "could not ask about an
     /// address" does. **Once per call, whatever happens**, so this cannot
     /// become the thing the plan warned against: a node answering every
-    /// transient failure with an RPC.
+    /// transient failure with an RPC — and because a refresh that did not help
+    /// the first file will not help the fifth either.
     ///
     /// **What it cannot do**, said here because the acceptance run found it:
     /// the directory lives on core nodes, so a group whose core is entirely
@@ -794,6 +839,13 @@ impl Api {
     /// stays stuck until one comes back. That is a bigger question than this
     /// method — see delta P2-25.
     async fn find_the_providers(&self, providers: &[MemberId]) -> bool {
+        // Counted for the log rather than to decide anything, and it earns
+        // that: it separates the two failures that look alike from here.
+        // `unplaced=0` says every provider resolved and the fetch still
+        // failed, so an address is stale or a holder is down; a non-zero
+        // count says this node simply never learned where somebody is. They
+        // want different things done about them, and the distinction cost a
+        // day to establish the first time.
         let unplaced = providers
             .iter()
             .filter(|member| self.node.known_addresses().address_of(**member).is_none())
