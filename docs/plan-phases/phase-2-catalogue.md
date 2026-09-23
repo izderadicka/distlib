@@ -801,6 +801,43 @@ learner does not satisfy it. A paragraph in `manual-check.md` for each.
 
 ## Carried out of Phase 2 — open, and why they are not being guessed at
 
+Thirteen items, two of them closed during the phase and kept here because what they closed *to* is
+part of the record. Eleven are open.
+
+### Triage
+
+**Importance is graded against phase 3 (API + UI)** rather than in the abstract, because that is the
+decision this table is being read for. An item that only bites at §2's thousands of members is not
+unimportant; it is unimportant *now*, and the column says which. **Difficulty is the work itself.**
+
+The third column is the one worth reading first, because for most of these the work is not what is
+in the way. Nine of the eleven open items are waiting on a decision or on a number, and for several
+the thing to build is the measurement rather than the fix.
+
+| Item | Importance for phase 3 | Difficulty | What is actually blocking it |
+|---|---|---|---|
+| **A full peer offer is O(N²) dials** | Low now; high at the thousands §2 allows | Large — wants a scoping rule (nearest N, core plus a sample, something the swarm knows) that nobody has designed | **A measurement.** No group big enough to show it has ever been run, and none will be by phase 3. |
+| **Content nobody will serve is asked for for ever** | **Closed** (P2-18) | — | Nothing. What is left is a bound on what repair can cost, not a fault in it. |
+| **The sweep reads the whole document every five seconds** | Low — cost only, and dwarfed by the per-hash second a round costs when anything *is* missing | Medium — wants a listing that filters partials, or a reason to believe the document has not changed; neither exists to hand | **A measurement**, and a catalogue large enough to take it on. |
+| **A restarted core node cannot refill its own directory** | **High** — reachable today in any group, and the follower half compounds it: a node that joins just after a core node restarted spends its single ask on an empty directory and never asks again | **Small, and smaller than the row below says.** `MembershipNode::refresh_addresses` was built in 2b-3b and is exactly the one-shot ask this wants; nothing new has to be written | **A decision, one sentence long:** when does a core node ask — at startup only, or also when it notices it is answering with fewer addresses than it has members. |
+| **Nothing asks again when a member cannot be resolved** | Medium — half closed in 2b-3b, so `library.download` is covered and every other client still fails silently | Medium — generalising one method's detection point across three layers that disagree about what "cannot be resolved" means | **A decision:** whether the other clients share that point, or one method noticing on the node's behalf is enough for now. |
+| **A field blinks out of the read model while its newest value is in flight** | **High** — of everything here this is what an API and a UI actually surface: an item that disappears from a search and comes back | **Split, and the split is the point.** Measuring the gap is small; fixing it is large, and both obvious fixes are rejected below | **A measurement, and the cheapest one on this list** — a counter for "newest entry here, its content not" would size the problem in an afternoon and is worth doing before anything is designed. |
+| **The read model is replayed in full at every start** | Low — O(items), milliseconds at §2's thousands | Medium, and the present shape is a deliberate refusal rather than a gap | **A measurement:** a start that is slow enough to notice. |
+| **`added_by`, `created`, `modified_by` have nowhere to come from** | Medium — and **phase 3 is the trigger this row names**: "revisit when a phase actually wants to show who added something" | Medium — a decision about the *catalogue* (new entries, and last-writer-wins on a field two members set differently), not about the read model | **A product decision**, and phase 3's own plan is where to take it rather than here. |
+| **P2-6 — `PENDING_EXPIRY` is one fixed count** | Medium — wrong in opposite directions at the two ends | Large — three candidate answers, none right, and the best of them wants §5.5's policy-event machinery | **A measurement** (a real group's membership-event rate) **and machinery that is phase 5.** Lands there on its own. |
+| **The fast lane is not fast** | Low, but it is a tax on every edit-compile-test loop | **Small**, now that the list exists: one test is 22.4 s of the 30 | **A decision about what CI runs** on every push. |
+| **A core node that is demoted keeps running as a voter** | **Closed** (MEM-04) | — | Nothing. Its residual is the row below. |
+| **A node cannot be promoted, demoted and promoted again** | Low — reachable only by an operator who does exactly that, and a restart works | **Small** — a test that demotes and re-promotes, over a case the argument says is probably fine | **Nothing.** The only row here that is simply work nobody has done. |
+| **Gossip does not change sides when a node is promoted** | Low — changes no outcome, and becomes real only in a group of nothing but promoted core nodes, which nothing can produce | Medium — restructuring `join_topic` to hold both halves and pick by role | Nothing blocks it, and nothing wants it. |
+
+**What the third column says, taken together.** Five open rows end in "revisit when it shows up in a
+measurement", and nothing in this workspace measures any of them. That is a hope rather than a plan
+unless something starts counting — which is cheap for the read-model gap and expensive for the two
+that need a group nobody can assemble. Two rows are blocked on a decision that is one sentence long.
+One row is blocked on nothing at all.
+
+### The detail
+
 | Item | Standing |
 |---|---|
 | **A full peer offer is O(N²) dials group-wide.** `sync_with` hands iroh-docs the whole allowlist and `start_sync` dials every peer in it, not just the ones it has not seen; every node does this on the `OFFER_AGAIN` timer whether or not anything has changed. | **Open.** Narrowed, not closed: since P2-15's follow-up the *reaction* path offers only the member it just learned about, so this is now the repair sweep alone. Fine at any size anything is tested at, and wrong at the thousands §2 allows, where a group would spend its time on handshakes. Not guessed at now, on the P1-35 precedent — nobody has watched a group big enough to say what the sweep should be scoped to (nearest N, the core group plus a sample, or something the swarm already knows). Revisit when it shows up in a measurement rather than in an argument. |
