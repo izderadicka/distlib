@@ -319,30 +319,36 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
-`cargo test` runs everything, which takes about 43 seconds — most of it four
-binaries: the acceptance criteria, openraft's storage conformance suite, the
-property tests, and the tests that spawn real processes or wait out a timeout.
-Those sit behind a `slow-tests` feature that is **on by default**, so nothing is
-skipped unless you ask.
+`cargo test` runs everything, which takes a couple of minutes — most of it the
+binaries that stand real nodes up: the acceptance criteria, openraft's storage
+conformance suite, the property tests, and the tests that spawn processes or
+wait out a timeout. Those sit behind a `slow-tests` feature that is **on by
+default**, so nothing is skipped unless you ask.
 
 With [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`)
 there are two lanes, both defined in `.cargo/config.toml`:
 
 | | | |
 |---|---|---|
-| `cargo test-fast` | ~4s | everything except the slow four |
-| `cargo test-all` | ~17s | all of it — what CI runs |
+| `cargo test-fast` | ~30s | everything except the slow four |
+| `cargo test-all` | ~2min | all of it — what CI runs |
 
-nextest runs the test binaries concurrently rather than one after another, which
-is where the 43 seconds go. The fast lane is for the edit-compile-test loop; run
-the full one before pushing, since that is what CI will do.
+Measured warm on a 12-core machine at the end of phase 2, and they move with it:
+treat them as which lane to reach for rather than as a budget. nextest runs the
+test binaries concurrently rather than one after another, which is most of the
+difference from `cargo test`. The fast lane is for the edit-compile-test loop;
+run the full one before pushing, since that is what CI will do.
+
+The fast lane is not as fast as its name, and that is a known thing rather than
+a measurement gone stale: multi-node tests that belong in the slow lane are not
+gated into it. Which ones, and what each costs, is written down in the phase-2
+plan's carried-forward list.
 
 `.config/nextest.toml` caps it at four tests at a time. Most of these tests are
 clusters of nodes waiting on real timers rather than CPU work, and a dozen at
 once makes the Raft election timeouts thrash — which then reads as a bug in the
-code rather than in the runner. On a 12-core machine the cap costs about a
-second and takes the run-to-run spread from ±2s to ±0.4s; the numbers move with
-the machine, the trade does not.
+code rather than in the runner. The cap buys a run that fails for real reasons
+at the cost of some wall clock, and that trade holds whatever the machine.
 
 The test suite never contacts the public relay or DNS infrastructure — endpoints are
 either given explicit addresses or pointed at an in-process relay, so the suite is
