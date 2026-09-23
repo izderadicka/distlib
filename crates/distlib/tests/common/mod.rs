@@ -8,6 +8,10 @@
 
 #![allow(dead_code)] // each test file uses a subset; the module is shared
 
+/// Running the binary itself, for the tests that drive the commands rather
+/// than the library.
+pub mod process;
+
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib::Runtime;

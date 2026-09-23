@@ -321,7 +321,7 @@ enum Progress {
 /// Answers whether anybody replied. One answer is enough — every core node
 /// hears the same topic — so this stops at the first, and a caller that gets
 /// `false` asks again after the next fetch rather than retrying here.
-async fn ask_for_the_directory(
+pub(crate) async fn ask_for_the_directory(
     me: MemberId,
     client: &MemberlogClient,
     sources: &SharedSources,

@@ -12,465 +12,12 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{
-    fs::File,
-    io::Read as _,
-    net::{TcpListener, UdpSocket},
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU16, Ordering},
-    time::{Duration, Instant},
-};
+use std::process::Stdio;
 
 use tempfile::TempDir;
 
-/// Long enough for three processes to start, elect and replicate; short enough
-/// that a hang fails the suite rather than stalling it.
-const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// One friend's node: a data directory, a pinned port, and an identity.
-struct Friend {
-    dir: TempDir,
-    port: u16,
-    /// The local API's port.
-    ///
-    /// Its own, like the transport port: three nodes on one machine cannot
-    /// share either.
-    api_port: u16,
-    id: String,
-}
-
-impl Friend {
-    /// Runs `whoami` to create the identity and learn the member id.
-    ///
-    /// This is step one of the real procedure — the command exists so that a
-    /// founder can be told who everyone is before there is a group to ask.
-    fn introduce() -> Self {
-        let dir = TempDir::new().unwrap();
-        // Each probed with the protocol that will use it: the transport is
-        // QUIC over UDP, the local api is HTTP over TCP, and a free port in one
-        // says nothing whatever about the other.
-        let port = a_free_port(Protocol::Udp);
-        let api_port = a_free_port(Protocol::Tcp);
-
-        // The port has to be pinned before `whoami`, because founding writes
-        // this address into the log and an OS-chosen one would be gone by the
-        // next restart.
-        std::fs::write(
-            dir.path().join("config.toml"),
-            format!(
-                "[net]\nbind_addr_v4 = \"127.0.0.1:{port}\"\nrelay_mode = \"disabled\"\n\n\
-                 [api]\nbind_addr = \"127.0.0.1:{api_port}\"\n"
-            ),
-        )
-        .unwrap();
-
-        let output = distlib(dir.path()).arg("whoami").output().unwrap();
-        assert!(
-            output.status.success(),
-            "whoami failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        let id = stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("identity   "))
-            .expect("whoami prints the identity")
-            .trim()
-            .to_owned();
-        assert_eq!(id.len(), 64, "a member id is 32 hex-encoded bytes");
-        assert!(
-            stdout.contains(&format!("member = \"{id}\"")),
-            "whoami prints a line to paste into [consensus] core; got:\n{stdout}"
-        );
-
-        Self {
-            dir,
-            port,
-            api_port,
-            id,
-        }
-    }
-
-    /// Writes the founding core group — the same list for everyone.
-    fn agree_on(&self, everyone: &[(String, u16)]) {
-        let core = everyone
-            .iter()
-            .map(|(id, port)| {
-                format!("  {{ member = \"{id}\", addrs = [\"127.0.0.1:{port}\"] }},\n")
-            })
-            .collect::<String>();
-        std::fs::write(
-            self.dir.path().join("config.toml"),
-            format!(
-                "[net]\nbind_addr_v4 = \"127.0.0.1:{}\"\nrelay_mode = \"disabled\"\n\n\
-                 [api]\nbind_addr = \"127.0.0.1:{}\"\n\n\
-                 [consensus]\ncore = [\n{core}]\n",
-                self.port, self.api_port
-            ),
-        )
-        .unwrap();
-    }
-
-    /// Starts the node, optionally founding the group.
-    fn run(&self, found: bool) -> Running {
-        let log = self.dir.path().join("node.log");
-        let mut command = distlib(self.dir.path());
-        command.arg("run");
-        if found {
-            command.arg("--found-group");
-        }
-        let child = command
-            .stdout(Stdio::from(File::create(&log).unwrap()))
-            .stderr(Stdio::from(File::create(&log).unwrap()))
-            .spawn()
-            .unwrap();
-        Running { child, log }
-    }
-
-    /// Admits `member` through the CLI, against this node's running API.
-    fn admit(&self, member: &str) {
-        let output = distlib(self.dir.path())
-            .args(["admit", member, "--name", "newcomer"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "admit failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    /// Renumbers this node's transport port, as a renumbered machine would be.
-    ///
-    /// `[consensus] core` is rewritten with everyone's *old* addresses, this
-    /// node's own included, because that is the position the group is really in
-    /// after a machine moves: nobody has been told, and the stale list is what
-    /// is on disk. It does not matter either — once a group is founded the log
-    /// decides who votes and where they are, and this is the test that says so.
-    fn move_to(&mut self, everyone: &[(String, u16)], port: u16) {
-        self.port = port;
-        self.agree_on(everyone);
-    }
-
-    /// Tells the group where a core node is now, through the CLI.
-    fn core_set(&self, member: &str, port: u16) -> String {
-        let output = distlib(self.dir.path())
-            .args([
-                "core",
-                "set",
-                member,
-                "--addr",
-                &format!("127.0.0.1:{port}"),
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "core set failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    /// Approves a pending change through the CLI.
-    fn approve(&self, proposal: u64) {
-        let output = distlib(self.dir.path())
-            .args(["approve", &proposal.to_string()])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "approve failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    /// The index of the one change waiting for approval.
-    ///
-    /// **Polled, not asked once.** A proposal is pending on the leader the
-    /// moment `core set` returns, but this is usually called against a
-    /// *different* node — a proposal is only pending there once Raft has
-    /// replicated it, which the proposer's own CLI call returning success
-    /// says nothing about. Asking once is asserting the absence of that
-    /// replication delay, the same reasoning `wait_for_status` gives for
-    /// polling a promotion.
-    fn the_pending_one(&self) -> u64 {
-        let deadline = Instant::now() + CONVERGE_TIMEOUT;
-        loop {
-            let output = distlib(self.dir.path()).arg("pending").output().unwrap();
-            assert!(
-                output.status.success(),
-                "pending failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let listed = String::from_utf8(output.stdout).unwrap();
-            if let Some(proposal) = listed
-                .lines()
-                .find_map(|line| line.split_whitespace().next()?.parse::<u64>().ok())
-            {
-                return proposal;
-            }
-            if Instant::now() >= deadline {
-                panic!(
-                    "timed out waiting for a proposal to become pending here; last saw:\n{listed}"
-                );
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    /// Waits for this node's own account of itself to satisfy `settled`.
-    ///
-    /// Polled rather than asserted, because the last step of a promotion is
-    /// the leader noticing a learner has caught up — and it notices on its own
-    /// retry rather than being woken, since replication progress is not
-    /// something openraft reports through the metrics the reconciler watches.
-    /// A couple of seconds, then, and asserting straight away is asserting the
-    /// absence of that delay rather than the promotion.
-    fn wait_for_status(&self, what: &str, settled: impl Fn(&str) -> bool) -> String {
-        let deadline = Instant::now() + CONVERGE_TIMEOUT;
-        loop {
-            let status = self.status();
-            if settled(&status) {
-                return status;
-            }
-            if Instant::now() >= deadline {
-                panic!("timed out waiting for {what}; this node last said:\n{status}");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    /// What this node says about itself, live.
-    fn status(&self) -> String {
-        let output = distlib(self.dir.path()).arg("status").output().unwrap();
-        assert!(
-            output.status.success(),
-            "status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    /// Asks this node for a join ticket.
-    fn ticket(&self) -> String {
-        let output = distlib(self.dir.path()).arg("ticket").output().unwrap();
-        assert!(
-            output.status.success(),
-            "ticket failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .next()
-            .expect("the ticket is the first line")
-            .trim()
-            .to_owned()
-    }
-
-    /// Takes a ticket and writes the group into this node's configuration.
-    fn join(&self, ticket: &str) {
-        let output = distlib(self.dir.path())
-            .args(["join", ticket])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "join failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn members(&self) -> String {
-        let output = distlib(self.dir.path()).arg("members").output().unwrap();
-        assert!(
-            output.status.success(),
-            "members failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
-}
-
-/// Waits for `needle` in every node's log, and gives up the moment any of them
-/// has stopped.
-///
-/// Across *all* of them, which is the point rather than a convenience. The node
-/// that fails at startup is usually not the one being waited on: the survivors
-/// carry on trying to elect a leader and look perfectly healthy, so waiting on
-/// them one at a time sits out the whole bound against a node that is fine and
-/// then reports the wrong thing. That is what happened — an api listener lost a
-/// port race, and it surfaced thirty seconds later as a convergence failure
-/// blamed on a different node, with the line that said so buried in a log
-/// nobody had reason to read.
-///
-/// So this checks liveness before content, and prints *every* node's log when
-/// it does give up.
-fn wait_for_all(nodes: &mut [&mut Running], needle: &str) {
-    let deadline = Instant::now() + CONVERGE_TIMEOUT;
-    loop {
-        for node in nodes.iter_mut() {
-            if let Some(status) = node.exited() {
-                panic!(
-                    "a node exited ({status}) while the group waited for {needle:?}; its log was:\n{}",
-                    node.log_contents()
-                );
-            }
-        }
-        if nodes
-            .iter()
-            .all(|node| node.log_contents().contains(needle))
-        {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let logs: String = nodes
-                .iter()
-                .map(|node| format!("--- {}\n{}\n", node.log.display(), node.log_contents()))
-                .collect();
-            panic!("timed out waiting for {needle:?} on every node; logs were:\n{logs}");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// A node process, killed when the test ends however it ends.
-struct Running {
-    child: Child,
-    log: PathBuf,
-}
-
-impl Running {
-    /// Waits for `needle` to appear in this node's log.
-    ///
-    /// Gives up early if the node is no longer running, which is worth the two
-    /// extra lines: a node that fails at startup can never print anything, so
-    /// waiting the full bound turns "this process exited immediately" into a
-    /// thirty-second timeout blamed on whatever the test was waiting for. That
-    /// is not hypothetical — an api listener losing a port race was reported as
-    /// a convergence failure two steps further on, and the log line saying so
-    /// was three screens above the panic.
-    fn wait_for(&mut self, needle: &str) {
-        wait_for_all(&mut [self], needle);
-    }
-
-    /// The exit status, if this node has stopped on its own.
-    fn exited(&mut self) -> Option<std::process::ExitStatus> {
-        self.child.try_wait().ok().flatten()
-    }
-
-    fn log_contents(&self) -> String {
-        let mut text = String::new();
-        if let Ok(mut file) = File::open(&self.log) {
-            let _ = file.read_to_string(&mut text);
-        }
-        text
-    }
-
-    /// Stops the node so its database can be opened by `members`.
-    ///
-    /// A kill rather than a signal: redb releases its lock when the process
-    /// dies, and everything committed is already durable, so what `members`
-    /// reads afterwards is exactly what replication delivered.
-    fn stop(self) {
-        // The work is in `Drop`, so that a failing assertion above kills these
-        // too. Without that a panic leaves nodes running — holding ports and
-        // their databases — until somebody notices them in `ps` much later.
-        drop(self);
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn distlib(data_dir: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_distlib"));
-    command.arg("--data-dir").arg(data_dir);
-    command
-}
-
-/// Which protocol will bind the port, because a free UDP port is not a free
-/// TCP port and this test needs one of each per node.
-#[derive(Clone, Copy)]
-enum Protocol {
-    Udp,
-    Tcp,
-}
-
-/// Hands out the next port in [`PINNED`], so two nodes in one run cannot be
-/// given the same number even if both probe it while it is still free.
-static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
-
-/// Where pinned ports come from: below the kernel's ephemeral range, and above
-/// the crowded low numbers.
-///
-/// Linux hands out 32768–60999 for anything that does not ask for a specific
-/// port, which is every outgoing connection and every socket bound to `:0`.
-const PINNED: std::ops::Range<u16> = 20_000..30_000;
-
-/// A port this test can pin, chosen where nothing else will be given it.
-///
-/// Founding needs pinned ports — the founder writes them into every node's
-/// configuration before anything binds — so the test cannot let the OS choose
-/// at bind time, and there is an unavoidable gap between deciding on a number
-/// and using it. What matters is *where the number comes from*.
-///
-/// This used to bind `:0`, read the port back and release it, which hands back
-/// an **ephemeral** port: exactly the range the kernel draws from for every
-/// unpinned socket, and this test starts three nodes that each open several.
-/// About one run in ten something took the number in between, and the failure
-/// was `Address already in use` on the api listener and a node that never
-/// started — reported as a thirty-second convergence timeout two steps later,
-/// which is nowhere near where the problem was.
-///
-/// So: a fixed range the kernel will not allocate from, walked by a counter so
-/// two nodes in one run cannot collide, offset by the process id so two runs on
-/// one machine do not either, and probed with the protocol that will use it.
-fn a_free_port(protocol: Protocol) -> u16 {
-    let span = PINNED.end - PINNED.start;
-    // Spreads concurrent runs apart. Not a guarantee — hence the probe — but it
-    // means two runs do not start walking from the same place.
-    let offset = (std::process::id() as u16).wrapping_mul(64);
-
-    for _ in 0..span {
-        let step = offset.wrapping_add(NEXT_PORT.fetch_add(1, Ordering::Relaxed));
-        let port = PINNED.start + step % span;
-        let free = match protocol {
-            Protocol::Udp => UdpSocket::bind(("127.0.0.1", port)).is_ok(),
-            Protocol::Tcp => TcpListener::bind(("127.0.0.1", port)).is_ok(),
-        };
-        if free {
-            return port;
-        }
-    }
-    panic!("no free port in {PINNED:?}");
-}
-
-/// Waits for a process that is expected to give up on its own.
-///
-/// `Command::output` would be shorter and would hang forever the day the
-/// refusal stops working — which is precisely the day this test has to fail.
-fn wait_for_exit(mut child: Child, what: &str) -> std::process::Output {
-    let deadline = Instant::now() + REFUSAL_TIMEOUT;
-    while Instant::now() < deadline {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    panic!("{what} did not exit within {REFUSAL_TIMEOUT:?}");
-}
-
-/// A refusal happens before any network work, so it is immediate or it is broken.
-const REFUSAL_TIMEOUT: Duration = Duration::from_secs(10);
+mod common;
+use common::process::{Friend, Protocol, a_free_port, distlib, wait_for_all, wait_for_exit};
 
 #[test]
 fn run_refuses_a_data_directory_with_no_identity() {
@@ -648,7 +195,16 @@ fn a_core_node_that_moves_is_told_to_the_group_and_comes_back() {
     // different port, and the other two are still looking for it on the old
     // one — which under `relay_mode = "disabled"` is the whole of the problem:
     // there is no lookup to fall back on.
-    third.stop();
+    //
+    // **Crashed rather than stopped, and that is the scenario rather than a
+    // shortcut.** A machine that is renumbered does not first close its
+    // connections and tell its peers it is going. If it did, they would drop
+    // the path they hold for it and adopt the new one the moment it dialled
+    // them again — which the catalogue's own document sync does within
+    // milliseconds of startup, healing the address change without anybody
+    // running the command this test is named for. Measured at roughly one run
+    // in five; see P2-25.
+    third.crash();
     let moved_port = a_free_port(Protocol::Udp);
     friends[2].move_to(&everyone, moved_port);
     let mut third = friends[2].run(false);
@@ -776,4 +332,48 @@ fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
     for node in [first, second, third, joined] {
         node.stop();
     }
+}
+
+#[test]
+fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
+    // A node run by hand is stopped with Ctrl-C, and that was the only signal
+    // `run` listened for. A node run by systemd, Docker or any other
+    // supervisor is stopped with SIGTERM, which without a handler kills the
+    // process where it stands — and what that costs here is specific rather
+    // than general untidiness: the blob store writes its metadata when the
+    // router closes it, so a node that never shut down comes back holding
+    // every *downloaded* blob's bytes with no record that it holds them, and
+    // fetches the lot again. (Imported blobs survive it; the asymmetry is
+    // measured in P2-25.)
+    //
+    // A group of one is enough. What is in question is whether the signal is
+    // answered rather than fatal — what the shutdown then does is the same
+    // thing Ctrl-C has always run, and there is no second path to check.
+    let friend = Friend::introduce();
+    friend.agree_on(&[(friend.id.clone(), friend.port)]);
+    let mut node = friend.run(true);
+    node.wait_for("members=1");
+
+    node.signal("TERM");
+    let status = node
+        .wait_until_gone()
+        .expect("a node asked to stop should stop");
+
+    // Both halves are needed, and the first one alone would be a test that
+    // passes on the behaviour it is meant to close: an unhandled SIGTERM also
+    // makes the process go away, rather faster. `success()` is what separates
+    // running the shutdown from being killed by the signal.
+    let log = node.log_contents();
+    assert!(
+        status.success(),
+        "a node killed by the signal rather than answering it exits {status}; its log was:\n{log}"
+    );
+    assert!(
+        log.contains("SIGTERM"),
+        "the log should say which signal stopped it; got:\n{log}"
+    );
+    assert!(
+        log.contains("shutting down"),
+        "the node should reach its own shutdown; got:\n{log}"
+    );
 }

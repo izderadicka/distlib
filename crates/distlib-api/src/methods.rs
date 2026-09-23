@@ -716,12 +716,21 @@ impl Api {
             .collect();
 
         let mut files = Vec::with_capacity(targets.len());
+        let mut refresh = OneRefresh::of(self, &providers);
         for (hash, record, target) in targets {
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
             let already_here = self.blobs.has(hash).await.map_err(net_error)?;
-            if !already_here {
+            if !already_here && let Err(failure) = self.blobs.fetch(hash, providers.clone()).await {
+                // A fetch that failed is the first evidence that this node's
+                // idea of where everybody is might be out of date, so it is
+                // worth one question and one more attempt. The second error
+                // is the one that surfaces: it is the more recent account of
+                // the same thing, and the refresh happened in between.
+                if !refresh.spend().await {
+                    return Err(net_error(failure));
+                }
                 self.blobs
                     .fetch(hash, providers.clone())
                     .await
@@ -744,6 +753,89 @@ impl Api {
             "title": stored.item.title,
             "files": files,
         }))
+    }
+
+    /// Asks a core node where the providers are.
+    ///
+    /// Called by [`OneRefresh`], which is what holds it to once per
+    /// `library.download` and to only after a fetch has already failed.
+    ///
+    /// **The gap this closes, found by running §9's own acceptance.** A
+    /// follower asks the core group for the directory exactly once, at
+    /// startup, and latches on whatever came back. Two followers that start
+    /// close together lose that race in one direction: the one already in the
+    /// gossip swarm hears the other announce and learns it, while the one
+    /// that arrives later hears nothing, because an announcement is an event
+    /// and nothing repeats it for a newcomer. Nothing then asks again, so a
+    /// member who holds the only copy of a file can stay unreachable for as
+    /// long as both nodes run.
+    ///
+    /// **How often that really happens is not settled**, and the honest
+    /// account is worth more here than a confident one. With a core node up,
+    /// the startup ask usually covers it — a follower that arrives late gets
+    /// the earlier one's address from the directory, and a peer that moves
+    /// re-announces to everyone already in the swarm. Both were re-run by hand
+    /// while this was moved onto the failure path, and both reached the holder
+    /// on the first try. What is certain is the shape of the hole: one ask,
+    /// at startup, with nothing that asks again, and a restarted core node
+    /// answering it out of a directory that came back empty. This closes that
+    /// without needing to know how wide it is, because on the path it now sits
+    /// on it costs nothing until something has already gone wrong.
+    ///
+    /// **Why here rather than deeper down.** The phase plan carried this out
+    /// of phase 2 saying what was missing was *a single point where "we had
+    /// no address for this member" is observable* — a dial failure surfaces
+    /// inside iroh, inside iroh-docs' downloader and at each protocol client,
+    /// and none of them agree on what the phrase means. This method is such a
+    /// point: it chose the provider list itself, it can ask the directory
+    /// which of them it cannot place, and it is about to fail in front of
+    /// somebody if it goes ahead regardless.
+    ///
+    /// **The trigger is a fetch that failed, not "we hold no address for this
+    /// member".** The second was written first and never fired once: the
+    /// common case is a peer that restarted on a new port, where the address
+    /// lookup answers perfectly well — with somewhere nobody is listening any
+    /// more. A node that cannot be placed at all and a node placed wrongly
+    /// fail identically from here, and only the fetch knows the difference.
+    /// It also means the happy path costs nothing: a download whose providers
+    /// are all reachable never asks anybody anything.
+    ///
+    /// **Best effort, and deliberately quiet about its own failure.** A core
+    /// node that is down or has nothing to say leaves the download exactly
+    /// where it would have been, and the *fetch's* error is the better one to
+    /// report — "could not fetch X from any of the offered providers" tells
+    /// somebody who asked for a file more than "could not ask about an
+    /// address" does.
+    ///
+    /// **What it cannot do**, said here because the acceptance run found it:
+    /// the directory lives on core nodes, so a group whose core is entirely
+    /// unreachable cannot learn anything new about where anybody is. A
+    /// follower holding a stale address for a peer, with no core node to ask,
+    /// stays stuck until one comes back. That is a bigger question than this
+    /// method — see delta P2-25.
+    async fn find_the_providers(&self, providers: &[MemberId]) -> bool {
+        // Counted for the log rather than to decide anything, and it earns
+        // that: it separates the two failures that look alike from here.
+        // `unplaced=0` says every provider resolved and the fetch still
+        // failed, so an address is stale or a holder is down; a non-zero
+        // count says this node simply never learned where somebody is. They
+        // want different things done about them, and the distinction cost a
+        // day to establish the first time.
+        let unplaced = providers
+            .iter()
+            .filter(|member| self.node.known_addresses().address_of(**member).is_none())
+            .count();
+        tracing::debug!(
+            unplaced,
+            of = providers.len(),
+            "a fetch failed; asking a core node where the providers are"
+        );
+
+        let answered = self.node.refresh_addresses().await;
+        if !answered {
+            tracing::debug!("no core node said where the providers are");
+        }
+        answered
     }
 
     /// Hashes and stores one local file for `library.add`, and describes it
@@ -873,6 +965,44 @@ fn query_error(error: StoreError) -> Error {
     match error {
         StoreError::Query { .. } => Error::invalid_params(error.to_string()),
         other => Error::failed(other.to_string()),
+    }
+}
+
+/// The single directory refresh a `library.download` is allowed, and whether
+/// it has been used.
+///
+/// Exists so that "once per call" is a property of a thing with a name rather
+/// than a flag passed around and checked. A download offers every member as a
+/// provider, so a fetch that fails is the first evidence that this node's idea
+/// of where anybody is may be out of date — worth one question to a core node,
+/// and worth it for whichever file fails first rather than only for the first
+/// file, which is why the state outlives any one fetch.
+struct OneRefresh<'a> {
+    api: &'a Api,
+    providers: &'a [MemberId],
+    spent: bool,
+}
+
+impl<'a> OneRefresh<'a> {
+    fn of(api: &'a Api, providers: &'a [MemberId]) -> Self {
+        Self {
+            api,
+            providers,
+            spent: false,
+        }
+    }
+
+    /// Spends the refresh, and answers whether the fetch that just failed is
+    /// worth trying again.
+    ///
+    /// `false` once it has been spent, whatever the answer was that time: the
+    /// directory is then as fresh as this node can make it, so a fetch failing
+    /// afterwards is failing for a reason no amount of asking will move. That
+    /// is also what keeps this from becoming the thing the phase plan warned
+    /// against — a node answering every transient failure with an RPC.
+    async fn spend(&mut self) -> bool {
+        !std::mem::replace(&mut self.spent, true)
+            && self.api.find_the_providers(self.providers).await
     }
 }
 
