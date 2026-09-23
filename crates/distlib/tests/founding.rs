@@ -400,9 +400,13 @@ fn a_restarted_core_node_asks_the_others_where_everybody_is() {
         friend.agree_on(&everyone);
     }
 
+    // Both of the nodes that might be asked run at `debug`, because the test
+    // has to see that each of them heard the announcement before it takes the
+    // one away — `candidates` decides which of the two the restarted node
+    // asks, and this test does not get to choose.
     let mut second = friends[1].run_verbosely(false);
     let mut third = friends[2].run(false);
-    let mut first = friends[0].run(true);
+    let mut first = friends[0].run_verbosely(true);
     wait_for_all(
         &mut [&mut first, &mut second, &mut third],
         "members=3 core=3",
@@ -413,13 +417,14 @@ fn a_restarted_core_node_asks_the_others_where_everybody_is() {
     // three core nodes and nobody else, every directory in the group is empty,
     // because a directory is filled by announcements and only a follower makes
     // them. The restarted node asked, was told nothing, and was right to be.
-    // So somebody joins and announces, and the node that will be asked is
-    // watched until it has heard them.
+    // So somebody joins and announces, and *both* of the nodes that could be
+    // asked are watched until they have heard them.
     let newcomer = Friend::introduce();
     friends[0].admit(&newcomer.id);
     newcomer.join(&friends[1].ticket());
     let mut joined = newcomer.run(false);
     joined.wait_for("members=4");
+    first.wait_for("learned where a member is");
     second.wait_for("learned where a member is");
 
     // Crashed rather than stopped, which is the case this is about: a node that
@@ -433,6 +438,12 @@ fn a_restarted_core_node_asks_the_others_where_everybody_is() {
     // `members=3` is the line it prints on the way past rather than the one it
     // settles on.
     third.wait_for("members=4 core=3");
+    // **Waited for, not read once.** The ask runs alongside the enactment loop
+    // rather than before it, so a node can be caught up on the membership
+    // while the ask is still in flight — which is a race this test lost on CI
+    // and won on the machine it was written on. The membership line says
+    // nothing about the ask having finished; only the ask does.
+    third.wait_for("a core node said where the group is");
 
     // What it learned, from whom, said by the ask itself. The count is the
     // assertion rather than the line: a core node that asked and was told
