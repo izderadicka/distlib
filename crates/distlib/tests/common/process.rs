@@ -464,11 +464,12 @@ impl Running {
         self.wait_until_gone().is_some()
     }
 
-    /// There is no signal to send a child on Windows short of attaching to its
-    /// console, so the node is killed at once rather than after waiting out a
-    /// request it could never have received. That is an abrupt stop, with what
-    /// P2-25 says an abrupt stop costs; the tests that restart a node still pass
-    /// on it, and none of them exercises an orderly stop on Windows.
+    /// There is no signal to send a child on Windows without an `unsafe` call
+    /// the workspace forbids, so the node is killed at once rather than after
+    /// waiting out a request it could never have received. That is an abrupt
+    /// stop, with what P2-25 says an abrupt stop costs — a restarted node has
+    /// forgotten what it downloaded — and nothing exercises an orderly stop on
+    /// Windows (P3-1).
     #[cfg(not(unix))]
     fn interrupt(&mut self) -> bool {
         false

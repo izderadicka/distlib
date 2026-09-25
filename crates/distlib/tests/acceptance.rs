@@ -275,10 +275,15 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
         bob.dir.path(),
         &["download", &dune, "--dest", bobs_books.to_str().unwrap()],
     );
-    assert!(
-        again.contains("had it"),
-        "the restarted node still holds the file it downloaded, and says so: {again}"
-    );
+    // Unix only: the harness cannot stop a node in an orderly way on Windows
+    // (P3-1), and a node that was killed has lost the record of what it
+    // fetched, so there it fetches again. The bytes are still checked below.
+    if cfg!(unix) {
+        assert!(
+            again.contains("had it"),
+            "the restarted node still holds the file it downloaded, and says so: {again}"
+        );
+    }
     assert_eq!(
         std::fs::read(&bobs_copy).unwrap(),
         std::fs::read(books.join("dune.epub")).unwrap(),

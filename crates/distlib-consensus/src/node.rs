@@ -95,6 +95,30 @@ const PROPOSE_ATTEMPTS: usize = 3;
 /// enough not to stall a proposal that would otherwise succeed immediately.
 const FORWARD_RETRY_DELAY: Duration = Duration::from_millis(250);
 
+/// Raft's timing, in milliseconds: a heartbeat every quarter second, and an
+/// election after one to two seconds without one.
+///
+/// openraft's defaults are 50ms and 150–300ms, which suit voters on one LAN.
+/// A group of friends' machines is not that — voters may reach each other
+/// through a relay, over a home uplink, on a machine that is busy with other
+/// things — and one stall past the election timeout costs a term: the leader
+/// is deposed, proposals in flight fail with nobody to forward to, and the
+/// group spends the next election unable to commit. Found by Windows CI: under
+/// load, 22 of 24 freshly founded test groups re-elected within three seconds
+/// on the defaults, some of them four times; on these values none did (P3-4).
+///
+/// The price is detection: a leader that really has died is replaced after one
+/// to two seconds rather than a fraction of one, which nothing in a membership
+/// log notices.
+fn raft_config() -> Config {
+    Config {
+        heartbeat_interval: 250,
+        election_timeout_min: 1_000,
+        election_timeout_max: 2_000,
+        ..Config::default()
+    }
+}
+
 /// How long founding waits for the first election to settle.
 ///
 /// Generous: it covers a real election among founders who have to reach each
@@ -409,7 +433,7 @@ impl MembershipNode {
         // `distlib/memberlog/0`, which every member may speak, while the
         // factory serves Raft's own replication between voters.
         let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
-        let config = Arc::new(Config::default().validate().map_err(raft_failed)?);
+        let config = Arc::new(raft_config().validate().map_err(raft_failed)?);
 
         // The log store goes to whichever of the two will write it: openraft
         // now, or the promotion task later. A follower's is left over and
