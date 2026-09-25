@@ -363,6 +363,8 @@ fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
     }
 }
 
+// SIGTERM is a Unix signal; Windows stops a service another way entirely.
+#[cfg(unix)]
 #[test]
 fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
     // A node run by hand is stopped with Ctrl-C, and that was the only signal

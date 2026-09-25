@@ -413,8 +413,9 @@ impl Running {
     /// Sends `signal` — `"INT"`, `"TERM"` — to this node.
     ///
     /// Through `kill(1)` rather than a signalling crate: one command in one
-    /// test harness is not worth a dependency, and every platform this runs its
-    /// process tests on has it.
+    /// test harness is not worth a dependency. Unix only — Windows has neither
+    /// the command nor the signals.
+    #[cfg(unix)]
     pub fn signal(&mut self, signal: &str) {
         let _ = Command::new("kill")
             .arg(format!("-{signal}"))
@@ -452,6 +453,7 @@ impl Running {
     }
 
     /// Asks the node to stop, and says whether it did within the bound.
+    #[cfg(unix)]
     fn interrupt(&mut self) -> bool {
         // A node that has already gone is not signalled: its pid is free to
         // have been handed to something else by now.
@@ -460,6 +462,16 @@ impl Running {
         }
         self.signal("INT");
         self.wait_until_gone().is_some()
+    }
+
+    /// There is no signal to send a child on Windows short of attaching to its
+    /// console, so the node is killed at once rather than after waiting out a
+    /// request it could never have received. That is an abrupt stop, with what
+    /// P2-25 says an abrupt stop costs; the tests that restart a node still pass
+    /// on it, and none of them exercises an orderly stop on Windows.
+    #[cfg(not(unix))]
+    fn interrupt(&mut self) -> bool {
+        false
     }
 }
 

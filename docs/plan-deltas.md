@@ -149,7 +149,7 @@ Phase 1 is complete against §9's acceptance criteria, which run as a test on ev
   a standing load on core nodes that gossip was meant to remove. The direction: catch up once at
   startup, rely on announcements, treat a failed operation as its own signal to refresh, and make
   the safety poll optional with a period carried in the log so every member agrees on it.
-- **Windows and macOS are still unverified** (P0-6), unchanged since Phase 0.
+- ~~**Windows and macOS are still unverified** (P0-6), unchanged since Phase 0.~~ **Discharged** in phase 3 — see P3-1.
 
 ## Phase 2 — Catalogue & library basics
 
@@ -201,7 +201,14 @@ which are taken (P1-23) and which are deferred, and why.
 
 ## Phase 3 — API + UI
 
-*Not started.*
+*In progress.* The sequencing plan is [`plan-phases/phase-3-api-ui.md`](plan-phases/phase-3-api-ui.md);
+as in phase 2, deviations from the design land here, in the PR that causes them.
+
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P3-1 | §2, P0-6 | platforms are Linux, Windows and macOS | **CI tests all three.** Closes P0-6. | Deferred twice, and widened now because phase 3 adds a JS build, an embedded UI and release artefacts, and a platform problem found under those would be found tangled up with them. **What the matrix found**: macOS passed as it stood; Windows found one product bug (P3-2) and one test that cannot run there — `a_node_stopped_by_a_service_manager_shuts_down_cleanly` is about `SIGTERM`, which Windows does not have, so it is `#[cfg(unix)]`. **The harness stops nodes abruptly on Windows.** It stops a node with `kill -INT` and waits; Windows has no `kill(1)` and no way to signal a child short of sharing its console, so there it kills the node outright rather than waiting ten seconds for a request that cannot arrive. Every restart test still passes on that, but **an orderly stop on Windows is not exercised by anything** — `run` answers Ctrl-C through tokio there, and how a Windows service manager stops it is phase 3c's question, alongside the release build. CI also runs nextest with `--no-fail-fast` now: the first Windows run stopped at 13 tests of 328, which is a count of what was hidden rather than a finding. |
+| P3-2 | §9.1 | — | **Logs go to stderr; stdout carries only a command's answer.** Keeping a node's log is `distlib run 2> node.log`. | Found by the Windows run, and not a Windows bug: logs shared stdout with output, so any warning logged during a one-shot command came out above its answer. On Windows reading the token always warns (P3-3), so `distlib ticket` printed that warning where the ticket belonged, and a script reading the first line — the test harness, here — handed the warning to `join`. On Linux it only needed a warning to happen. Pinned by `a_commands_answer_is_not_mixed_with_its_log`, which forces a debug line during `members` and fails with the writer set back to stdout. |
+| P3-3 | P1-25 | "the token lives in `<data-dir>/api.token` at mode 0600"; the node key likewise | **Unix only. On Windows neither file's privacy is enforced or checked**, and `private_file` logs that it is not. Not fixed here. | The default data directory on Windows is under `%APPDATA%`, which inherits the profile's ACL — the user, SYSTEM and Administrators — so the default is private without anything of ours doing it, roughly as a 0700 home directory would be on Unix. What is unprotected is an operator pointing `--data-dir` at a shared folder, and the warning already says so. Enforcing it would mean writing an ACL through the Windows security API — `unsafe` FFI of roughly a hundred lines, or a new dependency — to cover a case that the default avoids and the log already names. Worth revisiting with the release build in 3c, if Windows is advertised as a server platform rather than a desktop one. |
 
 ## Phase 4 — Availability + community metadata
 
