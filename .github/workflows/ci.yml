@@ -51,6 +51,8 @@ jobs:
       # binaries concurrently, which takes this from ~43s to ~17s, and
       # `.config/nextest.toml` caps how many run at once so a busy runner does
       # not make the election timers thrash.
-      - run: cargo nextest run --workspace --all-features
+      # `--no-fail-fast`: one run should show every test a platform breaks,
+      # not the first one and a count of the rest that never ran.
+      - run: cargo nextest run --workspace --all-features --no-fail-fast
       # nextest does not run doctests, so they need their own pass.
       - run: cargo test --workspace --all-features --doc
