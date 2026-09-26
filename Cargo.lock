@@ -1163,6 +1163,7 @@ dependencies = [
  "distlib-net",
  "distlib-store",
  "distlib-sync",
+ "futures-lite",
  "http-body-util",
  "hyper",
  "hyper-util",

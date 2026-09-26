@@ -19,7 +19,11 @@ use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
 use distlib_sync::Catalogue;
 use http_body_util::{BodyExt as _, Full};
-use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
+use hyper::{
+    Request, StatusCode,
+    body::Bytes,
+    header::{AUTHORIZATION, WWW_AUTHENTICATE},
+};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
 use iroh::{
     Endpoint, SecretKey,
@@ -155,6 +159,7 @@ impl Harness {
                 search: search.clone(),
             },
             SecretString::from(token.clone()),
+            distlib_api::events::bus(),
         )
         .await
         .unwrap();
@@ -304,6 +309,7 @@ impl Harness {
                 search: search.clone(),
             },
             SecretString::from(token.clone()),
+            distlib_api::events::bus(),
         )
         .await
         .unwrap();
@@ -364,10 +370,76 @@ impl Harness {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
 
-        // A 401 carries plain text, not a JSON-RPC envelope.
-        let answer = serde_json::from_slice(&body)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
+        // Every answer is JSON, refusals included (D9) — so a body that is not
+        // is a failure of the server, not something to tolerate here.
+        let answer = serde_json::from_slice(&body).unwrap_or_else(|_| {
+            panic!(
+                "a {status} answer that is not JSON: {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
         (status, answer)
+    }
+
+    /// Sends `method` to `path` and returns the status, one header and the
+    /// body parsed as JSON — which it must be, whatever the status.
+    async fn raw(
+        &self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, Option<String>, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("http://{}{path}", self.server.addr()));
+        if let Some(token) = token {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = Hyper::builder(TokioExecutor::new())
+            .build_http()
+            .request(request.body(Full::new(Bytes::new())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let challenge = response
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let answer = serde_json::from_slice(&body).unwrap_or_else(|_| {
+            panic!(
+                "{method} {path} answered {status} with a body that is not JSON: {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+        (status, challenge, answer)
+    }
+
+    /// Opens `GET /events` with the token and waits for its headers.
+    ///
+    /// Waiting for them is what makes a test that then changes something
+    /// deterministic: the server subscribes before it answers, so once the 200
+    /// is here nothing published afterwards can be missed.
+    async fn watch(&self) -> Watcher {
+        let request = Request::get(format!("http://{}/events", self.server.addr()))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = Hyper::builder(TokioExecutor::new())
+            .build_http()
+            .request(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/event-stream",
+            "an event stream, not a document"
+        );
+        Watcher {
+            body: response.into_body(),
+            seen: String::new(),
+        }
     }
 
     async fn shutdown(self) {
@@ -378,6 +450,40 @@ impl Harness {
         for router in &self.routers {
             let _ = router.shutdown().await;
         }
+    }
+}
+
+/// One open `GET /events`.
+struct Watcher {
+    body: hyper::body::Incoming,
+    /// Everything read so far. Frames and events do not line up — one read
+    /// can hold half an event or three — so what is asserted is the text.
+    seen: String,
+}
+
+impl Watcher {
+    /// Reads until an `event:` line naming `name` arrives, or fails the test.
+    ///
+    /// "Within a bound" rather than "next": keep-alive comments and other
+    /// events may arrive first, on their own schedules.
+    async fn expect(&mut self, name: &str) {
+        let wanted = format!("event: {name}\n");
+        let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !self.seen.contains(&wanted) {
+                let frame = self.body.frame().await.expect("the stream ended").unwrap();
+                if let Ok(data) = frame.into_data() {
+                    self.seen.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+        })
+        .await;
+        assert!(
+            found.is_ok(),
+            "no `{name}` event within ten seconds; the stream said:\n{}",
+            self.seen
+        );
+        // Consumed, so that a second `expect` waits for a second event.
+        self.seen.clear();
     }
 }
 
@@ -408,8 +514,9 @@ async fn a_call_with_the_wrong_token_is_refused() {
     // call that gets past this can make the node propose as itself.
     let harness = Harness::start().await;
 
-    let (anonymous, _) = harness.post(None, rpc("node.status", Value::Null)).await;
+    let (anonymous, answer) = harness.post(None, rpc("node.status", Value::Null)).await;
     assert_eq!(anonymous, StatusCode::UNAUTHORIZED, "no token at all");
+    assert_eq!(raw_code(&answer), -32001, "refused in the envelope, too");
 
     let (stranger, _) = harness
         .post(Some(&"f".repeat(64)), rpc("node.status", Value::Null))
@@ -423,6 +530,80 @@ async fn a_call_with_the_wrong_token_is_refused() {
     // And the right token works, so this is not passing because the server is
     // simply broken.
     harness.call("node.status", Value::Null).await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn every_refusal_is_answered_in_json_with_its_http_status() {
+    // D9: one parser for every answer. Before it, a refused token came back as
+    // plain text, and a caller had to guess which kind of body it was holding
+    // before it could read the reason. The statuses are kept exactly as they
+    // were — browsers and proxies read them.
+    let harness = Harness::start().await;
+
+    for path in ["/rpc", "/events"] {
+        let method = if path == "/rpc" { "POST" } else { "GET" };
+        let (status, challenge, answer) = harness.raw(method, path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        assert_eq!(raw_code(&answer), -32001, "{method} {path}: {answer}");
+        assert_eq!(challenge.as_deref(), Some("Bearer"), "{method} {path}");
+    }
+
+    // The token guards routes, not the listener: an unknown path is answered
+    // as unknown, with or without one.
+    let (status, _, answer) = harness.raw("GET", "/nowhere", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(raw_code(&answer), -32600, "{answer}");
+
+    let (status, _, answer) = harness.raw("GET", "/rpc", Some(&harness.token)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(raw_code(&answer), -32600, "{answer}");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watcher_hears_the_membership_change() {
+    // 3a-1's acceptance: a page that is open when somebody is admitted is told
+    // so, without asking.
+    let harness = Harness::start().await;
+    let mut watcher = harness.watch().await;
+
+    harness
+        .call(
+            "group.propose_add",
+            json!({ "member": MemberId::from(SecretKey::generate().public()) }),
+        )
+        .await;
+    watcher.expect("membership.changed").await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_change_nobody_watched_does_not_silence_the_next_one() {
+    // With no page open there is no receiver, and a broadcast send then fails
+    // — which is most of a node's life, not an error. A producer that treated
+    // it as one would stop at the first change made while nobody was looking,
+    // and every page opened afterwards would wait for events that never come.
+    let harness = Harness::start().await;
+
+    harness
+        .call(
+            "group.propose_add",
+            json!({ "member": MemberId::from(SecretKey::generate().public()) }),
+        )
+        .await;
+
+    let mut watcher = harness.watch().await;
+    harness
+        .call(
+            "group.propose_add",
+            json!({ "member": MemberId::from(SecretKey::generate().public()) }),
+        )
+        .await;
+    watcher.expect("membership.changed").await;
 
     harness.shutdown().await;
 }

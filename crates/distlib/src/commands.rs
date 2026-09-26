@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, Ticket,
+    Config, ContentHash, CoreMember, DataDir, Event, ItemId, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -15,6 +15,7 @@ use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 use crate::{Runtime, cli::Kind};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 
 /// How long `status --online` waits to reach a relay before giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -119,6 +120,12 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         );
     }
 
+    // What the node tells whoever is watching it. Made here rather than by any
+    // one producer, so that each producer is handed a clone instead of having
+    // to reach the bus through another's API. Today the server is the only
+    // one; 3a-2 hands one to the projection as well.
+    let events = distlib_api::events::bus();
+
     // The local API. Started after founding, so a caller that reaches it finds
     // a node that has finished deciding what it is.
     let api = if config.api.enabled {
@@ -126,6 +133,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
             serve_api(
                 paths,
                 &config,
+                events,
                 Api {
                     node: Arc::clone(&node),
                     secret: secret.clone(),
@@ -1219,11 +1227,16 @@ fn founders(
 ///
 /// The token is created on first run rather than at `init`, so a data
 /// directory made before this existed grows one when it is next started.
-async fn serve_api(paths: &Paths, config: &Config, api: Api) -> Result<Server> {
+async fn serve_api(
+    paths: &Paths,
+    config: &Config,
+    events: broadcast::Sender<Event>,
+    api: Api,
+) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
-    let server = distlib_api::serve(config.api.bind_addr, api, token)
+    let server = distlib_api::serve(config.api.bind_addr, api, token, events)
         .await
         .with_context(|| {
             format!(
