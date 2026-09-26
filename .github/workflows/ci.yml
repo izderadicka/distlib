@@ -35,9 +35,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows builds the dependency tree from cold in well over the twenty
+    # minutes Linux needs; thirty was sized for Linux alone.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml
@@ -49,6 +51,8 @@ jobs:
       # binaries concurrently, which takes this from ~43s to ~17s, and
       # `.config/nextest.toml` caps how many run at once so a busy runner does
       # not make the election timers thrash.
-      - run: cargo nextest run --workspace --all-features
+      # `--no-fail-fast`: one run should show every test a platform breaks,
+      # not the first one and a count of the rest that never ran.
+      - run: cargo nextest run --workspace --all-features --no-fail-fast
       # nextest does not run doctests, so they need their own pass.
       - run: cargo test --workspace --all-features --doc

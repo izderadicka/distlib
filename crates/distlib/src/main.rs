@@ -143,10 +143,15 @@ fn init_tracing(verbose: u8) {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
-        // Colour only for a terminal. `distlib run > node.log` is the ordinary
+        // Diagnostics go to stderr, because stdout is a command's answer. With
+        // both on stdout, any warning logged during `distlib ticket` came out
+        // above the ticket, and whatever read the first line got the warning —
+        // found on Windows, where reading the token always warns.
+        .with_writer(std::io::stderr)
+        // Colour only for a terminal. `distlib run 2> node.log` is the ordinary
         // way to keep a node's output, and escape codes in that file make it
         // unreadable and ungreppable — `members=3` is not even a substring of a
         // coloured line, because the `=` is wrapped in them.
-        .with_ansi(std::io::stdout().is_terminal())
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 }

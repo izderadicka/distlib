@@ -143,6 +143,14 @@ impl Friend {
         if found {
             command.arg("--found-group");
         }
+        // Its own process group on Windows, because Ctrl-Break is addressed to
+        // a group: without one of its own the node shares this test's, and
+        // stopping it would stop the test runner too.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        }
         let child = command
             .stdout(Stdio::from(File::create(&log).unwrap()))
             .stderr(Stdio::from(File::create(&log).unwrap()))
@@ -413,13 +421,37 @@ impl Running {
     /// Sends `signal` — `"INT"`, `"TERM"` — to this node.
     ///
     /// Through `kill(1)` rather than a signalling crate: one command in one
-    /// test harness is not worth a dependency, and every platform this runs its
-    /// process tests on has it.
+    /// test harness is not worth a dependency.
+    #[cfg(unix)]
     pub fn signal(&mut self, signal: &str) {
         let _ = Command::new("kill")
             .arg(format!("-{signal}"))
             .arg(self.child.id().to_string())
             .status();
+    }
+
+    /// Sends this node Ctrl-Break, which is Windows' nearest thing to a signal.
+    ///
+    /// Ctrl-Break rather than Ctrl-C because a process started in a group of
+    /// its own — see `Friend::spawn` — has Ctrl-C disabled.
+    #[cfg(windows)]
+    pub fn ctrl_break(&mut self) -> std::io::Result<()> {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+
+        let group = self.child.id();
+        // SAFETY: the call takes two integers by value and reads or writes no
+        // memory of ours; it is `unsafe` only because it crosses into kernel32.
+        // Its one precondition that matters — that `group` names a process
+        // group — holds because the node was spawned with
+        // `CREATE_NEW_PROCESS_GROUP`, which makes it the leader of a group
+        // whose id is its pid. Were it not, the event would go to this
+        // process's own group and stop the test runner, not corrupt anything.
+        #[allow(unsafe_code)]
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, group) };
+        if sent == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Waits for the node to exit of its own accord, within the bound.
@@ -458,7 +490,16 @@ impl Running {
         if self.exited().is_some() {
             return true;
         }
+        #[cfg(unix)]
         self.signal("INT");
+        #[cfg(windows)]
+        if let Err(error) = self.ctrl_break() {
+            // Said out loud rather than folded into the kill that follows:
+            // a node killed here forgets what it downloaded (P2-25), and the
+            // test that notices will otherwise blame the node.
+            eprintln!("could not send ctrl-break, so the node will be killed: {error}");
+            return false;
+        }
         self.wait_until_gone().is_some()
     }
 }
