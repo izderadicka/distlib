@@ -89,11 +89,13 @@ pub fn alpns() -> Vec<Vec<u8>> {
 /// a `ForwardToLeader` may have lost the term by the time we dial it.
 const PROPOSE_ATTEMPTS: usize = 3;
 
-/// How long to wait before asking again who the leader is.
+/// How long a proposal waits, after a forward failed, for this node to hear
+/// of a different leader before it asks again.
 ///
-/// Long enough for replication to tell this node about a term it missed, short
-/// enough not to stall a proposal that would otherwise succeed immediately.
-const FORWARD_RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Five of P3-4's longest election timeouts: room for a split vote or two on
+/// a busy machine, and short enough that a leader which was only briefly out
+/// of reach is asked again before the caller has given up.
+const LEADER_CHANGE_WAIT: Duration = Duration::from_secs(10);
 
 /// Raft's timing, in milliseconds: a heartbeat every quarter second, and an
 /// election after one to two seconds without one.
@@ -917,14 +919,32 @@ impl MembershipNode {
 
                         // The hint was stale or the leader unreachable: the
                         // named node may have lost the term before we dialled
-                        // it. Our own Raft learns the new leader from
-                        // replication, so ask it again rather than giving up —
-                        // this is the case PROPOSE_ATTEMPTS exists for, and
-                        // what the previous version got wrong by returning here.
+                        // it, or be dead. Our own Raft learns the new leader
+                        // from the election, so ask it again rather than
+                        // giving up — this is the case PROPOSE_ATTEMPTS exists
+                        // for, and what the previous version got wrong by
+                        // returning here.
+                        //
+                        // **Waiting for somebody else to lead, not for a fixed
+                        // delay.** Asked again at once, Raft names the same
+                        // leader until the election that replaces it has
+                        // reached this node, and each attempt against a dead
+                        // one costs a whole dial timeout — so a fixed delay
+                        // spent the attempts racing the election, and lost it
+                        // on a slow runner with P3-4's longer timeouts. The
+                        // wait is bounded, and a timeout is not a failure:
+                        // the leader may simply have been briefly unreachable,
+                        // and the next attempt says.
                         Err(error) => {
-                            tracing::debug!(%error, "forwarding failed; asking again");
+                            tracing::debug!(%error, "forwarding failed; waiting for the leadership to move");
+                            let _ = raft
+                                .wait(Some(LEADER_CHANGE_WAIT))
+                                .metrics(
+                                    |metrics| metrics.current_leader != Some(leader),
+                                    "a leader other than the one that did not answer",
+                                )
+                                .await;
                             unreached = Some((leader, error));
-                            tokio::time::sleep(FORWARD_RETRY_DELAY).await;
                         }
                     }
                 }
