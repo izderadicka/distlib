@@ -214,9 +214,8 @@ async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
     let dir = TempDir::new().unwrap();
     let node = a_node(dir.path()).await;
     let mut asleep = node.events().subscribe();
-    // And one that does keep reading, whose sighting of the last item is how
-    // the test knows every event has been published — the store has an item
-    // before its batch's events go out, since those wait for the commit.
+    // And one that does keep reading, to know when everything has been
+    // published — see `barrier` below.
     let mut awake = node.events().subscribe();
 
     let count = u16::try_from(distlib_api::events::CAPACITY).unwrap() + 20;
@@ -226,17 +225,29 @@ async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
             .await
             .unwrap();
     }
-    let last = id(count - 1);
+    // Written last, with the greatest id there is. A batch is projected — and
+    // its events published — in id order, so whether the writes above land in
+    // one batch or many, hearing about this one means every one of theirs has
+    // gone out. "The last item written" is not that: ids sort by byte, not by
+    // the order they were written in.
+    let barrier = ItemId::from_bytes([0xff; 32]);
+    node.catalogue()
+        .write(&Item {
+            title: Some("barrier".to_owned()),
+            ..Item::new(barrier)
+        })
+        .await
+        .unwrap();
     tokio::time::timeout(SOON, async {
         loop {
             match awake.recv().await {
                 Ok(Event::ItemAdded { item_id } | Event::ItemChanged { item_id })
-                    if item_id == last =>
+                    if item_id == barrier =>
                 {
                     return;
                 }
                 // Reading, but a batch can still outrun it; the newest events
-                // are the ones kept, so the last item's is not among the lost.
+                // are the ones kept, so the barrier's is not among the lost.
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => panic!("the bus closed"),
             }
