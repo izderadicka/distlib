@@ -39,11 +39,13 @@ const SOON: Duration = Duration::from_secs(15);
 /// What a proposal can cost when the leader has just been killed.
 ///
 /// Arithmetic rather than a guess. `propose` makes `PROPOSE_ATTEMPTS` = 3
-/// attempts; an attempt that forwards to the dead leader spends
-/// `CONNECT_TIMEOUT` = 3s discovering it is gone, with `FORWARD_RETRY_DELAY`
-/// between them — about 9.5 seconds before an election has been decided, never
-/// mind a commit replicated. `SOON` left no room for either half, which is how
-/// this clause failed under a parallel runner.
+/// attempts; one that forwards to the dead leader spends `CONNECT_TIMEOUT` =
+/// 3s discovering it is gone, then waits up to `LEADER_CHANGE_WAIT` = 3s for
+/// this node to stop naming it — 18 seconds if every bound is spent, which a
+/// healthy election never comes near. `SOON` left no room for that,
+/// which is how this clause first failed under a parallel runner; a fixed
+/// quarter-second between attempts, rather than a wait for the leadership to
+/// move, is how it failed a second time on a slow Windows one (P3-11).
 const AFTER_A_DEATH: Duration = Duration::from_secs(45);
 
 #[tokio::test]
