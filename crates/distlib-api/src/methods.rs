@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig, NodeAddr,
-    Series, Ticket,
+    ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind, MemberId, NetConfig,
+    NodeAddr, Series, Ticket,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
@@ -80,6 +80,7 @@ impl Api {
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
             "library.download" => self.download(parse(params)?).await,
+            "library.edit_metadata" => self.edit_metadata(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -413,6 +414,49 @@ impl Api {
         record["files"] = json!(stored.item.files);
         record["last_modified"] = json!(stored.last_modified);
         Ok(record)
+    }
+
+    /// `library.edit_metadata` — writes the fields given, and only those.
+    ///
+    /// **One entry per field, and a field not named is not touched.** The
+    /// catalogue is last-writer-wins per key, so two members editing the same
+    /// item's title and genres at the same time both keep their edit; writing
+    /// the whole record would have the second erase the first's. That is also
+    /// why **a field cannot be cleared** here: "no value" has no entry to write
+    /// that would not erase somebody else's concurrent one, and the catalogue
+    /// has no tombstone for a field yet.
+    ///
+    /// **The item must already be in this node's document**, which is asked
+    /// rather than the read model, since the document is what gets written.
+    /// Editing an item nobody added would create one out of nothing but
+    /// metadata — no files, and an id nothing fingerprints to.
+    async fn edit_metadata(&self, params: EditMetadata) -> Result<Value, Error> {
+        let EditMetadata { item_id, fields } = params;
+        // How many copies the group keeps is custodianship (§5.5), phase 5's,
+        // and not something a metadata edit should move in passing.
+        if fields.replicas.is_some() {
+            return Err(Error::invalid_params(
+                "replicas is not metadata, and library.edit_metadata does not write it",
+            ));
+        }
+        let mut edit = Item::new(item_id);
+        edit.set(fields);
+        if edit == Item::new(item_id) {
+            return Err(Error::invalid_params(
+                "library.edit_metadata needs at least one field to write",
+            ));
+        }
+        if self
+            .catalogue
+            .item(item_id)
+            .await
+            .map_err(sync_error)?
+            .is_none()
+        {
+            return Err(Error::failed(format!("no such item: {item_id}")));
+        }
+        self.catalogue.write(&edit).await.map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id }))
     }
 
     /// `library.add` — hash a file set, store it as blobs, and write a
@@ -1229,6 +1273,14 @@ struct Add {
     lang: Option<String>,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// `library.edit_metadata`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EditMetadata {
+    item_id: ItemId,
+    fields: ItemFields,
 }
 
 /// `library.download`'s params.

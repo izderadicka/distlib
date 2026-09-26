@@ -405,3 +405,155 @@ async fn adding_two_different_files_under_one_name_is_refused() {
 
     runtime.shutdown().await;
 }
+
+/// 3a-3's acceptance: a title edited on one node converges to the other, a
+/// watcher there is told, and `library.item` reads the new title on both.
+///
+/// And the edit writes only what it names: the authors `library.add` wrote
+/// are still there afterwards, which is what lets two members edit different
+/// fields of one item at once without either erasing the other.
+#[tokio::test]
+async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
+    let dir = TempDir::new().unwrap();
+    let alice_key = SecretKey::generate();
+    let bob_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let bob_id = MemberId::from(bob_key.public());
+    let group_config = config(&[alice_id, bob_id]);
+    let alice = Runtime::start(
+        &alice_key,
+        &group_config,
+        &DataDir::new(dir.path().join("alice")),
+    )
+    .await
+    .unwrap();
+    let bob = Runtime::start(
+        &bob_key,
+        &group_config,
+        &DataDir::new(dir.path().join("bob")),
+    )
+    .await
+    .unwrap();
+    alice
+        .node()
+        .init_group(
+            vec![
+                (record(alice_id, "alice"), bound(&alice)),
+                (record(bob_id, "bob"), bound(&bob)),
+            ],
+            &alice_key,
+        )
+        .await
+        .unwrap();
+    alice.catalogue().ready().await;
+    bob.catalogue().ready().await;
+    let alice_api = api(&alice, &alice_key);
+    let bob_api = api(&bob, &bob_key);
+
+    let book = dir.path().join("dune.epub");
+    std::fs::write(&book, b"a desert planet").unwrap();
+    let added = alice_api
+        .call(
+            "library.add",
+            Some(json!({
+                "kind": "ebook",
+                "files": [book],
+                "title": "Dune",
+                "authors": ["Frank Herbert"],
+            })),
+        )
+        .await
+        .unwrap();
+    let item_id: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    tokio::time::timeout(SOON, async {
+        while title_on(&bob_api, item_id).await.as_deref() != Some("Dune") {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob reads the item alice added");
+
+    let mut watching_bob = bob.events().subscribe();
+    alice_api
+        .call(
+            "library.edit_metadata",
+            Some(json!({ "item_id": item_id, "fields": { "title": "Dune Messiah" } })),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(SOON, async {
+        loop {
+            if let Ok(distlib_core::Event::ItemChanged { item_id: changed }) =
+                watching_bob.recv().await
+                && changed == item_id
+                && title_on(&bob_api, item_id).await.as_deref() == Some("Dune Messiah")
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("bob is told the item changed, and reads the new title");
+    assert_eq!(
+        title_on(&alice_api, item_id).await.as_deref(),
+        Some("Dune Messiah")
+    );
+
+    let on_bob = bob_api
+        .call("library.item", Some(json!({ "item_id": item_id })))
+        .await
+        .unwrap();
+    assert_eq!(
+        on_bob["authors"],
+        json!(["Frank Herbert"]),
+        "an edit that named only the title left the authors alone"
+    );
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// The title `library.item` reads for `item_id`, or `None` while there is none.
+async fn title_on(api: &Api, item_id: ItemId) -> Option<String> {
+    api.call("library.item", Some(json!({ "item_id": item_id })))
+        .await
+        .ok()
+        .and_then(|item| item["title"].as_str().map(str::to_owned))
+}
+
+/// An edit of an item this node's document does not hold is refused, and
+/// leaves nothing behind — otherwise it would create an item out of nothing
+/// but metadata, with no files and an id nothing fingerprints to.
+#[tokio::test]
+async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    let runtime = Runtime::start(&key, &config(&[id]), &DataDir::new(dir.path().join("solo")))
+        .await
+        .unwrap();
+    runtime
+        .node()
+        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .await
+        .unwrap();
+    runtime.catalogue().ready().await;
+
+    let nowhere = ItemId::from_bytes([3; 32]);
+    let error = api(&runtime, &key)
+        .call(
+            "library.edit_metadata",
+            Some(json!({ "item_id": nowhere, "fields": { "title": "Dune" } })),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no such item"), "{error}");
+    assert_eq!(
+        runtime.catalogue().item(nowhere).await.unwrap(),
+        None,
+        "the refusal wrote nothing"
+    );
+
+    runtime.shutdown().await;
+}

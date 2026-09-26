@@ -609,6 +609,51 @@ async fn a_change_nobody_watched_does_not_silence_the_next_one() {
 }
 
 #[tokio::test]
+async fn an_edit_must_say_what_to_write() {
+    // Refused before anything is asked of the catalogue — which this harness
+    // has none of worth the name. That an edit of an item nobody added is
+    // refused is `library.rs`'s to show, against a real one.
+    let harness = Harness::start().await;
+    let item_id = ItemId::from_bytes([3; 32]);
+
+    let no_fields = harness
+        .refuse(
+            "library.edit_metadata",
+            json!({ "item_id": item_id, "fields": {} }),
+        )
+        .await;
+    assert_eq!(code(&no_fields), -32602, "{no_fields}");
+
+    let not_a_field = harness
+        .refuse(
+            "library.edit_metadata",
+            json!({ "item_id": item_id, "fields": { "replicas": 5 } }),
+        )
+        .await;
+    assert_eq!(
+        code(&not_a_field),
+        -32602,
+        "replicas is custodianship, not metadata: {not_a_field}"
+    );
+
+    let no_such_field = harness
+        .refuse(
+            "library.edit_metadata",
+            // Beside a real field, so that ignoring the unknown one would
+            // leave an edit to make rather than an empty one to refuse.
+            json!({ "item_id": item_id, "fields": { "title": "Dune", "colour": "blue" } }),
+        )
+        .await;
+    assert_eq!(
+        code(&no_such_field),
+        -32602,
+        "a name that is not a field is refused, not ignored: {no_such_field}"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn node_status_reports_the_group_this_node_founded() {
     let harness = Harness::start().await;
     let status = harness.call("node.status", Value::Null).await;
