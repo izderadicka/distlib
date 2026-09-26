@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use distlib_api::{Api, Server, serve};
+use distlib_api::{Api, Server, serve, tasks::Tasks};
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
@@ -61,6 +61,9 @@ struct Harness {
     store: Store,
     /// Same reasoning, same emptiness, for `library.search`.
     search: SearchIndex,
+    /// The server's own task registry, for a test to start a download in
+    /// directly — nothing here has files to fetch the real way.
+    tasks: Tasks,
     _dir: TempDir,
 }
 
@@ -146,6 +149,7 @@ impl Harness {
         .unwrap();
 
         let token = "0123456789abcdef".repeat(4);
+        let tasks = Tasks::new(distlib_api::events::bus());
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -157,9 +161,9 @@ impl Harness {
                 blobs,
                 store: store.clone(),
                 search: search.clone(),
+                tasks: tasks.clone(),
             },
             SecretString::from(token.clone()),
-            distlib_api::events::bus(),
         )
         .await
         .unwrap();
@@ -170,6 +174,7 @@ impl Harness {
             routers: vec![router],
             store,
             search,
+            tasks,
             _dir: dir,
         }
     }
@@ -296,6 +301,7 @@ impl Harness {
         let store = Store::open(None).await.unwrap();
         let search = SearchIndex::open(None).await.unwrap();
         let token = "0123456789abcdef".repeat(4);
+        let tasks = Tasks::new(distlib_api::events::bus());
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -307,9 +313,9 @@ impl Harness {
                 blobs: blobs.expect("node 0 built one above"),
                 store: store.clone(),
                 search: search.clone(),
+                tasks: tasks.clone(),
             },
             SecretString::from(token.clone()),
-            distlib_api::events::bus(),
         )
         .await
         .unwrap();
@@ -321,6 +327,7 @@ impl Harness {
             routers,
             store,
             search,
+            tasks,
             _dir: dir,
         };
         (harness, nodes, secrets)
@@ -462,11 +469,12 @@ struct Watcher {
 }
 
 impl Watcher {
-    /// Reads until an `event:` line naming `name` arrives, or fails the test.
+    /// Reads until an `event:` line naming `name` arrives, or fails the test,
+    /// and answers with everything read up to and including it.
     ///
     /// "Within a bound" rather than "next": keep-alive comments and other
     /// events may arrive first, on their own schedules.
-    async fn expect(&mut self, name: &str) {
+    async fn expect(&mut self, name: &str) -> String {
         let wanted = format!("event: {name}\n");
         let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !self.seen.contains(&wanted) {
@@ -483,7 +491,7 @@ impl Watcher {
             self.seen
         );
         // Consumed, so that a second `expect` waits for a second event.
-        self.seen.clear();
+        std::mem::take(&mut self.seen)
     }
 }
 
@@ -604,6 +612,67 @@ async fn a_change_nobody_watched_does_not_silence_the_next_one() {
         )
         .await;
     watcher.expect("membership.changed").await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_page_that_connects_mid_download_is_told_how_far_it_has_got() {
+    // 3a-5: a page reloaded while a download runs must get its bar back at
+    // once, not at the next report — which, for a download that has stalled
+    // on a slow provider, may be a long time coming.
+    let harness = Harness::start().await;
+    let mut download = harness
+        .tasks
+        .start_download(ItemId::from_bytes([3; 32]), None, 100);
+    // Published to nobody: no page was open.
+    download.progress(40);
+
+    let mut watcher = harness.watch().await;
+    let replayed = watcher.expect("download.progress").await;
+    assert!(replayed.contains(r#""done":40"#), "{replayed}");
+
+    // And then live, as for any other watcher.
+    download.finish(json!([]));
+    watcher.expect("download.finished").await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_download_can_be_asked_after_while_it_runs_and_once_it_has_ended() {
+    let harness = Harness::start().await;
+    let mut download =
+        harness
+            .tasks
+            .start_download(ItemId::from_bytes([3; 32]), Some("Dune".to_owned()), 100);
+    let task_id = download.id();
+    download.progress(40);
+
+    let running = harness
+        .call("library.task", json!({ "task_id": task_id }))
+        .await;
+    assert_eq!(running["state"], "running", "{running}");
+    assert_eq!(running["done"], 40, "{running}");
+    assert_eq!(running["title"], "Dune", "{running}");
+
+    download.finish(json!([{ "fetched": true }]));
+    let finished = harness
+        .call("library.task", json!({ "task_id": task_id }))
+        .await;
+    assert_eq!(finished["state"], "finished", "{finished}");
+    assert_eq!(finished["files"], json!([{ "fetched": true }]));
+
+    let unknown = harness
+        .refuse("library.task", json!({ "task_id": 999 }))
+        .await;
+    assert!(
+        unknown["message"]
+            .as_str()
+            .unwrap()
+            .contains("no such task"),
+        "{unknown}"
+    );
 
     harness.shutdown().await;
 }

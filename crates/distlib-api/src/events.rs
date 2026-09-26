@@ -19,7 +19,7 @@ use std::convert::Infallible;
 use axum::response::sse::Event as Frame;
 use distlib_consensus::MembershipState;
 use distlib_core::Event;
-use futures_lite::{Stream, stream};
+use futures_lite::{Stream, StreamExt as _, stream};
 use tokio::sync::{
     broadcast::{self, error::RecvError},
     watch,
@@ -41,15 +41,21 @@ pub fn bus() -> broadcast::Sender<Event> {
     broadcast::channel(CAPACITY).0
 }
 
-/// The frames one watcher reads, until the bus closes.
+/// The frames one watcher reads: `first`, then everything on the bus until it
+/// closes.
+///
+/// `first` is what the watcher would have heard had it been connected sooner
+/// — the downloads already running, as `GET /events` uses it.
 ///
 /// `Lagged` is not the end of the stream — the receiver has been moved past
 /// what it missed and carries on — so it becomes a `resync` frame, which a
 /// page answers with the same refetch as any other event.
 pub(crate) fn frames(
+    first: Vec<Event>,
     receiver: broadcast::Receiver<Event>,
 ) -> impl Stream<Item = Result<Frame, Infallible>> {
-    stream::unfold(receiver, |mut receiver| async move {
+    let first = stream::iter(first).map(|event| Ok(frame(event.name(), &event)));
+    first.chain(stream::unfold(receiver, |mut receiver| async move {
         let frame = match receiver.recv().await {
             Ok(event) => frame(event.name(), &event),
             Err(RecvError::Lagged(missed)) => {
@@ -59,7 +65,7 @@ pub(crate) fn frames(
             Err(RecvError::Closed) => return None,
         };
         Some((Ok(frame), receiver))
-    })
+    }))
 }
 
 fn frame(name: &str, data: &impl serde::Serialize) -> Frame {
@@ -91,14 +97,12 @@ mod tests {
 
     use std::pin::pin;
 
-    use futures_lite::StreamExt as _;
-
     use super::*;
 
     #[tokio::test]
     async fn a_watcher_that_fell_behind_is_told_to_resync_and_carries_on() {
         let (events, receiver) = broadcast::channel(1);
-        let mut frames = pin!(frames(receiver));
+        let mut frames = pin!(frames(Vec::new(), receiver));
 
         // Two into a channel of one: the first is overwritten before anybody
         // reads it.

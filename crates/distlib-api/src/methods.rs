@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
     ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind, MemberId, NetConfig,
-    NodeAddr, Series, Ticket,
+    NodeAddr, Series, TaskId, Ticket,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
@@ -18,7 +18,10 @@ use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::rpc::Error;
+use crate::{
+    rpc::Error,
+    tasks::{self, Tasks},
+};
 
 /// Everything the methods need: the running node and the key it signs with.
 ///
@@ -33,6 +36,7 @@ const MAX_SEARCH_RESULTS: usize = 500;
 
 /// The node is shared rather than owned: whoever started it keeps serving the
 /// group with it while this answers questions about it.
+#[derive(Clone)]
 pub struct Api {
     pub node: Arc<MembershipNode>,
     pub secret: SecretKey,
@@ -59,6 +63,9 @@ pub struct Api {
     /// What `library.search` ranks against. Only a ranking — see its own doc
     /// comment — so a hit's fields still come from `store`.
     pub search: SearchIndex,
+    /// The downloads this node is running or has recently run, and the event
+    /// bus they — and everything else — publish to.
+    pub tasks: Tasks,
 }
 
 impl Api {
@@ -80,6 +87,7 @@ impl Api {
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
             "library.download" => self.download(parse(params)?).await,
+            "library.task" => self.task(parse(params)?),
             "library.edit_metadata" => self.edit_metadata(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
@@ -609,15 +617,21 @@ impl Api {
     /// `library.download` — fetch an item's files from whoever has them, and
     /// write them out to a directory (2b-3).
     ///
-    /// **Synchronous, where §7.1's sketch answers with a `task_id`.** A task
-    /// id is only useful next to the `download.progress` events §7.2 puts on
-    /// the SSE stream, and that stream is phase 3 — so the id would be a
-    /// handle to nothing, and a caller would have to poll for a completion
-    /// that has no representation either. Returning when the files are on
-    /// disk says the same thing with nothing to build first, and turning it
-    /// into a task later is an addition rather than a change: the answer
-    /// gains a field. The same cut P2-21 made for `library.search`'s
-    /// `filters`.
+    /// **Answers with a `task_id` as soon as the download is checked, and
+    /// fetches in the background** (phase 3's D4). This was synchronous in
+    /// phase 2, and its doc comment then predicted that becoming a task would
+    /// be "an addition rather than a change". It is a change: the files are
+    /// no longer on disk when the answer arrives, and the answer no longer
+    /// says whether each was fetched — `library.task` does, once it has
+    /// finished. The reason is the browser: axum drops a handler whose client
+    /// went away, so a synchronous download would die with a page reload.
+    ///
+    /// **Every refusal is still synchronous.** Everything below that can be
+    /// the caller's mistake — a destination that is not a directory, an item
+    /// or file this node does not have, a name that cannot be written or is
+    /// already taken — is checked before the task exists, so it is refused as
+    /// a JSON-RPC error exactly as before. What the task can fail with is the
+    /// network.
     ///
     /// **`file` names a content hash, where the sketch says `file_index`.**
     /// An item's files are a map keyed by content hash (§5.2), so the only
@@ -650,7 +664,7 @@ impl Api {
     ///
     /// **Nothing is "registered".** The fetch lands the bytes in the store
     /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
-    /// holder from the moment it returns and stays one across a restart,
+    /// holder from the moment it finishes and stays one across a restart,
     /// because that store is on disk. §5.6's heartbeat is what would announce
     /// it, and it does not exist yet.
     async fn download(&self, params: Download) -> Result<Value, Error> {
@@ -759,14 +773,59 @@ impl Api {
             .filter(|member| *member != me)
             .collect();
 
+        let total = targets.iter().map(|(_, record, _)| record.size).sum();
+        let task = self
+            .tasks
+            .start_download(params.item_id, stored.item.title.clone(), total);
+        let task_id = task.id();
+        let answer = json!({
+            "task_id": task_id,
+            "item_id": params.item_id,
+            "title": stored.item.title,
+            "files": targets
+                .iter()
+                .map(|(hash, record, target)| json!({
+                    "file": hash,
+                    "filename": record.filename,
+                    "path": target,
+                }))
+                .collect::<Vec<_>>(),
+        });
+
+        // A clone, because the task outlives this call; every field is a
+        // handle onto something shared, so it is the same node either way.
+        let api = self.clone();
+        tokio::spawn(async move {
+            let mut task = task;
+            match api.fetch_all(targets, &providers, &mut task).await {
+                Ok(files) => task.finish(Value::Array(files)),
+                Err(error) => task.fail(error.message),
+            }
+        });
+        Ok(answer)
+    }
+
+    /// `library.download`'s background half: fetches what is not here yet and
+    /// writes every file out, reporting progress to `task` as it goes.
+    ///
+    /// Progress is counted across all of the files, so a bar fills once per
+    /// download rather than once per file: a file already here counts as done
+    /// the moment it is found, and one being fetched counts what it has so far.
+    async fn fetch_all(
+        &self,
+        targets: Vec<(ContentHash, FileRecord, PathBuf)>,
+        providers: &[MemberId],
+        task: &mut tasks::Download,
+    ) -> Result<Vec<Value>, Error> {
         let mut files = Vec::with_capacity(targets.len());
-        let mut refresh = OneRefresh::of(self, &providers);
+        let mut refresh = OneRefresh::of(self, providers);
+        let mut done = 0;
         for (hash, record, target) in targets {
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
             let already_here = self.blobs.has(hash).await.map_err(net_error)?;
-            if !already_here && let Err(failure) = self.blobs.fetch(hash, providers.clone()).await {
+            if !already_here && let Err(failure) = self.fetch(hash, providers, done, task).await {
                 // A fetch that failed is the first evidence that this node's
                 // idea of where everybody is might be out of date, so it is
                 // worth one question and one more attempt. The second error
@@ -775,11 +834,12 @@ impl Api {
                 if !refresh.spend().await {
                     return Err(net_error(failure));
                 }
-                self.blobs
-                    .fetch(hash, providers.clone())
+                self.fetch(hash, providers, done, task)
                     .await
                     .map_err(net_error)?;
             }
+            done += record.size;
+            task.progress(done);
             self.blobs.export(hash, &target).await.map_err(net_error)?;
             files.push(json!({
                 "file": hash,
@@ -791,12 +851,34 @@ impl Api {
                 "fetched": !already_here,
             }));
         }
+        Ok(files)
+    }
 
-        Ok(json!({
-            "item_id": params.item_id,
-            "title": stored.item.title,
-            "files": files,
-        }))
+    /// Fetches one file, reporting to `task` how far the whole download has
+    /// got: `before` bytes from the files already done, plus this one's.
+    async fn fetch(
+        &self,
+        hash: ContentHash,
+        providers: &[MemberId],
+        before: u64,
+        task: &mut tasks::Download,
+    ) -> Result<(), NetError> {
+        self.blobs
+            .fetch_with_progress(hash, providers.to_vec(), |got| task.progress(before + got))
+            .await
+    }
+
+    /// `library.task` — how a download started by `library.download` is
+    /// getting on, or how it ended.
+    ///
+    /// A task this node never started, or finished long enough ago to have
+    /// been pruned, is refused alike: either way there is nothing to report.
+    fn task(&self, params: TaskParams) -> Result<Value, Error> {
+        let state = self
+            .tasks
+            .get(params.task_id)
+            .ok_or_else(|| Error::failed(format!("no such task: {}", params.task_id)))?;
+        serde_json::to_value(state).map_err(|error| Error::failed(error.to_string()))
     }
 
     /// Asks a core node where the providers are.
@@ -1301,6 +1383,13 @@ struct Download {
     dest: PathBuf,
     #[serde(default)]
     file: Option<ContentHash>,
+}
+
+/// `library.task`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskParams {
+    task_id: TaskId,
 }
 
 /// Reads the params a method expects, or says what was wrong with them.

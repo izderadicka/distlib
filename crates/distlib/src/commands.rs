@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use distlib_api::{Api, Client, ClientError, Server};
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, ContentHash, CoreMember, DataDir, Event, ItemId, MemberId, NodeAddr, Ticket,
+    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -15,7 +15,6 @@ use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 use crate::{Runtime, cli::Kind};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
 
 /// How long `status --online` waits to reach a relay before giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -127,7 +126,6 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
             serve_api(
                 paths,
                 &config,
-                runtime.events().clone(),
                 Api {
                     node: Arc::clone(&node),
                     secret: secret.clone(),
@@ -137,6 +135,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                     blobs: runtime.blobs().clone(),
                     store: runtime.store().clone(),
                     search: runtime.search().clone(),
+                    tasks: runtime.tasks().clone(),
                 },
             )
             .await?,
@@ -754,12 +753,13 @@ pub async fn download(
     let dest = std::fs::canonicalize(dest)
         .with_context(|| format!("could not find {}", dest.display()))?;
 
-    let answer = ask(
+    let started = ask(
         paths,
         "library.download",
         json!({ "item_id": item_id, "dest": dest, "file": file }),
     )
     .await?;
+    let answer = wait_for(paths, &started["task_id"]).await?;
 
     println!(
         "downloaded  {item_id}  {}",
@@ -780,6 +780,31 @@ pub async fn download(
         );
     }
     Ok(())
+}
+
+/// How often `distlib download` asks how its download is going.
+const TASK_POLL: Duration = Duration::from_millis(200);
+
+/// Waits for task `task_id` to end, and answers with its final state — or
+/// fails with its error.
+///
+/// Polls `library.task` rather than reading `/events`: the CLI shows no
+/// progress, so all it needs from the stream is the ending, and a poll every
+/// fifth of a second finds that with one client and no stream parser. A
+/// download is seconds at the least, so the poll is not what anybody waits
+/// on.
+async fn wait_for(paths: &Paths, task_id: &Value) -> Result<Value> {
+    loop {
+        let task = ask(paths, "library.task", json!({ "task_id": task_id })).await?;
+        match task["state"].as_str() {
+            Some("running") => tokio::time::sleep(TASK_POLL).await,
+            Some("finished") => return Ok(task),
+            _ => anyhow::bail!(
+                "the download failed: {}",
+                task["error"].as_str().unwrap_or("no reason given")
+            ),
+        }
+    }
 }
 
 /// [`Kind`] as `library.add` spells it — §5.2's `type`, in `ItemKind`'s own
@@ -1221,16 +1246,11 @@ fn founders(
 ///
 /// The token is created on first run rather than at `init`, so a data
 /// directory made before this existed grows one when it is next started.
-async fn serve_api(
-    paths: &Paths,
-    config: &Config,
-    events: broadcast::Sender<Event>,
-    api: Api,
-) -> Result<Server> {
+async fn serve_api(paths: &Paths, config: &Config, api: Api) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
-    let server = distlib_api::serve(config.api.bind_addr, api, token, events)
+    let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await
         .with_context(|| {
             format!(

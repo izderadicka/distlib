@@ -28,11 +28,13 @@ use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
-    ContentHash, DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig,
+    ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig,
+    TaskId,
 };
 use iroh::SecretKey;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::broadcast;
 
 mod common;
 use common::{bound, config, following, record};
@@ -52,7 +54,76 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
+        tasks: runtime.tasks().clone(),
     }
+}
+
+/// Downloads as a caller of the API does since 3a-5: starts the task, then
+/// asks after it until it ends. Answers with the finished task — whose
+/// `files` say what was fetched — or with why it was refused or failed.
+async fn download(api: &Api, params: Value) -> Result<Value, String> {
+    let started = api
+        .call("library.download", Some(params))
+        .await
+        .map_err(|error| error.to_string())?;
+    let task = json!({ "task_id": started["task_id"] });
+    tokio::time::timeout(SOON, async {
+        loop {
+            let state = api
+                .call("library.task", Some(task.clone()))
+                .await
+                .map_err(|error| error.to_string())?;
+            match state["state"].as_str() {
+                Some("running") => tokio::time::sleep(Duration::from_millis(50)).await,
+                Some("finished") => return Ok(state),
+                _ => return Err(state["error"].to_string()),
+            }
+        }
+    })
+    .await
+    .expect("a download ends, one way or the other")
+}
+
+/// Everything `watching` hears about the download `task` describes: up to
+/// and including its ending, and then a little longer, so that a second
+/// ending would be caught too.
+///
+/// Fails the test if an ending is not the last thing heard, or is heard
+/// twice — whatever else it goes on to assert.
+async fn told_about(watching: &mut broadcast::Receiver<Event>, task: &Value) -> Vec<Event> {
+    let task_id: TaskId = serde_json::from_value(task["task_id"].clone()).unwrap();
+    let about_it = |event: &Event| match event {
+        Event::DownloadProgress { task_id: id, .. }
+        | Event::DownloadFinished { task_id: id, .. }
+        | Event::DownloadFailed { task_id: id, .. } => *id == task_id,
+        _ => false,
+    };
+    let ending = |event: &Event| {
+        matches!(
+            event,
+            Event::DownloadFinished { .. } | Event::DownloadFailed { .. }
+        )
+    };
+    let mut heard = Vec::new();
+    tokio::time::timeout(SOON, async {
+        while !heard.last().is_some_and(ending) {
+            let event = watching.recv().await.unwrap();
+            if about_it(&event) {
+                heard.push(event);
+            }
+        }
+    })
+    .await
+    .expect("the download's ending is published");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after: Vec<Event> = std::iter::from_fn(|| watching.try_recv().ok())
+        .filter(about_it)
+        .collect();
+    assert!(
+        after.is_empty(),
+        "nothing more is said of a download that has ended: {after:?}"
+    );
+    heard
 }
 
 /// Writes a file and adds it as an ebook, answering with the item's id.
@@ -206,13 +277,29 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     until_projected(&carol, item, 1, "carol").await;
 
     let bobs_dest = dest(dir.path(), "bob");
-    let downloaded = api(&bob, &bob_key)
-        .call(
-            "library.download",
-            Some(json!({ "item_id": item, "dest": &bobs_dest })),
-        )
-        .await
-        .unwrap();
+    let mut watching_bob = bob.events().subscribe();
+    let downloaded = download(
+        &api(&bob, &bob_key),
+        json!({ "item_id": item, "dest": &bobs_dest }),
+    )
+    .await
+    .unwrap();
+
+    // 3a-5's acceptance: a page watching bob sees the bar reach the whole
+    // size, then hears the download end, once.
+    let heard = told_about(&mut watching_bob, &downloaded).await;
+    let total = u64::try_from(bytes.len()).unwrap();
+    let [.., last_progress, ending] = &heard[..] else {
+        panic!("a progress report and an ending, at least: {heard:?}")
+    };
+    assert!(
+        matches!(last_progress, Event::DownloadProgress { done, total: of, .. } if *done == total && *of == total),
+        "the bar ends full: {heard:?}"
+    );
+    assert!(
+        matches!(ending, Event::DownloadFinished { .. }),
+        "{heard:?}"
+    );
     let files = downloaded["files"].as_array().unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(
@@ -264,12 +351,11 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
             // bob before her endpoint has finished learning how, and a fetch
             // that finds nobody fails rather than waiting. What is being
             // pinned is that it comes through, not how soon.
-            match api(&carol, &carol_key)
-                .call(
-                    "library.download",
-                    Some(json!({ "item_id": item, "dest": &carols_dest })),
-                )
-                .await
+            match download(
+                &api(&carol, &carol_key),
+                json!({ "item_id": item, "dest": &carols_dest }),
+            )
+            .await
             {
                 Ok(answer) => return answer,
                 Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
@@ -317,13 +403,12 @@ async fn downloading_something_this_node_already_has_asks_nobody() {
     until_projected(&runtime, item, 1, "the solo node").await;
 
     let dest = dest(dir.path(), "me");
-    let downloaded = api(&runtime, &key)
-        .call(
-            "library.download",
-            Some(json!({ "item_id": item, "dest": &dest })),
-        )
-        .await
-        .unwrap();
+    let downloaded = download(
+        &api(&runtime, &key),
+        json!({ "item_id": item, "dest": &dest }),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         downloaded["files"].as_array().unwrap()[0]["fetched"],
@@ -419,13 +504,12 @@ async fn downloading_one_file_of_an_item_takes_only_that_file() {
         .0;
 
     let dest = dest(dir.path(), "me");
-    let downloaded = api(&runtime, &key)
-        .call(
-            "library.download",
-            Some(json!({ "item_id": item, "dest": &dest, "file": wanted })),
-        )
-        .await
-        .unwrap();
+    let downloaded = download(
+        &api(&runtime, &key),
+        json!({ "item_id": item, "dest": &dest, "file": wanted }),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(downloaded["files"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -476,6 +560,70 @@ async fn downloading_into_something_that_is_not_a_directory_is_refused() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("not a directory"), "{error}");
+
+    runtime.shutdown().await;
+}
+
+/// A download that fails does so in the background, after `library.download`
+/// has answered — so it has to be told, both to whoever asks after it and to
+/// whoever is watching.
+///
+/// Seeded by hand, like the test below it: an item whose one file nobody in
+/// the group holds, which `library.add` cannot make but a catalogue written by
+/// a member who has since left can.
+#[tokio::test]
+async fn a_download_nobody_can_serve_fails_and_says_so() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let hash = ContentHash::from_bytes([0xdd; 32]);
+    let item = ItemId::from_content_hashes(&[*hash.as_bytes()]);
+    runtime
+        .catalogue()
+        .write(&Item {
+            kind: Some(ItemKind::Ebook),
+            title: Some("Lost".to_owned()),
+            files: BTreeMap::from([(
+                hash,
+                FileRecord {
+                    role: FileRole::Content,
+                    format: "epub".to_owned(),
+                    size: 1_000,
+                    filename: "lost.epub".to_owned(),
+                    seq: None,
+                    disc: None,
+                    title: None,
+                    duration: None,
+                },
+            )]),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
+    until_projected(&runtime, item, 1, "the solo node").await;
+
+    let dest = dest(dir.path(), "me");
+    let api = api(&runtime, &key);
+    let mut watching = runtime.events().subscribe();
+    let started = api
+        .call(
+            "library.download",
+            Some(json!({ "item_id": item, "dest": &dest })),
+        )
+        .await
+        .expect("nothing the caller could have got wrong, so it starts");
+
+    let heard = told_about(&mut watching, &started).await;
+    assert!(
+        matches!(heard.last(), Some(Event::DownloadFailed { .. })),
+        "{heard:?}"
+    );
+    let error = download(&api, json!({ "item_id": item, "dest": &dest }))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains(&hash.to_string()),
+        "names what failed: {error}"
+    );
+    assert!(!dest.join("lost.epub").exists());
 
     runtime.shutdown().await;
 }
@@ -580,13 +728,12 @@ async fn downloading_an_item_whose_files_share_a_name_is_refused() {
         .item
         .files;
     let one = *files.keys().next().unwrap();
-    api(&runtime, &key)
-        .call(
-            "library.download",
-            Some(json!({ "item_id": item, "dest": &dest, "file": one })),
-        )
-        .await
-        .unwrap();
+    download(
+        &api(&runtime, &key),
+        json!({ "item_id": item, "dest": &dest, "file": one }),
+    )
+    .await
+    .unwrap();
     assert!(dest.join("track01.mp3").exists());
 
     runtime.shutdown().await;

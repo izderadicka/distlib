@@ -504,6 +504,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
+        tasks: runtime.tasks().clone(),
     };
 
     let found = api
