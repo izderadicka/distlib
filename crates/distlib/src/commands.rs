@@ -231,26 +231,48 @@ impl StopSignals {
     }
 }
 
-/// The same, where there are no unix signals and Ctrl-C is what there is.
-#[cfg(not(unix))]
-struct StopSignals;
+/// The same on Windows, which has console control events rather than signals.
+///
+/// **Ctrl-Break matters as much as Ctrl-C.** A process started in a process
+/// group of its own — which is how anything that wants to stop one child and
+/// not itself has to start it — has Ctrl-C disabled, and Ctrl-Break is the
+/// event that can still be sent to it. Closing the console window and the
+/// machine shutting down are the other two ways a console process is told to
+/// go, and Windows kills it a few seconds after either, so both start the
+/// shutdown straight away.
+///
+/// A Windows *service* is stopped by the service control manager, which is
+/// none of these; running `distlib` as one needs a service wrapper, and that
+/// is the release build's business (3c), not this listener's.
+#[cfg(windows)]
+struct StopSignals {
+    ctrl_c: tokio::signal::windows::CtrlC,
+    ctrl_break: tokio::signal::windows::CtrlBreak,
+    ctrl_close: tokio::signal::windows::CtrlClose,
+    ctrl_shutdown: tokio::signal::windows::CtrlShutdown,
+}
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl StopSignals {
     fn install() -> Result<Self> {
-        Ok(Self)
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+
+        Ok(Self {
+            ctrl_c: ctrl_c().context("could not listen for ctrl-c")?,
+            ctrl_break: ctrl_break().context("could not listen for ctrl-break")?,
+            ctrl_close: ctrl_close().context("could not listen for the console closing")?,
+            ctrl_shutdown: ctrl_shutdown().context("could not listen for shutdown")?,
+        })
     }
 
+    /// Resolves with the name of whichever event arrived first.
     async fn requested(&mut self) -> &'static str {
-        // The error case is a platform that cannot report Ctrl-C at all, where
-        // there is nothing better to do than go on running: a node that exited
-        // because it could not install a handler would be stopping for the one
-        // reason nobody asked it to.
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "could not listen for ctrl-c");
-            std::future::pending::<()>().await;
+        tokio::select! {
+            _ = self.ctrl_c.recv() => "ctrl-c",
+            _ = self.ctrl_break.recv() => "ctrl-break",
+            _ = self.ctrl_close.recv() => "ctrl-close",
+            _ = self.ctrl_shutdown.recv() => "ctrl-shutdown",
         }
-        "ctrl-c"
     }
 }
 

@@ -57,6 +57,9 @@ tokio = { version = "=1.53.1", features = [
     "io-util",
 ] }
 thiserror = "=2.0.20"
+# Test-only, Windows-only: the one console call the process harness needs.
+# Already in the tree through tokio's mio, so pinning it adds no package.
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Console", "Win32_System_Threading"] }
 anyhow = "=1.0.104"
 
 # --- config, serialisation, CLI --------------------------------------------
@@ -150,7 +153,10 @@ distlib-sync = { path = "crates/distlib-sync", default-features = false }
 distlib-store = { path = "crates/distlib-store" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` rather than `forbid` only so that one item can say `#[allow]`: the
+# test harness sending a Windows child Ctrl-Break, which has no safe wrapper
+# (P3-1). Anything else that wants `unsafe` has to make the same case in review.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 # CLAUDE.md: never unwrap in library code; expect() only for invariant violations.

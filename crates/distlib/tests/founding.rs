@@ -363,7 +363,6 @@ fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
     }
 }
 
-// SIGTERM is a Unix signal; Windows stops a service another way entirely.
 #[cfg(unix)]
 #[test]
 fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
@@ -376,32 +375,50 @@ fn a_node_stopped_by_a_service_manager_shuts_down_cleanly() {
     // every *downloaded* blob's bytes with no record that it holds them, and
     // fetches the lot again. (Imported blobs survive it; the asymmetry is
     // measured in P2-25.)
-    //
-    // A group of one is enough. What is in question is whether the signal is
-    // answered rather than fatal — what the shutdown then does is the same
-    // thing Ctrl-C has always run, and there is no second path to check.
+    stops_cleanly_when_asked("SIGTERM", |node| node.signal("TERM"));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_node_sent_ctrl_break_shuts_down_cleanly() {
+    // Windows' counterpart, and what the harness stops every node with there:
+    // a node in a process group of its own has Ctrl-C disabled, so Ctrl-Break
+    // is the event that reaches it. Unanswered, it kills the process — with
+    // the same cost as an unanswered SIGTERM.
+    stops_cleanly_when_asked("ctrl-break", |node| {
+        node.ctrl_break().expect("sending ctrl-break");
+    });
+}
+
+/// Starts a group of one, sends it `stop`, and checks it shut down rather
+/// than died.
+///
+/// A group of one is enough. What is in question is whether the request is
+/// answered rather than fatal — what the shutdown then does is the same thing
+/// Ctrl-C has always run, and there is no second path to check.
+fn stops_cleanly_when_asked(name: &str, stop: impl FnOnce(&mut common::process::Running)) {
     let friend = Friend::introduce();
     friend.agree_on(&[(friend.id.clone(), friend.port)]);
     let mut node = friend.run(true);
     node.wait_for("members=1");
 
-    node.signal("TERM");
+    stop(&mut node);
     let status = node
         .wait_until_gone()
         .expect("a node asked to stop should stop");
 
     // Both halves are needed, and the first one alone would be a test that
-    // passes on the behaviour it is meant to close: an unhandled SIGTERM also
+    // passes on the behaviour it is meant to close: an unanswered request also
     // makes the process go away, rather faster. `success()` is what separates
-    // running the shutdown from being killed by the signal.
+    // running the shutdown from being killed by it.
     let log = node.log_contents();
     assert!(
         status.success(),
-        "a node killed by the signal rather than answering it exits {status}; its log was:\n{log}"
+        "a node killed by {name} rather than answering it exits {status}; its log was:\n{log}"
     );
     assert!(
-        log.contains("SIGTERM"),
-        "the log should say which signal stopped it; got:\n{log}"
+        log.contains(name),
+        "the log should say what stopped it; got:\n{log}"
     );
     assert!(
         log.contains("shutting down"),
