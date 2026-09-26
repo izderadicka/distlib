@@ -34,13 +34,14 @@
 use std::path::Path;
 
 use distlib_core::{ContentHash, MemberId};
+use futures_lite::StreamExt as _;
 use iroh::Endpoint;
 use iroh_blobs::{
     Hash, HashAndFormat,
     api::{
         Store,
         blobs::BlobStatus,
-        downloader::{Downloader, Shuffled},
+        downloader::{DownloadProgressItem, Downloader, Shuffled},
     },
 };
 
@@ -119,17 +120,66 @@ impl Blobs {
     /// `tokio::time::timeout` for one, the way `distlib-sync`'s repair sweep
     /// wraps the same downloader for its own.
     pub async fn fetch(&self, hash: ContentHash, providers: Vec<MemberId>) -> Result<()> {
+        self.fetch_with_progress(hash, providers, |_| {}).await
+    }
+
+    /// [`Self::fetch`], telling `progress` how far it has got as it goes.
+    ///
+    /// **What `progress` is told is a byte offset, and only that.** It has no
+    /// total — the blob's size is the catalogue's `FileRecord::size`, which
+    /// the caller has and this does not. It is **not monotonic**: when one
+    /// provider fails and the next is tried, the offset starts again, and a
+    /// caller drawing a bar keeps its own high-water mark rather than this
+    /// pretending the bytes were not re-read. And a blob this store already
+    /// holds is not fetched at all, so `progress` may never be called.
+    ///
+    /// **The outcome is decided here, by three rules.** iroh-blobs' own
+    /// `.await` on a download applies them and throws the progress away, and
+    /// its version is private, so this is a reimplementation — a download
+    /// fails if the stream reports an error or a download error, and **the
+    /// stream ending with neither is the only thing that means success**.
+    /// Getting that wrong would report a failed fetch as done, which is worse
+    /// than reporting no progress at all.
+    pub async fn fetch_with_progress(
+        &self,
+        hash: ContentHash,
+        providers: Vec<MemberId>,
+        mut progress: impl FnMut(u64),
+    ) -> Result<()> {
+        let failed =
+            |source: Box<dyn std::error::Error + Send + Sync>| NetError::Fetch { hash, source };
         let providers = providers
             .into_iter()
             .map(|member| member.endpoint_id())
             .collect();
-        self.downloader
+        let mut items = self
+            .downloader
             .download(HashAndFormat::raw(to_blobs(hash)), Shuffled::new(providers))
+            .stream()
             .await
-            .map_err(|source| NetError::Fetch {
-                hash,
-                source: Box::new(source),
-            })
+            .map_err(|source| failed(Box::new(source)))?;
+        while let Some(item) = items.next().await {
+            match item {
+                DownloadProgressItem::Progress(offset) => progress(offset),
+                DownloadProgressItem::Error(source) => return Err(failed(source.into())),
+                // Only sent when a request is split across providers, and
+                // `download` never splits one: for a single raw blob this arm
+                // cannot be reached, and no test here reaches it. Kept because
+                // it is the downloader's own contract, and the day this
+                // fetches a collection it is the failure that will arrive.
+                DownloadProgressItem::DownloadError => {
+                    return Err(failed(
+                        "every provider was tried, and none of them served it".into(),
+                    ));
+                }
+                // Which provider is being asked, and which one gave up, are
+                // the downloader's business; what a caller sees is the offset.
+                DownloadProgressItem::TryProvider { .. }
+                | DownloadProgressItem::ProviderFailed { .. }
+                | DownloadProgressItem::PartComplete { .. } => {}
+            }
+        }
+        Ok(())
     }
 
     /// Writes `hash` out of the store to `target`, as a copy.

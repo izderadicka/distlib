@@ -298,3 +298,85 @@ async fn fetching_from_an_unreachable_provider_fails_rather_than_hangs() {
 
     assert!(fetched.is_err(), "nobody offered this content");
 }
+
+/// 3a-4's acceptance: a real fetch between two nodes says how far it has got,
+/// and the last thing it says is the whole blob.
+///
+/// Big enough to arrive in more than one piece — a blob that fits in one
+/// would report a single offset and prove nothing about progress. With one
+/// provider there is no failover, so here the offsets do only climb.
+#[tokio::test]
+async fn a_fetch_reports_offsets_that_climb_to_the_blobs_size() {
+    let a_secret = SecretKey::generate();
+    let a_id = MemberId::from(a_secret.public());
+    let a_store = MemStore::new();
+    let a_endpoint = endpoint(a_secret, vec![iroh_blobs::ALPN.to_vec()]).await;
+    let a_router = Router::builder(a_endpoint.clone())
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&a_store, None))
+        .spawn();
+    let a_addr = NodeAddr::default().with_direct(
+        a_endpoint
+            .bound_sockets()
+            .into_iter()
+            .next()
+            .expect("a bound endpoint reports a socket"),
+    );
+    let size: u64 = 1024 * 1024;
+    let bytes: Vec<u8> = (0..size).map(|n| (n % 251) as u8).collect();
+    let hash = a_store.add_bytes(bytes).await.unwrap().hash;
+    let hash = ContentHash::from_bytes(*hash.as_bytes());
+
+    let b_store = MemStore::new();
+    let b_endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    AddressBook::install(&b_endpoint)
+        .unwrap()
+        .learn(a_id, &a_addr);
+
+    let mut offsets = Vec::new();
+    Blobs::new(&b_store, &b_endpoint)
+        .fetch_with_progress(hash, vec![a_id], |offset| offsets.push(offset))
+        .await
+        .unwrap();
+
+    assert!(
+        offsets.len() > 1,
+        "a megabyte arrives in more than one piece; got {offsets:?}"
+    );
+    assert!(
+        offsets.is_sorted(),
+        "one provider, so nothing to restart from: {offsets:?}"
+    );
+    assert_eq!(
+        offsets.last(),
+        Some(&size),
+        "the last offset is the whole blob"
+    );
+
+    let _ = a_router.shutdown().await;
+}
+
+/// The other half of the acceptance: a fetch nobody can serve ends, and ends
+/// as a failure — the case where reimplementing the terminal rules could get
+/// it wrong by treating "the stream stopped" as "the blob is here".
+#[tokio::test]
+async fn a_fetch_nobody_can_serve_reports_failure_not_success() {
+    let stranger = MemberId::from(SecretKey::generate().public());
+    let b_store = MemStore::new();
+    let b_endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    let hash = ContentHash::from_bytes([0xab; 32]);
+
+    let mut offsets = Vec::new();
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(10),
+        Blobs::new(&b_store, &b_endpoint)
+            .fetch_with_progress(hash, vec![stranger], |offset| offsets.push(offset)),
+    )
+    .await
+    .expect("an unresolvable provider should fail quickly, not hang");
+
+    assert!(
+        fetched.is_err(),
+        "nobody offered this content, so it is not here"
+    );
+    assert!(offsets.is_empty(), "nothing arrived: {offsets:?}");
+}
