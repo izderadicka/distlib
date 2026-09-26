@@ -89,13 +89,23 @@ pub fn alpns() -> Vec<Vec<u8>> {
 /// a `ForwardToLeader` may have lost the term by the time we dial it.
 const PROPOSE_ATTEMPTS: usize = 3;
 
-/// How long a proposal waits, after a forward failed, for this node to hear
-/// of a different leader before it asks again.
+/// The longest Raft waits without hearing from a leader before it stands for
+/// election itself, in milliseconds. See [`raft_config`].
+const ELECTION_TIMEOUT_MAX: u64 = 2_000;
+
+/// How long a proposal waits, after a forward failed, for this node to stop
+/// naming the leader that did not answer.
 ///
-/// Five of P3-4's longest election timeouts: room for a split vote or two on
-/// a busy machine, and short enough that a leader which was only briefly out
-/// of reach is asked again before the caller has given up.
-const LEADER_CHANGE_WAIT: Duration = Duration::from_secs(10);
+/// **Long enough to tell a dead leader from a live one, and no longer.** This
+/// node is a voter, so if the leader is dead its own election timer fires at
+/// most [`ELECTION_TIMEOUT_MAX`] after the last heartbeat, and from then on it
+/// names nobody or somebody new — which ends the wait at once. Still naming
+/// the same leader after that, plus a second's slack for a busy machine,
+/// means the leader is alive and was only out of reach for a moment, so the
+/// right thing is to ask it again rather than wait any longer.
+///
+/// The wait never slows down a failover: it only watches for one.
+const LEADER_CHANGE_WAIT: Duration = Duration::from_millis(ELECTION_TIMEOUT_MAX + 1_000);
 
 /// Raft's timing, in milliseconds: a heartbeat every quarter second, and an
 /// election after one to two seconds without one.
@@ -116,7 +126,7 @@ fn raft_config() -> Config {
     Config {
         heartbeat_interval: 250,
         election_timeout_min: 1_000,
-        election_timeout_max: 2_000,
+        election_timeout_max: ELECTION_TIMEOUT_MAX,
         ..Config::default()
     }
 }
@@ -932,9 +942,9 @@ impl MembershipNode {
                         // one costs a whole dial timeout — so a fixed delay
                         // spent the attempts racing the election, and lost it
                         // on a slow runner with P3-4's longer timeouts. The
-                        // wait is bounded, and a timeout is not a failure:
-                        // the leader may simply have been briefly unreachable,
-                        // and the next attempt says.
+                        // wait ends the moment the leadership moves, and its
+                        // bound is what tells a leader that died from one that
+                        // was briefly out of reach — see `LEADER_CHANGE_WAIT`.
                         Err(error) => {
                             tracing::debug!(%error, "forwarding failed; waiting for the leadership to move");
                             let _ = raft

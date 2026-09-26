@@ -40,9 +40,9 @@ const SOON: Duration = Duration::from_secs(15);
 ///
 /// Arithmetic rather than a guess. `propose` makes `PROPOSE_ATTEMPTS` = 3
 /// attempts; one that forwards to the dead leader spends `CONNECT_TIMEOUT` =
-/// 3s discovering it is gone, then waits up to `LEADER_CHANGE_WAIT` = 10s for
-/// the election to name somebody else — 39 seconds if every bound is spent,
-/// which a healthy election never comes near. `SOON` left no room for that,
+/// 3s discovering it is gone, then waits up to `LEADER_CHANGE_WAIT` = 3s for
+/// this node to stop naming it — 18 seconds if every bound is spent, which a
+/// healthy election never comes near. `SOON` left no room for that,
 /// which is how this clause first failed under a parallel runner; a fixed
 /// quarter-second between attempts, rather than a wait for the leadership to
 /// move, is how it failed a second time on a slow Windows one (P3-11).
