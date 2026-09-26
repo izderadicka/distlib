@@ -18,6 +18,14 @@ use crate::{
 /// The file the read model lives in, inside the directory the caller names.
 const DATABASE: &str = "read-model.sqlite";
 
+/// What [`Store::upsert_item`] did: wrote a row this read model did not have,
+/// or wrote over one it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upserted {
+    Created,
+    Updated,
+}
+
 /// One row of `items`, with the `item_files` rows that belong to it.
 ///
 /// Carries an [`Item`] rather than restating its fields: the projection writes
@@ -99,7 +107,12 @@ impl Store {
     /// longer in it is a row that must go. That is what makes replaying a
     /// document converge on the same tables however many times it is replayed,
     /// and in whatever order.
-    pub async fn upsert_item(&self, stored: StoredItem) -> Result<()> {
+    ///
+    /// Says whether the item was new here. Asked inside the same transaction
+    /// as the write, so two writes of one new item cannot both be told it was
+    /// new — and so the answer is about this read model rather than about the
+    /// document, which is what a watcher of this node wants to know.
+    pub async fn upsert_item(&self, stored: StoredItem) -> Result<Upserted> {
         self.write("written to", move |tx| upsert_item(tx, &stored))
             .await
     }
@@ -214,16 +227,18 @@ impl Store {
     /// On the pool for the reason redb is: SQLite's commit reaches the disk
     /// synchronously, and a fsync on an async worker stalls every other task
     /// that worker was going to poll.
-    async fn write<F>(&self, doing: &'static str, work: F) -> Result<()>
+    async fn write<T, F>(&self, doing: &'static str, work: F) -> Result<T>
     where
-        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<()> + Send + 'static,
+        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let tx = conn.transaction()?;
-            work(&tx)?;
-            tx.commit()
+            let done = work(&tx)?;
+            tx.commit()?;
+            Ok(done)
         })
         .await
         .map_err(StoreError::Stopped)?
@@ -258,9 +273,14 @@ const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_ind
 /// The `item_files` columns, in the order [`files_of`] reads them.
 const FILE_COLUMNS: &str = "item, blob, role, format, size, filename, seq, disc, title, duration";
 
-fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<()> {
+fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Upserted> {
     let item = &stored.item;
     let id = item.id.to_string();
+    let existed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1)",
+        params![id],
+        |row| row.get(0),
+    )?;
     tx.execute(
         "INSERT INTO items (id, kind, title, authors, genres, series, series_index, \
                             year, lang, description, replicas, last_modified) \
@@ -308,7 +328,11 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<()
             file.duration,
         ])?;
     }
-    Ok(())
+    Ok(if existed {
+        Upserted::Updated
+    } else {
+        Upserted::Created
+    })
 }
 
 /// Every file row, or just one item's, grouped by the item it belongs to.
