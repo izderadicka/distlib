@@ -796,14 +796,24 @@ const TASK_POLL: Duration = Duration::from_millis(200);
 async fn wait_for(paths: &Paths, task_id: &Value) -> Result<Value> {
     loop {
         let task = ask(paths, "library.task", json!({ "task_id": task_id })).await?;
-        match task["state"].as_str() {
-            Some("running") => tokio::time::sleep(TASK_POLL).await,
-            Some("finished") => return Ok(task),
-            _ => anyhow::bail!(
-                "the download failed: {}",
-                task["error"].as_str().unwrap_or("no reason given")
-            ),
+        if let Some(finished) = ended(task)? {
+            return Ok(finished);
         }
+        tokio::time::sleep(TASK_POLL).await;
+    }
+}
+
+/// What `library.task`'s answer says of a download: `None` while it runs, the
+/// task once it has finished, and its error once it has failed — which is
+/// what makes `distlib download` exit non-zero.
+fn ended(task: Value) -> Result<Option<Value>> {
+    match task["state"].as_str() {
+        Some("running") => Ok(None),
+        Some("finished") => Ok(Some(task)),
+        _ => anyhow::bail!(
+            "the download failed: {}",
+            task["error"].as_str().unwrap_or("no reason given")
+        ),
     }
 }
 
@@ -1438,6 +1448,17 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_that_failed_in_the_background_is_a_failed_command() {
+        // The refusals `acceptance.rs` checks are all answered before the
+        // task exists; this is the one path they never reach.
+        let error = ended(json!({ "state": "failed", "error": "nobody had it" }))
+            .expect_err("a failed download is a failed command");
+        assert!(error.to_string().contains("nobody had it"), "{error}");
+        assert!(matches!(ended(json!({ "state": "running" })), Ok(None)));
+        assert!(matches!(ended(json!({ "state": "finished" })), Ok(Some(_))));
+    }
 
     fn an_id(byte: u8) -> MemberId {
         MemberId::from(iroh::SecretKey::from_bytes(&[byte; 32]).public())

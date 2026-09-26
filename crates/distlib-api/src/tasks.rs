@@ -328,6 +328,29 @@ mod tests {
     }
 
     #[test]
+    fn a_download_is_not_heard_to_end_before_it_has() {
+        // Whoever hears the ending and asks must be told it has ended. So
+        // with the registry held, an ending cannot be recorded — and must
+        // therefore not be published either.
+        let (tasks, mut watching) = registry();
+        let download = tasks.start_download(ITEM, None, 100);
+        let held = tasks.lock();
+        let ending = std::thread::spawn(move || download.fail("nobody had it".to_owned()));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            watching.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty),
+            "published before it was recorded"
+        );
+        drop(held);
+        ending.join().unwrap();
+        assert!(matches!(
+            watching.try_recv(),
+            Ok(Event::DownloadFailed { .. })
+        ));
+    }
+
+    #[test]
     fn progress_is_recorded_every_time_and_published_at_most_every_so_often() {
         let (tasks, mut watching) = registry();
         let mut download = tasks.start_download(ITEM, None, 1_000);

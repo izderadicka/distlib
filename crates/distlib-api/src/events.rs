@@ -6,8 +6,8 @@
 //! listening — which is most of a node's life. A watcher that reads too slowly
 //! is skipped past rather than waited for, and told so with `resync`. That is
 //! the whole reason for a lossy channel here: the producers are the membership
-//! log and, from 3a-2, the catalogue's projection, and a browser tab left in
-//! the background must never be able to hold either of them up.
+//! log, the catalogue's projection and the downloads (3a-5), and a browser tab
+//! left in the background must never be able to hold any of them up.
 //!
 //! Replacing the bus with something that "never drops an event" — a bounded
 //! `mpsc` per watcher, say — would bring that stall straight back, and would
@@ -35,8 +35,9 @@ pub const CAPACITY: usize = 256;
 
 /// A new bus.
 ///
-/// The binary makes one and hands a clone to every producer, so that no
-/// producer owns it and none has to reach another through its API.
+/// The binary makes one and hands it to the download registry
+/// ([`crate::tasks::Tasks`]), which every other producer takes a clone from —
+/// so none has to reach another through its API.
 pub fn bus() -> broadcast::Sender<Event> {
     broadcast::channel(CAPACITY).0
 }
