@@ -23,6 +23,8 @@ iroh-gossip = { workspace = true }
 # on the router (2a-2) — see the module doc for why that stays where it is.
 iroh-blobs = { workspace = true }
 tokio = { workspace = true }
+# `StreamExt` over the downloader's progress stream.
+futures-lite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

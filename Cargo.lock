@@ -1228,6 +1228,7 @@ name = "distlib-net"
 version = "0.1.0"
 dependencies = [
  "distlib-core",
+ "futures-lite",
  "iroh",
  "iroh-blobs",
  "iroh-gossip",
