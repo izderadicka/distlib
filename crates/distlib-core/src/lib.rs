@@ -17,7 +17,9 @@ pub mod ticket;
 pub mod token;
 
 pub use addr::{BadRelayUrl, NodeAddr, SignedAddress};
-pub use catalogue::{Absorbed, Field, FileRecord, FileRole, Item, ItemKind, Key, Series};
+pub use catalogue::{
+    Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
+};
 pub use config::{ApiConfig, Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;
 pub use event::Event;

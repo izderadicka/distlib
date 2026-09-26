@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig, NodeAddr,
-    Series, Ticket,
+    ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind, MemberId, NetConfig,
+    NodeAddr, Series, Ticket,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
@@ -432,17 +432,15 @@ impl Api {
     /// metadata — no files, and an id nothing fingerprints to.
     async fn edit_metadata(&self, params: EditMetadata) -> Result<Value, Error> {
         let EditMetadata { item_id, fields } = params;
-        let edit = Item {
-            kind: fields.kind,
-            title: fields.title,
-            authors: fields.authors,
-            genres: fields.genres,
-            series: fields.series,
-            year: fields.year,
-            lang: fields.lang,
-            description: fields.description,
-            ..Item::new(item_id)
-        };
+        // How many copies the group keeps is custodianship (§5.5), phase 5's,
+        // and not something a metadata edit should move in passing.
+        if fields.replicas.is_some() {
+            return Err(Error::invalid_params(
+                "replicas is not metadata, and library.edit_metadata does not write it",
+            ));
+        }
+        let mut edit = Item::new(item_id);
+        edit.set(fields);
         if edit == Item::new(item_id) {
             return Err(Error::invalid_params(
                 "library.edit_metadata needs at least one field to write",
@@ -1282,33 +1280,7 @@ struct Add {
 #[serde(deny_unknown_fields)]
 struct EditMetadata {
     item_id: ItemId,
-    fields: Fields,
-}
-
-/// The fields an edit may write — `library.add`'s metadata, every one
-/// optional, and an absent one left as it is.
-///
-/// Not `replicas`: how many copies the group keeps is custodianship (§5.5),
-/// phase 5's, and not something a metadata edit should move in passing.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Fields {
-    #[serde(default)]
-    kind: Option<ItemKind>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    authors: Option<Vec<String>>,
-    #[serde(default)]
-    genres: Option<Vec<String>>,
-    #[serde(default)]
-    series: Option<Series>,
-    #[serde(default)]
-    year: Option<i32>,
-    #[serde(default)]
-    lang: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
+    fields: ItemFields,
 }
 
 /// `library.download`'s params.

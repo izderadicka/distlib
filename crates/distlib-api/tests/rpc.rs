@@ -636,6 +636,20 @@ async fn an_edit_must_say_what_to_write() {
         "replicas is custodianship, not metadata: {not_a_field}"
     );
 
+    let no_such_field = harness
+        .refuse(
+            "library.edit_metadata",
+            // Beside a real field, so that ignoring the unknown one would
+            // leave an edit to make rather than an empty one to refuse.
+            json!({ "item_id": item_id, "fields": { "title": "Dune", "colour": "blue" } }),
+        )
+        .await;
+    assert_eq!(
+        code(&no_such_field),
+        -32602,
+        "a name that is not a field is refused, not ignored: {no_such_field}"
+    );
+
     harness.shutdown().await;
 }
 

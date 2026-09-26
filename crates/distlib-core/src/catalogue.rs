@@ -88,7 +88,7 @@ pub struct FileRecord {
 }
 
 /// The item's fields, stated once: the variant, the name the key gives it,
-/// and the member of [`Item`] that holds it.
+/// the member of [`Item`] that holds it, and that member's type.
 ///
 /// Four things follow from every row — a variant, a key name, an entry that
 /// gets written, a value that gets read — and **two of them are silent when
@@ -97,8 +97,14 @@ pub struct FileRecord {
 /// simply never reads back, and one missing from `entries` is never written.
 /// Neither is a compile error, and both are the kind of thing noticed a
 /// release later. One table, and the question cannot arise.
+///
+/// [`ItemFields`] comes from the same table, so that whatever takes a partial
+/// item from outside — an edit — does not keep a list of its own to fall out
+/// of step with this one. [`Item`] itself is still written out by hand, for
+/// its doc comments; the table assigns to its members by name and type, so the
+/// two cannot disagree and still compile.
 macro_rules! fields {
-    ($($variant:ident => $name:literal, $member:ident;)+) => {
+    ($($variant:ident => $name:literal, $member:ident: $ty:ty;)+) => {
         /// One field of an item — one key in the document.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum Field {
@@ -140,20 +146,43 @@ macro_rules! fields {
                     $(Field::$variant => take(&mut self.$member, value),)+
                 }
             }
+
+            /// Sets the fields `fields` has a value for, and leaves the rest.
+            pub fn set(&mut self, fields: ItemFields) {
+                $(
+                    if let Some(value) = fields.$member {
+                        self.$member = Some(value);
+                    }
+                )+
+            }
+        }
+
+        /// Some of an item's fields, each optional — what an edit says.
+        ///
+        /// A field left out is not a field set to nothing: it is left as it
+        /// is. Named as [`Item`]'s members are, so `kind` rather than the
+        /// key's `type`, and an unknown name is refused rather than ignored.
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct ItemFields {
+            $(
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub $member: Option<$ty>,
+            )+
         }
     };
 }
 
 fields! {
-    Kind        => "type",        kind;
-    Title       => "title",       title;
-    Authors     => "authors",     authors;
-    Genres      => "genres",      genres;
-    Series      => "series",      series;
-    Year        => "year",        year;
-    Lang        => "lang",        lang;
-    Description => "description", description;
-    Replicas    => "replicas",    replicas;
+    Kind        => "type",        kind:        ItemKind;
+    Title       => "title",       title:       String;
+    Authors     => "authors",     authors:     Vec<String>;
+    Genres      => "genres",      genres:      Vec<String>;
+    Series      => "series",      series:      Series;
+    Year        => "year",        year:        i32;
+    Lang        => "lang",        lang:        String;
+    Description => "description", description: String;
+    Replicas    => "replicas",    replicas:    u32;
 }
 
 /// A key in the catalogue document.
