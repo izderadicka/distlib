@@ -84,6 +84,15 @@ impl Error {
         Self::new(-32602, message)
     }
 
+    /// The request did not carry this node's token.
+    ///
+    /// From the range the spec leaves to implementations, since JSON-RPC itself
+    /// has no notion of authentication. Sent with an HTTP 401, which is what a
+    /// caller that only looks at the status goes by.
+    pub fn unauthorised() -> Self {
+        Self::new(-32001, "invalid or missing bearer token")
+    }
+
     /// The method ran and failed.
     ///
     /// -32000 rather than -32603: the spec reserves -32603 for a fault in the
