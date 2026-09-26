@@ -80,6 +80,7 @@ impl Api {
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
             "library.download" => self.download(parse(params)?).await,
+            "library.edit_metadata" => self.edit_metadata(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -413,6 +414,51 @@ impl Api {
         record["files"] = json!(stored.item.files);
         record["last_modified"] = json!(stored.last_modified);
         Ok(record)
+    }
+
+    /// `library.edit_metadata` — writes the fields given, and only those.
+    ///
+    /// **One entry per field, and a field not named is not touched.** The
+    /// catalogue is last-writer-wins per key, so two members editing the same
+    /// item's title and genres at the same time both keep their edit; writing
+    /// the whole record would have the second erase the first's. That is also
+    /// why **a field cannot be cleared** here: "no value" has no entry to write
+    /// that would not erase somebody else's concurrent one, and the catalogue
+    /// has no tombstone for a field yet.
+    ///
+    /// **The item must already be in this node's document**, which is asked
+    /// rather than the read model, since the document is what gets written.
+    /// Editing an item nobody added would create one out of nothing but
+    /// metadata — no files, and an id nothing fingerprints to.
+    async fn edit_metadata(&self, params: EditMetadata) -> Result<Value, Error> {
+        let EditMetadata { item_id, fields } = params;
+        let edit = Item {
+            kind: fields.kind,
+            title: fields.title,
+            authors: fields.authors,
+            genres: fields.genres,
+            series: fields.series,
+            year: fields.year,
+            lang: fields.lang,
+            description: fields.description,
+            ..Item::new(item_id)
+        };
+        if edit == Item::new(item_id) {
+            return Err(Error::invalid_params(
+                "library.edit_metadata needs at least one field to write",
+            ));
+        }
+        if self
+            .catalogue
+            .item(item_id)
+            .await
+            .map_err(sync_error)?
+            .is_none()
+        {
+            return Err(Error::failed(format!("no such item: {item_id}")));
+        }
+        self.catalogue.write(&edit).await.map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id }))
     }
 
     /// `library.add` — hash a file set, store it as blobs, and write a
@@ -1221,6 +1267,40 @@ struct Add {
     authors: Vec<String>,
     #[serde(default)]
     genres: Vec<String>,
+    #[serde(default)]
+    series: Option<Series>,
+    #[serde(default)]
+    year: Option<i32>,
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// `library.edit_metadata`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EditMetadata {
+    item_id: ItemId,
+    fields: Fields,
+}
+
+/// The fields an edit may write — `library.add`'s metadata, every one
+/// optional, and an absent one left as it is.
+///
+/// Not `replicas`: how many copies the group keeps is custodianship (§5.5),
+/// phase 5's, and not something a metadata edit should move in passing.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Fields {
+    #[serde(default)]
+    kind: Option<ItemKind>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    authors: Option<Vec<String>>,
+    #[serde(default)]
+    genres: Option<Vec<String>>,
     #[serde(default)]
     series: Option<Series>,
     #[serde(default)]
