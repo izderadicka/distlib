@@ -13,6 +13,8 @@
 
 use serde::Serialize;
 
+use crate::ItemId;
+
 /// One thing a watcher may want to refetch.
 ///
 /// Serialised with its name as `type`, so an event's data reads on its own
@@ -27,6 +29,20 @@ pub enum Event {
     /// `group.members` and `group.pending` are what to ask.
     #[serde(rename = "membership.changed")]
     MembershipChanged,
+
+    /// An item this node's read model did not hold is now in it — searchable
+    /// and readable, since it is published only after both are committed.
+    #[serde(rename = "catalogue.item_added")]
+    ItemAdded { item_id: ItemId },
+
+    /// An item this node already held was re-read and written again: a field
+    /// changed, a file was contributed, or content it was waiting for arrived.
+    ///
+    /// Occasionally about a write that changed nothing a page shows. The read
+    /// model re-reads whole items rather than diffing them, and a spare
+    /// refetch is the whole cost of that.
+    #[serde(rename = "catalogue.item_changed")]
+    ItemChanged { item_id: ItemId },
 }
 
 impl Event {
@@ -34,6 +50,8 @@ impl Event {
     pub fn name(&self) -> &'static str {
         match self {
             Self::MembershipChanged => "membership.changed",
+            Self::ItemAdded { .. } => "catalogue.item_added",
+            Self::ItemChanged { .. } => "catalogue.item_changed",
         }
     }
 }
