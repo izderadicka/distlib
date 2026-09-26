@@ -120,12 +120,6 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
         );
     }
 
-    // What the node tells whoever is watching it. Made here rather than by any
-    // one producer, so that each producer is handed a clone instead of having
-    // to reach the bus through another's API. Today the server is the only
-    // one; 3a-2 hands one to the projection as well.
-    let events = distlib_api::events::bus();
-
     // The local API. Started after founding, so a caller that reaches it finds
     // a node that has finished deciding what it is.
     let api = if config.api.enabled {
@@ -133,7 +127,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
             serve_api(
                 paths,
                 &config,
-                events,
+                runtime.events().clone(),
                 Api {
                     node: Arc::clone(&node),
                     secret: secret.clone(),

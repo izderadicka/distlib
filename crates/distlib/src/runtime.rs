@@ -17,13 +17,14 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use distlib_consensus::MembershipNode;
-use distlib_core::{Config, DataDir, MemberId, NodeAddr, identity::member_id};
+use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::Catalogue;
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
 use iroh_gossip::net::Gossip;
+use tokio::sync::broadcast;
 
 /// A node and the transport it is served on.
 ///
@@ -45,6 +46,10 @@ pub struct Runtime {
     /// Held rather than detached: dropping it stops the task, so a runtime
     /// that goes away does not leave one writing to a database nobody reads.
     projection: Projection,
+    /// What this node tells whoever is watching it. Made here, by the thing
+    /// that assembles the producers, so that each is handed a clone rather
+    /// than reaching the bus through another's API.
+    events: broadcast::Sender<Event>,
     router: Router,
 }
 
@@ -139,11 +144,13 @@ impl Runtime {
         let search = SearchIndex::open(Some(data_dir.index_dir()))
             .await
             .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
+        let events = distlib_api::events::bus();
         let projection = Projection::start(
             catalogue.clone(),
             store.clone(),
             search.clone(),
             node.subscribe(),
+            events.clone(),
         );
 
         // Nothing is answered until here: the endpoint has been advertising
@@ -165,6 +172,7 @@ impl Runtime {
             store,
             search,
             projection,
+            events,
             router,
         })
     }
@@ -197,6 +205,12 @@ impl Runtime {
     /// The task keeping the read model in step — `admin.reindex` drives it.
     pub fn projection(&self) -> &Projection {
         &self.projection
+    }
+
+    /// The event bus: what the projection publishes into, and what the local
+    /// API streams to its watchers.
+    pub fn events(&self) -> &broadcast::Sender<Event> {
+        &self.events
     }
 
     /// The endpoint everything in this process is served on.

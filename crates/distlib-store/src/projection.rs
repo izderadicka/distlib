@@ -44,20 +44,33 @@
 //! nudge, which costs nothing: with no peer there is nothing for the sweep to
 //! fetch either.
 
+//! **It tells watchers what it wrote, and only when it is news** (phase 3's
+//! D1). The projection is the one place that knows both that an item changed
+//! and that the change is now readable, so it is the producer of catalogue
+//! events — nothing else subscribes to the document for them, since a second
+//! subscriber that awaited anything would stall this node's live actor
+//! (`iroh-docs`' `Subscribers::send` waits on every subscriber). Two rules keep
+//! the events honest. **They go out after the batch is committed**, index
+//! included, so a page that reacts by searching finds what it was told about.
+//! And **a replay publishes nothing**: it runs on every start and on every
+//! `admin.reindex`, and a read model being rebuilt from a document it already
+//! held is not news — publishing it would put every watcher into `resync` at
+//! startup.
+
 use std::collections::BTreeSet;
 
 use distlib_consensus::MembershipState;
-use distlib_core::ItemId;
+use distlib_core::{Event, ItemId};
 use distlib_sync::{Batch, Catalogue};
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 
 use crate::{
     error::{Result, StoreError},
     index::SearchIndex,
-    store::{Store, StoredItem, StoredMember},
+    store::{Store, StoredItem, StoredMember, Upserted},
 };
 
 /// How many reindex requests can be queued while one is running.
@@ -116,7 +129,8 @@ impl Drop for Projection {
 }
 
 impl Projection {
-    /// Starts projecting `catalogue` into `store` and `index`.
+    /// Starts projecting `catalogue` into `store` and `index`, and telling
+    /// `events` what changed.
     ///
     /// Returns as soon as the task is spawned, which is before the catalogue
     /// exists: a node that has just joined has not fetched the log yet, so the
@@ -126,10 +140,12 @@ impl Projection {
         store: Store,
         index: SearchIndex,
         membership: watch::Receiver<MembershipState>,
+        events: broadcast::Sender<Event>,
     ) -> Self {
         let (reindex_tx, reindex_rx) = mpsc::channel(REINDEX_QUEUE);
+        let task = tokio::spawn(run(catalogue, store, index, membership, events, reindex_rx));
         Self {
-            task: tokio::spawn(run(catalogue, store, index, membership, reindex_rx)),
+            task,
             reindex: ReindexHandle(reindex_tx),
         }
     }
@@ -166,6 +182,7 @@ async fn run(
     store: Store,
     index: SearchIndex,
     mut membership: watch::Receiver<MembershipState>,
+    events: broadcast::Sender<Event>,
     mut reindex_rx: mpsc::Receiver<oneshot::Sender<()>>,
 ) {
     // A node with no group yet — freshly started, not founded or joined —
@@ -213,7 +230,13 @@ async fn run(
                 if content_arrived {
                     items.extend(incomplete.iter().copied());
                 }
-                project(&catalogue, &store, &index, items, &mut incomplete).await;
+                let written = project(&catalogue, &store, &index, items, &mut incomplete).await;
+                for event in written {
+                    // Nobody watching is the ordinary case. Never awaited: a
+                    // watcher that falls behind is skipped past, and this task
+                    // does not wait for it.
+                    let _ = events.send(event);
+                }
             }
             changed = membership.changed() => {
                 if changed.is_err() {
@@ -243,14 +266,20 @@ async fn run(
 /// segment flush and an fsync, so committing per item would make a replay of
 /// N items N fsyncs. A commit lost to a crash costs nothing extra — the next
 /// start replays again, per P2-19 — which is what makes batching safe here.
+///
+/// Returns what it wrote, as the events a watcher would be told — and returns
+/// rather than publishes, so that the caller decides whether this batch is
+/// news (see the module docs), and so that nothing is told before the commit
+/// at the end of this function has happened.
 async fn project(
     catalogue: &Catalogue,
     store: &Store,
     index: &SearchIndex,
     items: BTreeSet<ItemId>,
     incomplete: &mut BTreeSet<ItemId>,
-) {
+) -> Vec<Event> {
     let mut indexed = false;
+    let mut written = Vec::new();
     for id in items {
         let read = match catalogue.read_item(id).await {
             Ok(Some(read)) => read,
@@ -277,14 +306,18 @@ async fn project(
             indexed = true;
         }
 
-        if let Err(error) = store
+        match store
             .upsert_item(StoredItem {
                 item: read.item,
                 last_modified: read.last_modified,
             })
             .await
         {
-            tracing::warn!(%id, %error, "could not write a catalogue item to the read model");
+            Ok(Upserted::Created) => written.push(Event::ItemAdded { item_id: id }),
+            Ok(Upserted::Updated) => written.push(Event::ItemChanged { item_id: id }),
+            Err(error) => {
+                tracing::warn!(%id, %error, "could not write a catalogue item to the read model");
+            }
         }
     }
 
@@ -294,6 +327,7 @@ async fn project(
     if indexed && let Err(error) = index.commit().await {
         tracing::error!(%error, "could not commit the search index");
     }
+    written
 }
 
 /// Writes the group's membership as the log currently has it.
@@ -339,5 +373,7 @@ async fn replay(
         items = ids.len(),
         "replaying the catalogue into the read model"
     );
+    // What it wrote is dropped on purpose: a replay is not news — see the
+    // module docs.
     project(catalogue, store, index, ids, incomplete).await;
 }

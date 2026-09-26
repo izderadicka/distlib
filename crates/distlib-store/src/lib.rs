@@ -39,4 +39,4 @@ pub mod store;
 pub use error::{Result, StoreError};
 pub use index::SearchIndex;
 pub use projection::{Projection, ReindexHandle};
-pub use store::{Store, StoredItem, StoredMember};
+pub use store::{Store, StoredItem, StoredMember, Upserted};
