@@ -6,20 +6,20 @@
 //! listening — which is most of a node's life. A watcher that reads too slowly
 //! is skipped past rather than waited for, and told so with `resync`. That is
 //! the whole reason for a lossy channel here: the producers are the membership
-//! log and, from 3a-2, the catalogue's projection, and a browser tab left in
-//! the background must never be able to hold either of them up.
+//! log, the catalogue's projection and the downloads (3a-5), and a browser tab
+//! left in the background must never be able to hold any of them up.
 //!
 //! Replacing the bus with something that "never drops an event" — a bounded
 //! `mpsc` per watcher, say — would bring that stall straight back, and would
 //! look like an improvement while doing it. Events carry ids and a page
 //! refetches (D2), so a dropped event costs one refetch, not correctness.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
 
 use axum::response::sse::Event as Frame;
 use distlib_consensus::MembershipState;
 use distlib_core::Event;
-use futures_lite::{Stream, stream};
+use futures_lite::{Stream, StreamExt as _, stream};
 use tokio::sync::{
     broadcast::{self, error::RecvError},
     watch,
@@ -33,23 +33,37 @@ use tokio::sync::{
 /// where a page should refetch its list rather than replay every item.
 pub const CAPACITY: usize = 256;
 
+/// How often an idle stream says so, with a comment line.
+///
+/// Also how a watcher tells a quiet stream from a dead one: a connection that
+/// has said nothing at all for a good deal longer than this is broken, even
+/// if nothing has closed it — see [`crate::client::Events`].
+pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
 /// A new bus.
 ///
-/// The binary makes one and hands a clone to every producer, so that no
-/// producer owns it and none has to reach another through its API.
+/// The binary makes one and hands it to the download registry
+/// ([`crate::tasks::Tasks`]), which every other producer takes a clone from —
+/// so none has to reach another through its API.
 pub fn bus() -> broadcast::Sender<Event> {
     broadcast::channel(CAPACITY).0
 }
 
-/// The frames one watcher reads, until the bus closes.
+/// The frames one watcher reads: `first`, then everything on the bus until it
+/// closes.
+///
+/// `first` is what the watcher would have heard had it been connected sooner
+/// — the downloads already running, as `GET /events` uses it.
 ///
 /// `Lagged` is not the end of the stream — the receiver has been moved past
 /// what it missed and carries on — so it becomes a `resync` frame, which a
 /// page answers with the same refetch as any other event.
 pub(crate) fn frames(
+    first: Vec<Event>,
     receiver: broadcast::Receiver<Event>,
 ) -> impl Stream<Item = Result<Frame, Infallible>> {
-    stream::unfold(receiver, |mut receiver| async move {
+    let first = stream::iter(first).map(|event| Ok(frame(event.name(), &event)));
+    first.chain(stream::unfold(receiver, |mut receiver| async move {
         let frame = match receiver.recv().await {
             Ok(event) => frame(event.name(), &event),
             Err(RecvError::Lagged(missed)) => {
@@ -59,7 +73,7 @@ pub(crate) fn frames(
             Err(RecvError::Closed) => return None,
         };
         Some((Ok(frame), receiver))
-    })
+    }))
 }
 
 fn frame(name: &str, data: &impl serde::Serialize) -> Frame {
@@ -91,14 +105,12 @@ mod tests {
 
     use std::pin::pin;
 
-    use futures_lite::StreamExt as _;
-
     use super::*;
 
     #[tokio::test]
     async fn a_watcher_that_fell_behind_is_told_to_resync_and_carries_on() {
         let (events, receiver) = broadcast::channel(1);
-        let mut frames = pin!(frames(receiver));
+        let mut frames = pin!(frames(Vec::new(), receiver));
 
         // Two into a channel of one: the first is overwritten before anybody
         // reads it.

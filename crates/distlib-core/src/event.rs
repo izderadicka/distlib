@@ -11,15 +11,16 @@
 //! read model's projection will publish catalogue events, and it sits below the
 //! API in the dependency graph.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ItemId;
 
 /// One thing a watcher may want to refetch.
 ///
 /// Serialised with its name as `type`, so an event's data reads on its own
-/// without the SSE frame around it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// without the SSE frame around it — and read back by `distlib download`,
+/// which watches the stream for its download's ending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
     /// The membership changed: a member came or went, a proposal was made,
@@ -43,6 +44,59 @@ pub enum Event {
     /// refetch is the whole cost of that.
     #[serde(rename = "catalogue.item_changed")]
     ItemChanged { item_id: ItemId },
+
+    /// How far a download has got, in bytes and in files, across all of the
+    /// files it is fetching.
+    ///
+    /// **The one event that carries values**, against the rule above. Progress
+    /// *is* the news, and a page that refetched on every tick would be asking
+    /// several times a second for what the event could simply have said. The
+    /// byte count is not monotonic — a provider failover starts a file again —
+    /// so a page keeps its own high-water mark.
+    #[serde(rename = "download.progress")]
+    DownloadProgress {
+        task_id: TaskId,
+        item_id: ItemId,
+        #[serde(flatten)]
+        progress: Progress,
+    },
+
+    /// A download finished: every file is written. `library.task` says where.
+    #[serde(rename = "download.finished")]
+    DownloadFinished { task_id: TaskId, item_id: ItemId },
+
+    /// A download failed. `library.task` says why.
+    #[serde(rename = "download.failed")]
+    DownloadFailed { task_id: TaskId, item_id: ItemId },
+}
+
+/// How far a download has got.
+///
+/// Files as well as bytes, because they answer different questions: bytes
+/// say how long is left, files say how much can already be opened — a
+/// written file is complete, where half the bytes of an audiobook may be no
+/// chapter at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// Files written to their destination.
+    pub files_done: u64,
+    pub files_total: u64,
+}
+
+/// Names one piece of work in progress on this node — a download, today.
+///
+/// Counted from one when the node starts, and meaningful only to the node
+/// that handed it out: nothing outlives a restart, so neither does the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskId(pub u64);
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl Event {
@@ -52,6 +106,9 @@ impl Event {
             Self::MembershipChanged => "membership.changed",
             Self::ItemAdded { .. } => "catalogue.item_added",
             Self::ItemChanged { .. } => "catalogue.item_changed",
+            Self::DownloadProgress { .. } => "download.progress",
+            Self::DownloadFinished { .. } => "download.finished",
+            Self::DownloadFailed { .. } => "download.failed",
         }
     }
 }

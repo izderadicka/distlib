@@ -3,10 +3,13 @@
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use distlib_api::{Api, Client, ClientError, Server};
+use distlib_api::{
+    Api, Client, ClientError, Server,
+    tasks::{Downloaded, Outcome},
+};
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, ContentHash, CoreMember, DataDir, Event, ItemId, MemberId, NodeAddr, Ticket,
+    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -15,7 +18,6 @@ use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 use crate::{Runtime, cli::Kind};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
 
 /// How long `status --online` waits to reach a relay before giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -127,7 +129,6 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
             serve_api(
                 paths,
                 &config,
-                runtime.events().clone(),
                 Api {
                     node: Arc::clone(&node),
                     secret: secret.clone(),
@@ -137,6 +138,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                     blobs: runtime.blobs().clone(),
                     store: runtime.store().clone(),
                     search: runtime.search().clone(),
+                    tasks: runtime.tasks().clone(),
                 },
             )
             .await?,
@@ -386,13 +388,18 @@ async fn ask(paths: &Paths, method: &str, params: Value) -> Result<Value> {
     api(paths, &config)?
         .call(method, params)
         .await
-        .map_err(|error| match error {
-            ClientError::Unreachable { .. } => anyhow::anyhow!(
-                "{error}\n\nthe node holds its log while it runs, so changing membership \
-                 goes through it: start it with `distlib run`"
-            ),
-            other => anyhow::Error::from(other),
-        })
+        .map_err(advice)
+}
+
+/// A client error, with what to do about the common one.
+fn advice(error: ClientError) -> anyhow::Error {
+    match error {
+        ClientError::Unreachable { .. } => anyhow::anyhow!(
+            "{error}\n\nthe node holds its log while it runs, so changing membership \
+             goes through it: start it with `distlib run`"
+        ),
+        other => anyhow::Error::from(other),
+    }
 }
 
 /// `distlib admit`
@@ -754,32 +761,48 @@ pub async fn download(
     let dest = std::fs::canonicalize(dest)
         .with_context(|| format!("could not find {}", dest.display()))?;
 
-    let answer = ask(
-        paths,
-        "library.download",
-        json!({ "item_id": item_id, "dest": dest, "file": file }),
-    )
-    .await?;
+    let config = load_config(&paths.config_file)?;
+    let client = api(paths, &config)?;
+    // Watching before asking: the node subscribes this watcher before it
+    // answers, so the download's ending cannot happen in a window before
+    // anybody was listening for it.
+    let events = client.watch().await.map_err(advice)?;
+    let started = client
+        .call(
+            "library.download",
+            json!({ "item_id": item_id, "dest": dest, "file": file }),
+        )
+        .await
+        .map_err(advice)?;
+    let task_id: TaskId = serde_json::from_value(started["task_id"].clone())
+        .context("the node answered without a task id")?;
+    let state = client.until_ended(events, task_id).await.map_err(advice)?;
 
     println!(
         "downloaded  {item_id}  {}",
-        answer["title"].as_str().unwrap_or("(no title)")
+        state.title.as_deref().unwrap_or("(no title)")
     );
-    for file in answer["files"].as_array().map_or(&[][..], |v| v) {
+    for file in written(state.outcome)? {
         println!(
             "  {}  {}",
             // A file that was already here is said so rather than passed off
             // as a transfer: an operator who expected the group to be asked
             // should be able to tell that it was not.
-            if file["fetched"].as_bool().unwrap_or(false) {
-                "fetched"
-            } else {
-                "had it "
-            },
-            file["path"].as_str().unwrap_or("?")
+            if file.fetched { "fetched" } else { "had it " },
+            file.path.display()
         );
     }
     Ok(())
+}
+
+/// The files an ended download wrote — or its error, which is what makes
+/// `distlib download` exit non-zero.
+fn written(outcome: Outcome) -> Result<Vec<Downloaded>> {
+    match outcome {
+        Outcome::Finished { files } => Ok(files),
+        Outcome::Failed { error } => bail!("the download failed: {error}"),
+        Outcome::Running => bail!("the download has not ended"),
+    }
 }
 
 /// [`Kind`] as `library.add` spells it — §5.2's `type`, in `ItemKind`'s own
@@ -1221,16 +1244,11 @@ fn founders(
 ///
 /// The token is created on first run rather than at `init`, so a data
 /// directory made before this existed grows one when it is next started.
-async fn serve_api(
-    paths: &Paths,
-    config: &Config,
-    events: broadcast::Sender<Event>,
-    api: Api,
-) -> Result<Server> {
+async fn serve_api(paths: &Paths, config: &Config, api: Api) -> Result<Server> {
     let token_file = paths.data_dir.api_token_file();
     let token = token::load_or_create(&token_file)?;
 
-    let server = distlib_api::serve(config.api.bind_addr, api, token, events)
+    let server = distlib_api::serve(config.api.bind_addr, api, token)
         .await
         .with_context(|| {
             format!(
@@ -1418,6 +1436,21 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_that_failed_in_the_background_is_a_failed_command() {
+        // The refusals `acceptance.rs` checks are all answered before the
+        // task exists; this is the one path they never reach.
+        let error = written(Outcome::Failed {
+            error: "nobody had it".to_owned(),
+        })
+        .expect_err("a failed download is a failed command");
+        assert!(error.to_string().contains("nobody had it"), "{error}");
+        assert!(matches!(
+            written(Outcome::Finished { files: Vec::new() }),
+            Ok(files) if files.is_empty()
+        ));
+    }
 
     fn an_id(byte: u8) -> MemberId {
         MemberId::from(iroh::SecretKey::from_bytes(&[byte; 32]).public())

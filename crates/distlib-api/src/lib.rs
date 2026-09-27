@@ -30,6 +30,7 @@ pub mod client;
 pub mod events;
 pub mod methods;
 pub mod rpc;
+pub mod tasks;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -44,12 +45,11 @@ use axum::{
     },
     routing::{get, post},
 };
-use distlib_core::Event;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
-use tokio::{net::TcpListener, sync::broadcast};
+use tokio::net::TcpListener;
 
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientError, Events, Watched};
 pub use methods::Api;
 use rpc::{Error, Request, Response};
 
@@ -82,31 +82,25 @@ impl Server {
 struct Shared {
     api: Api,
     token: SecretString,
-    events: broadcast::Sender<Event>,
 }
 
 /// Binds `addr` and serves the API until the returned [`Server`] is shut down.
 ///
-/// `events` is the node's bus — see [`events::bus`]. The server subscribes a
-/// receiver per watcher, and publishes the membership's changes into it
+/// The event bus is `api.tasks`' — see [`events::bus`]. The server subscribes
+/// a receiver per watcher, and publishes the membership's changes into it
 /// itself, since the membership node is already in `api`.
 ///
 /// Returns once the listener is bound, so a caller that immediately connects
 /// will not race the server into existence.
-pub async fn serve(
-    addr: SocketAddr,
-    api: Api,
-    token: SecretString,
-    events: broadcast::Sender<Event>,
-) -> std::io::Result<Server> {
+pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::Result<Server> {
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
     let membership = tokio::spawn(events::publish_membership(
         api.node.subscribe(),
-        events.clone(),
+        api.tasks.events().clone(),
     ));
-    let shared = Arc::new(Shared { api, token, events });
+    let shared = Arc::new(Shared { api, token });
     // The token guards these two routes rather than the whole router, so that
     // the UI's static assets can be added beside them unguarded (D3) and an
     // unknown path is answered as unknown rather than as unauthorised.
@@ -177,10 +171,22 @@ fn refused(status: StatusCode, error: Error) -> HttpResponse {
 ///
 /// Subscribed before the response starts, so a caller that has its headers
 /// back is already receiving — nothing published after that point is missed.
-/// The keep-alive is a comment line every fifteen seconds, which keeps an
-/// idle connection from being closed by whatever sits in between.
+///
+/// **Downloads already running come first**, as the progress each has got to
+/// (3a-5): a page reloaded in the middle of a download gets its bar back
+/// straight away rather than at the next report. Snapshotted *after*
+/// subscribing, so a download cannot end in between unheard — at worst it is
+/// reported twice, once here and once live, and a page keeps a high-water
+/// mark anyway.
+///
+/// The keep-alive is a comment line every [`events::KEEP_ALIVE`], which keeps
+/// an idle connection from being closed by whatever sits in between — and
+/// tells a watcher that a stream gone quiet for longer is broken.
 async fn watch(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
-    Sse::new(events::frames(shared.events.subscribe())).keep_alive(KeepAlive::default())
+    let live = shared.api.tasks.events().subscribe();
+    let running = shared.api.tasks.running();
+    Sse::new(events::frames(running, live))
+        .keep_alive(KeepAlive::new().interval(events::KEEP_ALIVE))
 }
 
 /// One JSON-RPC call.

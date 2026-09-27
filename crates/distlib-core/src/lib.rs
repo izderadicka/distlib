@@ -22,7 +22,7 @@ pub use catalogue::{
 };
 pub use config::{ApiConfig, Config, ConsensusConfig, CoreMember, NetConfig, RelayMode};
 pub use error::CoreError;
-pub use event::Event;
+pub use event::{Event, Progress, TaskId};
 pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};
 pub use paths::DataDir;
 pub use ticket::Ticket;
