@@ -9,8 +9,13 @@
 
 use std::net::SocketAddr;
 
+use distlib_core::Event;
 use http_body_util::{BodyExt as _, Full};
-use hyper::{Request, StatusCode, body::Bytes, header::AUTHORIZATION};
+use hyper::{
+    Request, StatusCode,
+    body::{Bytes, Incoming},
+    header::AUTHORIZATION,
+};
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
@@ -50,12 +55,46 @@ impl Client {
         Self { addr, token }
     }
 
-    /// Calls `method` and returns its result.
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value, ClientError> {
-        let unreachable = |error: &dyn std::fmt::Display| ClientError::Unreachable {
+    fn unreachable(&self, error: &dyn std::fmt::Display) -> ClientError {
+        ClientError::Unreachable {
             addr: self.addr,
             message: error.to_string(),
-        };
+        }
+    }
+
+    /// Opens `GET /events`, and returns once the node has answered.
+    ///
+    /// The node subscribes this watcher before it answers, so everything it
+    /// publishes after this returns is heard — which is what lets a caller
+    /// start something and then wait for the news of it ending, without a
+    /// window in which the ending could go by unheard.
+    pub async fn watch(&self) -> Result<Events, ClientError> {
+        let request = Request::get(format!("http://{}/events", self.addr))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.token.expose_secret()),
+            )
+            .body(Full::new(Bytes::new()))
+            .map_err(|error| self.unreachable(&error))?;
+        let response = Hyper::builder(TokioExecutor::new())
+            .build_http()
+            .request(request)
+            .await
+            .map_err(|error| self.unreachable(&error))?;
+        match response.status() {
+            StatusCode::OK => Ok(Events {
+                addr: self.addr,
+                body: response.into_body(),
+                unread: Vec::new(),
+            }),
+            StatusCode::UNAUTHORIZED => Err(ClientError::Unauthorised),
+            other => Err(ClientError::Malformed(format!("/events answered {other}"))),
+        }
+    }
+
+    /// Calls `method` and returns its result.
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, ClientError> {
+        let unreachable = |error: &dyn std::fmt::Display| self.unreachable(error);
 
         let body = json!({
             "jsonrpc": "2.0",
@@ -104,5 +143,107 @@ impl Client {
             .get("result")
             .cloned()
             .ok_or_else(|| ClientError::Malformed(format!("no result and no error in {answer}")))
+    }
+}
+
+/// One thing `GET /events` said.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Watched {
+    Event(Event),
+    /// This watcher fell behind and missed events; whatever it is waiting
+    /// for has to be asked about rather than heard.
+    Resync,
+}
+
+/// An open `GET /events`.
+pub struct Events {
+    addr: SocketAddr,
+    body: Incoming,
+    /// Bytes read but not yet a whole event: a read can end anywhere, half an
+    /// event or three.
+    unread: Vec<u8>,
+}
+
+impl Events {
+    /// The next thing the node says, or `None` once it has closed the stream.
+    ///
+    /// **An event this build cannot read is skipped**, not an error: a newer
+    /// node may publish types this client has never heard of, and events are
+    /// ids a watcher refetches by (D2), so there is nothing in one it must
+    /// not miss. The keep-alive comments are skipped likewise.
+    pub async fn next(&mut self) -> Option<Result<Watched, ClientError>> {
+        loop {
+            if let Some(end) = self.unread.windows(2).position(|pair| pair == b"\n\n") {
+                let block: Vec<u8> = self.unread.drain(..end + 2).collect();
+                if let Some(watched) = read_block(&String::from_utf8_lossy(&block)) {
+                    return Some(Ok(watched));
+                }
+                continue;
+            }
+            match self.body.frame().await? {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        self.unread.extend_from_slice(&data);
+                    }
+                }
+                Err(error) => {
+                    return Some(Err(ClientError::Unreachable {
+                        addr: self.addr,
+                        message: error.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// One server-sent event, as `crate::events` writes it: an `event:` line and
+/// one `data:` line of JSON. `None` for anything else.
+fn read_block(block: &str) -> Option<Watched> {
+    let field = |name: &str| {
+        block
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim_start)
+    };
+    match field("event:")? {
+        "resync" => Some(Watched::Resync),
+        _ => serde_json::from_str(field("data:")?)
+            .ok()
+            .map(Watched::Event),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use distlib_core::ItemId;
+
+    use super::*;
+
+    #[test]
+    fn an_event_reads_back_as_the_node_wrote_it() {
+        let item_id = ItemId::from_bytes([1; 32]);
+        let block = format!(
+            "event: catalogue.item_added\ndata: {}\n\n",
+            serde_json::to_string(&Event::ItemAdded { item_id }).unwrap_or_default()
+        );
+        assert_eq!(
+            read_block(&block),
+            Some(Watched::Event(Event::ItemAdded { item_id }))
+        );
+        assert_eq!(
+            read_block("event: resync\ndata: {\"type\":\"resync\"}\n\n"),
+            Some(Watched::Resync)
+        );
+    }
+
+    #[test]
+    fn what_this_build_cannot_read_is_skipped() {
+        assert_eq!(read_block(":\n\n"), None, "a keep-alive");
+        assert_eq!(
+            read_block("event: wish.changed\ndata: {\"type\":\"wish.changed\"}\n\n"),
+            None,
+            "an event from a newer node"
+        );
     }
 }

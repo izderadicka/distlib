@@ -22,13 +22,13 @@
 
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
-use distlib_core::{Event, ItemId, TaskId};
-use serde::Serialize;
-use serde_json::Value;
+use distlib_core::{ContentHash, Event, ItemId, Progress, TaskId};
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 /// How many finished or failed downloads are kept for `library.task`.
@@ -61,31 +61,36 @@ struct Registry {
 }
 
 /// What `library.task` answers with.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskState {
     pub task_id: TaskId,
     pub item_id: ItemId,
     pub title: Option<String>,
-    /// Bytes fetched so far, and to fetch in all.
-    pub done: u64,
-    pub total: u64,
+    #[serde(flatten)]
+    pub progress: Progress,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
 
 /// Where a download has got to.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Outcome {
     Running,
-    /// `files` is what `library.download` used to answer with: each file, the
-    /// path it was written to, and whether it had to be fetched.
-    Finished {
-        files: Value,
-    },
-    Failed {
-        error: String,
-    },
+    Finished { files: Vec<Downloaded> },
+    Failed { error: String },
+}
+
+/// One file a finished download wrote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Downloaded {
+    pub file: ContentHash,
+    pub filename: String,
+    pub path: PathBuf,
+    /// Whether it had to come over the network. A caller cannot act on it,
+    /// but an operator watching a download of an item half of which was
+    /// already here can read it.
+    pub fetched: bool,
 }
 
 impl Tasks {
@@ -102,11 +107,23 @@ impl Tasks {
         &self.events
     }
 
-    /// Registers a download of `total` bytes of `item_id` as running.
+    /// Registers a download of `files_total` files and `bytes_total` bytes of
+    /// `item_id` as running.
     ///
     /// Registered here, before any work starts, so that the id a caller is
     /// handed back can be asked about at once.
-    pub fn start_download(&self, item_id: ItemId, title: Option<String>, total: u64) -> Download {
+    pub fn start_download(
+        &self,
+        item_id: ItemId,
+        title: Option<String>,
+        files_total: u64,
+        bytes_total: u64,
+    ) -> Download {
+        let progress = Progress {
+            bytes_total,
+            files_total,
+            ..Progress::default()
+        };
         let mut registry = self.lock();
         registry.next += 1;
         let task_id = TaskId(registry.next);
@@ -116,8 +133,7 @@ impl Tasks {
                 task_id,
                 item_id,
                 title,
-                done: 0,
-                total,
+                progress,
                 outcome: Outcome::Running,
             },
         );
@@ -125,7 +141,7 @@ impl Tasks {
             tasks: self.clone(),
             task_id,
             item_id,
-            total,
+            progress,
             published: None,
             ended: false,
         }
@@ -147,8 +163,7 @@ impl Tasks {
             .map(|task| Event::DownloadProgress {
                 task_id: task.task_id,
                 item_id: task.item_id,
-                done: task.done,
-                total: task.total,
+                progress: task.progress,
             })
             .collect()
     }
@@ -158,9 +173,9 @@ impl Tasks {
     }
 
     /// Records how far `task_id` has got.
-    fn record(&self, task_id: TaskId, done: u64) {
+    fn record(&self, task_id: TaskId, progress: Progress) {
         if let Some(task) = self.lock().tasks.get_mut(&task_id) {
-            task.done = done;
+            task.progress = progress;
         }
     }
 
@@ -194,7 +209,7 @@ pub struct Download {
     tasks: Tasks,
     task_id: TaskId,
     item_id: ItemId,
-    total: u64,
+    progress: Progress,
     published: Option<Instant>,
     ended: bool,
 }
@@ -205,28 +220,41 @@ impl Download {
         self.task_id
     }
 
-    /// Records that `done` bytes of the total are here, and publishes that if
-    /// the last publication was long enough ago.
-    pub fn progress(&mut self, done: u64) {
-        self.tasks.record(self.task_id, done);
+    /// Records that `bytes_done` bytes of the total are here, and publishes
+    /// that if the last publication was long enough ago.
+    pub fn progress(&mut self, bytes_done: u64) {
+        self.progress.bytes_done = bytes_done;
+        self.tasks.record(self.task_id, self.progress);
         if self
             .published
             .is_none_or(|at| at.elapsed() >= PUBLISH_EVERY)
         {
-            self.published = Some(Instant::now());
-            self.publish_progress(done);
+            self.publish_progress();
         }
+    }
+
+    /// Records that one more file is written, `bytes_done` bytes into the
+    /// download, and publishes it whatever the throttle says: a file becoming
+    /// something that can be opened happens once per file, and is worth
+    /// hearing about at once.
+    pub fn file_written(&mut self, bytes_done: u64) {
+        self.progress.bytes_done = bytes_done;
+        self.progress.files_done += 1;
+        self.tasks.record(self.task_id, self.progress);
+        self.publish_progress();
     }
 
     /// Ends it as done, with the files it wrote.
     ///
     /// A last progress of the whole total goes out first, whatever was
     /// published before: throttling may have held the last one back, a file
-    /// already held reports no progress at all, and a page's bar should end
-    /// full rather than wherever the last throttled report left it.
-    pub fn finish(mut self, files: Value) {
-        self.tasks.record(self.task_id, self.total);
-        self.publish_progress(self.total);
+    /// already held reports no bytes at all, and a page's bar should end full
+    /// rather than wherever the last throttled report left it.
+    pub fn finish(mut self, files: Vec<Downloaded>) {
+        self.progress.bytes_done = self.progress.bytes_total;
+        self.progress.files_done = self.progress.files_total;
+        self.tasks.record(self.task_id, self.progress);
+        self.publish_progress();
         let (task_id, item_id) = (self.task_id, self.item_id);
         self.end(
             Outcome::Finished { files },
@@ -239,12 +267,12 @@ impl Download {
         self.failed(error);
     }
 
-    fn publish_progress(&self, done: u64) {
+    fn publish_progress(&mut self) {
+        self.published = Some(Instant::now());
         self.tasks.publish(Event::DownloadProgress {
             task_id: self.task_id,
             item_id: self.item_id,
-            done,
-            total: self.total,
+            progress: self.progress,
         });
     }
 
@@ -277,8 +305,6 @@ impl Drop for Download {
 mod tests {
     #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-    use serde_json::json;
-
     use super::*;
 
     const ITEM: ItemId = ItemId::from_bytes([1; 32]);
@@ -289,6 +315,16 @@ mod tests {
         (Tasks::new(events), watching)
     }
 
+    /// The progress of a download of two files and a hundred bytes.
+    fn progress_of(bytes_done: u64, files_done: u64) -> Progress {
+        Progress {
+            bytes_done,
+            bytes_total: 100,
+            files_done,
+            files_total: 2,
+        }
+    }
+
     /// Everything published so far.
     fn heard(watching: &mut broadcast::Receiver<Event>) -> Vec<Event> {
         std::iter::from_fn(|| watching.try_recv().ok()).collect()
@@ -297,25 +333,29 @@ mod tests {
     #[test]
     fn a_finished_download_ends_on_a_full_bar_and_one_ending() {
         let (tasks, mut watching) = registry();
-        let mut download = tasks.start_download(ITEM, None, 100);
+        let mut download = tasks.start_download(ITEM, None, 2, 100);
         let task_id = download.id();
         download.progress(10);
         // Inside the throttle window, so held back — the case the final
         // report is there for.
         download.progress(60);
-        download.finish(json!([]));
+        download.finish(Vec::new());
 
-        let progress = |done| Event::DownloadProgress {
+        let progress = |bytes_done, files_done| Event::DownloadProgress {
             task_id,
             item_id: ITEM,
-            done,
-            total: 100,
+            progress: Progress {
+                bytes_done,
+                bytes_total: 100,
+                files_done,
+                files_total: 2,
+            },
         };
         assert_eq!(
             heard(&mut watching),
             [
-                progress(10),
-                progress(100),
+                progress(10, 0),
+                progress(100, 2),
                 Event::DownloadFinished {
                     task_id,
                     item_id: ITEM
@@ -323,8 +363,29 @@ mod tests {
             ]
         );
         let state = tasks.get(task_id).unwrap();
-        assert_eq!(state.done, 100);
-        assert_eq!(state.outcome, Outcome::Finished { files: json!([]) });
+        assert_eq!(state.progress, progress_of(100, 2));
+        assert_eq!(state.outcome, Outcome::Finished { files: Vec::new() });
+    }
+
+    #[test]
+    fn a_written_file_is_counted_and_heard_at_once() {
+        let (tasks, mut watching) = registry();
+        let mut download = tasks.start_download(ITEM, None, 2, 100);
+        download.progress(10);
+        // Inside the throttle window: a byte count here would be held back.
+        download.file_written(50);
+
+        let heard = heard(&mut watching);
+        assert_eq!(heard.len(), 2, "{heard:?}");
+        assert_eq!(
+            heard[1],
+            Event::DownloadProgress {
+                task_id: download.id(),
+                item_id: ITEM,
+                progress: progress_of(50, 1),
+            }
+        );
+        assert_eq!(tasks.get(download.id()).unwrap().progress.files_done, 1);
     }
 
     #[test]
@@ -333,7 +394,7 @@ mod tests {
         // with the registry held, an ending cannot be recorded — and must
         // therefore not be published either.
         let (tasks, mut watching) = registry();
-        let download = tasks.start_download(ITEM, None, 100);
+        let download = tasks.start_download(ITEM, None, 2, 100);
         let held = tasks.lock();
         let ending = std::thread::spawn(move || download.fail("nobody had it".to_owned()));
         std::thread::sleep(Duration::from_millis(200));
@@ -353,7 +414,7 @@ mod tests {
     #[test]
     fn progress_is_recorded_every_time_and_published_at_most_every_so_often() {
         let (tasks, mut watching) = registry();
-        let mut download = tasks.start_download(ITEM, None, 1_000);
+        let mut download = tasks.start_download(ITEM, None, 2, 1_000);
         for done in 1..=500 {
             download.progress(done);
         }
@@ -363,7 +424,7 @@ mod tests {
             "one report, not five hundred"
         );
         assert_eq!(
-            tasks.get(download.id()).unwrap().done,
+            tasks.get(download.id()).unwrap().progress.bytes_done,
             500,
             "a page that asks is told the latest, throttled or not"
         );
@@ -372,7 +433,7 @@ mod tests {
     #[test]
     fn a_download_dropped_before_it_ended_is_failed_not_running_for_ever() {
         let (tasks, mut watching) = registry();
-        let download = tasks.start_download(ITEM, None, 100);
+        let download = tasks.start_download(ITEM, None, 2, 100);
         let task_id = download.id();
         drop(download);
 
@@ -393,7 +454,7 @@ mod tests {
     #[test]
     fn a_failed_download_ends_once() {
         let (tasks, mut watching) = registry();
-        let download = tasks.start_download(ITEM, None, 100);
+        let download = tasks.start_download(ITEM, None, 2, 100);
         let task_id = download.id();
         download.fail("nobody had it".to_owned());
 
@@ -416,17 +477,16 @@ mod tests {
     #[test]
     fn only_running_downloads_are_replayed_to_a_new_watcher() {
         let (tasks, _watching) = registry();
-        let mut running = tasks.start_download(ITEM, None, 100);
+        let mut running = tasks.start_download(ITEM, None, 2, 100);
         running.progress(40);
-        tasks.start_download(ITEM, None, 100).finish(json!([]));
+        tasks.start_download(ITEM, None, 2, 100).finish(Vec::new());
 
         assert_eq!(
             tasks.running(),
             [Event::DownloadProgress {
                 task_id: running.id(),
                 item_id: ITEM,
-                done: 40,
-                total: 100,
+                progress: progress_of(40, 0),
             }]
         );
     }
@@ -434,12 +494,12 @@ mod tests {
     #[test]
     fn ended_downloads_are_pruned_oldest_first_and_running_ones_never() {
         let (tasks, _watching) = registry();
-        let running = tasks.start_download(ITEM, None, 100);
+        let running = tasks.start_download(ITEM, None, 2, 100);
         let ended: Vec<TaskId> = (0..KEEP_ENDED + 3)
             .map(|_| {
-                let download = tasks.start_download(ITEM, None, 100);
+                let download = tasks.start_download(ITEM, None, 2, 100);
                 let task_id = download.id();
-                download.finish(json!([]));
+                download.finish(Vec::new());
                 task_id
             })
             .collect();

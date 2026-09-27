@@ -29,7 +29,7 @@ use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
     ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig,
-    TaskId,
+    Progress, TaskId,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -292,9 +292,15 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     let [.., last_progress, ending] = &heard[..] else {
         panic!("a progress report and an ending, at least: {heard:?}")
     };
+    let full = Progress {
+        bytes_done: total,
+        bytes_total: total,
+        files_done: 1,
+        files_total: 1,
+    };
     assert!(
-        matches!(last_progress, Event::DownloadProgress { done, total: of, .. } if *done == total && *of == total),
-        "the bar ends full: {heard:?}"
+        matches!(last_progress, Event::DownloadProgress { progress, .. } if *progress == full),
+        "the bar ends full, in bytes and in files: {heard:?}"
     );
     assert!(
         matches!(ending, Event::DownloadFinished { .. }),

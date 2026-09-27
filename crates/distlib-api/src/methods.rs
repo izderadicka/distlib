@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::{
     rpc::Error,
-    tasks::{self, Tasks},
+    tasks::{self, Downloaded, Tasks},
 };
 
 /// Everything the methods need: the running node and the key it signs with.
@@ -773,10 +773,13 @@ impl Api {
             .filter(|member| *member != me)
             .collect();
 
-        let total = targets.iter().map(|(_, record, _)| record.size).sum();
-        let task = self
-            .tasks
-            .start_download(params.item_id, stored.item.title.clone(), total);
+        let bytes = targets.iter().map(|(_, record, _)| record.size).sum();
+        let task = self.tasks.start_download(
+            params.item_id,
+            stored.item.title.clone(),
+            targets.len() as u64,
+            bytes,
+        );
         let task_id = task.id();
         let answer = json!({
             "task_id": task_id,
@@ -798,7 +801,7 @@ impl Api {
         tokio::spawn(async move {
             let mut task = task;
             match api.fetch_all(targets, &providers, &mut task).await {
-                Ok(files) => task.finish(Value::Array(files)),
+                Ok(files) => task.finish(files),
                 Err(error) => task.fail(error.message),
             }
         });
@@ -811,12 +814,13 @@ impl Api {
     /// Progress is counted across all of the files, so a bar fills once per
     /// download rather than once per file: a file already here counts as done
     /// the moment it is found, and one being fetched counts what it has so far.
+    /// A file counts towards `files_done` once it is written out.
     async fn fetch_all(
         &self,
         targets: Vec<(ContentHash, FileRecord, PathBuf)>,
         providers: &[MemberId],
         task: &mut tasks::Download,
-    ) -> Result<Vec<Value>, Error> {
+    ) -> Result<Vec<Downloaded>, Error> {
         let mut files = Vec::with_capacity(targets.len());
         let mut refresh = OneRefresh::of(self, providers);
         let mut done = 0;
@@ -839,17 +843,14 @@ impl Api {
                     .map_err(net_error)?;
             }
             done += record.size;
-            task.progress(done);
             self.blobs.export(hash, &target).await.map_err(net_error)?;
-            files.push(json!({
-                "file": hash,
-                "filename": record.filename,
-                "path": target,
-                // Whether it had to come over the network. A caller cannot
-                // act on it, but an operator watching a download of an item
-                // half of which was already here can read it.
-                "fetched": !already_here,
-            }));
+            task.file_written(done);
+            files.push(Downloaded {
+                file: hash,
+                filename: record.filename,
+                path: target,
+                fetched: !already_here,
+            });
         }
         Ok(files)
     }

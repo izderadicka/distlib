@@ -12,9 +12,12 @@ use std::{
     sync::Arc,
 };
 
-use distlib_api::{Api, Server, serve, tasks::Tasks};
+use distlib_api::{
+    Api, Server, serve,
+    tasks::{Downloaded, Outcome, TaskState, Tasks},
+};
 use distlib_consensus::{MemberRecord, MembershipNode};
-use distlib_core::{Item, ItemId, MemberId, NodeAddr, Ticket};
+use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
 use distlib_sync::Catalogue;
@@ -624,16 +627,16 @@ async fn a_page_that_connects_mid_download_is_told_how_far_it_has_got() {
     let harness = Harness::start().await;
     let mut download = harness
         .tasks
-        .start_download(ItemId::from_bytes([3; 32]), None, 100);
+        .start_download(ItemId::from_bytes([3; 32]), None, 2, 100);
     // Published to nobody: no page was open.
     download.progress(40);
 
     let mut watcher = harness.watch().await;
     let replayed = watcher.expect("download.progress").await;
-    assert!(replayed.contains(r#""done":40"#), "{replayed}");
+    assert!(replayed.contains(r#""bytes_done":40"#), "{replayed}");
 
     // And then live, as for any other watcher.
-    download.finish(json!([]));
+    download.finish(Vec::new());
     watcher.expect("download.finished").await;
 
     harness.shutdown().await;
@@ -645,23 +648,40 @@ async fn a_download_can_be_asked_after_while_it_runs_and_once_it_has_ended() {
     let mut download =
         harness
             .tasks
-            .start_download(ItemId::from_bytes([3; 32]), Some("Dune".to_owned()), 100);
+            .start_download(ItemId::from_bytes([3; 32]), Some("Dune".to_owned()), 1, 100);
     let task_id = download.id();
     download.progress(40);
 
-    let running = harness
-        .call("library.task", json!({ "task_id": task_id }))
-        .await;
-    assert_eq!(running["state"], "running", "{running}");
-    assert_eq!(running["done"], 40, "{running}");
-    assert_eq!(running["title"], "Dune", "{running}");
+    // Read back as the typed state `distlib download` reads it as, so that
+    // what the server writes and what a client parses cannot drift apart.
+    let ask = || async {
+        serde_json::from_value::<TaskState>(
+            harness
+                .call("library.task", json!({ "task_id": task_id }))
+                .await,
+        )
+        .unwrap()
+    };
+    let running = ask().await;
+    assert_eq!(running.outcome, Outcome::Running);
+    assert_eq!(running.progress.bytes_done, 40);
+    assert_eq!(running.title.as_deref(), Some("Dune"));
 
-    download.finish(json!([{ "fetched": true }]));
-    let finished = harness
-        .call("library.task", json!({ "task_id": task_id }))
-        .await;
-    assert_eq!(finished["state"], "finished", "{finished}");
-    assert_eq!(finished["files"], json!([{ "fetched": true }]));
+    let written = Downloaded {
+        file: ContentHash::from_bytes([4; 32]),
+        filename: "dune.epub".to_owned(),
+        path: "/books/dune.epub".into(),
+        fetched: true,
+    };
+    download.finish(vec![written.clone()]);
+    let finished = ask().await;
+    assert_eq!(
+        finished.outcome,
+        Outcome::Finished {
+            files: vec![written]
+        }
+    );
+    assert_eq!(finished.progress.files_done, 1);
 
     let unknown = harness
         .refuse("library.task", json!({ "task_id": 999 }))

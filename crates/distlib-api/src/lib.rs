@@ -49,7 +49,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientError, Events, Watched};
 pub use methods::Api;
 use rpc::{Error, Request, Response};
 

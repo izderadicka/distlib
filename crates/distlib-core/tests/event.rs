@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use distlib_core::{Event, ItemId, TaskId};
+use distlib_core::{Event, ItemId, Progress, TaskId};
 
 /// Every variant, once.
 ///
@@ -19,8 +19,12 @@ fn every_event() -> Vec<Event> {
         Event::DownloadProgress {
             task_id,
             item_id,
-            done: 1,
-            total: 2,
+            progress: Progress {
+                bytes_done: 1,
+                bytes_total: 2,
+                files_done: 0,
+                files_total: 1,
+            },
         },
         Event::DownloadFinished { task_id, item_id },
         Event::DownloadFailed { task_id, item_id },
@@ -46,6 +50,11 @@ fn an_events_name_and_its_type_agree() {
             data["type"],
             event.name(),
             "the SSE event name and the data's type must be the same string"
+        );
+        assert_eq!(
+            serde_json::from_value::<Event>(data).unwrap(),
+            event,
+            "what a node sends, a watcher reads back"
         );
     }
 }

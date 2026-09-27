@@ -18,8 +18,9 @@ use crate::ItemId;
 /// One thing a watcher may want to refetch.
 ///
 /// Serialised with its name as `type`, so an event's data reads on its own
-/// without the SSE frame around it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// without the SSE frame around it — and read back by `distlib download`,
+/// which watches the stream for its download's ending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
     /// The membership changed: a member came or went, a proposal was made,
@@ -44,20 +45,20 @@ pub enum Event {
     #[serde(rename = "catalogue.item_changed")]
     ItemChanged { item_id: ItemId },
 
-    /// How far a download has got: `done` of `total` bytes, across all of the
+    /// How far a download has got, in bytes and in files, across all of the
     /// files it is fetching.
     ///
     /// **The one event that carries values**, against the rule above. Progress
     /// *is* the news, and a page that refetched on every tick would be asking
-    /// several times a second for what the event could simply have said. Not
-    /// monotonic — a provider failover starts a file again — so a page keeps
-    /// its own high-water mark.
+    /// several times a second for what the event could simply have said. The
+    /// byte count is not monotonic — a provider failover starts a file again —
+    /// so a page keeps its own high-water mark.
     #[serde(rename = "download.progress")]
     DownloadProgress {
         task_id: TaskId,
         item_id: ItemId,
-        done: u64,
-        total: u64,
+        #[serde(flatten)]
+        progress: Progress,
     },
 
     /// A download finished: every file is written. `library.task` says where.
@@ -67,6 +68,21 @@ pub enum Event {
     /// A download failed. `library.task` says why.
     #[serde(rename = "download.failed")]
     DownloadFailed { task_id: TaskId, item_id: ItemId },
+}
+
+/// How far a download has got.
+///
+/// Files as well as bytes, because they answer different questions: bytes
+/// say how long is left, files say how much can already be opened — a
+/// written file is complete, where half the bytes of an audiobook may be no
+/// chapter at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// Files written to their destination.
+    pub files_done: u64,
+    pub files_total: u64,
 }
 
 /// Names one piece of work in progress on this node — a download, today.
