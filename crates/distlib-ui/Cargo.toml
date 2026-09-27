@@ -1,0 +1,18 @@
+[package]
+name = "distlib-ui"
+description = "The distlib node's web UI, and how it is served"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+# The UI's files, in the binary. `interpolate-folder-path` for an absolute
+# `$CARGO_MANIFEST_DIR` folder; `mime-guess` for each file's `Content-Type`.
+rust-embed = { workspace = true }
+
+[lints]
+workspace = true

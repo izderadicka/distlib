@@ -11,7 +11,7 @@
 //! refused token, an unknown route and a body that is not text all answer
 //! with a JSON-RPC error object, so a caller has one parser. The exceptions
 //! are the pages and files of the web UI, which a browser asks for by `GET`
-//! and which are what they are — see `page`. The HTTP status is kept as it would
+//! and which are what they are — see `distlib_ui`. The HTTP status is kept as it would
 //! have been — 401 is still 401 — because browsers and proxies read it, and
 //! the JSON-RPC code beside it is for the caller.
 //!
@@ -31,7 +31,6 @@
 pub mod client;
 pub mod events;
 pub mod methods;
-mod page;
 pub mod rpc;
 pub mod tasks;
 
@@ -40,7 +39,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     extract::{Request as HttpRequest, State, rejection::StringRejection},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::WWW_AUTHENTICATE},
+    http::{HeaderMap, Method, StatusCode, Uri, header::AUTHORIZATION, header::WWW_AUTHENTICATE},
     middleware::{self, Next},
     response::{
         IntoResponse, Response as HttpResponse,
@@ -114,8 +113,8 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
             Arc::clone(&shared),
             require_token,
         ))
-        // Everything else is the UI's, and open — see `page`.
-        .fallback(page::serve)
+        // Everything else is the UI's, and open — see `distlib_ui`.
+        .fallback(page)
         .method_not_allowed_fallback(|| async {
             refused(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -160,8 +159,19 @@ async fn require_token(
 ///
 /// For the refusals that happen before there is a call to answer — which is
 /// why the id is null: there is no request id to echo.
-pub(crate) fn refused(status: StatusCode, error: Error) -> HttpResponse {
+fn refused(status: StatusCode, error: Error) -> HttpResponse {
     (status, Json(Response::failed(Value::Null, error))).into_response()
+}
+
+/// Every request no API route took: the UI's, if it takes it, and otherwise
+/// missing — in JSON, like every other refusal here (D9).
+async fn page(method: Method, uri: Uri) -> HttpResponse {
+    distlib_ui::page(&method, uri.path()).unwrap_or_else(|| {
+        refused(
+            StatusCode::NOT_FOUND,
+            Error::invalid_request("no such route"),
+        )
+    })
 }
 
 /// `GET /events`: one watcher's stream.

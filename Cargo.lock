@@ -1174,6 +1174,7 @@ dependencies = [
  "distlib-net",
  "distlib-store",
  "distlib-sync",
+ "distlib-ui",
  "futures-lite",
  "http-body-util",
  "hyper",
@@ -1181,7 +1182,6 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "iroh-gossip",
- "rust-embed",
  "secrecy",
  "serde",
  "serde_json",
@@ -1291,6 +1291,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "distlib-ui"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "rust-embed",
 ]
 
 [[package]]

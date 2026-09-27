@@ -856,8 +856,18 @@ pub async fn ticket(paths: &Paths) -> Result<()> {
 ///
 /// Read from the token file rather than asked of the node: the link is only
 /// as good as a running node anyway, and printing it should not need one.
-pub fn ui(paths: &Paths) -> Result<()> {
+///
+/// **This machine's link unless told otherwise.** The node knows the address
+/// it listens on, not the one a browser elsewhere reaches it by — a server's
+/// name, a reverse proxy's `https://` — so that is `base_url`'s to say.
+pub fn ui(paths: &Paths, base_url: Option<&str>) -> Result<()> {
     let config = load_config(&paths.config_file)?;
+    if let Some(base_url) = base_url
+        && (!(base_url.starts_with("http://") || base_url.starts_with("https://"))
+            || base_url.contains('#'))
+    {
+        bail!("--base-url must be an http:// or https:// address with no `#` in it");
+    }
     let token_file = paths.data_dir.api_token_file();
     if !token_file.exists() {
         bail!(
@@ -866,11 +876,19 @@ pub fn ui(paths: &Paths) -> Result<()> {
         );
     }
     let token = token::load_or_create(&token_file)?;
-    println!(
-        "{}#token={}",
-        page_url(config.api.bind_addr),
-        token.expose_secret()
-    );
+    let base_url = match base_url {
+        Some(base_url) => base_url.to_owned(),
+        None => {
+            if config.api.bind_addr.ip().is_unspecified() {
+                eprintln!(
+                    "this link works on this machine only; for a browser elsewhere, give \
+                     `--base-url` the address it reaches this node by"
+                );
+            }
+            page_url(config.api.bind_addr)
+        }
+    };
+    println!("{base_url}#token={}", token.expose_secret());
     Ok(())
 }
 

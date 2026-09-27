@@ -154,7 +154,13 @@ pub enum Command {
     /// it out of the address bar. It is a credential all the same, so this
     /// prints it only when asked — `distlib run` names the address and not
     /// the token — and it belongs in a browser, not in a chat or a log.
-    Ui,
+    Ui {
+        /// Where a browser reaches this node, if not on this machine: a node
+        /// bound to `0.0.0.0` on a server, or behind a reverse proxy. For
+        /// example `https://library.example.org/`.
+        #[arg(long)]
+        base_url: Option<String>,
+    },
 
     /// Print a join ticket for somebody who has been admitted.
     ///

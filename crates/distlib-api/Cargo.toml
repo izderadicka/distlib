@@ -29,7 +29,8 @@ distlib-net = { workspace = true }
 # the one it would write: a content hash is a BLAKE3 hash of the bytes.
 blake3 = { workspace = true }
 axum = { workspace = true }
-rust-embed = { workspace = true }
+# The web UI, served from the paths the API does not route (D3).
+distlib-ui = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

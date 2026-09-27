@@ -112,6 +112,23 @@ fn the_ui_link_is_printed_when_asked_for_and_never_logged() {
         String::from_utf8(output.stdout).unwrap().trim(),
         format!("{page}#token={token}")
     );
+
+    // A browser on another machine reaches the node by a name only the
+    // operator knows — a server's, a reverse proxy's.
+    let output = distlib(friend.dir.path())
+        .args(["ui", "--base-url", "https://library.example.org/"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("https://library.example.org/#token={token}")
+    );
+    let refused = distlib(friend.dir.path())
+        .args(["ui", "--base-url", "library.example.org"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "not an http(s) address");
 }
 
 #[test]

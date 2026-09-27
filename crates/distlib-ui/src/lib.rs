@@ -1,4 +1,11 @@
-//! The web UI's files, served beside the API (phase 3's 3b-1).
+//! The node's web UI (§7.3): its files, and how they are served.
+//!
+//! A crate of its own so that the UI can grow — more pages, more static
+//! files, its own npm project under `web/` — without `distlib-api` growing
+//! with it, and so that a change to the UI rebuilds this crate and not the
+//! API's. It knows nothing of JSON-RPC: `distlib-api` serves the API's routes
+//! and hands every other request to [`page`], answering in its own envelope
+//! whatever this does not take.
 //!
 //! **Open, where the API is not** (D3). Nothing here is about this node: the
 //! HTML and the bundle are the same bytes for every group, and everything a
@@ -8,30 +15,28 @@
 //!
 //! **A single-page app**: a path that names no file, `/members` say, answers
 //! with `index.html`, and the page routes itself. A path that looks like a
-//! file — it has an extension — and is not one answers 404 in JSON, as every
-//! other refusal does (D9): a missing script handed HTML instead is a
-//! confusing error in a browser's console, and a missing one reported as
-//! missing is not.
+//! file — it has an extension — and is not one is not taken, so it is
+//! answered as missing: a missing script handed HTML instead is a confusing
+//! error in a browser's console, and a missing one reported as missing is
+//! not.
 //!
 //! **Built or not, `cargo build` works** (D7). The files come from
-//! `ui/dist`, which `npm run build` writes and git ignores; when it is not
-//! there, `index.html` is the committed placeholder saying how to build it. A
-//! release build embeds what `ui/dist` held when it was compiled; a debug
-//! build reads the folder as it runs, so rebuilding the UI needs no rebuild of
-//! the node.
+//! `web/dist`, which `npm run build` writes and git ignores; when it is not
+//! there, `index.html` is the committed `placeholder.html` saying how to build
+//! it. A release build embeds what `web/dist` held when it was compiled; a
+//! debug build reads the folder as it runs, so rebuilding the UI needs no
+//! rebuild of the node.
 
 use std::borrow::Cow;
 
 use axum::{
     http::{
-        HeaderMap, HeaderValue, Method, StatusCode, Uri,
+        HeaderMap, HeaderValue, Method,
         header::{CACHE_CONTROL, CONTENT_TYPE},
     },
     response::{IntoResponse, Response},
 };
 use rust_embed::Embed;
-
-use crate::rpc::Error;
 
 /// The built UI, if there is one.
 ///
@@ -39,12 +44,12 @@ use crate::rpc::Error;
 /// a relative folder against wherever the binary is run from, which for a
 /// node is anywhere at all.
 #[derive(Embed)]
-#[folder = "$CARGO_MANIFEST_DIR/ui/dist/"]
+#[folder = "$CARGO_MANIFEST_DIR/web/dist/"]
 #[allow_missing = true]
 struct Built;
 
 /// What `index.html` is when the UI was not built.
-const PLACEHOLDER: &str = include_str!("../ui/placeholder.html");
+const PLACEHOLDER: &str = include_str!("../placeholder.html");
 
 /// What the page may do, and nothing more.
 ///
@@ -56,31 +61,32 @@ const PLACEHOLDER: &str = include_str!("../ui/placeholder.html");
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; \
      img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-/// Answers every request no API route took: a file of the UI, the page for
-/// a path the page routes itself, or a JSON 404.
-pub(crate) async fn serve(method: Method, uri: Uri) -> Response {
+/// The UI's answer to a request for `path`: a file of the UI, or the page for
+/// a path the page routes itself. `None` for anything else — another method
+/// than `GET` or `HEAD`, or a file that is not there — which the caller
+/// answers as missing, in whatever form its other refusals take.
+pub fn page(method: &Method, path: &str) -> Option<Response> {
     if method != Method::GET && method != Method::HEAD {
-        return crate::refused(
-            StatusCode::NOT_FOUND,
-            Error::invalid_request("no such route"),
-        );
+        return None;
     }
     // A debug build reads files off disk by this path; rust-embed refuses one
-    // that resolves outside the folder, and a test here checks that it does.
-    let path = uri.path().trim_start_matches('/');
+    // that resolves outside the folder, and `distlib-api`'s tests check that
+    // it does.
+    let path = path.trim_start_matches('/');
     if let Some(file) = Built::get(path).filter(|_| !path.is_empty()) {
-        return respond(file.metadata.mimetype(), cache_for(path), file.data);
+        return Some(respond(
+            file.metadata.mimetype(),
+            cache_for(path),
+            file.data,
+        ));
     }
     let last = path.rsplit('/').next().unwrap_or_default();
     if last.contains('.') {
-        return crate::refused(
-            StatusCode::NOT_FOUND,
-            Error::invalid_request("no such file"),
-        );
+        return None;
     }
     let index =
         Built::get("index.html").map_or(Cow::Borrowed(PLACEHOLDER.as_bytes()), |file| file.data);
-    respond("text/html; charset=utf-8", NO_CACHE, index)
+    Some(respond("text/html; charset=utf-8", NO_CACHE, index))
 }
 
 /// `index.html` is asked for fresh every time, so a new build is picked up

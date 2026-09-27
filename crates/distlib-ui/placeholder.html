@@ -10,12 +10,12 @@
 <p>The node is running, and its API answers at <code>/rpc</code> and <code>/events</code>. The web
 pages were not built before this binary was, so there is nothing to show here yet.</p>
 <p>To build them, with Node.js installed:</p>
-<pre>cd crates/distlib-api/ui
+<pre>cd crates/distlib-ui/web
 npm ci
 npm run build
 cd ../../..
 cargo build --release</pre>
-<p>A release build embeds whatever <code>crates/distlib-api/ui/dist</code> holds when it is compiled; a
+<p>A release build embeds whatever <code>crates/distlib-ui/web/dist</code> holds when it is compiled; a
 debug build reads that folder while it runs.</p>
 </body>
 </html>
