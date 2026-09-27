@@ -70,6 +70,10 @@ pub struct Api {
     /// The downloads this node is running or has recently run, and the event
     /// bus they — and everything else — publish to.
     pub tasks: Tasks,
+    /// Where `library.download` writes when it is given no `dest` — `[library]
+    /// download_dir`, resolved against the data directory. Created when first
+    /// needed, so a node nobody downloads through never has one.
+    pub downloads: PathBuf,
 }
 
 impl Api {
@@ -694,10 +698,22 @@ impl Api {
     /// because that store is on disk. §5.6's heartbeat is what would announce
     /// it, and it does not exist yet.
     async fn download(&self, params: Download) -> Result<Value, Error> {
-        if !params.dest.is_dir() {
+        // A destination named is the caller's, and has to be there already:
+        // creating one would turn a mistyped path into a new directory. The
+        // node's own is created, since nobody else is going to.
+        let dest = match params.dest {
+            Some(dest) => dest,
+            None => {
+                std::fs::create_dir_all(&self.downloads).map_err(|error| {
+                    Error::failed(format!("{}: {error}", self.downloads.display()))
+                })?;
+                self.downloads.clone()
+            }
+        };
+        if !dest.is_dir() {
             return Err(Error::invalid_params(format!(
                 "{}: not a directory to write files into",
-                params.dest.display()
+                dest.display()
             )));
         }
 
@@ -779,7 +795,7 @@ impl Api {
                         record.filename
                     ))
                 })?;
-            let target = params.dest.join(name);
+            let target = dest.join(name);
             if let Some(other) = taken.get(&target) {
                 return Err(Error::failed(format!(
                     "{} and {other} are both called {}; download them one at a time with `file`",
@@ -1486,7 +1502,9 @@ struct EditMetadata {
 #[serde(deny_unknown_fields)]
 struct Download {
     item_id: ItemId,
-    dest: PathBuf,
+    /// The node's own `downloads` when left out.
+    #[serde(default)]
+    dest: Option<PathBuf>,
     #[serde(default)]
     file: Option<ContentHash>,
 }

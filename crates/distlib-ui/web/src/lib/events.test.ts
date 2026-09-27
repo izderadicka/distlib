@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { parseFrame, watch } from "./events";
+import { isDownload, parseFrame, watch } from "./events";
 import { token } from "./token";
 
 const encoder = new TextEncoder();
@@ -217,6 +217,18 @@ describe("watching the node", () => {
     expect(node.connections[0].aborted).toBe(true);
     expect(node.fetch).toHaveBeenCalledOnce();
     expect(heard).not.toContain("[reconnecting]");
+  });
+});
+
+describe("telling news of a download", () => {
+  it("knows the three download events, and nothing else", () => {
+    const task = { task_id: 1, item_id: "x" };
+    expect(isDownload({ type: "download.progress", ...task, bytes_done: 0, bytes_total: 0, files_done: 0, files_total: 0 })).toBe(true);
+    expect(isDownload({ type: "download.finished", ...task })).toBe(true);
+    expect(isDownload({ type: "download.failed", ...task })).toBe(true);
+    expect(isDownload({ type: "resync" })).toBe(false);
+    expect(isDownload({ type: "membership.changed" })).toBe(false);
+    expect(isDownload({ type: "catalogue.item_changed", item_id: "x" })).toBe(false);
   });
 });
 

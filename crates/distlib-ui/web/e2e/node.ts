@@ -62,6 +62,11 @@ export class Node {
     }
   }
 
+  /** Where a download started from the page writes: `[library] download_dir`'s default. */
+  get downloads(): string {
+    return join(this.dir, "downloads");
+  }
+
   /** Starts the node again after [`stop`]. */
   async start(): Promise<void> {
     this.process = await run(this.dir, ["run"]);

@@ -55,6 +55,7 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         store: runtime.store().clone(),
         search: runtime.search().clone(),
         tasks: runtime.tasks().clone(),
+        downloads: runtime.downloads().to_path_buf(),
     }
 }
 
@@ -425,6 +426,36 @@ async fn downloading_something_this_node_already_has_asks_nobody() {
         std::fs::read(dest.join("dune.epub")).unwrap(),
         b"the same bytes, still here"
     );
+
+    runtime.shutdown().await;
+}
+
+/// A download asked for with no destination — the way the web UI asks, having
+/// no working directory to offer — goes to the node's own `[library]
+/// download_dir`, under the data directory unless configured elsewhere, and
+/// made when it is first needed.
+#[tokio::test]
+async fn a_download_without_a_destination_goes_to_the_nodes_own_directory() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let item = add_an_ebook(
+        &api(&runtime, &key),
+        &dir.path().join("dune.epub"),
+        b"for the web UI",
+        "Dune",
+    )
+    .await;
+    until_projected(&runtime, item, 1, "the solo node").await;
+    let downloads = dir.path().join("solo").join("downloads");
+    assert_eq!(runtime.downloads(), downloads);
+    assert!(!downloads.exists(), "made only when a download needs it");
+
+    let downloaded = download(&api(&runtime, &key), json!({ "item_id": item }))
+        .await
+        .unwrap();
+
+    let written = downloads.join("dune.epub");
+    assert_eq!(std::fs::read(&written).unwrap(), b"for the web UI");
+    assert_eq!(downloaded["files"][0]["path"], json!(written));
 
     runtime.shutdown().await;
 }

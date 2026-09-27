@@ -9,7 +9,7 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use figment::{
@@ -48,6 +48,7 @@ pub struct Config {
     pub consensus: ConsensusConfig,
     /// The local control API.
     pub api: ApiConfig,
+    pub library: LibraryConfig,
 }
 
 /// How this node talks to the network.
@@ -96,6 +97,25 @@ impl Default for ApiConfig {
         Self {
             enabled: true,
             bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11280)),
+        }
+    }
+}
+
+/// The library as this node's user handles it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LibraryConfig {
+    /// Where a download goes when whoever asked for it named nowhere — the
+    /// web UI, which has no working directory to offer the way the CLI does.
+    ///
+    /// Relative to the data directory; an absolute path is used as it is.
+    pub download_dir: PathBuf,
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            download_dir: PathBuf::from("downloads"),
         }
     }
 }
@@ -270,12 +290,19 @@ impl Config {
              # off 127.0.0.1, to reach a node on a server or in a container, put\n\
              # a reverse proxy in front of it.\n\
              enabled = {api_enabled}\n\
-             bind_addr = \"{api_bind}\"\n",
+             bind_addr = \"{api_bind}\"\n\
+             \n\
+             [library]\n\
+             # Where a download started from the web UI writes its files, created\n\
+             # when first needed. Relative to the data directory, or absolute.\n\
+             # `distlib download` writes to the working directory, or --dest.\n\
+             download_dir = \"{download_dir}\"\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
             api_enabled = self.api.enabled,
             api_bind = self.api.bind_addr,
+            download_dir = self.library.download_dir.display(),
             core = self
                 .consensus
                 .core

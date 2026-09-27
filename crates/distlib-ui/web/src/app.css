@@ -135,3 +135,7 @@ tr.me td:first-child {
 .description {
   white-space: pre-line;
 }
+
+.download {
+  margin-top: 1rem;
+}

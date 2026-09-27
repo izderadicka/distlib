@@ -19,6 +19,7 @@
 // — is taken for dead, the way `distlib download` does it: a connection can
 // die without anything closing it.
 
+import type { Progress } from "./rpc";
 import { forgetToken, token } from "./token";
 
 /** An event, by §7.2's name. Unknown types pass through; a page ignores them. */
@@ -26,8 +27,23 @@ export type NodeEvent =
   | { type: "membership.changed" }
   | { type: "catalogue.item_added"; item_id: string }
   | { type: "catalogue.item_changed"; item_id: string }
+  | ({ type: "download.progress"; task_id: number; item_id: string } & Progress)
+  | { type: "download.finished"; task_id: number; item_id: string }
+  | { type: "download.failed"; task_id: number; item_id: string }
   | { type: "resync" }
   | { type: string; [field: string]: unknown };
+
+/** News of one download. */
+export type DownloadEvent = Extract<NodeEvent, { task_id: number }>;
+
+/**
+ * Whether `event` is news of a download. A guard rather than a check of
+ * `type` where it is used: the open-ended member of `NodeEvent`, there so an
+ * unknown event passes through, keeps `type` alone from narrowing it.
+ */
+export function isDownload(event: NodeEvent): event is DownloadEvent {
+  return event.type.startsWith("download.");
+}
 
 /** Whether the page is hearing the node. */
 export type Connection = "connecting" | "live" | "reconnecting";

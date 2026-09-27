@@ -13,7 +13,10 @@
 //! a crate above `distlib-consensus` that consensus's own tests could not use
 //! would have bought nothing.
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result};
 use distlib_api::tasks::Tasks;
@@ -52,6 +55,8 @@ pub struct Runtime {
     /// Made here, by the thing that assembles the producers, so that each is
     /// handed a clone rather than reaching the bus through another's API.
     tasks: Tasks,
+    /// `[library] download_dir`, resolved against the data directory.
+    downloads: PathBuf,
     router: Router,
 }
 
@@ -175,6 +180,8 @@ impl Runtime {
             search,
             projection,
             tasks,
+            // `join` keeps an absolute path as it is.
+            downloads: data_dir.root().join(&config.library.download_dir),
             router,
         })
     }
@@ -218,6 +225,11 @@ impl Runtime {
     /// The downloads this node is running or has run, for the API.
     pub fn tasks(&self) -> &Tasks {
         &self.tasks
+    }
+
+    /// Where a download asked for without a destination is written.
+    pub fn downloads(&self) -> &Path {
+        &self.downloads
     }
 
     /// The endpoint everything in this process is served on.

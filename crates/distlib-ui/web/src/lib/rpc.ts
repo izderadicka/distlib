@@ -83,6 +83,34 @@ export interface ItemRecord extends ItemSummary {
   last_modified: number;
 }
 
+/** How far a download has got, in bytes and in files written. */
+export interface Progress {
+  bytes_done: number;
+  bytes_total: number;
+  files_done: number;
+  files_total: number;
+}
+
+/** One file a finished download wrote, and where its bytes came from. */
+export interface Downloaded {
+  file: string;
+  filename: string;
+  path: string;
+  from: "network" | "store" | "destination";
+}
+
+/** `library.task`: a download, and where it has got to. */
+export type TaskState = {
+  task_id: number;
+  item_id: string;
+  title: string | null;
+} & Progress &
+  (
+    | { state: "running" }
+    | { state: "finished"; files: Downloaded[] }
+    | { state: "failed"; error: string }
+  );
+
 /** A page of items, and how many there are in all. */
 export interface ItemPage {
   results: ItemSummary[];
@@ -98,6 +126,9 @@ interface Methods {
     result: ItemPage;
   };
   "library.item": { params: { item_id: string }; result: ItemRecord };
+  /** Without `dest`: into the node's own `[library] download_dir`. */
+  "library.download": { params: { item_id: string }; result: { task_id: number } };
+  "library.task": { params: { task_id: number }; result: TaskState };
 }
 
 /** The node answered, and the answer was an error. */
