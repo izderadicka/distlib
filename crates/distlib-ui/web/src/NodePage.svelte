@@ -44,6 +44,14 @@
     }),
   );
 
+  /** A core node says what Raft makes it; a follower has no Raft to ask. */
+  function role(node: NodeStatus): string {
+    if (!node.core) {
+      return "follower";
+    }
+    return node.raft ? `core — ${node.raft.toLowerCase()}` : "core";
+  }
+
   const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
   function bytes(count: number): string {
@@ -80,9 +88,7 @@
       <dt>Group</dt>
       <dd>{#if status.group}<code>{status.group}</code>{:else}in no group yet{/if}</dd>
       <dt>Role</dt>
-      <dd>
-        {#if status.core}core{#if status.raft} — {status.raft.toLowerCase()}{/if}{:else}follower{/if}
-      </dd>
+      <dd>{role(status)}</dd>
       {#if status.pending > 0}
         <dt>Pending</dt>
         <dd>{status.pending} proposal{status.pending === 1 ? "" : "s"} awaiting approval</dd>

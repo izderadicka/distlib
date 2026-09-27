@@ -31,11 +31,11 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   ui:
-    # The web UI's type check and build. A job of its own, and nothing in the
+    # The web UI's type check, tests and build. A job of its own, and nothing in the
     # Rust jobs depends on it: the npm tree must not be able to decide whether
     # the Rust suite passes (phase 3's supply-chain rule). The Rust jobs serve
     # the committed placeholder instead (D7).
-    name: ui (check + build)
+    name: ui (check + test + build)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -51,6 +51,9 @@ jobs:
       # `ci`, never `install`: exactly the lockfile, or fail.
       - run: npm ci
       - run: npm run check
+      # Vitest: the client modules against a fake node, and the components
+      # rendered in jsdom.
+      - run: npm test
       - run: npm run build
 
   test:

@@ -1,4 +1,6 @@
+/// <reference types="vitest/config" />
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { svelteTesting } from "@testing-library/svelte/vite";
 import { defineConfig } from "vite";
 
 // `npm run dev` serves the page with hot reload and forwards the API's two
@@ -8,7 +10,9 @@ import { defineConfig } from "vite";
 const node = process.env.DISTLIB_API ?? "http://127.0.0.1:11280";
 
 export default defineConfig({
-  plugins: [svelte()],
+  // `svelteTesting` acts only under Vitest: Svelte's browser build rather
+  // than its server one, and the DOM cleaned up after every test.
+  plugins: [svelte(), svelteTesting()],
   server: {
     proxy: {
       "/rpc": node,
@@ -18,5 +22,13 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+  },
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts"],
+    setupFiles: ["src/test-setup.ts"],
+    // Each test starts from a clean tab: no token, no mocks left over.
+    restoreMocks: true,
+    unstubGlobals: true,
   },
 });
