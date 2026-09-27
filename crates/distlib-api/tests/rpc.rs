@@ -1345,6 +1345,89 @@ async fn library_search_ranks_and_reads_hits_back() {
     harness.shutdown().await;
 }
 
+/// 3a-6's acceptance: 250 items read in three pages, with no overlap and no
+/// gap, by browsing and by searching — and the same at an offset past the
+/// end.
+#[tokio::test]
+async fn a_long_library_reads_in_pages_with_nothing_twice_and_nothing_missed() {
+    let harness = Harness::start().await;
+    // Written in an order that is neither the ids' nor the titles', with the
+    // case of the titles alternating: a sort that minded case would put every
+    // `Book` before every `book`. Item 0 has no title, and belongs last.
+    let id = |n: u16| {
+        let mut bytes = [0; 32];
+        bytes[..2].copy_from_slice(&n.wrapping_mul(7919).to_be_bytes());
+        bytes[31] = 1;
+        ItemId::from_bytes(bytes)
+    };
+    for n in (0..250_u16).rev() {
+        let item = Item {
+            title: (n > 0).then(|| format!("{} {n:03}", ["book", "Book"][usize::from(n % 2)])),
+            ..Item::new(id(n))
+        };
+        harness
+            .store
+            .upsert_item(StoredItem {
+                item: item.clone(),
+                last_modified: 1,
+            })
+            .await
+            .unwrap();
+        harness.search.index_item(item).await.unwrap();
+    }
+    harness.search.commit().await.unwrap();
+
+    // Three pages of a hundred, then one far past the end: the ids read, in
+    // order, and the total each page reported.
+    let read_all = async |method: &str, params: Value| {
+        let page = async |offset: u64| {
+            let mut params = params.clone();
+            params["offset"] = json!(offset);
+            params["limit"] = json!(100);
+            harness.call(method, params).await
+        };
+        let mut ids = Vec::new();
+        let mut totals = Vec::new();
+        for offset in [0, 100, 200] {
+            let page = page(offset).await;
+            ids.extend(
+                page["results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|hit| hit["item_id"].clone()),
+            );
+            totals.push(page["total"].clone());
+        }
+        // As far as there is: tantivy sizes its heap by `offset + limit`,
+        // which is then an overflow, not merely an allocation Linux's
+        // overcommit would quietly grant.
+        let past_the_end = page(u64::MAX).await;
+        assert_eq!(past_the_end["results"], json!([]), "{method}");
+        (ids, totals)
+    };
+
+    let (listed, totals) = read_all("library.list", json!({})).await;
+    assert_eq!(
+        totals,
+        vec![json!(250); 3],
+        "every page says how many there are"
+    );
+    let in_title_order: Vec<Value> = (1..250).chain([0]).map(|n| json!(id(n))).collect();
+    assert_eq!(
+        listed, in_title_order,
+        "by title, ignoring case, untitled last"
+    );
+
+    let (found, totals) = read_all("library.search", json!({ "query": "book" })).await;
+    assert_eq!(totals, vec![json!(249); 3], "every titled item matches");
+    let distinct: std::collections::BTreeSet<String> = found.iter().map(Value::to_string).collect();
+    assert_eq!(found.len(), 249, "nothing missed");
+    assert_eq!(distinct.len(), 249, "nothing twice");
+
+    harness.shutdown().await;
+}
+
 /// A malformed query is the caller's mistake (`-32602`), not this method
 /// failing (`-32000`) — the same distinction `an_unbalanced_query_is_refused`
 /// pins one layer down, in `distlib-store` itself.
