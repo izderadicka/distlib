@@ -1,0 +1,101 @@
+/* Minimal and flat, as §7.3 asks: the browser's own controls, one column,
+   and the system's colours in light and dark alike. */
+
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  --muted: color-mix(in srgb, currentColor 60%, transparent);
+  --rule: color-mix(in srgb, currentColor 20%, transparent);
+  --good: #2e7d32;
+  --bad: #c62828;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 60rem;
+  padding: 0 1rem 2rem;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  margin: 1rem 0;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+code {
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--rule);
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+th {
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.number {
+  text-align: right;
+}
+
+tr.me td:first-child {
+  font-weight: bold;
+}
+
+.unnamed {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.count {
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.connection {
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.connection.live {
+  color: var(--good);
+}
+
+.connection.reconnecting,
+.failure {
+  color: var(--bad);
+}
+
+.notice {
+  max-width: 40rem;
+}
