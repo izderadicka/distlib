@@ -40,3 +40,6 @@ Why some tests cannot run in parallel?  If it is about ports or some shared reso
 
 Why to delete all files?   Item ID is hash of all of it's content files -   so if they change, then ID has to change - so they cannot change.
 So I think it'll be enough to delete only non-content files -   and add them again ?
+
+## String literals
+Do not like much string literals uses as constants - like method names,  etc. We should replace them with enums, where possible
