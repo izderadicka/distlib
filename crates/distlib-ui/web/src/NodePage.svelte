@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
+  import { bytes } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { call, type Member, type NodeStatus, Unauthorised } from "./lib/rpc";
 
@@ -51,18 +52,6 @@
       return "follower";
     }
     return node.raft ? `core — ${node.raft.toLowerCase()}` : "core";
-  }
-
-  const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
-
-  function bytes(count: number): string {
-    let value = count;
-    let unit = 0;
-    while (value >= 1000 && unit < BYTE_UNITS.length - 1) {
-      value /= 1000;
-      unit += 1;
-    }
-    return `${Number.isInteger(value) ? value : value.toFixed(1)} ${BYTE_UNITS[unit]}`;
   }
 </script>
 

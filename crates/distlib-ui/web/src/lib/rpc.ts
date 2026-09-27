@@ -59,6 +59,30 @@ export interface ItemSummary {
   year: number | null;
 }
 
+/** One file of an item. What nobody said is left out, rather than `null`. */
+export interface FileRecord {
+  role: "content" | "cover" | "subtitle" | "metadata" | "other";
+  format: string;
+  size: number;
+  filename: string;
+  seq?: number;
+  disc?: number;
+  title?: string;
+  /** Seconds. */
+  duration?: number;
+}
+
+/** `library.item`: everything the read model holds for one item. */
+export interface ItemRecord extends ItemSummary {
+  lang: string | null;
+  description: string | null;
+  replicas: number | null;
+  /** By each file's content hash. */
+  files: Record<string, FileRecord>;
+  /** Microseconds since the epoch. */
+  last_modified: number;
+}
+
 /** A page of items, and how many there are in all. */
 export interface ItemPage {
   results: ItemSummary[];
@@ -73,6 +97,7 @@ interface Methods {
     params: { query: string; offset: number; limit: number };
     result: ItemPage;
   };
+  "library.item": { params: { item_id: string }; result: ItemRecord };
 }
 
 /** The node answered, and the answer was an error. */

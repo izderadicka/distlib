@@ -4,6 +4,7 @@
   // events is held here, for whichever page is open to listen to (D2, D6).
   import { onMount } from "svelte";
 
+  import ItemPage from "./ItemPage.svelte";
   import LibraryPage from "./LibraryPage.svelte";
   import NodePage from "./NodePage.svelte";
   import { type Connection, type Listen, type NodeEvent, watch } from "./lib/events";
@@ -50,17 +51,19 @@
   {/if}
 </p>
 
-{#if router.route.page === "library"}
-  <!-- A new search or page is a new page: nothing of the last one's answer,
-       arriving late, can land in it. -->
-  {#key href(router.route)}
+<!-- A new address is a new page: nothing of the last one's answer, arriving
+     late, can land in it. -->
+{#key href(router.route)}
+  {#if router.route.page === "library"}
     <LibraryPage route={router.route} {listen} {onUnauthorised} />
-  {/key}
-{:else if router.route.page === "node"}
-  <NodePage {listen} {onUnauthorised} />
-{:else}
-  <section class="notice">
-    <h2>No such page</h2>
-    <p><a href="/">Go to the library</a></p>
-  </section>
-{/if}
+  {:else if router.route.page === "item"}
+    <ItemPage id={router.route.id} {listen} {onUnauthorised} />
+  {:else if router.route.page === "node"}
+    <NodePage {listen} {onUnauthorised} />
+  {:else}
+    <section class="notice">
+      <h2>No such page</h2>
+      <p><a href="/">Go to the library</a></p>
+    </section>
+  {/if}
+{/key}

@@ -84,6 +84,14 @@ describe("the library page", () => {
     expect(untitled).toContain("ebook");
   });
 
+  it("links each item, titled or not, to its own page", async () => {
+    open();
+
+    await screen.findByText("Válka s mloky");
+    expect(link("Válka s mloky")).toBe(`/items/${MLOCI.item_id}`);
+    expect(link("no title")).toBe(`/items/${UNTITLED.item_id}`);
+  });
+
   it("searches with a query, for the page the address names", async () => {
     answer = { results: items(5), total: 45 };
     open("čapek", 3);

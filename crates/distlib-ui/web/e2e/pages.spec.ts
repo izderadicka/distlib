@@ -102,7 +102,7 @@ test("the page says when the node is gone, and comes back with it", async ({ pag
   await expect(rows(page).filter({ hasText: "dave" })).toBeVisible();
 });
 
-test("an item added from the CLI can be browsed and searched for", async ({ page, node }) => {
+test("an item added from the CLI can be browsed, searched for and opened", async ({ page, node }) => {
   await page.goto(node.link);
   await expect(page.getByText("The library is empty.")).toBeVisible();
 
@@ -126,4 +126,17 @@ test("an item added from the CLI can be browsed and searched for", async ({ page
 
   await page.goBack();
   await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Válka s mloky" }).click();
+  await expect(page.getByRole("heading", { name: "Válka s mloky" })).toBeVisible();
+  expect(new URL(page.url()).pathname).toMatch(/^\/items\/[0-9a-f]{64}$/);
+  // Read from the node's own answer, so its shape is the one the page expects.
+  await expect(page.getByText("Karel Čapek")).toBeVisible();
+  const file = rows(page).filter({ hasText: "mloci.epub" });
+  await expect(file).toContainText("epub");
+  await expect(file).toContainText("6 B");
+
+  // The item's address is one the node serves the page at.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Válka s mloky" })).toBeVisible();
 });

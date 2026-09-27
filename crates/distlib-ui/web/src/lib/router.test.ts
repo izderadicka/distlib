@@ -24,6 +24,18 @@ describe("reading the address", () => {
     }
   });
 
+  it("reads an item", () => {
+    const id = "5e70b15a0c92500ec3c5ac1c02014271939be7721f4159d016b98ab63a0a81f0";
+    expect(at(`/items/${id}`)).toEqual({ page: "item", id });
+  });
+
+  it("takes anything but an item id as the node writes one for no item", () => {
+    for (const id of ["5E70".padEnd(64, "0"), "a".repeat(63), "a".repeat(65), "g".repeat(64), ""]) {
+      expect(at(`/items/${id}`)).toEqual({ page: "missing" });
+    }
+    expect(at(`/items/${"a".repeat(64)}/files`)).toEqual({ page: "missing" });
+  });
+
   it("reads the node page", () => {
     expect(at("/node")).toEqual({ page: "node" });
   });
@@ -39,6 +51,7 @@ describe("writing the address", () => {
   it("leaves out what is the default", () => {
     expect(href({ page: "library", query: "", number: 1 })).toBe("/");
     expect(href({ page: "node" })).toBe("/node");
+    expect(href({ page: "item", id: "a".repeat(64) })).toBe(`/items/${"a".repeat(64)}`);
   });
 
   it("writes back what it reads, whatever the query holds", () => {

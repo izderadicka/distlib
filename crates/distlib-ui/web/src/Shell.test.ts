@@ -83,6 +83,31 @@ describe("the shell", () => {
     expect(current()?.textContent).toBe("Node");
   });
 
+  it("opens an item's page, and another item's as a page of its own", async () => {
+    vi.mocked(call).mockImplementation((async (_: string, params: { item_id: string }) => ({
+      item_id: params.item_id,
+      title: `Item ${params.item_id.slice(0, 1)}`,
+      kind: null,
+      authors: null,
+      genres: null,
+      series: null,
+      year: null,
+      lang: null,
+      description: null,
+      replicas: null,
+      files: {},
+      last_modified: 0,
+    })) as typeof call);
+    navigate(`/items/${"a".repeat(64)}`);
+    open();
+    await screen.findByText("Item a");
+
+    navigate(`/items/${"b".repeat(64)}`);
+
+    await screen.findByText("Item b");
+    expect(call).toHaveBeenLastCalledWith("library.item", { item_id: "b".repeat(64) });
+  });
+
   it("says when the address names no page", async () => {
     navigate("/shelves");
     open();

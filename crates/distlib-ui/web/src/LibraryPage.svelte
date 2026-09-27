@@ -100,7 +100,11 @@
       <tbody>
         {#each found.results as item (item.item_id)}
           <tr>
-            <td>{#if item.title}{item.title}{:else}<span class="unnamed">no title</span>{/if}</td>
+            <td>
+              <a href={href({ page: "item", id: item.item_id })}>
+                {#if item.title}{item.title}{:else}<span class="unnamed">no title</span>{/if}
+              </a>
+            </td>
             <td>{item.authors?.join(", ") ?? ""}</td>
             <td>{series(item)}</td>
             <td class="number">{item.year ?? ""}</td>
