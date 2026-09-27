@@ -4,12 +4,12 @@ use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use distlib_api::{
-    Api, Client, ClientError, Events, Server, Watched,
-    tasks::{Downloaded, Outcome, TaskState},
+    Api, Client, ClientError, Server,
+    tasks::{Downloaded, Outcome},
 };
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, ContentHash, CoreMember, DataDir, Event, ItemId, MemberId, NodeAddr, TaskId, Ticket,
+    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId, Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -766,7 +766,7 @@ pub async fn download(
     // Watching before asking: the node subscribes this watcher before it
     // answers, so the download's ending cannot happen in a window before
     // anybody was listening for it.
-    let mut events = client.watch().await.map_err(advice)?;
+    let events = client.watch().await.map_err(advice)?;
     let started = client
         .call(
             "library.download",
@@ -776,7 +776,7 @@ pub async fn download(
         .map_err(advice)?;
     let task_id: TaskId = serde_json::from_value(started["task_id"].clone())
         .context("the node answered without a task id")?;
-    let state = until_ended(&client, &mut events, task_id).await?;
+    let state = client.until_ended(events, task_id).await.map_err(advice)?;
 
     println!(
         "downloaded  {item_id}  {}",
@@ -793,39 +793,6 @@ pub async fn download(
         );
     }
     Ok(())
-}
-
-/// Waits for download `task_id` to end, and answers with how it ended.
-///
-/// Heard rather than polled for: the node publishes the ending on `/events`,
-/// and `events` was opened before the download started. A watcher that fell
-/// behind is told `resync` and may have missed the ending, so it asks.
-async fn until_ended(client: &Client, events: &mut Events, task_id: TaskId) -> Result<TaskState> {
-    loop {
-        match events.next().await {
-            Some(Ok(Watched::Event(
-                Event::DownloadFinished { task_id: id, .. }
-                | Event::DownloadFailed { task_id: id, .. },
-            ))) if id == task_id => return task_state(client, task_id).await,
-            Some(Ok(Watched::Resync)) => {
-                let state = task_state(client, task_id).await?;
-                if state.outcome != Outcome::Running {
-                    return Ok(state);
-                }
-            }
-            Some(Ok(Watched::Event(_))) => {}
-            Some(Err(error)) => return Err(advice(error)),
-            None => bail!("the node stopped before the download ended"),
-        }
-    }
-}
-
-async fn task_state(client: &Client, task_id: TaskId) -> Result<TaskState> {
-    let state = client
-        .call("library.task", json!({ "task_id": task_id }))
-        .await
-        .map_err(advice)?;
-    serde_json::from_value(state).context("the node answered library.task with something else")
 }
 
 /// The files an ended download wrote — or its error, which is what makes

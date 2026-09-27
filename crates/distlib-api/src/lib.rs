@@ -179,12 +179,14 @@ fn refused(status: StatusCode, error: Error) -> HttpResponse {
 /// reported twice, once here and once live, and a page keeps a high-water
 /// mark anyway.
 ///
-/// The keep-alive is a comment line every fifteen seconds, which keeps an
-/// idle connection from being closed by whatever sits in between.
+/// The keep-alive is a comment line every [`events::KEEP_ALIVE`], which keeps
+/// an idle connection from being closed by whatever sits in between — and
+/// tells a watcher that a stream gone quiet for longer is broken.
 async fn watch(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
     let live = shared.api.tasks.events().subscribe();
     let running = shared.api.tasks.running();
-    Sse::new(events::frames(running, live)).keep_alive(KeepAlive::default())
+    Sse::new(events::frames(running, live))
+        .keep_alive(KeepAlive::new().interval(events::KEEP_ALIVE))
 }
 
 /// One JSON-RPC call.

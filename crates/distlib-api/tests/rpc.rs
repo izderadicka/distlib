@@ -10,10 +10,11 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use distlib_api::{
-    Api, Server, serve,
+    Api, Client, Server, serve,
     tasks::{Downloaded, Outcome, TaskState, Tasks},
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
@@ -638,6 +639,34 @@ async fn a_page_that_connects_mid_download_is_told_how_far_it_has_got() {
     // And then live, as for any other watcher.
     download.finish(Vec::new());
     watcher.expect("download.finished").await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watcher_that_hears_nothing_asks_rather_than_waiting_for_ever() {
+    // The ending was published before this watcher connected, so no stream it
+    // opens will ever carry it — the case of a connection that died without
+    // closing, or broke and missed the ending while it was down. Only
+    // noticing the silence, reopening and asking can end this wait.
+    let harness = Harness::start().await;
+    let download = harness
+        .tasks
+        .start_download(ItemId::from_bytes([3; 32]), None, 1, 100);
+    let task_id = download.id();
+    download.finish(Vec::new());
+
+    let client = Client::new(
+        harness.server.addr(),
+        SecretString::from(harness.token.clone()),
+    )
+    .silent_after(Duration::from_millis(200));
+    let events = client.watch().await.unwrap();
+    let state = tokio::time::timeout(Duration::from_secs(10), client.until_ended(events, task_id))
+        .await
+        .expect("a silent stream is taken for broken, not waited on")
+        .expect("a broken stream is reopened, not taken for a failed download");
+    assert_eq!(state.outcome, Outcome::Finished { files: Vec::new() });
 
     harness.shutdown().await;
 }

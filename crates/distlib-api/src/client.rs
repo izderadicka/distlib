@@ -7,9 +7,9 @@
 //! toolchain — for a TLS stack this does not use. hyper is already in the tree
 //! via axum.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
-use distlib_core::Event;
+use distlib_core::{Event, TaskId};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{
     Request, StatusCode,
@@ -20,10 +20,25 @@ use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
 
+use crate::{
+    events::KEEP_ALIVE,
+    tasks::{Outcome, TaskState},
+};
+
+/// How many times [`Client::until_ended`] tries to reopen a broken event
+/// stream before giving up, the waits between doubling from a quarter of a
+/// second — about four seconds in all. Enough for a connection that broke to
+/// be replaced; a node that is gone for longer has lost the download with it,
+/// since tasks do not outlive a restart.
+const REOPEN_ATTEMPTS: u32 = 5;
+
 /// A client for one node's local API.
 pub struct Client {
     addr: SocketAddr,
     token: SecretString,
+    /// How long an event stream may say nothing at all — keep-alives
+    /// included — before it is taken to be broken.
+    silence: Duration,
 }
 
 /// Why a call produced no result.
@@ -52,7 +67,20 @@ pub enum ClientError {
 impl Client {
     /// A client for the API at `addr`, authenticating with `token`.
     pub fn new(addr: SocketAddr, token: SecretString) -> Self {
-        Self { addr, token }
+        Self {
+            addr,
+            token,
+            // Twice the keep-alive: one missed comment is a slow moment, two
+            // are a connection nobody is on the other end of.
+            silence: KEEP_ALIVE * 2,
+        }
+    }
+
+    /// Takes an event stream that has said nothing for `silence` to be
+    /// broken, in place of twice the node's keep-alive — which is right for
+    /// every real caller, and too long for a test to wait out.
+    pub fn silent_after(self, silence: Duration) -> Self {
+        Self { silence, ..self }
     }
 
     fn unreachable(&self, error: &dyn std::fmt::Display) -> ClientError {
@@ -86,10 +114,79 @@ impl Client {
                 addr: self.addr,
                 body: response.into_body(),
                 unread: Vec::new(),
+                silence: self.silence,
             }),
             StatusCode::UNAUTHORIZED => Err(ClientError::Unauthorised),
             other => Err(ClientError::Malformed(format!("/events answered {other}"))),
         }
+    }
+
+    /// `library.task`, read as the type the node writes it as.
+    pub async fn task(&self, task_id: TaskId) -> Result<TaskState, ClientError> {
+        let state = self
+            .call("library.task", json!({ "task_id": task_id }))
+            .await?;
+        serde_json::from_value(state).map_err(|error| ClientError::Malformed(error.to_string()))
+    }
+
+    /// Waits for download `task_id` to end, and answers with how it ended.
+    ///
+    /// `events` must have been opened before the download was started, so
+    /// that its ending cannot go by before anybody listens for it.
+    ///
+    /// **Heard, and asked about whenever hearing may have failed.** The
+    /// ending normally arrives as an event. Three things mean it may have
+    /// been missed, and all three are answered the same way — by asking
+    /// `library.task` — with the stream reopened *first* where it broke, so
+    /// that an ending after the answer is heard on the new one:
+    ///
+    /// - `resync`: this watcher fell behind, and the node skipped it past
+    ///   what it missed;
+    /// - the stream closed or failed;
+    /// - the stream went silent for longer than the keep-alive allows, which
+    ///   is how a connection that died without closing shows itself.
+    ///
+    /// A break is therefore never taken for the download's failure: the
+    /// download runs on in the node whatever happens to this connection.
+    pub async fn until_ended(
+        &self,
+        mut events: Events,
+        task_id: TaskId,
+    ) -> Result<TaskState, ClientError> {
+        loop {
+            match events.next().await {
+                Some(Ok(Watched::Event(
+                    Event::DownloadFinished { task_id: id, .. }
+                    | Event::DownloadFailed { task_id: id, .. },
+                ))) if id == task_id => return self.task(task_id).await,
+                Some(Ok(Watched::Event(_))) => continue,
+                Some(Ok(Watched::Resync)) => {}
+                broken => {
+                    tracing::debug!(?broken, "the event stream broke; reopening it");
+                    events = self.reopen().await?;
+                }
+            }
+            let state = self.task(task_id).await?;
+            if state.outcome != Outcome::Running {
+                return Ok(state);
+            }
+        }
+    }
+
+    /// [`Self::watch`], tried again a few times if the node cannot be
+    /// reached — see [`REOPEN_ATTEMPTS`].
+    async fn reopen(&self) -> Result<Events, ClientError> {
+        let mut wait = Duration::from_millis(250);
+        for _ in 1..REOPEN_ATTEMPTS {
+            match self.watch().await {
+                Err(ClientError::Unreachable { .. }) => {
+                    tokio::time::sleep(wait).await;
+                    wait *= 2;
+                }
+                reached => return reached,
+            }
+        }
+        self.watch().await
     }
 
     /// Calls `method` and returns its result.
@@ -162,6 +259,7 @@ pub struct Events {
     /// Bytes read but not yet a whole event: a read can end anywhere, half an
     /// event or three.
     unread: Vec<u8>,
+    silence: Duration,
 }
 
 impl Events {
@@ -170,7 +268,10 @@ impl Events {
     /// **An event this build cannot read is skipped**, not an error: a newer
     /// node may publish types this client has never heard of, and events are
     /// ids a watcher refetches by (D2), so there is nothing in one it must
-    /// not miss. The keep-alive comments are skipped likewise.
+    /// not miss. The keep-alive comments are skipped likewise — but they are
+    /// still something heard, so a stream that carries nothing, not even
+    /// those, for longer than the client's silence allows answers with an
+    /// error: it is broken, whether or not anything closed it.
     pub async fn next(&mut self) -> Option<Result<Watched, ClientError>> {
         loop {
             if let Some(end) = self.unread.windows(2).position(|pair| pair == b"\n\n") {
@@ -180,7 +281,13 @@ impl Events {
                 }
                 continue;
             }
-            match self.body.frame().await? {
+            let Ok(read) = tokio::time::timeout(self.silence, self.body.frame()).await else {
+                return Some(Err(ClientError::Unreachable {
+                    addr: self.addr,
+                    message: format!("the event stream said nothing for {:?}", self.silence),
+                }));
+            };
+            match read? {
                 Ok(frame) => {
                     if let Ok(data) = frame.into_data() {
                         self.unread.extend_from_slice(&data);

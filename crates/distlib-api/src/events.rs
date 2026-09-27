@@ -14,7 +14,7 @@
 //! look like an improvement while doing it. Events carry ids and a page
 //! refetches (D2), so a dropped event costs one refetch, not correctness.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
 
 use axum::response::sse::Event as Frame;
 use distlib_consensus::MembershipState;
@@ -32,6 +32,13 @@ use tokio::sync::{
 /// catalogue sync that lands hundreds of items at once is exactly the case
 /// where a page should refetch its list rather than replay every item.
 pub const CAPACITY: usize = 256;
+
+/// How often an idle stream says so, with a comment line.
+///
+/// Also how a watcher tells a quiet stream from a dead one: a connection that
+/// has said nothing at all for a good deal longer than this is broken, even
+/// if nothing has closed it — see [`crate::client::Events`].
+pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// A new bus.
 ///
