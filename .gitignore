@@ -6,6 +6,8 @@
 # serves `placeholder.html` instead (phase 3's D7).
 /crates/distlib-ui/web/dist/
 /crates/distlib-ui/web/node_modules/
+# Playwright's traces and screenshots of failed end-to-end tests.
+/crates/distlib-ui/web/test-results/
 
 # Secrets — never committed (see CLAUDE.md § Security)
 .env

@@ -56,6 +56,38 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  ui-e2e:
+    # The page in a real browser against a real node: a debug `distlib` (which
+    # reads `web/dist` as it runs, so building the UI after it is fine) and
+    # Playwright's headless Chromium. Like `ui`, no Rust job depends on it.
+    name: ui (end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/distlib-ui/web
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p distlib
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: crates/distlib-ui/web/.nvmrc
+          cache: npm
+          cache-dependency-path: crates/distlib-ui/web/package-lock.json
+      - run: npm ci
+      # The headless shell alone, with the system libraries it needs.
+      - run: npx playwright install --with-deps --only-shell chromium
+      - run: npm run e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-traces
+          path: crates/distlib-ui/web/test-results/
+          retention-days: 7
+
   test:
     name: test (${{ matrix.os }})
     strategy:
