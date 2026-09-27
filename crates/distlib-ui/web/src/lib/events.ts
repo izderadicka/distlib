@@ -39,6 +39,12 @@ export interface Watcher {
   onUnauthorised(): void;
 }
 
+/**
+ * Hears the node's events, as the page's one connection passes them on,
+ * until the returned function is called.
+ */
+export type Listen = (listener: (event: NodeEvent) => void) => () => void;
+
 /** How often the node sends a keep-alive comment (`events::KEEP_ALIVE`). */
 const KEEP_ALIVE_MS = 15_000;
 /** Two missed keep-alives are a connection nobody is on the other end of. */

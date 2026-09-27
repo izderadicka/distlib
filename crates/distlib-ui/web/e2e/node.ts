@@ -79,6 +79,16 @@ export class Node {
     await gone;
   }
 
+  /**
+   * Adds an item of one file, holding `content`, from this node's own CLI,
+   * with `details` as `distlib add` takes them (`--kind` and on).
+   */
+  add(filename: string, content: string, ...details: string[]): void {
+    const file = join(this.dir, filename);
+    writeFileSync(file, content);
+    distlib(this.dir, "add", file, ...details);
+  }
+
   /** Admits `member` from this node's own CLI. */
   admit(member: string, name: string): void {
     distlib(this.dir, "admit", member, "--name", name);

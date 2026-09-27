@@ -1,5 +1,5 @@
 <script lang="ts">
-  import NodePage from "./NodePage.svelte";
+  import Shell from "./Shell.svelte";
   import { token } from "./lib/token";
 
   // Whether this tab holds a token the node has not refused. Refused, it is
@@ -14,7 +14,7 @@
 
 <main>
   {#if signedIn}
-    <NodePage onUnauthorised={() => (signedIn = false)} />
+    <Shell onUnauthorised={() => (signedIn = false)} />
   {:else}
     <section class="notice">
       <h2>Not signed in</h2>

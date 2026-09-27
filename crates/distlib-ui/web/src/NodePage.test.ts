@@ -2,10 +2,9 @@ import { render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NodePage from "./NodePage.svelte";
-import { type Watcher, watch } from "./lib/events";
 import { call, type Members, type NodeStatus, RpcError, Unauthorised } from "./lib/rpc";
+import { fakeListen } from "./testing";
 
-vi.mock("./lib/events", () => ({ watch: vi.fn() }));
 vi.mock("./lib/rpc", async (original) => ({
   ...(await original<typeof import("./lib/rpc")>()),
   call: vi.fn(),
@@ -44,17 +43,12 @@ function members(...extra: Members["members"]): Members {
 /** What the node answers with, while the test lets it. */
 let answer: { status: NodeStatus; members: Members };
 
-/** Renders the page, and hands back what it watches the node with. */
+/** Renders the page, and hands back what it hears the node through. */
 function open() {
-  const stop = vi.fn();
-  let watcher!: Watcher;
-  vi.mocked(watch).mockImplementation((given) => {
-    watcher = given;
-    return stop;
-  });
+  const events = fakeListen();
   const onUnauthorised = vi.fn();
-  const page = render(NodePage, { onUnauthorised });
-  return { watcher, stop, onUnauthorised, page };
+  const page = render(NodePage, { listen: events.listen, onUnauthorised });
+  return { events, onUnauthorised, page };
 }
 
 /**
@@ -67,12 +61,6 @@ function wholly(tag: string, text: string) {
     element.textContent?.replace(/\s+/g, " ").trim() === text;
 }
 
-/** The stream coming up, which starts with a resync. */
-function goLive(watcher: Watcher) {
-  watcher.onConnection("live");
-  watcher.onEvent({ type: "resync" });
-}
-
 describe("the node page", () => {
   beforeEach(() => {
     answer = { status: STATUS, members: members() };
@@ -81,19 +69,10 @@ describe("the node page", () => {
       method === "node.status" ? answer.status : answer.members) as typeof call);
   });
 
-  it("asks for nothing until the stream is up, and says it is connecting", () => {
+  it("loads when it opens, and shows the node and its members", async () => {
     open();
 
-    expect(screen.getByText("Connecting…")).toBeTruthy();
-    expect(call).not.toHaveBeenCalled();
-  });
-
-  it("loads on the resync a connection starts with, and shows the node and its members", async () => {
-    const { watcher } = open();
-    goLive(watcher);
-
     await screen.findByText(ME);
-    expect(screen.getByText("Live")).toBeTruthy();
     expect(screen.getByText(STATUS.group ?? "")).toBeTruthy();
     expect(screen.getByText(wholly("dd", "core — leader"))).toBeTruthy();
     expect(screen.getByText("1 proposal awaiting approval")).toBeTruthy();
@@ -109,62 +88,55 @@ describe("the node page", () => {
   });
 
   it("loads again when the membership changes", async () => {
-    const { watcher } = open();
-    goLive(watcher);
+    const { events } = open();
     await screen.findByText("carol");
 
     answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }) };
-    watcher.onEvent({ type: "membership.changed" });
+    events.tell({ type: "membership.changed" });
+
+    await screen.findByText("dave");
+  });
+
+  it("loads again on a resync: whatever was missed is covered by it", async () => {
+    const { events } = open();
+    await screen.findByText("carol");
+
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }) };
+    events.tell({ type: "resync" });
 
     await screen.findByText("dave");
   });
 
   it("does not load again for news that is not about the membership", async () => {
-    const { watcher } = open();
-    goLive(watcher);
+    const { events } = open();
     await screen.findByText("carol");
     const asked = vi.mocked(call).mock.calls.length;
 
-    watcher.onEvent({ type: "catalogue.item_added", item_id: "x" });
+    events.tell({ type: "catalogue.item_added", item_id: "x" });
 
     expect(call).toHaveBeenCalledTimes(asked);
   });
 
-  it("says when what it shows may be out of date", async () => {
-    const { watcher } = open();
-    goLive(watcher);
-    await screen.findByText("carol");
-
-    watcher.onConnection("reconnecting");
-
-    await screen.findByText(/Cannot reach the node/);
-    // What it had is still shown, marked as possibly stale rather than blanked.
-    expect(screen.getByText("carol")).toBeTruthy();
-  });
-
   it("hands a refused token up to whoever signs the tab in", async () => {
     vi.mocked(call).mockRejectedValue(new Unauthorised());
-    const { watcher, onUnauthorised } = open();
-
-    goLive(watcher);
+    const { onUnauthorised } = open();
 
     await waitFor(() => expect(onUnauthorised).toHaveBeenCalled());
   });
 
   it("shows any other failure", async () => {
     vi.mocked(call).mockRejectedValue(new RpcError(-32000, "the read model is not ready"));
-    const { watcher } = open();
-
-    goLive(watcher);
+    open();
 
     await screen.findByText("the read model is not ready");
   });
 
-  it("stops watching when it is closed", () => {
-    const { stop, page } = open();
+  it("stops listening when it is closed", () => {
+    const { events, page } = open();
+    expect(events.listening()).toBe(1);
 
     page.unmount();
 
-    expect(stop).toHaveBeenCalled();
+    expect(events.listening()).toBe(0);
   });
 });
