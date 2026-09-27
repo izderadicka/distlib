@@ -29,13 +29,16 @@ use std::{
 use distlib_core::{Item, ItemId};
 use tantivy::{
     Index as TantivyIndex, IndexReader, IndexWriter, ReloadPolicy, Term,
-    collector::TopDocs,
+    collector::{Count, TopDocs},
     directory::MmapDirectory,
     query::QueryParser,
     schema::{Field, STORED, STRING, Schema, TEXT, TantivyDocument, Value},
 };
 
-use crate::error::{Result, StoreError};
+use crate::{
+    Page,
+    error::{Result, StoreError},
+};
 
 /// tantivy refuses less than this per indexing thread; see
 /// `tantivy::indexer::index_writer::MEMORY_BUDGET_NUM_BYTES_MIN`, not
@@ -238,20 +241,27 @@ impl SearchIndex {
     }
 
     /// The `limit` best-matching item ids for `query`, ranked by §5.4's
-    /// per-field boosts, best first.
+    /// per-field boosts, best first — [`Self::search_page`]'s first page.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ItemId>> {
+        Ok(self.search_page(query, 0, limit).await?.items)
+    }
+
+    /// The best-matching item ids for `query` from the `offset`-th on, at
+    /// most `limit` of them, and how many match in all.
     ///
     /// A plain word searches all five fields; `title:foo` searches just one,
     /// tantivy's own query syntax. Reading the actual title back is the
     /// caller's job — this is a ranking, not a second copy of the row.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ItemId>> {
-        // Not a query tantivy can even be asked: `TopDocs::with_limit` panics
-        // on `0` rather than returning nothing. `0` best matches has an
-        // honest answer that does not depend on asking, so it is given here
-        // rather than left for a caller to discover as a panic.
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
+    ///
+    /// Ties in score are broken by where tantivy holds the document, which
+    /// does not move between commits — so consecutive pages, with nothing
+    /// indexed in between, neither overlap nor leave a gap.
+    pub async fn search_page(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<ItemId>> {
         let fields = self.fields;
         let mut parser = QueryParser::for_index(
             &self.index,
@@ -278,17 +288,44 @@ impl SearchIndex {
         let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
             let searcher = reader.searcher();
-            let hits = searcher
-                .search(&parsed, &TopDocs::with_limit(limit).order_by_score())
+            // Not a page tantivy can even be asked for: `TopDocs::with_limit`
+            // panics on `0` rather than returning nothing. The count is still
+            // an honest answer, so it is given on its own.
+            if limit == 0 {
+                let total = searcher
+                    .search(&parsed, &Count)
+                    .map_err(StoreError::index("searched"))?;
+                return Ok(Page {
+                    items: Vec::new(),
+                    total,
+                });
+            }
+            // `TopDocs` reserves twice `offset + limit` entries per segment, so
+            // an offset past every document there is would be an allocation
+            // — or an overflow — sized by whatever number the caller sent.
+            // Nothing lies past the end.
+            let offset = offset.min(usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX));
+            let (total, hits) = searcher
+                .search(
+                    &parsed,
+                    &(
+                        Count,
+                        TopDocs::with_limit(limit)
+                            .and_offset(offset)
+                            .order_by_score(),
+                    ),
+                )
                 .map_err(StoreError::index("searched"))?;
-            hits.into_iter()
+            let items = hits
+                .into_iter()
                 .map(|(_score, address)| {
                     let doc: TantivyDocument = searcher
                         .doc(address)
                         .map_err(StoreError::index("read back a search hit"))?;
                     read_id(&doc, fields.id)
                 })
-                .collect()
+                .collect::<Result<_>>()?;
+            Ok(Page { items, total })
         })
         .await
         .map_err(StoreError::Stopped)?

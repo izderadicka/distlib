@@ -26,6 +26,16 @@ pub enum Upserted {
     Updated,
 }
 
+/// One page of a longer answer, and how long the whole answer is.
+///
+/// The total is what lets a caller show "page 2 of 5", and know when to stop
+/// asking, without asking for one more page to find it empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub total: usize,
+}
+
 /// One row of `items`, with the `item_files` rows that belong to it.
 ///
 /// Carries an [`Item`] rather than restating its fields: the projection writes
@@ -197,6 +207,38 @@ impl Store {
                 items.push(stored);
             }
             Ok(items)
+        })
+        .await
+    }
+
+    /// One page of items, `files` always empty, in browsing order: by title,
+    /// ignoring case, untitled last, and by id among equal titles — so that
+    /// the order is total and pages neither overlap nor leave a gap.
+    ///
+    /// **Case is folded for ASCII only** — SQLite's `NOCASE` — so a title
+    /// starting with an accented letter sorts after `Z`. A locale-aware
+    /// collation is a dependency this has not yet needed.
+    ///
+    /// The count and the page are read under one lock, so they agree with
+    /// each other. Between two pages the read model may change — an offset is
+    /// a position, and an item added before it moves everything after along
+    /// by one — which is why a page that hears `catalogue.item_added`
+    /// refetches rather than trusting the page it already holds.
+    pub async fn page(&self, offset: usize, limit: usize) -> Result<Page<StoredItem>> {
+        // SQLite's integers are signed; past `i64::MAX` is past the end anyway.
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.read(move |conn| {
+            let total = conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?;
+            let mut statement = conn.prepare(&format!(
+                "SELECT {ITEM_COLUMNS} FROM items
+                 ORDER BY title IS NULL, title COLLATE NOCASE, id
+                 LIMIT ?1 OFFSET ?2"
+            ))?;
+            let items = statement
+                .query_map(params![limit, offset], row_to_item)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(Page { items, total })
         })
         .await
     }

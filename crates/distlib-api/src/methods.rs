@@ -27,17 +27,17 @@ use crate::{
     tasks::{self, Downloaded, Source, Tasks},
 };
 
-/// Everything the methods need: the running node and the key it signs with.
-///
-/// A ceiling on `library.search`'s `limit`, whatever a caller asks for.
+/// A ceiling on a page's `limit` — `library.search`'s and `library.list`'s —
+/// whatever a caller asks for.
 ///
 /// This listener is loopback and token-gated (§7.1, P1-25), so this is a
 /// guard against a mistake rather than an attacker — but tantivy's
 /// `TopDocs::with_limit` allocates a heap sized to it, and no legitimate
-/// caller of a personal library's search needs a single page bigger than
-/// this.
-const MAX_SEARCH_RESULTS: usize = 500;
+/// caller of a personal library needs a single page bigger than this.
+const MAX_PAGE: usize = 500;
 
+/// Everything the methods need: the running node and the key it signs with.
+///
 /// The node is shared rather than owned: whoever started it keeps serving the
 /// group with it while this answers questions about it.
 #[derive(Clone)]
@@ -88,6 +88,7 @@ impl Api {
             "group.ticket" => self.ticket(),
             "admin.reindex" => self.reindex().await,
             "library.search" => self.search(parse(params)?).await,
+            "library.list" => self.list(parse(params)?).await,
             "library.item" => self.item(parse(params)?).await,
             "library.add" => self.add(parse(params)?).await,
             "library.download" => self.download(parse(params)?).await,
@@ -375,19 +376,18 @@ impl Api {
     /// a batched query would have to be reassembled into it afterwards for no
     /// saving at the sizes a `limit` here ever asks for.
     ///
-    /// **No `filters` and no paging**, though the plan's own sketch names
-    /// both (`{query, filters{type,genre,lang,author,series}, page}`) — see
-    /// [`Search`]'s doc comment for why each is left for whoever needs the
-    /// first real one.
+    /// **Paged by `offset` and `limit`**, and answers with `total`, the
+    /// number of matches in all (3a-6). **No `filters`**, though the plan's
+    /// own sketch names them — see [`Search`]'s doc comment.
     async fn search(&self, params: Search) -> Result<Value, Error> {
-        let ids = self
+        let page = self
             .search
-            .search(&params.query, params.limit.min(MAX_SEARCH_RESULTS))
+            .search_page(&params.query, params.offset, params.limit.min(MAX_PAGE))
             .await
             .map_err(query_error)?;
 
-        let mut results = Vec::with_capacity(ids.len());
-        for id in ids {
+        let mut results = Vec::with_capacity(page.items.len());
+        for id in page.items {
             // `item_fields`, not `item`: a hit is shown a summary, and reading
             // every file row along with it would be a query this response
             // never uses the answer to — `library.item` is where a caller
@@ -401,7 +401,25 @@ impl Api {
                 results.push(summary(&stored));
             }
         }
-        Ok(json!({ "results": results }))
+        Ok(json!({ "results": results, "total": page.total }))
+    }
+
+    /// `library.list` — every item, a page at a time, for browsing (3a-6).
+    ///
+    /// Ordered by title, ignoring case, untitled last — see [`Store::page`],
+    /// including why a title starting with an accented letter sorts after
+    /// `Z`. Answers with the same summaries as `library.search`, and `total`,
+    /// the number of items in all. An offset past the end is an empty page,
+    /// not an error: it is where a caller who asked for one page too many
+    /// honestly is.
+    async fn list(&self, params: List) -> Result<Value, Error> {
+        let page = self
+            .store
+            .page(params.offset, params.limit.min(MAX_PAGE))
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?;
+        let results: Vec<Value> = page.items.iter().map(summary).collect();
+        Ok(json!({ "results": results, "total": page.total }))
     }
 
     /// `library.item` — the full record the read model holds for one item.
@@ -1378,27 +1396,36 @@ struct Proposal {
 /// (`Proposal`, `PledgeSet`) rather than adding a nested object this crate has
 /// no other one of.
 ///
-/// **Neither `filters` nor an `offset` is implemented.** `authors`, `genres`
-/// and `series` are already free-text fields a query can point at directly —
+/// **`filters` is not implemented** (P2-21). `authors`, `genres` and `series`
+/// are already free-text fields a query can point at directly —
 /// `authors:herbert` is valid tantivy syntax today — so a `filters` object
 /// would either duplicate that or paper over `kind` and `lang`, which tantivy
 /// never indexes at all: they live in SQLite only, and filtering by them needs
-/// a real design, not a parameter nobody reads. Paging has the same shape of
-/// gap: tantivy supports an offset natively, but nothing in 2a-4's acceptance
-/// asks for a second page, and `SearchIndex::search` would have to grow the
-/// parameter — and every existing call to it — for a caller that does not
-/// exist yet. Left for whoever writes the first one.
+/// a real design, not a parameter nobody reads. **`offset` is** — 3a-6's
+/// browse page is the caller phase 2 was waiting for.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Search {
     query: String,
-    #[serde(default = "default_search_limit")]
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_limit")]
     limit: usize,
 }
 
-/// `library.search` without an explicit `limit`. Small enough to read in one
-/// screen, generous enough that "did my one test item show up" never needs one.
-fn default_search_limit() -> usize {
+/// `library.list`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct List {
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+/// A page without an explicit `limit`. Small enough to read in one screen,
+/// generous enough that "did my one test item show up" never needs one.
+fn default_page_limit() -> usize {
     20
 }
 
