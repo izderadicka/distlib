@@ -87,10 +87,22 @@ pub struct Downloaded {
     pub file: ContentHash,
     pub filename: String,
     pub path: PathBuf,
-    /// Whether it had to come over the network. A caller cannot act on it,
-    /// but an operator watching a download of an item half of which was
-    /// already here can read it.
-    pub fetched: bool,
+    pub from: Source,
+}
+
+/// Where a downloaded file came from. A caller cannot act on it, but an
+/// operator watching a download of an item half of which was already here can
+/// read it — and one who expected the group to be asked can tell it was not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// Fetched from another member.
+    Network,
+    /// Already in this node's store, and written out from there.
+    Store,
+    /// Already at its destination, byte for byte — an earlier download of
+    /// the same item wrote it — so nothing was fetched or written.
+    Destination,
 }
 
 impl Tasks {
