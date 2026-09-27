@@ -11,8 +11,12 @@
 export type Route =
   /** Browsing, or with `query`, searching; `number` counts from one. */
   | { page: "library"; query: string; number: number }
+  | { page: "item"; id: string }
   | { page: "node" }
   | { page: "missing" };
+
+/** An item id as the node writes one: 32 bytes of lower-case hex. */
+const ITEM = /^\/items\/([0-9a-f]{64})$/;
 
 /** Reads the route from an address. Anything unrecognised is `missing`. */
 export function parse(url: URL): Route {
@@ -28,8 +32,10 @@ export function parse(url: URL): Route {
     }
     case "/node":
       return { page: "node" };
-    default:
-      return { page: "missing" };
+    default: {
+      const item = ITEM.exec(url.pathname);
+      return item ? { page: "item", id: item[1] } : { page: "missing" };
+    }
   }
 }
 
@@ -47,6 +53,8 @@ export function href(route: Route): string {
       const query = search.toString();
       return query ? `/?${query}` : "/";
     }
+    case "item":
+      return `/items/${route.id}`;
     case "node":
       return "/node";
     case "missing":
