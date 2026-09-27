@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>distlib — no UI in this build</title>
+</head>
+<body>
+<h1>This distlib was built without its UI</h1>
+<p>The node is running, and its API answers at <code>/rpc</code> and <code>/events</code>. The web
+pages were not built before this binary was, so there is nothing to show here yet.</p>
+<p>To build them, with Node.js installed:</p>
+<pre>cd crates/distlib-api/ui
+npm ci
+npm run build
+cd ../../..
+cargo build --release</pre>
+<p>A release build embeds whatever <code>crates/distlib-api/ui/dist</code> holds when it is compiled; a
+debug build reads that folder while it runs.</p>
+</body>
+</html>

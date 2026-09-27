@@ -30,6 +30,9 @@ distlib-api = { workspace = true }
 distlib-sync = { workspace = true }
 distlib-store = { workspace = true }
 serde_json = { workspace = true }
+# `distlib ui` is the one place the binary reads the API token out of its
+# wrapper, to print the signed-in link.
+secrecy = { workspace = true }
 iroh = { workspace = true }
 # The one gossip instance in the process: the memberlog announces on it, and
 # from 2a-2 iroh-docs is handed the same one.

@@ -147,6 +147,15 @@ pub enum Command {
         bytes: u64,
     },
 
+    /// Print the link that opens this node's web UI, signed in.
+    ///
+    /// The link carries the API token after a `#`, which a browser never
+    /// sends to a server: the page reads it, keeps it for the tab, and takes
+    /// it out of the address bar. It is a credential all the same, so this
+    /// prints it only when asked — `distlib run` names the address and not
+    /// the token — and it belongs in a browser, not in a chat or a log.
+    Ui,
+
     /// Print a join ticket for somebody who has been admitted.
     ///
     /// Directions, not a credential: it says which group and how to reach its

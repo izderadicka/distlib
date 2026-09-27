@@ -5,11 +5,13 @@
 //! the Raft, so nothing else in the process tree can — and building a bespoke
 //! control channel for that would be a second thing to throw away when the
 //! specified one arrives. This is the specified one: `POST /rpc` for calls,
-//! `GET /events` for §7.2's stream.
+//! `GET /events` for §7.2's stream, and everything else the web UI (§7.3).
 //!
-//! **Every answer is JSON, on every path** (phase 3's D9). A refused token, an
-//! unknown route and a body that is not text all answer with a JSON-RPC error
-//! object, so a caller has one parser. The HTTP status is kept as it would
+//! **Every answer is JSON, on every path but the UI's own** (phase 3's D9). A
+//! refused token, an unknown route and a body that is not text all answer
+//! with a JSON-RPC error object, so a caller has one parser. The exceptions
+//! are the pages and files of the web UI, which a browser asks for by `GET`
+//! and which are what they are — see `page`. The HTTP status is kept as it would
 //! have been — 401 is still 401 — because browsers and proxies read it, and
 //! the JSON-RPC code beside it is for the caller.
 //!
@@ -29,6 +31,7 @@
 pub mod client;
 pub mod events;
 pub mod methods;
+mod page;
 pub mod rpc;
 pub mod tasks;
 
@@ -102,8 +105,8 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
     ));
     let shared = Arc::new(Shared { api, token });
     // The token guards these two routes rather than the whole router, so that
-    // the UI's static assets can be added beside them unguarded (D3) and an
-    // unknown path is answered as unknown rather than as unauthorised.
+    // the UI's files are served beside them unguarded (D3) and an unknown path
+    // is answered as unknown rather than as unauthorised.
     let router = Router::new()
         .route("/rpc", post(handle))
         .route("/events", get(watch))
@@ -111,14 +114,8 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
             Arc::clone(&shared),
             require_token,
         ))
-        // 3b-1 replaces this with the page's own fallback, which is how a
-        // single-page app answers a path it routes itself.
-        .fallback(|| async {
-            refused(
-                StatusCode::NOT_FOUND,
-                Error::invalid_request("no such route"),
-            )
-        })
+        // Everything else is the UI's, and open — see `page`.
+        .fallback(page::serve)
         .method_not_allowed_fallback(|| async {
             refused(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -163,7 +160,7 @@ async fn require_token(
 ///
 /// For the refusals that happen before there is a call to answer — which is
 /// why the id is null: there is no request id to echo.
-fn refused(status: StatusCode, error: Error) -> HttpResponse {
+pub(crate) fn refused(status: StatusCode, error: Error) -> HttpResponse {
     (status, Json(Response::failed(Value::Null, error))).into_response()
 }
 

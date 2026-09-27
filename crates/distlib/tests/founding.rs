@@ -83,6 +83,38 @@ fn a_commands_answer_is_not_mixed_with_its_log() {
 }
 
 #[test]
+fn the_ui_link_is_printed_when_asked_for_and_never_logged() {
+    // The link signs a browser in, so it carries the API token. `run`'s output
+    // tends to end up in a log file or a service's journal, so `run` names the
+    // page and not the token, and `distlib ui` prints the whole link to
+    // whoever asks for it at a terminal.
+    let friend = Friend::introduce();
+    let before = distlib(friend.dir.path()).arg("ui").output().unwrap();
+    assert!(
+        !before.status.success(),
+        "no token until the node has run once"
+    );
+
+    let mut node = friend.run(false);
+    node.wait_for("local api listening");
+    let log = node.log_contents();
+    node.stop();
+
+    let page = format!("http://127.0.0.1:{}/", friend.api_port);
+    let token = std::fs::read_to_string(friend.dir.path().join("api.token")).unwrap();
+    let token = token.trim();
+    assert!(log.contains(&page), "run names the page:\n{log}");
+    assert!(!log.contains(token), "run never logs the token:\n{log}");
+
+    let output = distlib(friend.dir.path()).arg("ui").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("{page}#token={token}")
+    );
+}
+
+#[test]
 fn three_friends_found_a_group() {
     // 1. Each of them runs `whoami` and sends the founder the line it prints.
     let friends: Vec<Friend> = (0..3).map(|_| Friend::introduce()).collect();

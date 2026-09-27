@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         } => commands::download(&paths, item_id, &dest, file).await,
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
         Command::Ticket => commands::ticket(&paths).await,
+        Command::Ui => commands::ui(&paths),
         Command::Join { ticket } => commands::join(&paths, &ticket),
         Command::Members => commands::members(&paths).await,
         Command::Status { online } => commands::status(&paths, online).await,

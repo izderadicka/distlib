@@ -127,6 +127,10 @@ secrecy = "=0.10.3"
 hyper = { version = "=1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "=0.1.3"
+# The UI's files, in the binary (phase 3's 3b-1). `interpolate-folder-path` lets
+# `distlib-api`'s build script choose the built UI or the committed placeholder
+# (D7); `mime-guess` gives each file its `Content-Type`.
+rust-embed = { version = "=8.12.0", features = ["interpolate-folder-path", "mime-guess"] }
 
 # --- dev -------------------------------------------------------------------
 # Only for tests: the in-process relay server's self-signed certificates need

@@ -426,6 +426,25 @@ impl Harness {
         (status, challenge, answer)
     }
 
+    /// `GET`s a page of the UI, with no token, and reads it as text.
+    async fn page(&self, path: &str) -> (StatusCode, hyper::HeaderMap, String) {
+        let request = Request::get(format!("http://{}{path}", self.server.addr()))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = Hyper::builder(TokioExecutor::new())
+            .build_http()
+            .request(request)
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let body = body.collect().await.unwrap().to_bytes();
+        (
+            parts.status,
+            parts.headers,
+            String::from_utf8_lossy(&body).into_owned(),
+        )
+    }
+
     /// Opens `GET /events` with the token and waits for its headers.
     ///
     /// Waiting for them is what makes a test that then changes something
@@ -563,14 +582,54 @@ async fn every_refusal_is_answered_in_json_with_its_http_status() {
     }
 
     // The token guards routes, not the listener: an unknown path is answered
-    // as unknown, with or without one.
-    let (status, _, answer) = harness.raw("GET", "/nowhere", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(raw_code(&answer), -32600, "{answer}");
+    // as unknown, with or without one. (`GET` of a path with no extension is
+    // the UI's, which routes itself — see `the_ui_is_served_to_anybody`.)
+    for (method, path) in [("GET", "/nowhere.js"), ("POST", "/nowhere")] {
+        let (status, _, answer) = harness.raw(method, path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+        assert_eq!(raw_code(&answer), -32600, "{method} {path}: {answer}");
+    }
 
     let (status, _, answer) = harness.raw("GET", "/rpc", Some(&harness.token)).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(raw_code(&answer), -32600, "{answer}");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_ui_is_served_to_anybody() {
+    // D3: the page is open, and everything about this node is behind the
+    // token. With no `ui/dist` built — CI's case — what is served is the
+    // placeholder; either way it is an HTML page.
+    let harness = Harness::start().await;
+
+    for path in ["/", "/members"] {
+        let (status, headers, body) = harness.page(path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(
+            headers["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"),
+            "{path}"
+        );
+        assert!(body.contains("<html"), "{path}: {body}");
+        // The token lives in the page's storage; script from anywhere else
+        // is how it would be stolen.
+        assert!(
+            headers["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("default-src 'self'"),
+            "{path}"
+        );
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+    }
+
+    // A path that climbs out of the UI's folder finds nothing there.
+    let (status, _, _) = harness.page("/../Cargo.toml").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     harness.shutdown().await;
 }

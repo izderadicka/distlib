@@ -1,6 +1,11 @@
 //! What each subcommand actually does.
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use distlib_api::{
@@ -17,6 +22,7 @@ use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 
 use crate::{Runtime, cli::Kind};
 use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher as _};
+use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
 
 /// How long `status --online` waits to reach a relay before giving up.
@@ -846,6 +852,41 @@ pub async fn ticket(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// `distlib ui`
+///
+/// Read from the token file rather than asked of the node: the link is only
+/// as good as a running node anyway, and printing it should not need one.
+pub fn ui(paths: &Paths) -> Result<()> {
+    let config = load_config(&paths.config_file)?;
+    let token_file = paths.data_dir.api_token_file();
+    if !token_file.exists() {
+        bail!(
+            "no api token at {}; the node writes one the first time it runs",
+            token_file.display()
+        );
+    }
+    let token = token::load_or_create(&token_file)?;
+    println!(
+        "{}#token={}",
+        page_url(config.api.bind_addr),
+        token.expose_secret()
+    );
+    Ok(())
+}
+
+/// Where a browser on this machine finds the page served at `bind_addr`.
+///
+/// An unspecified address — `0.0.0.0`, `::` — is where the node listens,
+/// not somewhere a browser can go; the loopback of the same family is.
+fn page_url(bind_addr: SocketAddr) -> String {
+    let ip = match bind_addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}/", SocketAddr::new(ip, bind_addr.port()))
+}
+
 /// `distlib join`
 ///
 /// Writes the ticket's directions into this node's configuration and stops
@@ -1274,8 +1315,13 @@ async fn serve_api(paths: &Paths, config: &Config, api: Api) -> Result<Server> {
     }
 
     // The address, never the token: it is a secret, and it is one command away
-    // for anyone entitled to it.
-    tracing::info!(addr = %server.addr(), token = %token_file.display(), "local api listening");
+    // for anyone entitled to it — `distlib ui` prints the signed-in link.
+    tracing::info!(
+        addr = %server.addr(),
+        ui = %page_url(server.addr()),
+        token = %token_file.display(),
+        "local api listening; `distlib ui` prints a link that signs the browser in"
+    );
     Ok(server)
 }
 
@@ -1440,6 +1486,22 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_url_is_somewhere_a_browser_can_go() {
+        assert_eq!(
+            page_url("0.0.0.0:11280".parse().expect("a literal address")),
+            "http://127.0.0.1:11280/"
+        );
+        assert_eq!(
+            page_url("[::]:11280".parse().expect("a literal address")),
+            "http://[::1]:11280/"
+        );
+        assert_eq!(
+            page_url("192.168.1.5:8080".parse().expect("a literal address")),
+            "http://192.168.1.5:8080/"
+        );
+    }
 
     #[test]
     fn a_download_that_failed_in_the_background_is_a_failed_command() {

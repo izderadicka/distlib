@@ -1,6 +1,12 @@
 # Rust build artefacts
 /target/
 
+# The UI's build and its dependencies. `ui/dist` is what `npm run build`
+# writes and what the binary embeds when it is there; without it the binary
+# serves `ui/placeholder.html` instead (phase 3's D7).
+/crates/distlib-api/ui/dist/
+/crates/distlib-api/ui/node_modules/
+
 # Secrets — never committed (see CLAUDE.md § Security)
 .env
 .env.*
