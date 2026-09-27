@@ -22,6 +22,38 @@ header h1 {
   margin: 1rem 0;
 }
 
+nav {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+nav a[aria-current="page"] {
+  font-weight: bold;
+  text-decoration: none;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+form[role="search"] {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+form[role="search"] input {
+  flex: 1;
+}
+
+.pager {
+  display: flex;
+  gap: 1rem;
+  color: var(--muted);
+}
+
 h2 {
   font-size: 1.1rem;
   margin: 1.5rem 0 0.5rem;

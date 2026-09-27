@@ -28,13 +28,21 @@ function errorsOn(page: Page): string[] {
 
 const rows = (page: Page) => page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") });
 
+/** Goes from wherever the page is to the node page, the way a person would. */
+async function toNodePage(page: Page, node: Node) {
+  await page.getByRole("link", { name: "Node" }).click();
+  await expect(page.getByText(node.id)).toBeVisible();
+}
+
 test("the link signs the tab in and shows this node, live", async ({ page, node }) => {
   const errors = errorsOn(page);
 
   await page.goto(node.link);
 
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
-  await expect(page.getByText(node.id)).toBeVisible();
+  await expect(page.getByText("The library is empty.")).toBeVisible();
+  await toNodePage(page, node);
+  expect(new URL(page.url()).pathname).toBe("/node");
   await expect(rows(page)).toHaveCount(1);
   await expect(rows(page).first()).toContainText("no name");
   await expect(rows(page).first()).toContainText("core (leader)");
@@ -46,7 +54,7 @@ test("the link signs the tab in and shows this node, live", async ({ page, node 
 
 test("a member admitted from the CLI appears without a reload", async ({ page, node }) => {
   await page.goto(node.link);
-  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  await toNodePage(page, node);
 
   node.admit(aStranger(), "carol");
 
@@ -54,9 +62,9 @@ test("a member admitted from the CLI appears without a reload", async ({ page, n
   await expect(rows(page)).toHaveCount(2);
 });
 
-test("a reload keeps the tab signed in", async ({ page, node }) => {
+test("a reload keeps the tab signed in, and on the page it was on", async ({ page, node }) => {
   await page.goto(node.link);
-  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  await toNodePage(page, node);
 
   await page.reload();
 
@@ -79,7 +87,7 @@ test("a token the node refuses sends the tab to sign in", async ({ page, node })
 
 test("the page says when the node is gone, and comes back with it", async ({ page, node }) => {
   await page.goto(node.link);
-  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  await toNodePage(page, node);
 
   await node.stop();
   await expect(page.getByText(/Cannot reach the node/)).toBeVisible();
@@ -92,4 +100,30 @@ test("the page says when the node is gone, and comes back with it", async ({ pag
   // And the new stream is a working one.
   node.admit(aStranger(), "dave");
   await expect(rows(page).filter({ hasText: "dave" })).toBeVisible();
+});
+
+test("an item added from the CLI can be browsed and searched for", async ({ page, node }) => {
+  await page.goto(node.link);
+  await expect(page.getByText("The library is empty.")).toBeVisible();
+
+  node.add("mloci.epub", "a book", "--kind", "ebook", "--title", "Válka s mloky", "--author", "Karel Čapek");
+
+  // Without a reload: the catalogue's own event brings it.
+  await expect(rows(page).filter({ hasText: "Válka s mloky" })).toContainText("Karel Čapek");
+
+  await page.getByRole("searchbox").fill("čapek");
+  await page.getByRole("button", { name: "Search" }).click();
+  await expect(page.getByText("1–1 of 1")).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("q")).toBe("čapek");
+
+  // The search is in the address, so a reload asks the node for it again.
+  await page.reload();
+  await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
+
+  await page.getByRole("searchbox").fill("hordubal");
+  await page.getByRole("button", { name: "Search" }).click();
+  await expect(page.getByText("Nothing matches “hordubal”.")).toBeVisible();
+
+  await page.goBack();
+  await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
 });

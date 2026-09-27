@@ -38,9 +38,41 @@ export interface Members {
   members: Member[];
 }
 
+/** Where an item sits in a series. */
+export interface Series {
+  name: string;
+  /** Left out, rather than `null`, when nobody said. */
+  index?: number;
+}
+
+/**
+ * What `library.list` and `library.search` show of one item. A field nobody
+ * has set is `null`.
+ */
+export interface ItemSummary {
+  item_id: string;
+  kind: "ebook" | "audiobook" | "video" | "other" | null;
+  title: string | null;
+  authors: string[] | null;
+  genres: string[] | null;
+  series: Series | null;
+  year: number | null;
+}
+
+/** A page of items, and how many there are in all. */
+export interface ItemPage {
+  results: ItemSummary[];
+  total: number;
+}
+
 interface Methods {
   "node.status": { params: null; result: NodeStatus };
   "group.members": { params: null; result: Members };
+  "library.list": { params: { offset: number; limit: number }; result: ItemPage };
+  "library.search": {
+    params: { query: string; offset: number; limit: number };
+    result: ItemPage;
+  };
 }
 
 /** The node answered, and the answer was an error. */

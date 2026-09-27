@@ -1,17 +1,17 @@
 <script lang="ts">
   // This node and its group, read-only (D8), kept current by the event
-  // stream: the page loads on every `resync` — which each connection starts
-  // with — and on `membership.changed`.
+  // stream: the page loads when it opens, and again on every `resync` —
+  // which each connection starts with — and on `membership.changed`.
   import { onMount } from "svelte";
 
-  import { type Connection, watch } from "./lib/events";
+  import type { Listen } from "./lib/events";
+  import { reloader } from "./lib/reloader";
   import { call, type Member, type NodeStatus, Unauthorised } from "./lib/rpc";
 
-  let { onUnauthorised }: { onUnauthorised: () => void } = $props();
+  let { listen, onUnauthorised }: { listen: Listen; onUnauthorised: () => void } = $props();
 
   let status = $state<NodeStatus | null>(null);
   let members = $state<Member[]>([]);
-  let connection = $state<Connection>("connecting");
   let failure = $state<string | null>(null);
 
   async function load() {
@@ -32,17 +32,18 @@
     }
   }
 
-  onMount(() =>
-    watch({
-      onEvent: (event) => {
-        if (event.type === "resync" || event.type === "membership.changed") {
-          void load();
-        }
-      },
-      onConnection: (now) => (connection = now),
-      onUnauthorised,
-    }),
-  );
+  const reload = reloader(load);
+
+  // Listening before the first load, so nothing said while it runs is missed.
+  onMount(() => {
+    const stop = listen((event) => {
+      if (event.type === "resync" || event.type === "membership.changed") {
+        reload();
+      }
+    });
+    reload();
+    return stop;
+  });
 
   /** A core node says what Raft makes it; a follower has no Raft to ask. */
   function role(node: NodeStatus): string {
@@ -64,16 +65,6 @@
     return `${Number.isInteger(value) ? value : value.toFixed(1)} ${BYTE_UNITS[unit]}`;
   }
 </script>
-
-<p class="connection {connection}">
-  {#if connection === "live"}
-    Live
-  {:else if connection === "connecting"}
-    Connecting…
-  {:else}
-    Cannot reach the node — what is shown may be out of date. Retrying…
-  {/if}
-</p>
 
 {#if failure}
   <p class="failure">{failure}</p>

@@ -5,6 +5,10 @@ import App from "./App.svelte";
 import { type Watcher, watch } from "./lib/events";
 
 vi.mock("./lib/events", () => ({ watch: vi.fn(() => () => {}) }));
+vi.mock("./lib/rpc", async (original) => ({
+  ...(await original<typeof import("./lib/rpc")>()),
+  call: vi.fn(async () => ({ results: [], total: 0 })),
+}));
 
 describe("the app", () => {
   it("says how to sign in when the tab holds no token", () => {
