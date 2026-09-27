@@ -309,8 +309,8 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     let files = downloaded["files"].as_array().unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(
-        files[0]["fetched"],
-        json!(true),
+        files[0]["from"],
+        json!("network"),
         "bob did not have these bytes, so they came over the network"
     );
     assert_eq!(
@@ -372,8 +372,8 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     .expect("carol must get the file from the node that downloaded it, with the adder gone");
 
     assert_eq!(
-        downloaded["files"].as_array().unwrap()[0]["fetched"],
-        json!(true)
+        downloaded["files"].as_array().unwrap()[0]["from"],
+        json!("network")
     );
     assert_eq!(
         std::fs::read(carols_dest.join("dune.epub")).unwrap(),
@@ -417,8 +417,8 @@ async fn downloading_something_this_node_already_has_asks_nobody() {
     .unwrap();
 
     assert_eq!(
-        downloaded["files"].as_array().unwrap()[0]["fetched"],
-        json!(false),
+        downloaded["files"].as_array().unwrap()[0]["from"],
+        json!("store"),
         "nothing was fetched: the bytes were already in this node's own store"
     );
     assert_eq!(
@@ -465,23 +465,37 @@ async fn downloading_over_a_file_that_is_already_there_is_refused() {
         "and the file that was there is untouched"
     );
 
+    // The same size as the file the item names, so only its content can
+    // tell them apart — the case the size check alone would let through.
+    std::fs::write(&in_the_way, b"what the group HOLDS").unwrap();
+    let error = api(&runtime, &key)
+        .call(
+            "library.download",
+            Some(json!({ "item_id": item, "dest": &dest })),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already exists"), "{error}");
+
     runtime.shutdown().await;
 }
 
-/// `file` takes one of an item's files and leaves the rest alone.
-///
-/// Also the reason it is a content hash rather than §7.1's `file_index`: the
-/// hash is what the item's own record is keyed by, and what `library.item`
-/// prints. See `Api::download`.
-#[tokio::test]
-async fn downloading_one_file_of_an_item_takes_only_that_file() {
-    let (dir, runtime, key) = a_solo_node().await;
-    let first = dir.path().join("chapter-1.mp3");
-    std::fs::write(&first, b"chapter one").unwrap();
-    let second = dir.path().join("chapter-2.mp3");
-    std::fs::write(&second, b"chapter two").unwrap();
+/// The second chapter's bytes: many of iroh-blobs' 16 KiB chunk groups, so
+/// that recognising it at its destination by a plain BLAKE3 hash is checked
+/// on a file whose hash tree has more than a leaf.
+fn chapter_two() -> Vec<u8> {
+    b"chapter two".repeat(20_000)
+}
 
-    let added = api(&runtime, &key)
+/// Adds a two-chapter audiobook to a solo node, answering with the item and
+/// the hash of its second chapter.
+async fn two_chapters(runtime: &Runtime, key: &SecretKey, dir: &Path) -> (ItemId, ContentHash) {
+    let first = dir.join("chapter-1.mp3");
+    std::fs::write(&first, b"chapter one").unwrap();
+    let second = dir.join("chapter-2.mp3");
+    std::fs::write(&second, chapter_two()).unwrap();
+
+    let added = api(runtime, key)
         .call(
             "library.add",
             Some(json!({
@@ -493,7 +507,7 @@ async fn downloading_one_file_of_an_item_takes_only_that_file() {
         .await
         .unwrap();
     let item: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
-    until_projected(&runtime, item, 2, "the solo node").await;
+    until_projected(runtime, item, 2, "the solo node").await;
 
     let files = runtime
         .store()
@@ -503,11 +517,75 @@ async fn downloading_one_file_of_an_item_takes_only_that_file() {
         .unwrap()
         .item
         .files;
-    let wanted = *files
+    let second = *files
         .iter()
         .find(|(_, record)| record.filename == "chapter-2.mp3")
         .expect("both files are in the item")
         .0;
+    (item, second)
+}
+
+/// Asking again for an item part of which is already at its destination —
+/// what a download that failed partway leaves — takes only what is missing,
+/// rather than being refused because of the files it wrote itself.
+///
+/// Staged with `file` rather than a real failure: the state it leaves is the
+/// same, a complete file of the item's at its destination and the rest not,
+/// and it needs no network to make fail on cue.
+#[tokio::test]
+async fn downloading_again_takes_only_what_is_missing() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let (item, second) = two_chapters(&runtime, &key, dir.path()).await;
+    let dest = dest(dir.path(), "me");
+    download(
+        &api(&runtime, &key),
+        json!({ "item_id": item, "dest": &dest, "file": second }),
+    )
+    .await
+    .unwrap();
+
+    let downloaded = download(
+        &api(&runtime, &key),
+        json!({ "item_id": item, "dest": &dest }),
+    )
+    .await
+    .expect("the chapter already there is this item's own, not in the way");
+
+    let from: BTreeMap<&str, &Value> = downloaded["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| (file["filename"].as_str().unwrap(), &file["from"]))
+        .collect();
+    assert_eq!(
+        from["chapter-2.mp3"], "destination",
+        "kept, not written again"
+    );
+    assert_eq!(
+        from["chapter-1.mp3"], "store",
+        "and only the missing one written"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("chapter-1.mp3")).unwrap(),
+        b"chapter one"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("chapter-2.mp3")).unwrap(),
+        chapter_two()
+    );
+
+    runtime.shutdown().await;
+}
+
+/// `file` takes one of an item's files and leaves the rest alone.
+///
+/// Also the reason it is a content hash rather than §7.1's `file_index`: the
+/// hash is what the item's own record is keyed by, and what `library.item`
+/// prints. See `Api::download`.
+#[tokio::test]
+async fn downloading_one_file_of_an_item_takes_only_that_file() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let (item, wanted) = two_chapters(&runtime, &key, dir.path()).await;
 
     let dest = dest(dir.path(), "me");
     let downloaded = download(
@@ -520,7 +598,7 @@ async fn downloading_one_file_of_an_item_takes_only_that_file() {
     assert_eq!(downloaded["files"].as_array().unwrap().len(), 1);
     assert_eq!(
         std::fs::read(dest.join("chapter-2.mp3")).unwrap(),
-        b"chapter two"
+        chapter_two()
     );
     assert!(
         !dest.join("chapter-1.mp3").exists(),

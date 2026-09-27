@@ -25,6 +25,9 @@ distlib-sync = { workspace = true }
 # with iroh-blobs goes through `distlib_net::Blobs` and `distlib_sync`, per
 # §5.1's wrap-don't-expose rule.
 distlib-net = { workspace = true }
+# For `library.download`'s check that a file already at its destination is
+# the one it would write: a content hash is a BLAKE3 hash of the bytes.
+blake3 = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

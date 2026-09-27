@@ -4,7 +4,11 @@
 //! than renaming it: `library.*` and the SSE stream land beside these, and a
 //! caller written against `group.members` today keeps working.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
@@ -20,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     rpc::Error,
-    tasks::{self, Downloaded, Tasks},
+    tasks::{self, Downloaded, Source, Tasks},
 };
 
 /// Everything the methods need: the running node and the key it signs with.
@@ -658,9 +662,13 @@ impl Api {
     /// **A failure partway through a multi-file download leaves the files
     /// already written where they are**, and the error names only what
     /// failed. That is deliberate rather than overlooked: those files are
-    /// complete and verified, deleting them would be this method destroying
-    /// something on its way out, and asking again writes the rest — the
-    /// ones already here are refused by name, which is what says so.
+    /// complete and verified, and deleting them would be this method
+    /// destroying something on its way out. **Asking again takes only what
+    /// is missing**: a file already at its destination with exactly the
+    /// content the item names counts as done, and nothing is fetched or
+    /// written for it. A file is only ever at its destination whole, since
+    /// [`Blobs::export`] renames it into place once complete — so what a
+    /// failed download leaves there is always something a retry can keep.
     ///
     /// **Nothing is "registered".** The fetch lands the bytes in the store
     /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
@@ -711,7 +719,14 @@ impl Api {
         // and all three are refused. A file already at the target is the
         // operator's — they may have edited or replaced it — and a download
         // is not a reason to assume otherwise; deleting it is an instruction,
-        // overwriting it would be a guess. Two of this item's own files
+        // overwriting it would be a guess. The exception is a file that *is*
+        // this one, byte for byte: nothing would be lost by keeping it, and
+        // it is what an earlier download that failed partway leaves behind.
+        // Checked by size first, which costs nothing, and only then by hash,
+        // which reads the whole file — here rather than in the task, so that
+        // "something of yours is in the way" is still refused before anything
+        // starts. Only a retry pays for it, and BLAKE3 reads faster than most
+        // disks can be read. Two of this item's own files
         // landing on one path is the same loss by a different route. And a
         // `filename` is a string some other member's build wrote into the
         // document, so it is reduced to its last component before it is
@@ -736,7 +751,7 @@ impl Api {
         // to do it with — they are the right disambiguator and nothing fills
         // them yet (P2-23).
         let mut taken: BTreeMap<PathBuf, ContentHash> = BTreeMap::new();
-        let mut targets: Vec<(ContentHash, FileRecord, PathBuf)> = Vec::with_capacity(wanted.len());
+        let mut targets: Vec<Target> = Vec::with_capacity(wanted.len());
         for (hash, record) in wanted {
             let name = std::path::Path::new(&record.filename)
                 .file_name()
@@ -754,14 +769,21 @@ impl Api {
                     target.display()
                 )));
             }
-            if target.exists() {
+            let in_place = target.exists();
+            if in_place && !already_there(&target, hash, record.size).await? {
                 return Err(Error::failed(format!(
-                    "{} already exists; move or delete it to download this file again",
+                    "{} already exists and is not this file; move or delete it to download \
+                     this file again",
                     target.display()
                 )));
             }
             taken.insert(target.clone(), hash);
-            targets.push((hash, record, target));
+            targets.push(Target {
+                hash,
+                record,
+                path: target,
+                in_place,
+            });
         }
 
         let me = self.node.id();
@@ -773,7 +795,7 @@ impl Api {
             .filter(|member| *member != me)
             .collect();
 
-        let bytes = targets.iter().map(|(_, record, _)| record.size).sum();
+        let bytes = targets.iter().map(|target| target.record.size).sum();
         let task = self.tasks.start_download(
             params.item_id,
             stored.item.title.clone(),
@@ -787,10 +809,10 @@ impl Api {
             "title": stored.item.title,
             "files": targets
                 .iter()
-                .map(|(hash, record, target)| json!({
-                    "file": hash,
-                    "filename": record.filename,
-                    "path": target,
+                .map(|target| json!({
+                    "file": target.hash,
+                    "filename": target.record.filename,
+                    "path": target.path,
                 }))
                 .collect::<Vec<_>>(),
         });
@@ -814,17 +836,35 @@ impl Api {
     /// Progress is counted across all of the files, so a bar fills once per
     /// download rather than once per file: a file already here counts as done
     /// the moment it is found, and one being fetched counts what it has so far.
-    /// A file counts towards `files_done` once it is written out.
+    /// A file counts towards `files_done` once it is written out — or at once,
+    /// if it was at its destination already.
     async fn fetch_all(
         &self,
-        targets: Vec<(ContentHash, FileRecord, PathBuf)>,
+        targets: Vec<Target>,
         providers: &[MemberId],
         task: &mut tasks::Download,
     ) -> Result<Vec<Downloaded>, Error> {
         let mut files = Vec::with_capacity(targets.len());
         let mut refresh = OneRefresh::of(self, providers);
         let mut done = 0;
-        for (hash, record, target) in targets {
+        for Target {
+            hash,
+            record,
+            path,
+            in_place,
+        } in targets
+        {
+            if in_place {
+                done += record.size;
+                task.file_written(done);
+                files.push(Downloaded {
+                    file: hash,
+                    filename: record.filename,
+                    path,
+                    from: Source::Destination,
+                });
+                continue;
+            }
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
@@ -843,13 +883,17 @@ impl Api {
                     .map_err(net_error)?;
             }
             done += record.size;
-            self.blobs.export(hash, &target).await.map_err(net_error)?;
+            self.blobs.export(hash, &path).await.map_err(net_error)?;
             task.file_written(done);
             files.push(Downloaded {
                 file: hash,
                 filename: record.filename,
-                path: target,
-                fetched: !already_here,
+                path,
+                from: if already_here {
+                    Source::Store
+                } else {
+                    Source::Network
+                },
             });
         }
         Ok(files)
@@ -1093,6 +1137,40 @@ fn query_error(error: StoreError) -> Error {
         StoreError::Query { .. } => Error::invalid_params(error.to_string()),
         other => Error::failed(other.to_string()),
     }
+}
+
+/// One file `library.download` is to write, worked out and checked before the
+/// task starts.
+struct Target {
+    hash: ContentHash,
+    record: FileRecord,
+    path: PathBuf,
+    /// Already at `path`, byte for byte: nothing to fetch or write.
+    in_place: bool,
+}
+
+/// Whether `path` holds exactly the `size` bytes `hash` names.
+///
+/// A content hash is iroh-blobs' hash, and that is the plain BLAKE3 hash of
+/// the bytes — its tree only shapes the verified-streaming outboard, not the
+/// root — so the file is hashed as it stands.
+/// `downloading_again_takes_only_what_is_missing` is what would notice if
+/// that stopped being true. On a blocking thread: it reads the whole
+/// file, and a multi-gigabyte one takes seconds.
+async fn already_there(path: &Path, hash: ContentHash, size: u64) -> Result<bool, Error> {
+    let owned = path.to_owned();
+    let same = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        let metadata = std::fs::metadata(&owned)?;
+        if !metadata.is_file() || metadata.len() != size {
+            return Ok(false);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update_reader(std::fs::File::open(&owned)?)?;
+        Ok(hasher.finalize().as_bytes() == hash.as_bytes())
+    })
+    .await
+    .map_err(|error| Error::failed(error.to_string()))?;
+    same.map_err(|error| Error::failed(format!("{}: {error}", path.display())))
 }
 
 /// The single directory refresh a `library.download` is allowed, and whether

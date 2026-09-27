@@ -28,7 +28,7 @@ use std::{
 };
 
 use distlib_core::{ContentHash, MemberId, NodeAddr};
-use distlib_net::{AddressBook, Blobs};
+use distlib_net::{AddressBook, Blobs, blobs::partial_of};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -245,6 +245,36 @@ async fn an_exported_blob_is_a_copy_and_the_store_still_holds_it() {
     );
 
     store.shutdown().await.unwrap();
+}
+
+/// An export is written beside its target and renamed into place, so what is
+/// at the target is always a whole file — and a partial one left by a node
+/// that died mid-copy is replaced by the next export, not left lying about.
+///
+/// The crash itself cannot be staged here; what can be is its residue.
+/// **Mutation check:** exporting straight to `target` leaves the stale
+/// sibling behind and fails the last assertion.
+#[tokio::test]
+async fn an_export_left_half_done_is_finished_by_the_next_one() {
+    let store = MemStore::new();
+    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    let blobs = Blobs::new(&store, &endpoint);
+    let hash = store
+        .add_bytes(b"the whole book".to_vec())
+        .await
+        .unwrap()
+        .hash;
+    let hash = ContentHash::from_bytes(*hash.as_bytes());
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("dune.epub");
+    let partial = partial_of(&target);
+    std::fs::write(&partial, b"the whole").unwrap();
+
+    blobs.export(hash, &target).await.unwrap();
+
+    assert_eq!(std::fs::read(&target).unwrap(), b"the whole book");
+    assert!(!partial.exists(), "the half-done copy is gone");
 }
 
 /// A hash the store has never seen is `has() == false` rather than an error,

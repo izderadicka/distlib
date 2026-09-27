@@ -31,7 +31,7 @@
 //! it for that reason; this crate owns it as the thing media moves in and out
 //! of, in either direction.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use distlib_core::{ContentHash, MemberId};
 use futures_lite::StreamExt as _;
@@ -192,25 +192,54 @@ impl Blobs {
     /// alternative mode hands out a path into the store's own data, where
     /// either of those would be the node quietly ceasing to be a holder.
     ///
+    /// **All or nothing at `target`.** iroh-blobs writes straight into the
+    /// path it is given, so an export that fails partway — a full disk, the
+    /// node stopping — would leave a truncated file there, and a truncated
+    /// file at a download's destination is indistinguishable from one the
+    /// operator put there: the next download would refuse to touch it. So
+    /// the copy is written to a hidden sibling and renamed into place once
+    /// complete; the same directory keeps the rename on one filesystem, where
+    /// it is atomic. A sibling left by a node that died mid-copy is simply
+    /// overwritten by the next export of the same file.
+    ///
     /// Fails if the blob is not here in full; [`Self::has`] is how a caller
     /// asks first.
     pub async fn export(&self, hash: ContentHash, target: &Path) -> Result<()> {
-        self.store
+        let failed = |source: Box<dyn std::error::Error + Send + Sync>| NetError::Export {
+            hash,
+            target: target.to_owned(),
+            source,
+        };
+        let partial = partial_of(target);
+        let copied = self
+            .store
             .blobs()
-            .export(to_blobs(hash), target)
+            .export(to_blobs(hash), &partial)
             .await
-            .map_err(|source| NetError::Export {
-                hash,
-                target: target.to_owned(),
-                source: Box::new(source),
-            })
-            // The byte count it answers with is the size of a file this
-            // caller is about to be told the path of, so it is a fact they
-            // can read off the filesystem rather than one worth a return
-            // type — and `FileRecord::size` already carries the claim it
-            // would be checked against.
-            .map(|_written| ())
+            .map_err(|error| failed(Box::new(error)))
+            .and_then(|_written| {
+                // The byte count it answers with is the size of a file this
+                // caller is about to be told the path of, so it is a fact
+                // they can read off the filesystem rather than one worth a
+                // return type.
+                std::fs::rename(&partial, target).map_err(|error| failed(Box::new(error)))
+            });
+        if copied.is_err() {
+            // Best effort: the error being returned is the one worth reading.
+            let _ = std::fs::remove_file(&partial);
+        }
+        copied
     }
+}
+
+/// Where [`Blobs::export`] writes `target` before it is complete: beside it,
+/// hidden, and named after it so an operator who finds one knows what it was.
+pub fn partial_of(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.partial"))
 }
 
 /// The seam [`ContentHash`]'s own doc comment names: both spell a blake3

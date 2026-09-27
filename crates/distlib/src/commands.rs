@@ -5,7 +5,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, Result, bail};
 use distlib_api::{
     Api, Client, ClientError, Server,
-    tasks::{Downloaded, Outcome},
+    tasks::{Downloaded, Outcome, Source},
 };
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
@@ -788,7 +788,11 @@ pub async fn download(
             // A file that was already here is said so rather than passed off
             // as a transfer: an operator who expected the group to be asked
             // should be able to tell that it was not.
-            if file.fetched { "fetched" } else { "had it " },
+            match file.from {
+                Source::Network => "fetched ",
+                Source::Store => "had it  ",
+                Source::Destination => "in place",
+            },
             file.path.display()
         );
     }

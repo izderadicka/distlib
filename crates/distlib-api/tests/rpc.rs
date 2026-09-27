@@ -15,7 +15,7 @@ use std::{
 
 use distlib_api::{
     Api, Client, Server, serve,
-    tasks::{Downloaded, Outcome, TaskState, Tasks},
+    tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Ticket};
@@ -700,7 +700,7 @@ async fn a_download_can_be_asked_after_while_it_runs_and_once_it_has_ended() {
         file: ContentHash::from_bytes([4; 32]),
         filename: "dune.epub".to_owned(),
         path: "/books/dune.epub".into(),
-        fetched: true,
+        from: Source::Network,
     };
     download.finish(vec![written.clone()]);
     let finished = ask().await;
