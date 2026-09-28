@@ -1093,12 +1093,21 @@ impl Role {
 /// sound because promotion puts the node back exactly where a follower that
 /// never voted starts — a blank state machine and an empty Raft log — so the
 /// second seat is the first one over again.
+///
+/// **Either half giving up ends the task**, so the loop never goes round on a
+/// transition that did not happen. Today neither half can see its channel
+/// close — the sender lives in the store this task holds a clone of, and
+/// shutdown aborts the task rather than closing anything — but a `stand_down`
+/// that returned without emptying the seat would otherwise be called again at
+/// once, for ever.
 async fn serve_role(role: Role) {
     loop {
         if role.seat.raft().is_none() && !take_the_seat(&role).await {
             return;
         }
-        stand_down(&role).await;
+        if !stand_down(&role).await {
+            return;
+        }
     }
 }
 
@@ -1132,7 +1141,10 @@ async fn serve_role(role: Role) {
 /// gossip does not change sides — a demoted node keeps the announcing half it
 /// had as a voter, so nothing pokes its new follow loop and the timer is what
 /// it waits on.
-async fn stand_down(role: &Role) {
+///
+/// Returns `true` once it has done it; `false` if the state machine went away,
+/// as its mirror does.
+async fn stand_down(role: &Role) -> bool {
     let mut memberships = role.state_machine.subscribe();
     loop {
         {
@@ -1145,7 +1157,7 @@ async fn stand_down(role: &Role) {
         }
         if memberships.changed().await.is_err() {
             tracing::error!("membership channel closed");
-            return;
+            return false;
         }
     }
     tracing::info!("the log says this node no longer votes; standing down");
@@ -1172,6 +1184,7 @@ async fn stand_down(role: &Role) {
         tokio::spawn(follower::follow(role.following(), listens)),
     );
     tracing::info!("this node is now a follower");
+    true
 }
 
 /// Waits for the log to say this node votes, and then makes that true.
