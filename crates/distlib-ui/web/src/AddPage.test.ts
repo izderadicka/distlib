@@ -119,14 +119,16 @@ describe("the add page", () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
-  it("uploads nothing when a file has no extension to tell its format by", async () => {
-    for (const name of ["README", ".epub", "book."]) {
+  it("uploads nothing when a file's name is not one the node takes", async () => {
+    for (const name of ["README", ".epub", "book.", ".hidden.epub", "book.epub.", " book.epub", "book.epub\t"]) {
       open();
       await choose(file("fine.epub"), file(name));
 
       await submit();
 
-      await screen.findByText(new RegExp(`^${name.replace(".", "\\.")} has no extension`));
+      // Testing Library collapses whitespace in what it reads, so the name is
+      // looked for as it reads it.
+      await screen.findByText(`${name.trim()} cannot be an item's file`, { exact: false });
       document.body.innerHTML = "";
     }
     expect(upload).not.toHaveBeenCalled();

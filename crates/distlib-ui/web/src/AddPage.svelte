@@ -32,9 +32,13 @@
     if (chosen.length === 0) {
       return "Choose the item's files first.";
     }
-    const unnamed = chosen.find((file) => !/.\.[^.]+$/.test(file.name));
+    // The node's own rule: an extension, which is the file's format, and no
+    // dot or whitespace at either end.
+    const unnamed = chosen.find(
+      (file) => file.name.trim() !== file.name || !/^[^.].*\.[^.]+$/.test(file.name),
+    );
     if (unnamed) {
-      return `${unnamed.name} has no extension to tell its format by; rename it first.`;
+      return `${unnamed.name} cannot be an item's file: it needs an extension to tell its format by, and no dot or space at either end. Rename it first.`;
     }
     const names = chosen.map((file) => file.name);
     const twice = names.find((name, index) => names.indexOf(name) !== index);

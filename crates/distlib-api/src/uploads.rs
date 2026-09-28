@@ -190,13 +190,17 @@ impl Uploads {
     /// for a caller about to use it once, successfully or not.
     pub async fn take(&self, upload: UploadId) -> Result<(PathBuf, Staged), UploadError> {
         let staged = Staged(self.dir.join(upload.to_string()));
-        let unknown = |_| UploadError::Unknown(upload);
-        let mut entries = tokio::fs::read_dir(&staged.0).await.map_err(unknown)?;
+        // No directory, an unreadable one and an empty one all mean the same
+        // to the caller: there is no such upload to take.
+        let unknown = || UploadError::Unknown(upload);
+        let mut entries = tokio::fs::read_dir(&staged.0)
+            .await
+            .map_err(|_| unknown())?;
         let file = entries
             .next_entry()
             .await
-            .map_err(unknown)?
-            .ok_or(UploadError::Unknown(upload))?;
+            .map_err(|_| unknown())?
+            .ok_or_else(unknown)?;
         Ok((file.path(), staged))
     }
 }
@@ -212,6 +216,11 @@ impl Staged {
 }
 
 impl Drop for Staged {
+    /// **Blocking, and run on an async task** — `Drop` cannot await. Knowingly:
+    /// it removes one directory holding one file, which is an unlink whatever
+    /// the file's size, and a guard that handed the work to another task
+    /// would no longer guarantee it had happened by the time the request
+    /// that owned it was gone.
     fn drop(&mut self) {
         if !self.0.as_os_str().is_empty() {
             // Nothing to be done about a failure here, and the next start
@@ -222,11 +231,21 @@ impl Drop for Staged {
 }
 
 /// Whether `name` can be an item's filename: one plain path component, with
-/// an extension to record as its format, and nothing that is a separator or
-/// otherwise unwritable on one of the platforms a member may run.
+/// an extension, and nothing a platform a member may run cannot write.
+///
+/// **The extension is required** because it is the file's `format` — what
+/// `library.add` records for it, and refuses a path without, so both doors
+/// agree. **No dot at either end**: a leading one hides a file on Unix, and
+/// Windows drops a trailing one, so the file written would not be the one
+/// named. A trailing dot is also what `Path::extension` reads as an extension
+/// that is there but empty. **No whitespace at either end** either: it cannot
+/// be seen in a listing, and Windows drops trailing spaces as it drops dots.
 fn is_plain(name: &str) -> bool {
     let path = Path::new(name);
     path.file_name().is_some_and(|plain| plain == name)
+        && name.trim() == name
+        && !name.starts_with('.')
+        && !name.ends_with('.')
         && path.extension().is_some()
         && !name.contains(['\\', ':', '\0'])
 }
@@ -340,7 +359,7 @@ mod tests {
             "mloky.epub",
             "Válka s mloky.epub",
             "chapter 01.mp3",
-            ".hidden.epub",
+            "R.U.R.epub",
         ] {
             assert!(is_plain(name), "{name}");
         }
@@ -350,6 +369,14 @@ mod tests {
             ".",
             "mloky",
             ".epub",
+            ".hidden.epub",
+            "mloky.",
+            "mloky.epub.",
+            " mloky.epub",
+            "mloky.epub ",
+            "\tmloky.epub",
+            "mloky.epub\n",
+            "mloky. ",
             "a/b.epub",
             "../b.epub",
             "a\\b.epub",

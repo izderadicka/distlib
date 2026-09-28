@@ -414,6 +414,17 @@ impl Harness {
     /// declared, or — `chunked` — in pieces with none, the way a stream of
     /// unknown length is sent. The answer must be JSON, whatever the status.
     async fn upload(&self, query: &str, body: Vec<u8>, chunked: bool) -> (StatusCode, Value) {
+        self.try_upload(query, body, chunked).await.unwrap()
+    }
+
+    /// [`Harness::upload`], but handing back a connection that failed before
+    /// an answer arrived rather than panicking on it.
+    async fn try_upload(
+        &self,
+        query: &str,
+        body: Vec<u8>,
+        chunked: bool,
+    ) -> Result<(StatusCode, Value), hyper_util::client::legacy::Error> {
         let request = Request::post(format!("http://{}/upload?{query}", self.server.addr()))
             .header(AUTHORIZATION, format!("Bearer {}", self.token));
         let response = if chunked {
@@ -432,7 +443,7 @@ impl Harness {
                 .request(request.body(Full::new(Bytes::from(body))).unwrap())
                 .await
         };
-        let response = response.unwrap();
+        let response = response?;
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let answer = serde_json::from_slice(&body).unwrap_or_else(|_| {
@@ -441,7 +452,7 @@ impl Harness {
                 String::from_utf8_lossy(&body)
             )
         });
-        (status, answer)
+        Ok((status, answer))
     }
 
     /// What is held in the upload directory: uploads received and not yet
@@ -595,6 +606,21 @@ fn code(error: &Value) -> i64 {
 }
 
 /// The code out of a whole response body.
+/// Whether `error` is the connection being closed under a request still
+/// being sent — aborted, reset or a broken pipe, whichever the platform says.
+fn cut_off(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source()).any(|error| {
+        error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
+    })
+}
+
 fn raw_code(response: &Value) -> i64 {
     code(
         response
@@ -1647,11 +1673,20 @@ async fn an_upload_is_capped_whether_or_not_it_says_how_long_it_is() {
         assert_eq!(answer["size"], MAX_UPLOAD);
 
         let before = harness.held();
-        let (status, answer) = harness
-            .upload("filename=big.mkv", over_it.clone(), chunked)
-            .await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "chunked: {chunked}");
-        assert_eq!(raw_code(&answer), -32602, "{answer}");
+        match harness
+            .try_upload("filename=big.mkv", over_it.clone(), chunked)
+            .await
+        {
+            Ok((status, answer)) => {
+                assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "chunked: {chunked}");
+                assert_eq!(raw_code(&answer), -32602, "{answer}");
+            }
+            // Refused before the whole body has arrived, the node closes a
+            // connection the client is still writing to. Linux lets the
+            // client read the 413 first; Windows resets the connection, and
+            // the answer goes with it. Either way the upload was refused.
+            Err(error) => assert!(cut_off(&error), "chunked: {chunked}: {error:?}"),
+        }
         assert_eq!(
             harness.held(),
             before,
@@ -1678,6 +1713,10 @@ async fn an_upload_needs_a_plain_filename() {
         "filename=a%5Cb.epub",
         "filename=..",
         "filename=.epub",
+        "filename=.hidden.epub",
+        "filename=mloky.",
+        "filename=%20mloky.epub",
+        "filename=mloky.epub%20",
         "filename=mloky",
     ] {
         let (status, answer) = harness.upload(query, b"bytes".to_vec(), false).await;
