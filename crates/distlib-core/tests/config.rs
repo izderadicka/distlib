@@ -178,6 +178,7 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         api: distlib_core::ApiConfig {
             enabled: false,
             bind_addr: "127.0.0.1:11999".parse().unwrap(),
+            max_upload_bytes: 1_234_567,
         },
         library: distlib_core::LibraryConfig {
             download_dir: "/srv/books".into(),

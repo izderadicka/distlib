@@ -155,3 +155,23 @@ test("an item downloads from its page into the node's download directory", async
   await expect(page.getByText(written)).toBeVisible();
   expect(readFileSync(written, "utf8")).toBe("a book to take home");
 });
+
+test("a file chosen in the browser becomes an item", async ({ page, node }) => {
+  await page.goto(node.link);
+  await page.getByRole("link", { name: "Add" }).click();
+
+  await page
+    .locator('input[type="file"]')
+    .setInputFiles({ name: "Válka s mloky.epub", mimeType: "application/epub+zip", buffer: Buffer.from("a book") });
+  await page.getByLabel("Title").fill("Válka s mloky");
+  await page.getByLabel(/^Authors/).fill("Karel Čapek");
+  await page.getByRole("button", { name: "Add" }).click();
+
+  // Opened on its own page, with the file under the name it was chosen by.
+  await expect(page.getByRole("heading", { name: "Válka s mloky" })).toBeVisible();
+  await expect(page.getByText("Karel Čapek")).toBeVisible();
+  await expect(rows(page).filter({ hasText: "Válka s mloky.epub" })).toContainText("6 B");
+
+  await page.getByRole("link", { name: "Library" }).click();
+  await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
+});

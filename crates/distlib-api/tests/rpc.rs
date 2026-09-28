@@ -16,16 +16,17 @@ use std::{
 use distlib_api::{
     Api, Client, Server, serve,
     tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
+    uploads::Uploads,
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
 use distlib_sync::Catalogue;
-use http_body_util::{BodyExt as _, Full};
+use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::{
     Request, StatusCode,
-    body::Bytes,
+    body::{Bytes, Frame},
     header::{AUTHORIZATION, WWW_AUTHENTICATE},
 };
 use hyper_util::{client::legacy::Client as Hyper, rt::TokioExecutor};
@@ -38,6 +39,10 @@ use iroh_gossip::net::Gossip;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+/// The upload cap the harness serves with: above axum's two-megabyte default
+/// body limit, so a test can show that limit is not the one in force.
+const MAX_UPLOAD: u64 = 4_000_000;
 
 /// A handle nobody answers.
 ///
@@ -68,6 +73,10 @@ struct Harness {
     /// The server's own task registry, for a test to start a download in
     /// directly — nothing here has files to fetch the real way.
     tasks: Tasks,
+    /// The API's catalogue, for a test to read what `library.add` wrote.
+    catalogue: Catalogue,
+    /// Where the server holds uploads, for a test to see what is left there.
+    uploads: std::path::PathBuf,
     _dir: TempDir,
 }
 
@@ -161,12 +170,13 @@ impl Harness {
                 secret,
                 net: distlib_core::NetConfig::default(),
                 reindex_handle,
-                catalogue,
+                catalogue: catalogue.clone(),
                 blobs,
                 store: store.clone(),
                 search: search.clone(),
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
+                uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
             },
             SecretString::from(token.clone()),
         )
@@ -180,6 +190,8 @@ impl Harness {
             store,
             search,
             tasks,
+            catalogue,
+            uploads: dir.path().join("uploads"),
             _dir: dir,
         }
     }
@@ -305,6 +317,7 @@ impl Harness {
 
         let store = Store::open(None).await.unwrap();
         let search = SearchIndex::open(None).await.unwrap();
+        let catalogue = catalogue.expect("node 0 built one above");
         let token = "0123456789abcdef".repeat(4);
         let tasks = Tasks::new(distlib_api::events::bus());
         let server = serve(
@@ -314,12 +327,13 @@ impl Harness {
                 secret: secrets[0].clone(),
                 net: distlib_core::NetConfig::default(),
                 reindex_handle: no_reindex(),
-                catalogue: catalogue.expect("node 0 built one above"),
+                catalogue: catalogue.clone(),
                 blobs: blobs.expect("node 0 built one above"),
                 store: store.clone(),
                 search: search.clone(),
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
+                uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
             },
             SecretString::from(token.clone()),
         )
@@ -334,6 +348,8 @@ impl Harness {
             store,
             search,
             tasks,
+            catalogue,
+            uploads: dir.path().join("uploads"),
             _dir: dir,
         };
         (harness, nodes, secrets)
@@ -392,6 +408,52 @@ impl Harness {
             )
         });
         (status, answer)
+    }
+
+    /// `POST /upload` with `query`, sending `body` in one piece with its length
+    /// declared, or — `chunked` — in pieces with none, the way a stream of
+    /// unknown length is sent. The answer must be JSON, whatever the status.
+    async fn upload(&self, query: &str, body: Vec<u8>, chunked: bool) -> (StatusCode, Value) {
+        let request = Request::post(format!("http://{}/upload?{query}", self.server.addr()))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token));
+        let response = if chunked {
+            let pieces: Vec<Result<Frame<Bytes>, std::convert::Infallible>> = body
+                .chunks(64 * 1024)
+                .map(|piece| Ok(Frame::data(Bytes::copy_from_slice(piece))))
+                .collect();
+            let body = StreamBody::new(futures_lite::stream::iter(pieces));
+            Hyper::builder(TokioExecutor::new())
+                .build_http()
+                .request(request.body(body).unwrap())
+                .await
+        } else {
+            Hyper::builder(TokioExecutor::new())
+                .build_http()
+                .request(request.body(Full::new(Bytes::from(body))).unwrap())
+                .await
+        };
+        let response = response.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let answer = serde_json::from_slice(&body).unwrap_or_else(|_| {
+            panic!(
+                "a {status} answer that is not JSON: {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+        (status, answer)
+    }
+
+    /// What is held in the upload directory: uploads received and not yet
+    /// taken.
+    fn held(&self) -> Vec<String> {
+        std::fs::read_dir(&self.uploads)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Sends `method` to `path` and returns the status, one header and the
@@ -575,8 +637,8 @@ async fn every_refusal_is_answered_in_json_with_its_http_status() {
     // were — browsers and proxies read them.
     let harness = Harness::start().await;
 
-    for path in ["/rpc", "/events"] {
-        let method = if path == "/rpc" { "POST" } else { "GET" };
+    for path in ["/rpc", "/events", "/upload"] {
+        let method = if path == "/events" { "GET" } else { "POST" };
         let (status, challenge, answer) = harness.raw(method, path, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
         assert_eq!(raw_code(&answer), -32001, "{method} {path}: {answer}");
@@ -1524,6 +1586,167 @@ async fn a_ticket_carries_directions_to_this_group() {
             .any(|(member, addr)| *member == harness.node.id() && !addr.direct.is_empty()),
         "a joiner has to be able to reach a core node: {:?}",
         ticket.core
+    );
+
+    harness.shutdown().await;
+}
+
+/// D5: a browser's door into `library.add`. A file larger than axum's default
+/// two-megabyte body limit is taken — the body is streamed, so that limit is
+/// not the one in force — and becomes an item under the name it was uploaded
+/// with, after which nothing of the upload is left.
+#[tokio::test]
+async fn an_uploaded_file_becomes_an_item_and_is_not_kept() {
+    let harness = Harness::start().await;
+
+    let (status, uploaded) = harness
+        .upload(
+            "filename=V%C3%A1lka%20s%20mloky.epub",
+            vec![7_u8; 3_000_000],
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    assert_eq!(uploaded["filename"], "Válka s mloky.epub");
+    assert_eq!(uploaded["size"], 3_000_000);
+    assert_eq!(harness.held(), [uploaded["upload"].as_str().unwrap()]);
+
+    let added = harness
+        .call(
+            "library.add",
+            json!({ "kind": "ebook", "uploads": [uploaded["upload"]], "title": "Válka s mloky" }),
+        )
+        .await;
+    assert_eq!(added["created"], true, "{added}");
+    assert!(harness.held().is_empty(), "taken, so removed");
+
+    let item: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    let stored = harness.catalogue.item(item).await.unwrap().unwrap();
+    let file = stored.files.values().next().unwrap();
+    assert_eq!(file.filename, "Válka s mloky.epub");
+    assert_eq!(file.format, "epub");
+    assert_eq!(file.size, 3_000_000);
+
+    harness.shutdown().await;
+}
+
+/// `[api] max_upload_bytes` bounds an upload whether its length is declared —
+/// refused before a byte is read — or not, and nothing of a refused upload is
+/// left behind.
+#[tokio::test]
+async fn an_upload_is_capped_whether_or_not_it_says_how_long_it_is() {
+    let harness = Harness::start().await;
+    let at_the_cap = vec![1_u8; usize::try_from(MAX_UPLOAD).unwrap()];
+    let over_it = vec![1_u8; usize::try_from(MAX_UPLOAD).unwrap() + 1];
+
+    for chunked in [false, true] {
+        let (status, answer) = harness
+            .upload("filename=big.mkv", at_the_cap.clone(), chunked)
+            .await;
+        assert_eq!(status, StatusCode::OK, "chunked: {chunked}: {answer}");
+        assert_eq!(answer["size"], MAX_UPLOAD);
+
+        let before = harness.held();
+        let (status, answer) = harness
+            .upload("filename=big.mkv", over_it.clone(), chunked)
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "chunked: {chunked}");
+        assert_eq!(raw_code(&answer), -32602, "{answer}");
+        assert_eq!(
+            harness.held(),
+            before,
+            "chunked: {chunked}: nothing left of it"
+        );
+    }
+
+    harness.shutdown().await;
+}
+
+/// An upload's name becomes a file's name in a shared catalogue, so it has to
+/// be one plain name with an extension — never a path — and a refusal says
+/// why, in JSON like everything else.
+#[tokio::test]
+async fn an_upload_needs_a_plain_filename() {
+    let harness = Harness::start().await;
+
+    for query in [
+        "",
+        "name=mloky.epub",
+        "filename=",
+        "filename=..%2F..%2Fescape.epub",
+        "filename=a%2Fb.epub",
+        "filename=a%5Cb.epub",
+        "filename=..",
+        "filename=.epub",
+        "filename=mloky",
+    ] {
+        let (status, answer) = harness.upload(query, b"bytes".to_vec(), false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query:?}: {answer}");
+        assert_eq!(raw_code(&answer), -32602, "{query:?}: {answer}");
+    }
+    assert!(harness.held().is_empty());
+
+    harness.shutdown().await;
+}
+
+/// An upload is taken once, by the `library.add` it is named to — which
+/// takes it whether it succeeds or not — and a call naming files by path and
+/// by upload at once, or neither, is refused.
+#[tokio::test]
+async fn library_add_takes_an_upload_once() {
+    let harness = Harness::start().await;
+    let upload = async |name: &str| {
+        let (_, uploaded) = harness
+            .upload(&format!("filename={name}"), name.as_bytes().to_vec(), false)
+            .await;
+        uploaded["upload"].clone()
+    };
+
+    let first = upload("first.epub").await;
+    harness
+        .call(
+            "library.add",
+            json!({ "kind": "ebook", "uploads": [first] }),
+        )
+        .await;
+    let again = harness
+        .refuse(
+            "library.add",
+            json!({ "kind": "ebook", "uploads": [first] }),
+        )
+        .await;
+    assert!(again.to_string().contains("no such upload"), "{again}");
+
+    let both = upload("both.epub").await;
+    let refused = harness
+        .refuse(
+            "library.add",
+            json!({ "kind": "ebook", "uploads": [both], "files": ["/etc/hostname"] }),
+        )
+        .await;
+    assert!(refused.to_string().contains("not both"), "{refused}");
+    assert!(
+        harness.held().is_empty(),
+        "a refused add takes its uploads too"
+    );
+
+    let neither = harness
+        .refuse("library.add", json!({ "kind": "ebook" }))
+        .await;
+    assert!(
+        neither.to_string().contains("at least one file"),
+        "{neither}"
+    );
+
+    let malformed = harness
+        .refuse(
+            "library.add",
+            json!({ "kind": "ebook", "uploads": ["../../etc"] }),
+        )
+        .await;
+    assert!(
+        malformed.to_string().contains("not an upload id"),
+        "{malformed}"
     );
 
     harness.shutdown().await;

@@ -1169,6 +1169,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blake3",
+ "data-encoding",
  "distlib-consensus",
  "distlib-core",
  "distlib-net",
@@ -1176,6 +1177,7 @@ dependencies = [
  "distlib-sync",
  "distlib-ui",
  "futures-lite",
+ "getrandom 0.3.4",
  "http-body-util",
  "hyper",
  "hyper-util",

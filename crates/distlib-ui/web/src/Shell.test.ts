@@ -108,6 +108,15 @@ describe("the shell", () => {
     expect(call).toHaveBeenLastCalledWith("library.item", { item_id: "b".repeat(64) });
   });
 
+  it("opens the page for adding an item from its link", async () => {
+    open();
+
+    await fireEvent.click(screen.getByRole("link", { name: "Add" }));
+
+    await screen.findByRole("heading", { name: "Add an item" });
+    expect(current()?.textContent).toBe("Add");
+  });
+
   it("says when the address names no page", async () => {
     navigate("/shelves");
     open();

@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use crate::{
     rpc::Error,
     tasks::{self, Downloaded, Source, Tasks},
+    uploads::{UploadId, Uploads},
 };
 
 /// A ceiling on a page's `limit` — `library.search`'s and `library.list`'s —
@@ -74,6 +75,8 @@ pub struct Api {
     /// download_dir`, resolved against the data directory. Created when first
     /// needed, so a node nobody downloads through never has one.
     pub downloads: PathBuf,
+    /// Files `POST /upload` has received, for `library.add`'s `uploads`.
+    pub uploads: Uploads,
 }
 
 impl Api {
@@ -533,9 +536,32 @@ impl Api {
     /// `converge.rs`'s `it is what it contains` pins as an invariant nothing
     /// upstream of the domain type should be able to break twice.
     async fn add(&self, params: Add) -> Result<Value, Error> {
-        if params.files.is_empty() {
-            return Err(Error::invalid_params("library.add needs at least one file"));
+        // Uploads are taken — and so removed when this returns, whatever it
+        // returns — before anything else can refuse the call, so a refused
+        // `add` does not leave its uploads behind for the next start.
+        let mut staged = Vec::with_capacity(params.uploads.len());
+        let mut uploaded = Vec::with_capacity(params.uploads.len());
+        for upload in &params.uploads {
+            let (path, guard) = self
+                .uploads
+                .take(*upload)
+                .await
+                .map_err(|error| Error::invalid_params(error.to_string()))?;
+            staged.push(guard);
+            uploaded.push(path);
         }
+        let paths = match (params.files.is_empty(), uploaded.is_empty()) {
+            (false, true) => &params.files,
+            (true, false) => &uploaded,
+            (true, true) => {
+                return Err(Error::invalid_params("library.add needs at least one file"));
+            }
+            (false, false) => {
+                return Err(Error::invalid_params(
+                    "library.add takes files or uploads, not both",
+                ));
+            }
+        };
 
         // A placeholder: `fingerprint` reads only `files`, so the real id
         // is not known until every path is hashed into the same
@@ -558,7 +584,7 @@ impl Api {
         // says so.
         let mut named: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut item = Item::new(ItemId::from_bytes([0; 32]));
-        for path in &params.files {
+        for path in paths {
             let (hash, record) = self.hash_file(path).await?;
             if !item.files.contains_key(&hash)
                 && let Some(first) = named.get(&record.filename)
@@ -1462,7 +1488,13 @@ struct ItemParams {
 #[serde(deny_unknown_fields)]
 struct Add {
     kind: ItemKind,
+    /// Paths on the node's machine — the CLI's door.
+    #[serde(default)]
     files: Vec<PathBuf>,
+    /// What `POST /upload` answered with — the browser's. Exactly one of the
+    /// two is given.
+    #[serde(default)]
+    uploads: Vec<UploadId>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]

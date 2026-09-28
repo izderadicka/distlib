@@ -12,6 +12,7 @@ export type Route =
   /** Browsing, or with `query`, searching; `number` counts from one. */
   | { page: "library"; query: string; number: number }
   | { page: "item"; id: string }
+  | { page: "add" }
   | { page: "node" }
   | { page: "missing" };
 
@@ -30,6 +31,8 @@ export function parse(url: URL): Route {
         number: Number.isInteger(number) && number >= 1 ? number : 1,
       };
     }
+    case "/add":
+      return { page: "add" };
     case "/node":
       return { page: "node" };
     default: {
@@ -55,6 +58,8 @@ export function href(route: Route): string {
     }
     case "item":
       return `/items/${route.id}`;
+    case "add":
+      return "/add";
     case "node":
       return "/node";
     case "missing":

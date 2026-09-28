@@ -19,7 +19,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use distlib_api::tasks::Tasks;
+use distlib_api::{tasks::Tasks, uploads::Uploads};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
@@ -57,6 +57,8 @@ pub struct Runtime {
     tasks: Tasks,
     /// `[library] download_dir`, resolved against the data directory.
     downloads: PathBuf,
+    /// What the web UI uploads, held for `library.add`.
+    uploads: Uploads,
     router: Router,
 }
 
@@ -152,6 +154,9 @@ impl Runtime {
             .await
             .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
         let tasks = Tasks::new(distlib_api::events::bus());
+        // Clears what a previous run was sent and never added.
+        let uploads = Uploads::open(data_dir.root().join("uploads"), config.api.max_upload_bytes)
+            .context("could not clear the web UI's upload directory")?;
         let projection = Projection::start(
             catalogue.clone(),
             store.clone(),
@@ -182,6 +187,7 @@ impl Runtime {
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
+            uploads,
             router,
         })
     }
@@ -225,6 +231,11 @@ impl Runtime {
     /// The downloads this node is running or has run, for the API.
     pub fn tasks(&self) -> &Tasks {
         &self.tasks
+    }
+
+    /// Where the web UI's uploads wait for `library.add`.
+    pub fn uploads(&self) -> &Uploads {
+        &self.uploads
     }
 
     /// Where a download asked for without a destination is written.
