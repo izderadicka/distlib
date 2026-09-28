@@ -8,8 +8,8 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: built.** Every sub-phase below is merged, in nineteen PRs (#58–#76), and so is C12. One
-end-of-phase item is not done: the by-hand §11 run in `manual-check.md` — see
-[Verification](#verification). What the phase leaves open is listed in
+end-of-phase item is not done: running the by-hand §11 in `manual-check.md`, which is written but
+has not been run — see [Verification](#verification). What the phase leaves open is listed in
 [Carried out of Phase 3](#carried-out-of-phase-3--open-and-where-it-goes).
 
 Phase 2 is complete and merged: the catalogue converges across the group, every node answers queries
@@ -545,5 +545,5 @@ At the end of the phase:
   P3-21); a file uploaded on one node's page, found and downloaded byte for byte on the other's, and
   an upload over the cap refused (3b-4a, P3-22). The Playwright suite drives each flow on one node on
   every PR.
-- **The §11 runbook is not written, and the phase has not been run end to end by hand.** It is the
-  one item of this plan left undone.
+- **The §11 runbook is written** — two nodes, two browser windows, every flow of the phase — **and
+  has not yet been run.** Running it is the one item of this plan left undone.

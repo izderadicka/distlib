@@ -3,7 +3,8 @@
 Sections 1–6 are phase 1's acceptance sentence, run through the CLI in five separate
 processes. **[§10](#10-a-fresh-member-syncs-searches-downloads-and-still-serves--phase-2)
 is phase 2's**, and it stands on its own: three nodes, its own setup, nothing carried
-over from what is below.
+over from what is below. **[§11](#11-everything-from-phase-2-through-the-browser-phase-3)
+is phase 3's** — two nodes and two browser windows — and stands on its own the same way.
 
 Phase 1's sentence:
 
@@ -666,6 +667,217 @@ rm -rf $DL
 
 ---
 
+## 11. Everything from phase 2, through the browser (phase 3)
+
+> *Everything from Phase 2 done through the browser; download progress streams live.*
+
+The Playwright suite (`npm run e2e`) drives each flow on one node on every PR, and the
+Vitest suite pins every page's behaviour. What neither does is a **person, two nodes and
+two browser windows**: an item added on one node's page and watched arriving on the
+other's, a download big enough to watch and to reload in the middle of, and whether the
+pages say what is going on in words that make sense to somebody who did not write them.
+
+Independent of everything above — stop everything and start clean:
+
+```sh
+pgrep -af distlib       # must be empty
+rm -rf $DL
+```
+
+### Setup
+
+**Build the UI first.** A debug build reads `crates/distlib-ui/web/dist` as it runs, so
+the order does not matter for `cargo build` — but without a built UI every page is the
+placeholder that says so.
+
+```sh
+(cd crates/distlib-ui/web && npm ci && npm run build)
+cargo build
+```
+
+Two nodes. **Alice is core; bob follows** and gets a small upload cap, so that a refusal
+can be seen on his page without making a 16 GB file.
+
+```sh
+for n in a b; do dl -d $DL/$n init; done
+A=$(dl -d $DL/a whoami | awk '/^identity/{print $2}')
+B=$(dl -d $DL/b whoami | awk '/^identity/{print $2}')
+
+cat > $DL/a/config.toml <<EOF
+[net]
+bind_addr_v4 = "127.0.0.1:11204"
+relay_mode = "disabled"
+relay_urls = []
+
+[consensus]
+core = [ { member = "$A", name = "alice", addrs = ["127.0.0.1:11204"] } ]
+
+[api]
+enabled = true
+bind_addr = "127.0.0.1:11280"
+EOF
+
+cat > $DL/b/config.toml <<EOF
+[net]
+bind_addr_v4 = "127.0.0.1:11205"
+relay_mode = "disabled"
+relay_urls = []
+
+[consensus]
+core = []
+
+[api]
+enabled = true
+bind_addr = "127.0.0.1:11281"
+max_upload_bytes = 2000000
+EOF
+```
+
+Something to upload: three small books, and **one file of a gigabyte**, which is what
+makes a download on loopback last long enough to watch and to reload in the middle of.
+
+```sh
+mkdir -p $DL/files
+for f in dune dune-messiah children-of-dune; do
+  yes "$f, in full" | head -20000 > $DL/files/$f.epub
+done
+head -c 1G /dev/urandom > $DL/files/lectures.mkv
+head -c 5M /dev/urandom > $DL/files/too-big.pdf
+```
+
+**On WSL** a Windows browser reaches the nodes on `127.0.0.1` as usual, and the file
+picker finds these under `\\wsl.localhost\<distro>` followed by the path `echo $DL/files`
+prints.
+
+### Alice's page, and bob arriving on it
+
+Terminal a:
+
+```sh
+dl -d $DL/a -v run --found-group      # wait for members=1
+```
+
+Terminal 0:
+
+```sh
+dl -d $DL/a ui
+```
+
+Open the link. **Pass:** the page shows **Live**; the address bar has no `#token=` left in
+it; **Node** shows this node, its group and alice as the one member. Keep the tab open.
+
+```sh
+dl -d $DL/a admit $B --name bob
+```
+
+**Pass:** bob appears in alice's **Members** without a reload.
+
+```sh
+dl -d $DL/b join $(dl -d $DL/a ticket | head -1)
+```
+
+Terminal b:
+
+```sh
+dl -d $DL/b -v run                    # wait for members=2
+```
+
+Terminal 0 — **in a second browser window**, so both pages are in view at once:
+
+```sh
+dl -d $DL/b ui
+```
+
+A tab signs in only itself: each tab keeps its token for itself, so a new tab needs the link
+again.
+
+### Alice adds items in her page
+
+On alice's page, **Add**. Choose the three `.epub` files, type **Dune** as the title and
+**Frank Herbert** as the author, set the type to ebook, and **Add**.
+
+**Pass:** a bar reads `Uploading 1 of 3 …`, then `2 of 3`, `3 of 3`; alice's page moves
+to the new item, with all three files listed.
+
+**Add** again with `lectures.mkv` alone, title **Lectures**, type video. It takes a while
+— the bytes are written twice, once to staging and once into the store (D5). **Pass:** the
+bar moves steadily, and the item's page opens.
+
+### Bob finds them
+
+Watch bob's **Library** while alice adds. **Pass:** each item appears in bob's list
+without a reload — possibly first with a title and no author, as the fields arrive on
+their own schedules.
+
+Search `herbert` on bob's page. **Pass:** Dune is found; the address bar now carries
+`?q=herbert`; a reload keeps the search; **back** returns to the full list. Open Dune.
+**Pass:** the page shows its author, type, the three files ordered by name, and when it
+was last changed.
+
+### Bob downloads, and reloads in the middle
+
+Open **Lectures** on bob's page and **Download**.
+
+**Pass:** a bar with files and bytes starts climbing. **Reload the page** while it is
+somewhere in the middle. **Pass:** the bar comes back by itself, at or past where it was,
+without a click, and runs on to the end; then the file's path and `fetched`.
+
+```sh
+cmp $DL/b/downloads/lectures.mkv $DL/files/lectures.mkv
+```
+
+**Download** again. **Pass:** `already there` — nothing fetched, nothing written.
+
+Now start one from the command line while bob's page is open on the Dune item:
+
+```sh
+mkdir -p $DL/b-cli
+dl -d $DL/b download <dune's id, from the page's address> --dest $DL/b-cli
+```
+
+**Pass:** the page picks it up and shows it, though nobody clicked there.
+
+### Bob edits, alice sees it
+
+On bob's Dune page, **Edit**. Change the title to **Dune (1965)**, add a year, **Save**.
+**Pass:** the form closes and the page shows the new title. On alice's page, open Dune —
+or leave it open: **Pass:** it shows the new title and the year shortly after, without a
+reload.
+
+**Edit** again, empty the title, **Save**. **Pass:** refused, naming the title; nothing is
+sent. **Cancel**.
+
+### Bob's page refuses what it should
+
+On bob's page, **Add**, choose `too-big.pdf` (5 MB against bob's 2 MB cap), give it a
+title, **Add**. **Pass:** refused with a message that says the file is too large — the
+node's own words, not a broken connection — and nothing left behind:
+
+```sh
+ls -A $DL/b/uploads 2>/dev/null       # prints nothing
+```
+
+### The node goes away
+
+Ctrl-C terminal b. **Pass:** bob's page says **Cannot reach the node** and keeps showing
+what it had. Start bob again:
+
+```sh
+dl -d $DL/b -v run
+```
+
+**Pass:** the page goes back to **Live** by itself, within about thirty seconds, and
+answers clicks again. A reload stays signed in.
+
+### After
+
+```sh
+pgrep -af distlib
+rm -rf $DL
+```
+
+---
+
 ## Watch for, beyond pass/fail
 
 - Does any error leave you without a next step?
@@ -685,3 +897,11 @@ rm -rf $DL
 - Is "this item has no files yet" readable as "wait a moment", or as "something is
   broken"?
 - Is there anything that tells you a fetch is in progress on a large file?
+- Does any page leave you without a next step — a refusal, an empty library, a node that
+  went away, a tab that is not signed in?
+- Is it clear while an upload is being *added*, after its bar is full, that something is
+  still happening?
+- Is "already in the library" after an **Add** readable as "your details were not
+  applied"?
+- Does an item that arrives field by field look broken while it does?
+- Do two windows on two nodes ever disagree for longer than a sync should take?
