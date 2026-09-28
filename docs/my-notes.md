@@ -43,3 +43,6 @@ So I think it'll be enough to delete only non-content files -   and add them aga
 
 ## String literals
 Do not like much string literals uses as constants - like method names,  etc. We should replace them with enums, where possible
+
+## Parallel add/upload and download
+Can we have parallel upload and download -  for items with multiple file.  For downloads from different peers - as many parallel as there is peer having that file.
