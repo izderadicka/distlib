@@ -814,6 +814,122 @@ async fn a_demoted_node_catches_up_on_what_it_missed() {
     }
 }
 
+/// C12: a node demoted and then promoted again, in one process, votes again.
+///
+/// Two ways it used to fail, and this catches both. The role task promoted at
+/// most once, so the second promotion was never acted on. And with that fixed
+/// alone, the node flapped: `Raft::new` re-applied the log it still held from
+/// before its demotion, rebuilt a core group without it, and it stood down as
+/// soon as it had sat down — which is why promotion now empties the log too.
+///
+/// Slow for the reason `a_demoted_node_catches_up_on_what_it_missed` is: the
+/// demoted node learns of its promotion by its follow loop's idle poll.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_demoted_node_promoted_again_votes_again() {
+    let peers = a_founded_trio().await;
+    let trio: Vec<_> = peers
+        .iter()
+        .map(|peer| (peer.id, peer.addr.clone()))
+        .collect();
+
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: trio[..2].to_vec(),
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the demotion to be pending").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        peers[2].node.raft().is_none()
+    })
+    .await;
+
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged { core: trio.clone() },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the promotion to be pending").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+    until_upto(PATIENTLY, "the node to take its seat again", || {
+        peers[2].node.raft().is_some()
+    })
+    .await;
+    until_upto(PATIENTLY, "openraft to count it a voter again", || {
+        peers[0].node.raft().is_some_and(|raft| {
+            raft.metrics()
+                .borrow()
+                .membership_config
+                .voter_ids()
+                .count()
+                == 3
+        })
+    })
+    .await;
+    wait_for_upto(&peers[2], PATIENTLY, "it to be caught up", |m| {
+        *m == peers[0].node.membership()
+    })
+    .await;
+
+    // Nothing commits now without it: two of three is the majority. The one
+    // stopped is not the leader, so what is measured is its vote rather than
+    // how fast an election settles.
+    let leader = peers[0]
+        .node
+        .raft()
+        .and_then(|raft| raft.metrics().borrow().current_leader)
+        .map(|id| MemberId::try_from(id).expect("a leader id is a member id"));
+    let (stays, goes) = if leader == Some(peers[1].id) {
+        (&peers[1], &peers[0])
+    } else {
+        (&peers[0], &peers[1])
+    };
+    goes.shutdown().await;
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    stays
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "newcomer".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &stays.secret,
+        )
+        .await
+        .unwrap();
+    wait_for_upto(&peers[2], PATIENTLY, "a change it had to vote for", |m| {
+        m.is_member(&newcomer)
+    })
+    .await;
+    assert!(
+        peers[2].node.raft().is_some() && peers[2].node.is_core(),
+        "and it is still seated, rather than standing down again"
+    );
+
+    stays.shutdown().await;
+    peers[2].shutdown().await;
+}
+
 #[tokio::test]
 async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
     // §4.4 end to end, and the sub-phase's own acceptance: any member may

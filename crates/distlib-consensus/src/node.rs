@@ -447,24 +447,21 @@ impl MembershipNode {
         let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
         let config = Arc::new(raft_config().validate().map_err(raft_failed)?);
 
-        // The log store goes to whichever of the two will write it: openraft
-        // now, or the promotion task later. A follower's is left over and
-        // stays empty — it folds what it fetches straight into the state
-        // machine and never writes an entry — which is exactly what a node
-        // being added as a learner should have.
-        let (seat, spare_log) = if is_core {
+        // A voter's openraft writes the log store now; the role task keeps a
+        // clone for every later promotion, which empties it first.
+        let seat = if is_core {
             let raft = Raft::new(
                 RawMemberId::from(id),
                 Arc::clone(&config),
                 network.clone(),
-                log,
+                log.clone(),
                 state_machine.clone(),
             )
             .await
             .map_err(raft_failed)?;
-            (Seat::holding(raft), None)
+            Seat::holding(raft)
         } else {
-            (Seat::empty(), Some(log))
+            Seat::empty()
         };
 
         // Configuration, until the log can say better. A follower being
@@ -525,7 +522,7 @@ impl MembershipNode {
             me: id,
             config,
             network,
-            log: spare_log,
+            log,
             state_machine: state_machine.clone(),
             client: memberlog.clone(),
             sources: Arc::clone(&sources),
@@ -536,7 +533,7 @@ impl MembershipNode {
             follow: Arc::clone(&follow),
             core_group: Arc::clone(&core_group),
         };
-        if role.log.is_some() {
+        if !is_core {
             start(
                 &follow,
                 tokio::spawn(follower::follow(role.following(), listens)),
@@ -1044,18 +1041,17 @@ impl MembershipNode {
 /// Everything a node needs in order to change role without restarting.
 ///
 /// Held by the task rather than by the node: nothing here is any use to a node
-/// whose role is not changing, and most of it is consumed exactly once.
+/// whose role is not changing.
 struct Role {
     me: MemberId,
     config: Arc<Config>,
     network: RaftNetworkFactoryImpl,
-    /// The Raft log store, for a node that does not have a Raft yet.
+    /// The Raft log store, for each Raft this node builds on being promoted.
     ///
-    /// A follower opens one and never writes to it — it folds what it fetches
-    /// straight into the state machine — so this is empty, which is exactly
-    /// what a new learner should have. `None` on a node that started as a
-    /// voter, whose openraft owns it.
-    log: Option<LogStore>,
+    /// A clone of the one a voter's openraft writes. Promotion empties it,
+    /// because a node that voted before still holds entries a new learner must
+    /// not have.
+    log: LogStore,
     state_machine: StateMachineStore,
     client: MemberlogClient,
     sources: SharedSources,
@@ -1091,19 +1087,19 @@ impl Role {
 /// guarantees each half needs — nothing can promote a node midway through
 /// standing it down.
 ///
-/// **Promotion is once, demotion is once, and then the node needs a restart.**
-/// A demoted node's Raft log is no longer the empty one a new learner should
-/// have, and handing it back to `Raft::new` is a case nothing here has tested;
-/// the entry in the phase-2 register says so. A restart re-reads the
-/// projection, comes up as a follower, and the promotion path is available
-/// again from there.
-async fn serve_role(mut role: Role) {
-    if let Some(log) = role.log.take()
-        && !take_the_seat(&role, log).await
-    {
-        return;
+/// **As many times as the log says**, which was C12: this used to promote at
+/// most once and demote at most once, and a node demoted and promoted again
+/// stayed a follower while the log called it a voter. Going round again is
+/// sound because promotion puts the node back exactly where a follower that
+/// never voted starts — a blank state machine and an empty Raft log — so the
+/// second seat is the first one over again.
+async fn serve_role(role: Role) {
+    loop {
+        if role.seat.raft().is_none() && !take_the_seat(&role).await {
+            return;
+        }
+        stand_down(&role).await;
     }
-    stand_down(role).await;
 }
 
 /// Waits for the log to say this node no longer votes, and then makes that
@@ -1136,7 +1132,7 @@ async fn serve_role(mut role: Role) {
 /// gossip does not change sides — a demoted node keeps the announcing half it
 /// had as a voter, so nothing pokes its new follow loop and the timer is what
 /// it waits on.
-async fn stand_down(role: Role) {
+async fn stand_down(role: &Role) {
     let mut memberships = role.state_machine.subscribe();
     loop {
         {
@@ -1196,12 +1192,14 @@ async fn stand_down(role: Role) {
 ///    gives *now* — because step 3 takes that knowledge away, and step 4
 ///    leaves a node with no voters of its own for as long as it takes to be
 ///    caught up. See [`TrustedCore`].
-/// 3. **Blank the state machine.** Not tidiness: a node with a founded log and
-///    no Raft voters of its own is one that `RaftProtocol` refuses consensus
-///    to, by the rule that stops a follower being talked into a group it is
-///    not in (P1-22). A promoted node that kept its projection would refuse
-///    the very replication meant to catch it up. Blanking puts it back into
-///    the window step 2 just seeded. See
+/// 3. **Blank the state machine, and the Raft log with it.** Not tidiness: a
+///    node with a founded log and no Raft voters of its own is one that
+///    `RaftProtocol` refuses consensus to, by the rule that stops a follower
+///    being talked into a group it is not in (P1-22). A promoted node that
+///    kept its projection would refuse the very replication meant to catch it
+///    up. Blanking puts it back into the window step 2 just seeded. The log
+///    goes too because a node that voted before still holds one, and
+///    `Raft::new` would re-apply it and undo the blanking (C12). See
 ///    [`StateMachineStore::reset_for_promotion`], which has the measurement.
 /// 4. **Build the Raft and sit down.** `Raft::new` reads the applied state
 ///    once, at construction, which is why step 3 cannot come after it.
@@ -1210,11 +1208,12 @@ async fn stand_down(role: Role) {
 ///
 /// Returns `true` once it has done it; `false` if it could not, or if the
 /// state machine went away.
-async fn take_the_seat(role: &Role, log: LogStore) -> bool {
+async fn take_the_seat(role: &Role) -> bool {
     let Role {
         me,
         config,
         network,
+        log,
         state_machine,
         seat,
         trusted,
@@ -1253,7 +1252,7 @@ async fn take_the_seat(role: &Role, log: LogStore) -> bool {
         RawMemberId::from(*me),
         Arc::clone(config),
         network.clone(),
-        log,
+        log.clone(),
         state_machine.clone(),
     )
     .await

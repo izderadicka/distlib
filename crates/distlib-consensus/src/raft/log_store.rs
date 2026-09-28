@@ -27,7 +27,7 @@ use openraft::{
     entry::EntryPayload,
     storage::{LogFlushed, RaftLogStorage},
 };
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::{
     raft::{
@@ -48,6 +48,34 @@ const COMMITTED: &str = "committed";
 const LAST_PURGED: &str = "last_purged";
 
 type Entry = openraft::impls::Entry<TypeConfig>;
+
+/// Empties the log inside `txn`, for a node about to be promoted — what a new
+/// learner should have.
+///
+/// Its only caller is [`crate::StateMachineStore::reset_for_promotion`], and
+/// it takes that caller's transaction rather than committing its own: the two
+/// stores share one database, and a log cleared without the state machine
+/// beside it, or the other way round, is a half-promoted node on disk.
+///
+/// **The vote stays.** A term must never go backwards on a node, and the vote
+/// is the one thing here that is not about which entries this node holds.
+///
+/// Why the entries cannot stay is C12: `Raft::new` re-applies everything up to
+/// the stored committed pointer. On a node that voted before, that rebuilds
+/// the projection as it stood when the node was demoted — a core group without
+/// it — so it stands down the moment it sat down, and then the follow loop
+/// promotes it again.
+pub(crate) fn clear_for_promotion(txn: &WriteTransaction) -> StorageResult<()> {
+    let fail = writing(ErrorSubject::Logs);
+    txn.open_table(LOG)
+        .map_err(|source| fail(&source))?
+        .retain(|_, _| false)
+        .map_err(|source| fail(&source))?;
+    let mut meta = txn.open_table(META).map_err(|source| fail(&source))?;
+    meta.remove(COMMITTED).map_err(|source| fail(&source))?;
+    meta.remove(LAST_PURGED).map_err(|source| fail(&source))?;
+    Ok(())
+}
 
 /// A Raft log stored in a redb database.
 ///
