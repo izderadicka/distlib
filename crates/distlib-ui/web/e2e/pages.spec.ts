@@ -175,3 +175,19 @@ test("a file chosen in the browser becomes an item", async ({ page, node }) => {
   await page.getByRole("link", { name: "Library" }).click();
   await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
 });
+
+test("an item's details are edited from its page", async ({ page, node }) => {
+  node.add("rur.epub", "a play", "--kind", "ebook", "--title", "RUR", "--author", "Karel Čapek");
+  await page.goto(node.link);
+  await page.getByRole("link", { name: "RUR" }).click();
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByLabel("Title").fill("R.U.R.");
+  await page.getByLabel("Year").fill("1920");
+  await page.getByRole("button", { name: "Save" }).click();
+
+  // Read back from the node, the way anybody else would see it.
+  await expect(page.getByRole("heading", { name: "R.U.R." })).toBeVisible();
+  await expect(page.getByText("1920")).toBeVisible();
+  await expect(page.getByText("Karel Čapek")).toBeVisible();
+});
