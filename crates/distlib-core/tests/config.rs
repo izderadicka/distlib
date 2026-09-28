@@ -179,6 +179,9 @@ fn the_starter_file_reloads_as_what_it_came_from() {
             enabled: false,
             bind_addr: "127.0.0.1:11999".parse().unwrap(),
         },
+        library: distlib_core::LibraryConfig {
+            download_dir: "/srv/books".into(),
+        },
     };
 
     let rendered = config.to_starter_toml();

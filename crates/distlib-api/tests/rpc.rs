@@ -166,6 +166,7 @@ impl Harness {
                 store: store.clone(),
                 search: search.clone(),
                 tasks: tasks.clone(),
+                downloads: dir.path().join("downloads"),
             },
             SecretString::from(token.clone()),
         )
@@ -318,6 +319,7 @@ impl Harness {
                 store: store.clone(),
                 search: search.clone(),
                 tasks: tasks.clone(),
+                downloads: dir.path().join("downloads"),
             },
             SecretString::from(token.clone()),
         )

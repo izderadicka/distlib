@@ -307,6 +307,11 @@ DISTLIB_NET__BIND_ADDR_V4=0.0.0.0:11204 distlib run
 before a group exists, and it is never consulted again once one does. Everything else
 about who belongs comes from the log.
 
+`[library] download_dir` is where a download started from the web UI writes its
+files — `downloads` under the data directory unless set, or an absolute path. It is
+created when first needed. `distlib download` writes to the working directory, or
+`--dest`.
+
 The data directory is the one thing that cannot be configured in the file, since the
 file lives inside it. Use `--data-dir` or `DISTLIB_DATA_DIR`; setting `data_dir` in the
 config is an error rather than being silently ignored.

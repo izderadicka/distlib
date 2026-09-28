@@ -42,6 +42,7 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         store: runtime.store().clone(),
         search: runtime.search().clone(),
         tasks: runtime.tasks().clone(),
+        downloads: runtime.downloads().to_path_buf(),
     }
 }
 

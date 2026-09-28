@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { type Page, test as base, expect } from "@playwright/test";
 
 import { aStranger, Node } from "./node";
@@ -139,4 +142,16 @@ test("an item added from the CLI can be browsed, searched for and opened", async
   // The item's address is one the node serves the page at.
   await page.reload();
   await expect(page.getByRole("heading", { name: "Válka s mloky" })).toBeVisible();
+});
+
+test("an item downloads from its page into the node's download directory", async ({ page, node }) => {
+  node.add("mloci.epub", "a book to take home", "--kind", "ebook", "--title", "Válka s mloky");
+  await page.goto(node.link);
+  await page.getByRole("link", { name: "Válka s mloky" }).click();
+
+  await page.getByRole("button", { name: "Download" }).click();
+
+  const written = join(node.downloads, "mloci.epub");
+  await expect(page.getByText(written)).toBeVisible();
+  expect(readFileSync(written, "utf8")).toBe("a book to take home");
 });

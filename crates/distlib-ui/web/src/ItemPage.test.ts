@@ -100,6 +100,7 @@ describe("the item page", () => {
       ["c1.mp3", "content", "mp3", "11 B"],
       ["c2.mp3", "content", "mp3", "12 B"],
     ]);
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   });
 
   it("leaves out what nobody has said", async () => {

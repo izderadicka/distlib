@@ -5,6 +5,7 @@
   // when it comes.
   import { onMount } from "svelte";
 
+  import Download from "./Download.svelte";
   import type { Listen } from "./lib/events";
   import { bytes, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
@@ -80,6 +81,8 @@
     </dl>
     {#if item.description}<p class="description">{item.description}</p>{/if}
   </section>
+
+  <Download {id} {listen} {onUnauthorised} />
 
   <section>
     <h2>Files <span class="count">{Object.keys(item.files).length}</span></h2>
