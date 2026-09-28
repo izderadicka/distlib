@@ -1,0 +1,11 @@
+# What the image build never needs: build output, installed packages, and
+# anything local. The UI is built inside the image, so a local `web/dist`
+# must not stand in for it.
+target/
+**/node_modules/
+crates/distlib-ui/web/dist/
+crates/distlib-ui/web/test-results/
+.git/
+.env
+.env.*
+docs/my-notes.md

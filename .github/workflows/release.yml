@@ -1,0 +1,184 @@
+name: Release
+
+# A tag `v*` makes a release: the web UI built once, a binary for each of the
+# three platforms CI tests with the UI embedded, each started on its own and
+# checked to serve that UI, the Docker image built and checked the same way —
+# and only once all of that has passed, the binaries attached to a GitHub
+# Release and the image pushed to GHCR.
+#
+# A pull request that changes how releases are made runs all of it except the
+# publishing, and so can a run started by hand.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile
+      - .dockerignore
+      - scripts/check-ui.sh
+      - scripts/smoke-test.sh
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The name archives carry: the tag when there is one.
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
+
+jobs:
+  ui:
+    name: ui (build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag names the version being built
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: crates/distlib-ui/web/.nvmrc
+          cache: npm
+          cache-dependency-path: crates/distlib-ui/web/package-lock.json
+      - run: npm ci
+        working-directory: crates/distlib-ui/web
+      - run: npm run build
+        working-directory: crates/distlib-ui/web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: crates/distlib-ui/web/dist/
+          retention-days: 1
+
+  binaries:
+    name: binary (${{ matrix.target }})
+    needs: ui
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, exe: "" }
+          - { os: macos-latest, target: aarch64-apple-darwin, exe: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: .exe }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: crates/distlib-ui/web/dist/
+      # A release build embeds `web/dist` as it is when compiled.
+      - run: cargo build --release --locked -p distlib
+      # With the UI's files gone from the tree, so only what is embedded can
+      # be served.
+      - name: Smoke test
+        run: |
+          rm -rf crates/distlib-ui/web/dist
+          scripts/smoke-test.sh "target/release/distlib${{ matrix.exe }}"
+      - name: Package
+        run: |
+          name="distlib-$VERSION-${{ matrix.target }}"
+          mkdir -p "out/$name"
+          cp "target/release/distlib${{ matrix.exe }}" README.md "out/$name/"
+          cd out
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            7z a -bso0 "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            out/*.tar.gz
+            out/*.zip
+          retention-days: 7
+
+  docker:
+    name: docker (build + check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t distlib:release .
+      - name: Check the image serves the UI
+        run: |
+          docker volume create distlib-check
+          docker run --rm -v distlib-check:/data distlib:release init
+          docker run -d --name distlib-check -v distlib-check:/data -p 127.0.0.1:11280:11280 distlib:release
+          if ! scripts/check-ui.sh http://127.0.0.1:11280; then
+            docker logs distlib-check
+            exit 1
+          fi
+          # The link a person running the image asks for.
+          docker exec distlib-check distlib ui
+      # Kept for the release job, which pushes it only once everything passed.
+      - name: Save the image
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: docker save distlib:release | gzip > distlib-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: docker-image
+          path: distlib-image.tar.gz
+          retention-days: 1
+
+  publish:
+    name: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist/
+          merge-multiple: true
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "distlib $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            ./*
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+      - name: Push the image to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker load < distlib-image.tar.gz
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "${GITHUB_REF_NAME#v}" latest; do
+            docker tag distlib:release "$image:$tag"
+            docker push "$image:$tag"
+          done

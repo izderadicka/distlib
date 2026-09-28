@@ -71,7 +71,36 @@ cargo build --release
 
 A release build embeds whatever `crates/distlib-ui/web/dist` holds when it is
 compiled, so the binary needs no files beside it. A debug build reads that folder
-while it runs, so after rebuilding the UI a reload in the browser is enough.
+while it runs, so after rebuilding the UI a reload in the browser is enough. A
+release binary built *before* the UI was keeps the placeholder until
+`cargo clean --release -p distlib-ui` makes cargo compile it again.
+
+Prebuilt binaries, UI included, for Linux (x86_64), macOS (Apple silicon) and
+Windows (x86_64) are attached to each [GitHub release](https://github.com/izderadicka/distlib/releases).
+
+## Docker
+
+The image is the node with its UI, and its data directory is `/data`:
+
+```sh
+docker volume create distlib
+docker run --rm -v distlib:/data ghcr.io/izderadicka/distlib init
+docker run -d --name distlib -v distlib:/data \
+  -p 127.0.0.1:11280:11280 -p 11204:11204/udp \
+  ghcr.io/izderadicka/distlib
+docker exec distlib distlib ui   # the link that opens the UI, signed in
+```
+
+Inside the container both listeners bind every interface, and `-p` decides what
+the host exposes. The API is published on the host's loopback above: it is guarded
+by its token, but there is no TLS on it — see [Behind a reverse proxy](#behind-a-reverse-proxy)
+for reaching it from elsewhere. The UDP port is the one other members dial: the image fixes it at
+11204, so the address to give them — for their `[consensus] core`, say — is the
+host's, with that port.
+Every command works through `docker exec distlib distlib …`, and `/data/config.toml`
+is the config file, with `DISTLIB_*` variables (`docker run -e`) overriding it.
+
+`docker build -t distlib .` builds the same image from a checkout.
 
 ## Quickstart: found a group
 
@@ -349,6 +378,33 @@ propose membership changes as itself. That is narrower than holding the node's k
 nothing it proposes escapes the group's rules, and every proposal is signed and
 attributed — but it is not nothing, and there is no TLS in front of it. Set
 `enabled = false` under `[api]` to switch it off.
+
+### Behind a reverse proxy
+
+To reach a node's UI from another machine, keep the API on loopback and put a
+reverse proxy in front of it that terminates TLS; `distlib ui --base-url
+https://library.example.org` then prints a link at the proxy's address.
+
+**Turn response buffering off for `/events`.** Most proxies buffer a response
+before passing it on, which turns the live event stream into delayed lumps — the
+page then shows progress and changes late, or not at all until the buffer fills.
+In nginx:
+
+```nginx
+location /events {
+    proxy_pass http://127.0.0.1:11280;
+    proxy_buffering off;
+}
+location / {
+    proxy_pass http://127.0.0.1:11280;
+    client_max_body_size 16g;     # uploads from the Add page, as [api] max_upload_bytes
+    proxy_request_buffering off;  # pass an upload on as it arrives, not once spooled
+}
+```
+
+The stream sends a keep-alive every fifteen seconds, so a proxy's usual idle
+timeout does not close it. Other proxies have the same switches under their own
+names.
 
 
 Global flags: `--data-dir/-d`, `--config/-c`, `--verbose/-v` (repeat for more).

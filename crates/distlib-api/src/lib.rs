@@ -24,9 +24,11 @@
 //! The default listener is `127.0.0.1`, which is a default rather than a
 //! promise: a node on a server or in a container has to be reachable from
 //! somewhere else. Nothing here refuses to bind elsewhere, and nothing here
-//! offers TLS either, so a non-loopback address wants a reverse proxy in front
-//! of it. TLS and whatever authentication belongs beside it are phase 3's, with
-//! the UI that needs them.
+//! offers TLS either: **a node reached from another machine goes behind a
+//! reverse proxy that terminates TLS**, which is the README's "Behind a reverse
+//! proxy" — including why `/events` must not be buffered on the way through.
+//! Serving TLS here would mean certificates to issue, renew and trust for
+//! every node, which a proxy in front of it already knows how to do.
 
 pub mod client;
 pub mod events;
