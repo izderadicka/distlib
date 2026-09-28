@@ -181,3 +181,8 @@ form.add button {
   color: var(--muted);
   font-size: 0.85em;
 }
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}

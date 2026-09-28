@@ -6,6 +6,7 @@
   import { onMount } from "svelte";
 
   import Download from "./Download.svelte";
+  import EditItem from "./EditItem.svelte";
   import type { Listen } from "./lib/events";
   import { bytes, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
@@ -16,6 +17,7 @@
 
   let item = $state<ItemRecord | null>(null);
   let failure = $state<string | null>(null);
+  let editing = $state(false);
 
   async function load() {
     try {
@@ -60,7 +62,17 @@
   <p class="failure">{failure}</p>
 {/if}
 
-{#if item}
+{#if item && editing}
+  <EditItem
+    {item}
+    onSaved={() => {
+      editing = false;
+      reload();
+    }}
+    onCancel={() => (editing = false)}
+    {onUnauthorised}
+  />
+{:else if item}
   <section>
     <h2>{#if item.title}{item.title}{:else}<span class="unnamed">no title</span>{/if}</h2>
     <dl>
@@ -80,6 +92,7 @@
       <dd><code>{item.item_id}</code></dd>
     </dl>
     {#if item.description}<p class="description">{item.description}</p>{/if}
+    <button onclick={() => (editing = true)}>Edit</button>
   </section>
 
   <Download {id} {listen} {onUnauthorised} />

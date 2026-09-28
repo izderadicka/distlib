@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ItemPage from "./ItemPage.svelte";
@@ -215,6 +215,35 @@ describe("the item page", () => {
 
     await screen.findByText("Válka s mloky");
     expect(screen.queryByText(/no such item/)).toBeNull();
+  });
+
+  it("opens its edit form, and after a save closes it and loads the item again", async () => {
+    open();
+    await screen.findByText("Válka s mloky");
+    await fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("heading", { name: "Edit" })).toBeTruthy();
+
+    answer = { ...MLOCI, title: "War with the Newts" };
+    await fireEvent.input(screen.getByLabelText(/^Title/), { target: { value: "War with the Newts" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await screen.findByRole("heading", { name: "War with the Newts" });
+    expect(screen.queryByRole("heading", { name: "Edit" })).toBeNull();
+    expect(call).toHaveBeenCalledWith("library.edit_metadata", {
+      item_id: MLOCI.item_id,
+      fields: { title: "War with the Newts" },
+    });
+  });
+
+  it("closes its edit form unchanged when the edit is cancelled", async () => {
+    open();
+    await screen.findByText("Válka s mloky");
+    await fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.getByRole("heading", { name: "Válka s mloky" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Edit" })).toBeNull();
   });
 
   it("hands a refused token up to whoever signs the tab in", async () => {
