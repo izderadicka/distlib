@@ -90,6 +90,13 @@ pub struct ApiConfig {
     /// TLS yet, so a non-loopback address wants a reverse proxy in front of it
     /// until there is.
     pub bind_addr: SocketAddr,
+
+    /// The largest file the web UI may upload in one go, in bytes.
+    ///
+    /// A guard against a mistake — a wrong file picked, a disk about to fill —
+    /// rather than against whoever holds the token, who can add any file on
+    /// this machine by its path. Large enough for a long audiobook or a film.
+    pub max_upload_bytes: u64,
 }
 
 impl Default for ApiConfig {
@@ -97,6 +104,7 @@ impl Default for ApiConfig {
         Self {
             enabled: true,
             bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11280)),
+            max_upload_bytes: 16_000_000_000,
         }
     }
 }
@@ -292,6 +300,10 @@ impl Config {
              enabled = {api_enabled}\n\
              bind_addr = \"{api_bind}\"\n\
              \n\
+             # The largest file the web UI may upload at once, in bytes. Files\n\
+             # added by path with `distlib add` are not limited.\n\
+             max_upload_bytes = {max_upload}\n\
+             \n\
              [library]\n\
              # Where a download started from the web UI writes its files, created\n\
              # when first needed. Relative to the data directory, or absolute.\n\
@@ -302,6 +314,7 @@ impl Config {
             relay_urls = quoted(&self.net.relay_urls),
             api_enabled = self.api.enabled,
             api_bind = self.api.bind_addr,
+            max_upload = self.api.max_upload_bytes,
             download_dir = self.library.download_dir.display(),
             core = self
                 .consensus

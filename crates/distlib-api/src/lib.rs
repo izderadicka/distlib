@@ -33,13 +33,21 @@ pub mod events;
 pub mod methods;
 pub mod rpc;
 pub mod tasks;
+pub mod uploads;
 
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Request as HttpRequest, State, rejection::StringRejection},
-    http::{HeaderMap, Method, StatusCode, Uri, header::AUTHORIZATION, header::WWW_AUTHENTICATE},
+    body::Body,
+    extract::{
+        Query, Request as HttpRequest, State,
+        rejection::{QueryRejection, StringRejection},
+    },
+    http::{
+        HeaderMap, Method, StatusCode, Uri,
+        header::{AUTHORIZATION, CONTENT_LENGTH, WWW_AUTHENTICATE},
+    },
     middleware::{self, Next},
     response::{
         IntoResponse, Response as HttpResponse,
@@ -48,12 +56,14 @@ use axum::{
     routing::{get, post},
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
 pub use client::{Client, ClientError, Events, Watched};
 pub use methods::Api;
 use rpc::{Error, Request, Response};
+use uploads::UploadError;
 
 /// A running API server.
 pub struct Server {
@@ -103,12 +113,13 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
         api.tasks.events().clone(),
     ));
     let shared = Arc::new(Shared { api, token });
-    // The token guards these two routes rather than the whole router, so that
+    // The token guards these routes rather than the whole router, so that
     // the UI's files are served beside them unguarded (D3) and an unknown path
     // is answered as unknown rather than as unauthorised.
     let router = Router::new()
         .route("/rpc", post(handle))
         .route("/events", get(watch))
+        .route("/upload", post(upload))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&shared),
             require_token,
@@ -194,6 +205,65 @@ async fn watch(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
     let running = shared.api.tasks.running();
     Sse::new(events::frames(running, live))
         .keep_alive(KeepAlive::new().interval(events::KEEP_ALIVE))
+}
+
+/// `POST /upload`'s query.
+#[derive(Debug, Deserialize)]
+struct UploadQuery {
+    filename: String,
+}
+
+/// `POST /upload?filename=…`: one file, as the raw request body (D5).
+///
+/// Streamed to disk rather than read into memory, so axum's default body
+/// limit, which applies to the extractors that buffer, is not what bounds it:
+/// `[api] max_upload_bytes` is, checked against a declared length before
+/// anything is read and against the bytes themselves as they arrive — a body
+/// sent in chunks declares none. Answers with the upload's id, for
+/// `library.add`; every refusal is JSON, like the rest of the API (D9).
+async fn upload(
+    State(shared): State<Arc<Shared>>,
+    query: Result<Query<UploadQuery>, QueryRejection>,
+    headers: HeaderMap,
+    body: Body,
+) -> HttpResponse {
+    let Ok(Query(UploadQuery { filename })) = query else {
+        return refused(
+            StatusCode::BAD_REQUEST,
+            Error::invalid_params("POST /upload needs the file's name, as ?filename="),
+        );
+    };
+    let uploads = &shared.api.uploads;
+    let declared = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|length| length.to_str().ok()?.parse::<u64>().ok());
+    let result = if declared.is_some_and(|length| length > uploads.max_bytes()) {
+        Err(UploadError::TooLarge {
+            max: uploads.max_bytes(),
+        })
+    } else {
+        uploads.receive(&filename, body).await
+    };
+    match result {
+        Ok(uploaded) => Json(uploaded).into_response(),
+        Err(error) => {
+            let (status, answer) = match error {
+                UploadError::TooLarge { .. } => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Error::invalid_params(error.to_string()),
+                ),
+                UploadError::Filename(_) | UploadError::Broken(_) | UploadError::Unknown(_) => (
+                    StatusCode::BAD_REQUEST,
+                    Error::invalid_params(error.to_string()),
+                ),
+                UploadError::Io { .. } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Error::failed(error.to_string()),
+                ),
+            };
+            refused(status, answer)
+        }
+    }
 }
 
 /// One JSON-RPC call.

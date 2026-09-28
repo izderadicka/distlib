@@ -36,6 +36,9 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 tokio = { workspace = true }
 futures-lite = { workspace = true }
+# For `POST /upload`: a random id for each upload, written in hex.
+getrandom = { workspace = true }
+data-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 secrecy = { workspace = true }

@@ -5,6 +5,7 @@
 // shape, is a type error here rather than an `undefined` in the page. Only
 // what a page calls is listed; the types follow `distlib-api`'s answers.
 
+import type { Fields } from "./metadata";
 import { forgetToken, token } from "./token";
 
 /** `node.status`. */
@@ -126,6 +127,10 @@ interface Methods {
     result: ItemPage;
   };
   "library.item": { params: { item_id: string }; result: ItemRecord };
+  "library.add": {
+    params: { uploads: string[] } & Fields;
+    result: { item_id: string; created: boolean; title: string | null; contributed_files: string[] };
+  };
   /** Without `dest`: into the node's own `[library] download_dir`. */
   "library.download": { params: { item_id: string }; result: { task_id: number } };
   "library.task": { params: { task_id: number }; result: TaskState };

@@ -4,6 +4,7 @@
   // events is held here, for whichever page is open to listen to (D2, D6).
   import { onMount } from "svelte";
 
+  import AddPage from "./AddPage.svelte";
   import ItemPage from "./ItemPage.svelte";
   import LibraryPage from "./LibraryPage.svelte";
   import NodePage from "./NodePage.svelte";
@@ -38,6 +39,7 @@
 
 <nav>
   <a href="/" aria-current={router.route.page === "library" ? "page" : undefined}>Library</a>
+  <a href="/add" aria-current={router.route.page === "add" ? "page" : undefined}>Add</a>
   <a href="/node" aria-current={router.route.page === "node" ? "page" : undefined}>Node</a>
 </nav>
 
@@ -58,6 +60,8 @@
     <LibraryPage route={router.route} {listen} {onUnauthorised} />
   {:else if router.route.page === "item"}
     <ItemPage id={router.route.id} {listen} {onUnauthorised} />
+  {:else if router.route.page === "add"}
+    <AddPage {onUnauthorised} />
   {:else if router.route.page === "node"}
     <NodePage {listen} {onUnauthorised} />
   {:else}

@@ -117,7 +117,7 @@ blake3 = "=1.8.7"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 # Pinned to what iroh already brings in, so the local API adds no second copy.
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 serde_json = "=1.0.151"
 getrandom = "=0.3.4"
 data-encoding = "=2.11.1"

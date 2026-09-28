@@ -146,6 +146,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                     search: runtime.search().clone(),
                     tasks: runtime.tasks().clone(),
                     downloads: runtime.downloads().to_path_buf(),
+                    uploads: runtime.uploads().clone(),
                 },
             )
             .await?,

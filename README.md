@@ -307,6 +307,9 @@ DISTLIB_NET__BIND_ADDR_V4=0.0.0.0:11204 distlib run
 before a group exists, and it is never consulted again once one does. Everything else
 about who belongs comes from the log.
 
+`[api] max_upload_bytes` caps one file uploaded from the web UI's Add page — 16 GB
+unless set. Files added by path with `distlib add` are not limited by it.
+
 `[library] download_dir` is where a download started from the web UI writes its
 files — `downloads` under the data directory unless set, or an absolute path. It is
 created when first needed. `distlib download` writes to the working directory, or
