@@ -7,6 +7,11 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 ## Context
 
+**Status: built.** Every sub-phase below is merged, in nineteen PRs (#58–#76), and so is C12. One
+end-of-phase item is not done: running the by-hand §11 in `manual-check.md`, which is written but
+has not been run — see [Verification](#verification). What the phase leaves open is listed in
+[Carried out of Phase 3](#carried-out-of-phase-3--open-and-where-it-goes).
+
 Phase 2 is complete and merged: the catalogue converges across the group, every node answers queries
 from its own SQLite + tantivy projection, files move as content-addressed blobs, and all of it is
 reachable from the CLI. The thirteen items phase 2 carried out of itself were triaged into C1–C13,
@@ -196,6 +201,10 @@ header. Alternative rejected explicitly: gating the assets means the browser can
 its first navigation, which forces either a cookie or a token in the path — both worse than what
 they would be protecting.
 
+**Revised in 3b-1 (P3-16): `distlib ui` prints the link, not `distlib run`.** A link carrying the
+token is a credential, and `run`'s output is what ends up in a log file or a service's journal;
+`run` logs the page's address and names the command instead. The rest of D3 stands as written.
+
 **D4 — `library.download` becomes asynchronous and answers `{task_id, files}`.**
 This departs from [`methods.rs:565`](../../crates/distlib-api/src/methods.rs)'s own prediction that
 turning it into a task later would be "an addition rather than a change: the answer gains a field".
@@ -233,6 +242,13 @@ Two alternatives rejected: a cargo feature (splits the test matrix and makes the
 broken one), and committing the real `dist` (a build artefact in every review diff, going stale
 silently whenever somebody forgets).
 
+**Revised in 3b-1 (P3-16): the goal held, the committed `ui/dist` did not.** A placeholder committed
+there is overwritten by every local `npm run build`, leaving the tree dirty. Instead `web/dist` is
+git-ignored, embedded with `rust-embed`'s `allow_missing` (which ground truth 11 could not check
+offline), and a committed `placeholder.html` is served when no built page exists. The one cost is
+recorded in P3-24: a *release* binary built before the UI keeps the placeholder until the UI crate is
+recompiled.
+
 **D8 — Group admin is read-only in the UI this phase.**
 §7.3's page list includes group administration, but §9's phase-3 checklist names search/browse, item
 detail, downloads and add-item, and the acceptance criterion is the library flow. One click that
@@ -263,19 +279,26 @@ this fills a gap rather than contradicting one.
 Twelve PRs, plus C12, which is a test with no phase of its own (below). Each ends compiling, tested, and — from 3a-1 on — demonstrable by hand with `curl` or
 the CLI. One PR at a time, review before the next.
 
-### 3a — API and events (7 PRs)
+**As built: nineteen.** 3b-1, 3b-2 and 3b-4 each went in two PRs, to keep a review to one concern;
+C12 took a PR of its own, being a fix rather than a test; and three were not planned at all — #63, a
+proposal racing an election that Windows CI found (P3-11); #65, a download retried after a partial
+failure (P3-14, from review of #64); and #69, end-to-end tests in a real browser (P3-18, from review
+of #68).
+
+### 3a — API and events (7 PRs, done)
 
 Rust only. Every step is verifiable without a browser, which is the point of doing all of it before
 any of 3b.
 
-- **3a-0 — widen the CI matrix.** Alone, and first. P0-6 has now been deferred twice, phase 2 added
+- **3a-0 — widen the CI matrix.** *Done: #58 (P3-1 to P3-5).* Alone, and first. P0-6 has now been deferred twice, phase 2 added
   three on-disk stores, and ground truth 12 says the token file is probably unprotected on Windows.
   Budget generously: "whatever it breaks" is the deliverable, and finding it here is far cheaper
   than finding it while also debugging rust-embed and a Dockerfile.
   **Acceptance:** CI green on Linux, macOS and Windows; the token file is either given equivalent
   protection on Windows or the gap is recorded as a delta with the reason.
 
-- **3a-1 — the event bus and `GET /events`.** An `Event` enum in `distlib-core`; a
+- **3a-1 — the event bus and `GET /events`.** *Done: #59 (P3-6, P3-7) — the `Api` tax was deferred
+  there and paid once in 3a-5.* An `Event` enum in `distlib-core`; a
   `broadcast::Sender<Event>` **created by the binary** at
   [`commands.rs:129`](../../crates/distlib/src/commands.rs) and handed to both `Projection::start`
   and `Api` — not created by the projection, because download events come from `distlib-api` and a
@@ -296,7 +319,7 @@ any of 3b.
   construction sites (one in production, five in tests), and this phase adds a bus, a task registry
   and a staging directory. Bundle them behind one struct here, or decide explicitly to keep paying.
 
-- **3a-2 — the catalogue tap.** The projection publishes after it commits; `upsert_item` reports
+- **3a-2 — the catalogue tap.** *Done: #60 (P3-8).* The projection publishes after it commits; `upsert_item` reports
   created-versus-updated (ground truth 5); `catalogue.item_added` and `catalogue.item_changed` reach
   the stream.
   **Acceptance:** an item written on A produces `item_added` for a subscriber on B; a second write to
@@ -308,11 +331,11 @@ any of 3b.
   emit nothing**: it runs on every start, not only a cold one (C7), so emitting would push every
   subscriber straight into `Lagged` at startup. A rebuild of the read model is not news.
 
-- **3a-3 — `library.edit_metadata`.** The one §7.1 method phase 3 owns (ground truth 13).
+- **3a-3 — `library.edit_metadata`.** *Done: #61 (P3-9).* The one §7.1 method phase 3 owns (ground truth 13).
   **Acceptance:** a title edited on A converges to B, `item_changed` arrives, and `library.item`
   shows the new value on both.
 
-- **3a-4 — progress-aware fetch.** `Blobs::fetch_with_progress` beside the existing `fetch`,
+- **3a-4 — progress-aware fetch.** *Done: #62 (P3-10).* `Blobs::fetch_with_progress` beside the existing `fetch`,
   reimplementing the terminal contract of ground truth 2 — because `complete()` is private, the three
   rules are ours to get right, and a fetch that reports success on a stream that ended in an error
   would be worse than no progress at all.
@@ -321,7 +344,7 @@ any of 3b.
   **Watch for:** progress is not monotonic, so the *client* clamps to a high-water mark. A bar that
   jumps backwards on a provider failover is the library being honest, not a bug to fix in the stream.
 
-- **3a-5 — download as a task.** A task registry in `distlib-api/src/tasks.rs` — not in
+- **3a-5 — download as a task.** *Done: #64 (P3-12, P3-13), and #65 for a retry (P3-14).* A task registry in `distlib-api/src/tasks.rs` — not in
   `distlib-store`, whose identity is "these tables are a function of the document", and not a new
   crate for one map. In memory, capped, and pruned, because a registry that grows for the life of the
   process is a leak with a nice name. **On connect, the stream replays a snapshot of in-flight tasks
@@ -333,17 +356,20 @@ any of 3b.
   method, not the command); a subscriber sees progress climb to the total and **exactly one**
   terminal event.
 
-- **3a-6 — browse and paging.** `library.list {offset, limit}`, `offset` on `library.search`, and a
+- **3a-6 — browse and paging.** *Done: #66 (P3-15).* `library.list {offset, limit}`, `offset` on `library.search`, and a
   paged `Store::items`. No `filters` object — P2-21 stands, and a browse page does not need one.
   **Acceptance:** 250 items read in three pages with no overlap and no gap, and the same at an offset
   past the end.
 
-### 3b — UI (4 PRs)
+### 3b — UI (4 PRs planned, 7 built, done)
 
 Svelte 5, as §7.3 specifies. §7.3 says minimal and flat, and "boring" is the instruction rather than
 a hedge.
 
-- **3b-1 — the shell.** Vite + Svelte under `crates/distlib-api/ui/`, `rust-embed` over `ui/dist`,
+- **3b-1 — the shell.** *Done in two: #67 serves the UI, #68 builds it (P3-16, P3-17); #69 added
+  browser tests (P3-18). **Revised**: the UI is its own crate, `distlib-ui`, with the npm project in
+  `crates/distlib-ui/web/` rather than `crates/distlib-api/ui/`, and the link is printed by
+  `distlib ui` (D3's revision).* Vite + Svelte under `crates/distlib-api/ui/`, `rust-embed` over `ui/dist`,
   an SPA fallback route, the `#token=` handoff, a typed RPC client, an SSE client with reconnect and
   backoff, and a read-only members / node page. This is the highest-leverage PR of the phase: until
   it exists, every other UI PR is unverifiable end to end.
@@ -354,23 +380,25 @@ a hedge.
   secured. And clippy runs `--all-features -D warnings`, so an `#[allow]` on the embed module
   pre-empts a lint against generated code landing at the worst possible moment.
 
-- **3b-2 — search, browse and item detail.** Including `last_modified`, which the projection already
+- **3b-2 — search, browse and item detail.** *Done in two: #70 the library and a router (P3-19),
+  #71 the item page (P3-20).* Including `last_modified`, which the projection already
   has; `added_by` and `created` do not exist to show (C8).
   **Acceptance:** a catalogue written on another node is searchable, browsable and readable in the
   browser.
 
-- **3b-3 — download with progress.**
+- **3b-3 — download with progress.** *Done: #72 (P3-21), with `dest` made optional.*
   **Acceptance:** the second half of §9's criterion — a download started in the browser streams its
   progress live, and survives a page reload.
 
-- **3b-4 — add item and edit metadata.** The upload door of D5, and `library.edit_metadata` from a
+- **3b-4 — add item and edit metadata.** *Done in two: #73 add (P3-22), #74 edit (P3-23).* The upload door of D5, and `library.edit_metadata` from a
   form.
   **Acceptance:** a file chosen in a file picker becomes an item that another node can see and
   download.
 
-### 3c — packaging (1 PR)
+### 3c — packaging (1 PR, done)
 
-- **3c-1 — release and Docker.** A CI job that builds the UI and embeds it, a Dockerfile, release
+- **3c-1 — release and Docker.** *Done: #75 (P3-24). The publishing half runs on the first tag and
+  has not run yet.* A CI job that builds the UI and embeds it, a Dockerfile, release
   artefacts for the three operating systems 3a-0 made green, and a fix to
   [`lib.rs`](../../crates/distlib-api/src/lib.rs)'s doc comment, which currently promises TLS is
   "phase 3's" — the honest sentence is a reverse proxy, and the Dockerfile is where binding to
@@ -389,6 +417,13 @@ a hedge.
 **C12 is not given a slot of its own.** It is a test of about fifty lines — promote a node, demote
 it, promote it again — blocked on nothing and related to nothing else here. Land it whenever the
 queue is free, in whichever sub-phase it happens to fall between.
+
+**Wrong, and closed by a fix: #76 (P3-25).** The test found two bugs behind "probably fine". The
+role task changed role at most once each way, so a second promotion was never acted on; and with
+that fixed, `Raft::new` re-applied the log the node held from before its demotion, rebuilt a core
+group without it, and the node flapped between voter and follower. Promotion now empties the Raft
+log with the state machine, in one transaction, keeping the vote. The phase-2 register's "a restart
+works" was wrong for the same reason, and is fixed by the same change.
 
 ---
 
@@ -409,8 +444,32 @@ Every C-number appears here, so that the phase-2 triage has a successor rather t
 | **C9** | `PENDING_EXPIRY` is one fixed count | **Deferred to phase 5**, where §5.5's policy-event machinery lands. |
 | **C10** | The fast lane is not fast | **Closed** on the way out of phase 2. |
 | **C11** | A demoted core node keeps running as a voter | **Closed** in phase 2 (MEM-04). |
-| **C12** | A node cannot be promoted, demoted and promoted again | **Taken**, without a PR slot of its own — see [C12 — no PR slot](#c12--no-pr-slot). |
+| **C12** | A node cannot be promoted, demoted and promoted again | **Closed** by #76 (P3-25) — a fix, not only a test; see [C12 — no PR slot](#c12--no-pr-slot). |
 | **C13** | Gossip does not change sides when a node is promoted | **Deferred.** Nothing blocks it and nothing wants it; unreachable by anything the code can currently produce. |
+
+---
+
+## Carried out of Phase 3 — open, and where it goes
+
+Phase 2's rule holds: C-numbers are permanent handles, a closed one is not reused, and new items take
+the next number. **From phase 2**, eight are still open, unchanged by this phase except where the
+table above says so: **C5** and **C8** go to phase 4, **C9** to phase 5, and **C1**, **C3**, **C6**,
+**C7** and **C13** stay deferred with no phase, each waiting on a measurement or a reason.
+
+**New in phase 3**, each recorded in the delta it came from:
+
+| # | Item | Where it goes, and what it waits on |
+|---|---|---|
+| **C14** | **`sync.status` does not exist** (D6) — the UI cannot show neighbours or sync rounds | **Phase 4.** Its material is the three events the pump discards, and reaching them means widening `Batch` or the pump; §5.6's availability work is the first phase that wants who is reachable. |
+| **C15** | **Group admin in the UI is read-only** (D8) | **No phase.** Admitting and expelling from a page needs a confirmation surface and a story for proposals pending approval; the CLI does it all meanwhile. Taken when somebody asks for it in the browser. |
+| **C16** | **On Windows, the key and token files' privacy is not enforced** (P3-3) | **No phase.** The default data directory is private by its profile ACL; enforcing it is ~100 lines of `unsafe` FFI or a new dependency. 3c was named as the point to revisit and did not: the trigger is Windows being offered as a server rather than a desktop. |
+| **C17** | **`distlib` cannot run as a Windows service** (P3-5) | **No phase**, same trigger as C16 — it needs a service wrapper, and 3c shipped a plain binary. |
+| **C18** | **A metadata field cannot be cleared** (P3-9, P3-23) | **No phase.** Needs a per-field tombstone in the *catalogue*, the same kind of change as C8; the UI refuses an emptied field meanwhile. |
+| **C19** | **Downloads are in-memory tasks with no list** (P3-12, P3-21) — lost on restart, no Downloads page, and the UI downloads whole items only | **No phase.** A `library.tasks` method and a page are small additions when a page wants them; surviving a restart is a real design question, not an addition. |
+| **C20** | **The CSP still allows `style-src 'unsafe-inline'`**, which the pages turned out not to need (P3-18) | **Carried to later phases**, at Ivan's call: kept open because a later page may want inline styles. Revisit when a phase adds pages; the change is one line either way. |
+| **C21** | **Titles sort with ASCII case folding only** (P3-15) — `Č` sorts after `Z` | **No phase.** A locale-correct order wants an ICU-class dependency; Ivan's call was to wait until somebody needs it. |
+| **C22** | **The consensus test peers cannot restart in place**, so two claims are pinned by argument only: a proposal riding out an election (P3-11), and promotion after a restart (P3-25) | **No phase.** Wants a test peer that keeps its data directory and address across a restart — which is also P1-23's address problem in the test harness. Worth doing the next time consensus changes. |
+| **C23** | **Release publishing has never run** (P3-24) — `gh release create` and the GHCR push only run on a tag | **The first `v*` tag.** Everything before publishing runs on every PR that touches the release files. After the first push the GHCR package has to be made public once, by hand. |
 
 ---
 
@@ -435,6 +494,11 @@ seconds", never "the next event is X". A test that pins a sequence here is a fla
 
 **The JS build is not a cargo test.** It gets its own CI job, and a UI test beyond "it builds" is out
 of scope for this phase — said plainly so that its absence is a decision rather than an oversight.
+
+**Reversed at the review of #68 (P3-17, P3-18).** Every UI feature is tested like the Rust is:
+Vitest unit and component tests are the main machinery, each mutation-checked, and Playwright drives
+a few common happy paths in a real browser against a real node. Both run in CI jobs that no Rust job
+depends on, so the supply-chain rule below still holds.
 
 ---
 
@@ -473,3 +537,13 @@ At the end of the phase:
 - The same criteria added to [`manual-check.md`](../manual-check.md) as a by-hand §11 — because the
   by-hand run is what found P1-39, P1-40 and P1-41 in phase 1, and three more mistakes in phase 2
   that no test noticed.
+
+**Where this stands at the end of the phase:**
+
+- The acceptance has been driven through a browser **in pieces**, each by hand on two nodes joined
+  by ticket, at the PR that built it: a 1 GB download reloaded mid-way and resumed its bar (3b-3,
+  P3-21); a file uploaded on one node's page, found and downloaded byte for byte on the other's, and
+  an upload over the cap refused (3b-4a, P3-22). The Playwright suite drives each flow on one node on
+  every PR.
+- **The §11 runbook is written** — two nodes, two browser windows, every flow of the phase — **and
+  has not yet been run.** Running it is the one item of this plan left undone.
