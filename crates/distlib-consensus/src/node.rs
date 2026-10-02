@@ -188,6 +188,15 @@ pub enum NodeError {
     /// and this node then failed to reach that membership itself.
     #[error("this node did not catch up to the membership at index {changed_at}")]
     BehindTheGroup { changed_at: u64 },
+
+    /// A proposal committed, but this node did not apply it in time to say
+    /// what became of it.
+    ///
+    /// Not a failure of the proposal — the group has it — so it is not
+    /// [`NodeError::BehindTheGroup`], which is about a proposal that never got
+    /// that far.
+    #[error("committed at index {index}, but this node has not caught up with it yet")]
+    NotYetApplied { index: u64 },
 }
 
 /// The result of starting or driving a node.
@@ -319,6 +328,14 @@ pub struct MembershipNode {
     /// is a fact about the group rather than about this task, so it lives on
     /// the node rather than inside the follow loop.
     expelled: watch::Sender<bool>,
+
+    /// The follow loop's wake-up, shared with the gossip listener.
+    ///
+    /// Held so a follower's own proposal can wake it: the core node that
+    /// committed the entry has just said how far the log reaches, and waiting
+    /// for gossip to say it again would put [`Self::propose`]'s answer behind
+    /// the idle poll whenever gossip is not getting through.
+    hints: watch::Sender<gossip::Hint>,
 }
 
 // `openraft::Raft` does not implement `Debug`, and there is nothing useful to
@@ -492,7 +509,7 @@ impl MembershipNode {
             state_machine.clone(),
             id,
             is_core,
-            hints,
+            hints.clone(),
             TopicParts {
                 endpoint: endpoint.clone(),
                 // The endpoint's key *is* this member's key — it is what the
@@ -573,6 +590,7 @@ impl MembershipNode {
             core_group,
             role,
             expelled,
+            hints,
         })
     }
 
@@ -778,9 +796,12 @@ impl MembershipNode {
     /// openraft returns `ForwardToLeader` and expects the application to do the
     /// forwarding itself.
     ///
-    /// Returns once the event is committed. If this node is the leader that is
-    /// also when it has been applied here; otherwise it arrives with the next
-    /// replication.
+    /// Returns once the event is committed **and applied here**, so whatever
+    /// the caller reads from [`Self::membership`] next already includes it.
+    /// Committed alone was the leader's view: anywhere else the entry arrived
+    /// with the next replication, and a caller asking at once whether its
+    /// proposal was still pending found nothing under its index and reported a
+    /// waiting expulsion as done (found by hand after phase 3).
     ///
     /// Signing happens here rather than in the caller because a proposal is
     /// made *against a particular membership* — see
@@ -795,7 +816,23 @@ impl MembershipNode {
     /// difference is a question about [`MembershipState::pending`], keyed by
     /// exactly this index.
     pub async fn propose(&self, event: MembershipEvent, secret_key: &SecretKey) -> Result<u64> {
-        match self.propose_once(&event, secret_key).await {
+        let index = self.propose_and_retry(&event, secret_key).await?;
+        // `changed_at` moves on every applied entry the fold accepts, and a
+        // committed proposal is one it accepted, so this cannot wait on an
+        // index that will never be reached here.
+        self.catch_up_to(index)
+            .await
+            .map_err(|_| NodeError::NotYetApplied { index })?;
+        Ok(index)
+    }
+
+    /// [`Self::propose_once`], once more after catching up if it was stale.
+    async fn propose_and_retry(
+        &self,
+        event: &MembershipEvent,
+        secret_key: &SecretKey,
+    ) -> Result<u64> {
+        match self.propose_once(event, secret_key).await {
             // Somebody else changed the membership between reading it and
             // committing this. Catch up to what the group actually is, then
             // propose against that.
@@ -807,7 +844,7 @@ impl MembershipNode {
             // statement honest.
             Err(NodeError::Event(ConsensusError::StaleProposal { current, .. })) => {
                 self.catch_up_to(current).await?;
-                self.propose_once(&event, secret_key).await
+                self.propose_once(event, secret_key).await
             }
             other => other,
         }
@@ -873,7 +910,12 @@ impl MembershipNode {
         let mut unreached = None;
         for (member, addr) in candidates {
             match self.memberlog.propose(member, &addr, event.clone()).await {
-                Ok(index) => return Ok(index),
+                Ok(index) => {
+                    // The node that committed it holds it, so the follow loop
+                    // has somewhere to fetch it from right now.
+                    self.hints.send_replace(gossip::Hint::Reaches(index));
+                    return Ok(index);
+                }
                 // The rules refused it. Every node reaches that verdict
                 // identically, so asking somebody else cannot change it.
                 Err(ProposeError::Rejected(error)) => return Err(NodeError::Event(error)),

@@ -984,6 +984,18 @@ async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
         )
         .await
         .unwrap();
+    // Asked at once, not waited for. `propose` returns once the entry is
+    // applied *here*, which is what lets the API say "waiting" rather than
+    // finding nothing under the index and calling it done — the follower's own
+    // `distlib expel` printed `expelled` for exactly this, found by hand.
+    assert!(
+        follower
+            .node
+            .membership()
+            .pending()
+            .any(|(index, _)| index == proposal),
+        "the proposer's own node must already hold its proposal as pending"
+    );
     assert_eq!(
         raft_voters(&peers[0]).len(),
         3,
@@ -1040,6 +1052,162 @@ async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
 
     follower.shutdown().await;
     for peer in peers {
+        peer.shutdown().await;
+    }
+}
+
+/// A demoted node is the one follower gossip does not wake — it keeps the
+/// announcing half it had as a voter — so its follow loop sits out the idle
+/// poll. `propose` waits for its own entry to be applied here, and without the
+/// nudge it gives its own follow loop that wait is the whole poll, about as
+/// long as the bound it waits under: a change that committed, reported as one
+/// this node never caught up with.
+#[tokio::test]
+async fn a_demoted_node_hears_its_own_proposal_at_once() {
+    let peers = a_founded_trio().await;
+    let pair: Vec<_> = peers[..2]
+        .iter()
+        .map(|peer| (peer.id, peer.addr.clone()))
+        .collect();
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged { core: pair },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the demotion to be pending").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        peers[2].node.raft().is_none()
+    })
+    .await;
+
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    let proposed = tokio::time::timeout(
+        Duration::from_secs(10),
+        peers[2].node.propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "proposed by the demoted".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &peers[2].secret,
+        ),
+    )
+    .await
+    .expect("not the idle poll's thirty seconds");
+    let index = proposed.unwrap();
+    // Waiting, not applied: it no longer votes, so its own approval does not
+    // count. What matters is that it already knows that.
+    assert!(
+        peers[2]
+            .node
+            .membership()
+            .pending()
+            .any(|(pending, _)| pending == index)
+    );
+
+    for peer in peers {
+        peer.shutdown().await;
+    }
+}
+
+/// The voter removed is the one leading, which no other test does: they remove
+/// whichever voter is not. Here the survivors stop talking to the leader the
+/// moment they apply its expulsion, so whatever takes it out of openraft's
+/// voters has to happen without its help — and the group has to commit again
+/// afterwards. Asked about after the phase 3 manual check.
+#[tokio::test]
+async fn expelling_the_leader_leaves_a_group_that_still_commits() {
+    let peers = a_founded_trio().await;
+    let leader = peers[0]
+        .node
+        .raft()
+        .and_then(|raft| raft.metrics().borrow().current_leader)
+        .map(|id| MemberId::try_from(id).expect("a leader id is a member id"))
+        .expect("a founded group has a leader");
+    let (gone, rest): (Vec<_>, Vec<_>) = peers.into_iter().partition(|peer| peer.id == leader);
+
+    // A core member proposing is its own first approval, so it stands at one
+    // of the two a trio needs.
+    let proposal = rest[0]
+        .node
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: leader,
+                reason: "the leader goes".to_owned(),
+            },
+            &rest[0].secret,
+        )
+        .await
+        .unwrap();
+    let membership = rest[0].node.membership();
+    let (_, entry) = membership
+        .pending()
+        .find(|(index, _)| *index == proposal)
+        .expect("one approval of two is still waiting");
+    assert_eq!(membership.approvals_counting(entry).count(), 1);
+
+    wait_for(&rest[1], "the proposal to reach the other survivor", |m| {
+        m.pending().any(|(index, _)| index == proposal)
+    })
+    .await;
+    // Not unwrapped, and that is a known gap rather than a tolerance. The
+    // approval is forwarded to the leader, which commits it; this node applies
+    // it, finds the leader expelled and closes its connection to it — the one
+    // the answer was coming back on. So the change takes effect and the caller
+    // may still be told the leader was unreachable. What is pinned is that the
+    // group gets past it on its own.
+    let _ = rest[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &rest[1].secret)
+        .await;
+
+    for peer in &rest {
+        until("the survivors to drop the old leader", || {
+            let voters = raft_voters(peer);
+            voters.len() == 2 && !voters.iter().any(|(member, _)| *member == leader)
+        })
+        .await;
+    }
+    until("a survivor to lead", || {
+        rest[0]
+            .node
+            .raft()
+            .and_then(|raft| raft.metrics().borrow().current_leader)
+            .is_some_and(|id| MemberId::try_from(id).is_ok_and(|id| id != leader))
+    })
+    .await;
+
+    let newcomer = MemberId::from(SecretKey::generate().public());
+    rest[0]
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: newcomer,
+                    display_name: "after the leader".to_owned(),
+                    pledge_bytes: 0,
+                },
+            },
+            &rest[0].secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&rest[1], "a change only the survivors could commit", |m| {
+        m.is_member(&newcomer) && !m.is_member(&leader)
+    })
+    .await;
+
+    for peer in gone.into_iter().chain(rest) {
         peer.shutdown().await;
     }
 }

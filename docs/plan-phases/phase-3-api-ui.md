@@ -470,6 +470,7 @@ table above says so: **C5** and **C8** go to phase 4, **C9** to phase 5, and **C
 | **C21** | **Titles sort with ASCII case folding only** (P3-15) — `Č` sorts after `Z` | **No phase.** A locale-correct order wants an ICU-class dependency; Ivan's call was to wait until somebody needs it. |
 | **C22** | **The consensus test peers cannot restart in place**, so two claims are pinned by argument only: a proposal riding out an election (P3-11), and promotion after a restart (P3-25) | **No phase.** Wants a test peer that keeps its data directory and address across a restart — which is also P1-23's address problem in the test harness. Worth doing the next time consensus changes. |
 | **C23** | **Release publishing has never run** (P3-24) — `gh release create` and the GHCR push only run on a tag | **The first `v*` tag.** Everything before publishing runs on every PR that touches the release files. After the first push the GHCR package has to be made public once, by hand. |
+| **C24** | **The last approval to expel the leader can be answered with an error although it took effect** (P3-26). The approver's node applies the expulsion and closes its connection to the old leader, which is the one the answer was coming back on; the group recovers in about four seconds | **No phase yet.** Wants the forwarding path to recognise its own write once it has been applied here, rather than retrying against a leader it has just stopped talking to. `pending` and `members` already show what happened. |
 
 ---
 

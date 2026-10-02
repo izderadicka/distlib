@@ -1128,6 +1128,12 @@ async fn approving_answers_about_the_proposal_not_about_the_approval() {
     })
     .await
     .expect("the proposal must replicate to the node serving the api");
+    let pending = harness.call("group.pending", Value::Null).await;
+    assert_eq!(
+        pending["pending"][0]["approved_by_you"],
+        json!(false),
+        "{pending}"
+    );
 
     let approved = harness
         .call("group.approve", json!({ "proposal": proposal }))
@@ -1145,9 +1151,29 @@ async fn approving_answers_about_the_proposal_not_about_the_approval() {
     );
     assert_eq!(approved["waiting"]["approvals"], json!(2));
     assert_eq!(approved["waiting"]["needed"], json!(3));
+    assert_eq!(approved["already_approved"], json!(false));
     assert!(
         harness.node.membership().is_member(&doomed),
         "and nothing has happened to them yet"
+    );
+
+    // Saying it twice is accepted — the fold allows a repeat on purpose — but
+    // the answer says so, and `pending` says whose agreement is already in.
+    // Found by hand after phase 3: both used to read exactly like a first.
+    let again = harness
+        .call("group.approve", json!({ "proposal": proposal }))
+        .await;
+    assert_eq!(again["already_approved"], json!(true), "{again}");
+    assert_eq!(
+        again["waiting"]["approvals"],
+        json!(2),
+        "and it counts once"
+    );
+    let pending = harness.call("group.pending", Value::Null).await;
+    assert_eq!(
+        pending["pending"][0]["approved_by_you"],
+        json!(true),
+        "{pending}"
     );
 
     // The third approval decides it, and only then does the answer change.
