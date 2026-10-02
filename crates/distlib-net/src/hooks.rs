@@ -289,7 +289,11 @@ impl EndpointHooks for AllowlistHooks {
         if self.allowlist.is_allowed(&peer) {
             return BeforeConnectOutcome::Accept;
         }
-        tracing::info!(
+        // `debug`: this node's own choice, not news. iroh-docs remembers the
+        // peers it last synced with and dials them on every offer, an expelled
+        // one included, so at `info` this was one line per sync round for as
+        // long as the node ran.
+        tracing::debug!(
             peer = %peer,
             alpn = %String::from_utf8_lossy(alpn),
             "refused to dial a non-member",

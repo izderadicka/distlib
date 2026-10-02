@@ -49,8 +49,15 @@ pub fn bus() -> broadcast::Sender<Event> {
     broadcast::channel(CAPACITY).0
 }
 
-/// The frames one watcher reads: `first`, then everything on the bus until it
-/// closes.
+/// The frames one watcher reads: a comment, `first`, then everything on the
+/// bus until it closes.
+///
+/// **The comment is for Firefox**, whose `fetch` resolves only once the body
+/// has sent something, where Chromium's resolves on the headers. With nothing
+/// to say, the first bytes were the keep-alive [`KEEP_ALIVE`] later, so the
+/// page read "Connecting…" for fifteen seconds while it worked (found by hand
+/// after phase 3, measured as 15.0 s in Firefox against 3 ms in Chromium). A
+/// comment is what a keep-alive is, so every watcher already skips it.
 ///
 /// `first` is what the watcher would have heard had it been connected sooner
 /// — the downloads already running, as `GET /events` uses it.
@@ -62,8 +69,11 @@ pub(crate) fn frames(
     first: Vec<Event>,
     receiver: broadcast::Receiver<Event>,
 ) -> impl Stream<Item = Result<Frame, Infallible>> {
-    let first = stream::iter(first).map(|event| Ok(frame(event.name(), &event)));
-    first.chain(stream::unfold(receiver, |mut receiver| async move {
+    let opening = Frame::default().comment("connected");
+    let first = std::iter::once(opening)
+        .chain(first.into_iter().map(|event| frame(event.name(), &event)))
+        .map(Ok);
+    stream::iter(first).chain(stream::unfold(receiver, |mut receiver| async move {
         let frame = match receiver.recv().await {
             Ok(event) => frame(event.name(), &event),
             Err(RecvError::Lagged(missed)) => {
@@ -108,9 +118,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_watcher_hears_something_before_anything_happens() {
+        let (_events, receiver) = broadcast::channel(1);
+        let mut frames = pin!(frames(Vec::new(), receiver));
+
+        // Nothing is sent, and the first frame is there anyway: a browser that
+        // waits for body bytes must not be kept waiting for the keep-alive.
+        let opening = tokio::time::timeout(Duration::from_millis(100), frames.next())
+            .await
+            .expect("not at the keep-alive")
+            .unwrap()
+            .unwrap();
+        assert!(
+            format!("{opening:?}").contains(": connected"),
+            "got {opening:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_watcher_that_fell_behind_is_told_to_resync_and_carries_on() {
         let (events, receiver) = broadcast::channel(1);
         let mut frames = pin!(frames(Vec::new(), receiver));
+        let _opening = frames.next().await.unwrap().unwrap();
 
         // Two into a channel of one: the first is overwritten before anybody
         // reads it.
