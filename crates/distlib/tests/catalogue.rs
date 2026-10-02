@@ -82,6 +82,10 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 /// bounded at [`SOON`] would be asserting a promptness the design does not
 /// offer — the same reasoning as the consensus harness's `PATIENTLY`, which
 /// sits above the follow loop's idle poll for exactly this reason.
+///
+/// Not padding: on Linux and macOS the followers usually meet directly and this
+/// passes in about 13 s, but on Windows CI they do not (C25), and with the
+/// timer briefly at two minutes a bound of sixty seconds failed (P3-27).
 const PATIENTLY: Duration = Duration::from_secs(60);
 
 /// Reads one key, waiting out the window where the entry is here and its

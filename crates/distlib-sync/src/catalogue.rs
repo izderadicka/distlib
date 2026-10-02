@@ -590,14 +590,25 @@ async fn open_when_founded(opening: Opening) {
 /// guarantee. Learning an address is the event, but it is not the only thing
 /// that strands a document — the node that introduced two members can go away
 /// afterwards, and gossip does not repair a swarm it has lost its last
-/// neighbour in. Nothing is broadcast here; it is a local call that re-offers
-/// peers to this node's own engine, so the cost of it being wrong is a
-/// connection attempt.
+/// neighbour in.
+///
+/// **Thirty seconds, not the fifteen it was.** An offer is not just a local
+/// call: iroh-docs dials every peer it is handed — and the ones it remembers,
+/// an expelled member included — and runs a set reconciliation with each. So
+/// a quiet group of N spent N × (N − 1) syncs every interval finding nothing,
+/// which a manual check after phase 3 saw as a log that never stopped. The
+/// timer is the repair path, not the way changes travel — but it is a repair
+/// that happens: on Windows two followers whose introducer had gone meet only
+/// through it (C25), which is why this is not longer. Halving the rate is what
+/// is bought now; what it costs is how long a stranded document takes to
+/// recover, and how long an item whose bytes the content sweep fetched waits to
+/// be re-read (P2-19): up to this, rather than up to fifteen seconds. Phase 4's
+/// heartbeats are meant to replace it with "offer whoever newly appears".
 ///
 /// The longest the whole set can go un-offered, rather than the longest the
 /// loop can sit idle — which are the same thing only while every wake-up offers
 /// everything, and one of them no longer does.
-const OFFER_AGAIN: Duration = Duration::from_secs(15);
+const OFFER_AGAIN: Duration = Duration::from_secs(30);
 
 /// The least time between two offers of the document's peers.
 ///
