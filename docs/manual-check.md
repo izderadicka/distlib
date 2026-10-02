@@ -1,41 +1,35 @@
-# Manual check: the acceptance criteria, by hand
+# Manual check: a small group, from founding to losing its leader
 
-Sections 1–6 are phase 1's acceptance sentence, run through the CLI in five separate
-processes. **[§10](#10-a-fresh-member-syncs-searches-downloads-and-still-serves--phase-2)
-is phase 2's**, and it stands on its own: three nodes, its own setup, nothing carried
-over from what is below. **[§11](#11-everything-from-phase-2-through-the-browser-phase-3)
-is phase 3's** — two nodes and two browser windows — and stands on its own the same way.
+One story, start to finish. Three friends found a group, two more people join, they share
+books and a lecture, find and download each other's things through the command line and
+the browser, someone leaves, someone is trusted with a vote, someone steps back, and the
+node holding the group together goes away.
 
-Phase 1's sentence:
+This is not where edge cases are tested — the automated suites do that on every commit.
+What a test cannot tell you is whether a **person** can do all this: whether the output
+says what happened, whether an error says what to do next, whether the pages make sense
+to somebody who did not write them. Run it at the end of each phase, and after anything
+that changes the CLI, the config file, the join flow or the pages.
 
-> 3-core-node cluster + 2 follower nodes; add a member → it can connect; expel it →
-> open connection drops, reconnect refused; kill one core node → group still admits
-> members.
+Everything runs on one machine, on loopback, with relays off — no internet needed.
 
-`crates/distlib-consensus/tests/acceptance.rs` already runs that in-process on every
-commit, and it is the gate. This is the other half: what a test cannot check is whether
-a *person* can do it — config-file friction, misleading output, port collisions, an
-error that does not say what to do next, a ticket that carries an address nobody can
-dial. Worth running at the end of a phase, and after anything that touches the CLI, the
-config file or the join flow.
+| Who | Node | Role | `[net] bind_addr_v4` | `[api] bind_addr` |
+|---|---|---|---|---|
+| alice | `a` | founds the group, core | `127.0.0.1:11204` | `127.0.0.1:11280` |
+| bob | `b` | founder, core | `127.0.0.1:11205` | `127.0.0.1:11281` |
+| carol | `c` | founder, core | `127.0.0.1:11206` | `127.0.0.1:11282` |
+| dave | `d` | joins later; later gets a vote | `127.0.0.1:11207` | `127.0.0.1:11283` |
+| erin | `e` | joins later; leaves | `127.0.0.1:11208` | `127.0.0.1:11284` |
+| frank | `f` | admitted at the very end, never started | — | — |
 
-Everything is on loopback with `relay_mode = "disabled"` — no relay, no DNS, offline
-and deterministic.
+You need six terminals — one per node, plus one to type commands in (terminal 0) — and two
+browser windows, alice's and dave's, side by side.
 
-| Node | Role | `[net] bind_addr_v4` | `[api] bind_addr` |
-|---|---|---|---|
-| `a` | core, founder | `127.0.0.1:11204` | `127.0.0.1:11280` |
-| `b` | core | `127.0.0.1:11205` | `127.0.0.1:11281` |
-| `c` | core | `127.0.0.1:11206` | `127.0.0.1:11282` |
-| `d` | follower | `127.0.0.1:11207` | `127.0.0.1:11283` |
-| `e` | follower | `127.0.0.1:11208` | `127.0.0.1:11284` |
-| `f` | admitted at the end, never started | — | — |
+---
 
-Six terminals: five for running nodes, one to drive from. Every node runs with `-v` —
-gossip announcements and follow-loop progress log at `debug`, and without them "did
-that arrive by gossip or by the 30-second poll?" is unanswerable.
+## 0. Prepare (terminal 0)
 
-**In every one of the six**, from the repo root:
+**In every terminal**, from the repository root:
 
 ```sh
 export DL=$HOME/tmp/dl
@@ -43,43 +37,27 @@ export BIN=$PWD/target/debug/distlib
 dl() { $BIN "$@"; }
 ```
 
-A mistyped `--data-dir` used to be silent: `run` would mint an identity in the empty
-directory, read defaults because there was no config file, and start a brand new node
-that looked perfectly healthy. It no longer can — `run` refuses a directory with no
-identity, and its first log line names both the data directory and the config file it
-loaded:
-
-```text
-INFO starting data_dir=/home/you/tmp/dl/b config=/home/you/tmp/dl/b/config.toml
-```
-
-`config=... (absent, using defaults)` means the config file is not where the node
-looked. That, plus `listening addr=0.0.0.0:<random>` under `relay_mode = "disabled"`
-and an api on 11280, is the shape of a node reading no configuration — check the data
-directory first.
-
----
-
-## Setup (terminal 0)
+Build the web UI, then the binary — without a built UI every page is a placeholder that
+says so:
 
 ```sh
+(cd crates/distlib-ui/web && npm ci && npm run build)
 cargo build
-for n in a b c d e f; do dl -d $DL/$n init; done
 ```
 
-**Collect ids.** `whoami` prints one whether or not a port is pinned.
+Create the six nodes and collect their ids:
 
 ```sh
+rm -rf $DL
+for n in a b c d e f; do dl -d $DL/$n init; done
 for n in a b c d e f; do
   eval "$(echo $n | tr a-f A-F)=$(dl -d $DL/$n whoami | awk '/^identity/{print $2}')"
 done
 echo $A $B $C $D $E $F
 ```
 
-**Write the configs.** Each node needs its own pair of ports — two on one machine
-collide on both, and the API collision has its own error message pointing at
-`[api] bind_addr`. The core nodes get the founding core group, identical in all three;
-d and e get an empty one, which `join` fills in later.
+Write their configuration. Alice, bob and carol get the same founding core group; dave
+and erin get an empty one, which `join` fills in for them later.
 
 ```sh
 CORE="core = [
@@ -106,802 +84,272 @@ bind_addr = "127.0.0.1:1128$((i-4))"
 EOF
   i=$((i+1))
 done
-cat $DL/a/config.toml
 ```
 
-Core nodes must be pinned *before* founding: founding records the address in the log
-and nothing rewrites it.
-
-Now read one `whoami` in full, with a port pinned — it prints the line a founder's
-friend is supposed to send them, and whether that reads properly is one of the things
-being checked:
-
-```sh
-dl -d $DL/b whoami
-```
-
----
-
-## 1. Found — clause "a 3-core-node cluster"
-
-Start b and c first; they warn they are in no group. Then found from a. In each node's
-own terminal:
-
-```sh
-dl -v -d $DL/b run                 # terminal 2
-dl -v -d $DL/c run                 # terminal 3
-dl -v -d $DL/a run --found-group   # terminal 1
-```
-
-Each should log `listening addr=127.0.0.1:1120…` and `local api listening
-addr=127.0.0.1:1128…` with its own ports, and no relay. Anything else means it is not
-reading the config file you wrote.
-
-Expect `founding the group` on a, then `membership group=… members=3 core=3` on **all
-three** — b and c were told nothing, they replicated it. A couple of openraft `WARN`
-lines around the election are normal.
-
-```sh
-dl -d $DL/b status      # group; role core member; Raft role; Raft leader
-```
-
----
-
-## 2. Followers — clause "+ 2 follower nodes"
-
-Admit first: until the log says so, nothing will talk to them.
-
-```sh
-dl -d $DL/a admit $D --name dave
-TICKET=$(dl -d $DL/a ticket | head -1)
-dl -d $DL/d join $TICKET
-cat $DL/d/config.toml       # check: core has the 3 pinned addrs; ports survived join
-```
-
-The ticket's addresses come from Raft's `StoredMembership`, populated at founding from
-the founders' configured `addrs`. With relays disabled there is no discovery to fall
-back on, so an empty or wildcard address here is a dead follower — cheaper to see in
-the file than to debug across four terminals.
-
-```sh
-dl -v -d $DL/d run                 # terminal 4
-```
-
-```sh
-dl -d $DL/d status      # role member; "follows the log to index N"; no Raft lines
-dl -d $DL/d members     # 4 so far: 3 core + dave
-```
-
-Repeat for e — `admit $E --name erin`, `join`, terminal 5 — then:
-
-```sh
-dl -d $DL/d members     # 5 members, 3 core
-```
-
----
-
-## 3. It can connect — clause "add a member → it can connect"
-
-Both pings run from a data dir whose node is running, so both need a throwaway port:
-the pinned one is held by the node itself.
-
-```sh
-DISTLIB_NET__BIND_ADDR_V4=127.0.0.1:0 dl -d $DL/d ping $A --addr 127.0.0.1:11204
-DISTLIB_NET__BIND_ADDR_V4=127.0.0.1:0 dl -d $DL/a ping $D --addr 127.0.0.1:11207
-```
-
-Both echo `ping`. The load-bearing proof of this clause is `d members` above — the
-follower fetched the whole log over a real connection. The pings corroborate it.
-
-Each ping binds a *second* endpoint under a key a running node already holds. Direct
-dial with `--addr` and no relay is fine; if one misbehaves, that duplicate identity is
-the first suspect, not the allowlist.
-
----
-
-## 4. Expel — clause "expel → connection drops, reconnect refused"
-
-From b, not the founder: any member may propose one.
-
-```sh
-dl -d $DL/b expel $E --reason "manual check"
-DISTLIB_NET__BIND_ADDR_V4=127.0.0.1:0 dl -d $DL/e ping $A --addr 127.0.0.1:11204
-```
-
-Expected: the ping fails with `is not a member, or does not consider us one`, and **a's
-terminal** logs `rejected a connection from a non-member`. Those two are the clause.
-
-Watch e's terminal, but do not assert anything about it in advance. Once the expulsion
-commits the core nodes refuse e at the allowlist, so e most likely never receives the
-entry expelling itself — expect its open connections to close and its fetches to be
-refused, with `dl -d $DL/e members` still listing e. There is a race where it catches
-the entry just before the allowlist updates. Both outcomes are correct.
-
-The reverse direction (a → e) is **not** the check: `ping` treats the id on the command
-line as consent, and e still allows a, since a is still in e's copy of the log.
-
----
-
-## 5. Kill the leader — clause "kill one core node → group still admits members"
-
-```sh
-dl -d $DL/a status      # the "Raft leader" line names it
-```
-
-Ctrl-C that terminal, then **immediately**, from a surviving core node:
-
-```sh
-time dl -d $DL/<survivor> admit $F --name frank
-```
-
-Must return within seconds. Two of three voters are still a quorum, and this is exactly
-where the forty-five-second forward-to-a-dead-leader bug lived (P1-38). Then:
-
-```sh
-dl -d $DL/d members     # frank appears on a follower nobody told
-```
-
----
-
-## 5a. A core node moves house — clause P1-23, "a core node changes IP or port"
-
-The one failure in phase 1 that had no way out: a core node in a group with
-`relay_mode = "disabled"` gets a new port, nobody can reach it again, and nothing in the
-log could say where it went. Refounding the group was the only fix. Do it on purpose.
-
-Run it with all three voters up — two of three is a quorum, one of two is not — so this
-comes before the core expulsion below. Check `dl -d $DL/a status` names a or c as the
-leader (if it names b, kill a different one and adjust the ids below), then Ctrl-C **b**'s
-terminal. Then edit its `config.toml`, change `[net] bind_addr_v4` to a port
-nothing else is using, and start it again with `dl -d $DL/b run`.
-
-It comes up, says `members=… core=…` from the log it already had, and then goes quiet.
-It can still reach the others — it has their addresses from the log — so you will see it
-call elections it cannot win. What it cannot do is be *reached*. Prove it: admit somebody
-from a node that is still where it was.
-
-```sh
-dl -d $DL/g init >/dev/null
-G=$(dl -d $DL/g whoami | awk '/^identity/{print $2}')
-dl -d $DL/a admit $G --name grace
-dl -d $DL/a members            # grace is there
-dl -d $DL/d members            # and on a follower nobody told
-```
-
-The moved node's terminal never mentions grace: its member count stays where it was.
-Now tell the group where it went, from any core member:
-
-```sh
-dl -d $DL/a core set $B --addr 127.0.0.1:<b's new port>
-```
-
-Expected: `core set    <id> at 127.0.0.1:<port>` — **applied, not proposed**. Moving a
-core node does not change *who* votes, so it takes one core approval and the proposer's
-own is it. Compare with the other verb, which does change who votes:
-
-```sh
-dl -d $DL/a core remove $B     # expect: proposed … waiting for core approval — 1 of 2
-dl -d $DL/a pending            # it is there, with what it is waiting for
-dl -d $DL/a withdraw <N>       # take it back; b is wanted, and §5b needs three voters
-```
-
-Within a second or two of the `core set`, the moved node's terminal should print a
-membership line naming grace. That is the whole claim: it was replicated to, at an
-address it only learned by being told.
-
-Worth watching, because it is what made this hard to find — how long the gap is between
-the `core set` returning and the moved node catching up. It should be about a second. If
-it is thirty, the connection-closing half of the fix has stopped working and the node is
-waiting for a dead path to time out rather than being redialled.
-
----
-
-## 5b. Two operators agree — removing a **core** member (§4.4 step 2)
-
-Everything above removes a *follower*, which any core member does alone. Removing a
-voter is the other rule, and it is the first thing in this runbook that needs two people
-to agree. Run it with three voters still up, so restart the node killed in §5 first.
-
-Propose it from a **follower** — e is expelled by now, so use f from §5, or any member
-that is not a voter. Submitting is open to every member; deciding is not.
-
-```sh
-dl -d $DL/f expel $C --reason "manual check: two operators"
-```
-
-Expected — and the point of this section — is that it does **not** say `expelled`:
-
-```
-proposed    <c>
-            waiting for core approval — 0 of 2 so far
-            a core member approves it with `distlib approve <N>`
-```
-
-Note the index. On **a**:
-
-```sh
-dl -d $DL/a pending      # lists it: what, who proposed it, how many approvals
-dl -d $DL/a approve <N>
-```
-
-Expected: `approved <N> — 1 of 2, still waiting for others`. One of three voters is not a
-majority, and `dl -d $DL/a status` still shows three in the core group. Then on **b**:
-
-```sh
-dl -d $DL/b approve <N>
-```
-
-Expected: `approved <N> — it has taken effect`, `dl -d $DL/a members` no longer lists c,
-and c's core-group line drops to two. **c's own terminal** behaves like e's did in §4 —
-it is no longer a member, so it most likely never sees the entry removing it.
-
-Then the other half, which is what makes this safe rather than merely ceremonious. Try
-to withdraw somebody else's proposal — propose a fresh one from f and, from **a**:
-
-```sh
-dl -d $DL/f expel $B --reason "manual check: withdrawal"
-dl -d $DL/a withdraw <N>       # expect a refusal: a did not propose it
-dl -d $DL/f withdraw <N>       # expect: withdrew <N>
-```
-
-A core member who could withdraw anyone's proposal would hold a veto over a decision the
-rest of the core group was reaching, so only the proposer may. Check `dl -d $DL/a
-pending` is empty afterwards.
-
----
-
-## 5c. A follower starts voting — clause P1-30, "promotion needs a restart"
-
-The other half of the core group being changeable, and the one phase 1 deferred: until
-2.3-2 a node served consensus only if it had *started* as a voter, so the core group
-could shrink and move but never grow. Adding one was refused outright.
-
-Do it to d, which has been following since §2. First, what it says about itself:
-
-```sh
-dl -d $DL/d status
-```
-
-Expected: `role        member` and a `follows     the log to index N` line — no Raft
-role at all, because it does not vote and is not pretending to.
-
-§5b expelled c from the core group, so the voters are a and b. Adding a third changes
-who votes, which takes a majority of the two — a proposes, b agrees:
-
-```sh
-dl -d $DL/a core set $D --addr 127.0.0.1:11207
-dl -d $DL/a pending            # note the index
-dl -d $DL/b approve <N>
-```
-
-**Watch d's terminal.** In order, and each line is a step that could not happen before:
-
-* `the log says this node votes now; taking a seat in consensus`
-* a membership line, then `this node is now a voter`
-
-Between those two it empties its own copy of the log. Nothing in the terminal says so —
-the membership line is only printed once there is a group, so the node simply goes quiet
-for a moment — but `dl -d $DL/d status` caught in that window reads `group  none yet`
-and `members  0 (0 core)`. That is deliberate: a node holding a log but no voters of its
-own is exactly what this codebase refuses to speak consensus to, so it has to look like
-a node that has not started yet for as long as it takes the leader to catch it up. What
-it does *not* do in that window is forget who it will talk to — it keeps enforcing the
-allowlist it already had, which is why it stays reachable throughout.
-
-Then ask it again:
-
-```sh
-dl -d $DL/d status
-```
-
-Expected: `role        core member`, and a `Raft role` line saying `Follower` or
-`Leader` — **not** `Learner`. Learner means it is being replicated to but is not yet
-counted in a quorum, which is the halfway state promotion passes through; it should take
-a second or two to leave it.
-
-Prove it is really voting rather than only being told things. Stop a — the group is
-three voters now, so two is still a majority — and admit somebody from b:
-
-```sh
-# Ctrl-C a's terminal
-dl -d $DL/b admit $C --name "carol, back again"
-dl -d $DL/d members
-```
-
-That commit needed d's vote. Before this sub-phase, the same group would have had two
-voters with one of them down, and nothing would have committed at all.
-
----
-
-## 5d. A voter stands down — clause MEM-04, "a demoted node keeps its seat"
-
-The mirror of §5c, and until the review-findings PR the half that did not work: a node
-the log dropped from the core group kept its Raft, went on answering `distlib/raft/0`,
-and never started following — so it froze at the membership it held and went on
-enforcing that allowlist for as long as it ran.
-
-Do it to d, which §5c just promoted. The voters are a, b and d, so demoting one takes a
-majority of three — two of the others have to say so. a is stopped from the end of §5c,
-so restart it first and let it catch up. **This is also what §6 used to ask for** —
-watch it rejoin and pick the log back up — so do that watching here:
-
-```sh
-dl -d $DL/a run &              # or its own terminal
-dl -d $DL/a status             # wait for `role  core member`, and for
-                               # `changed_at` to reach what b reports
-dl -d $DL/b core remove $D
-dl -d $DL/b pending            # note the index
-dl -d $DL/a approve <N>
-```
-
-**Watch d's terminal:**
-
-* `the log says this node no longer votes; standing down`
-* `this node is now a follower`
-
-Then ask it:
-
-```sh
-dl -d $DL/d status
-```
-
-Expected: `role  member` with no `Raft role` line at all — it has given the seat up
-rather than sitting in it as a non-voter — and a `follows  the log to index N` line
-whose N is where its Raft had got to, not zero. That number is the point: it picks up
-where it left off instead of re-fetching the whole log.
-
-It is still a member, so prove it is keeping up rather than frozen. Admit somebody from
-b, then ask d:
-
-```sh
-dl -d $DL/b admit $C --name "carol, once more"
-dl -d $DL/d members
-```
-
-**Be patient: this takes up to thirty seconds.** A demoted node keeps the announcing
-half of gossip it had as a voter, so nothing pokes its new follow loop and it waits out
-the idle poll. That is recorded in the phase-2 register, not a fault in this step — but
-it is why `dl -d $DL/d members` immediately after the admit will not show carol yet.
-
----
-
-## 6. After
-
-Everything is stopped and thrown away. The restart-and-catch-up that used to be the
-interesting part of this section is §5d's opening step, which needs it anyway.
-
-```sh
-pgrep -af distlib       # must be empty once everything is stopped
-rm -rf $DL
-```
-
----
-
-## 10. A fresh member syncs, searches, downloads — and still serves — (phase 2)
-
-> *Node A adds 3 ebooks; node B (fresh join) syncs the catalogue, searches by author,
-> downloads a file, and after restart still serves it.*
-
-`crates/distlib/tests/acceptance.rs` runs most of this on every commit, through the same
-commands. What it deliberately leaves here is the last clause taken literally: **another
-member fetching the file from B after B restarted and A is gone.** The automated run
-asserts only that B still holds the bytes, because making a third member reliably hold a
-*fresh* address for B at that moment means waiting on the gossip swarm, and a test that
-passes on timing is not testing the property. By hand you can watch it instead.
-
-Independent of §§1–6 — stop everything and start clean:
-
-```sh
-pgrep -af distlib       # must be empty
-rm -rf $DL
-```
-
-### Setup
-
-Three nodes. **Alice is the only core member**, which is what makes the last step mean
-something: stopping her is the group losing the only node that can answer anything, so
-bytes that reach carol afterwards came from bob.
-
-```sh
-for n in a b c; do dl -d $DL/$n init; done
-for n in a b c; do
-  eval "$(echo $n | tr a-c A-C)=$(dl -d $DL/$n whoami | awk '/^identity/{print $2}')"
-done
-
-i=4
-for n in a b c; do
-  case $n in a) core="core = [ { member = \"$A\", name = \"alice\", addrs = [\"127.0.0.1:11204\"] } ]" ;;
-             *) core="core = []" ;; esac
-  cat > $DL/$n/config.toml <<EOF
-[net]
-bind_addr_v4 = "127.0.0.1:1120$i"
-relay_mode = "disabled"
-relay_urls = []
-
-[consensus]
-$core
-
-[api]
-enabled = true
-bind_addr = "127.0.0.1:1128$((i-4))"
-EOF
-  i=$((i+1))
-done
-```
-
-### Found, admit, join
-
-Terminal a:
-
-```sh
-dl -d $DL/a -v run --found-group      # wait for members=1
-```
-
-Terminal 0:
-
-```sh
-dl -d $DL/a admit $B --name bob
-dl -d $DL/a admit $C --name carol
-TICKET=$(dl -d $DL/a ticket | head -1)
-dl -d $DL/b join $TICKET
-dl -d $DL/c join $TICKET
-```
-
-**Start carol before bob, and the order matters.** She is the one who has to reach bob at
-the end, after alice has stopped, and the way she gets a usable address for him is by
-being in the gossip swarm when he announces himself — which he does at startup, and only
-then. Started the other way round she never hears it, and `library.download`'s directory
-refresh cannot rescue her either: it asks a core node, and by that point the only core
-node is deliberately off. Started in this order she hears both of his announcements, the
-first one and the one after his restart.
-
-Terminal c, then terminal b:
-
-```sh
-dl -d $DL/c -v run                    # wait for members=3
-dl -d $DL/b -v run                    # wait for members=3
-```
-
-### Alice adds three ebooks
-
-**Make them bigger than about 16 KiB.** Below that the blob store keeps the bytes inline
-in its own database rather than as a file, and the next two steps stop being about the
-thing they are named for — a real book is well over it, and a three-line test file is
-not.
-
-```sh
-mkdir -p $DL/books
-for t in "Dune:dune" "Dune Messiah:dune-messiah" "Children of Dune:children-of-dune"; do
-  title=${t%%:*}; file=${t##*:}
-  yes "$title, in full" | head -20000 > $DL/books/$file.epub
-  dl -d $DL/a add $DL/books/$file.epub --kind ebook --title "$title" --author "Frank Herbert"
-done
-```
-
-### Bob syncs and searches by author
-
-By author, not by title. The projection re-reads a whole item whenever any part of it
-arrives, so its row shows up as soon as the *first* field lands — a title search can
-match an item whose author has not been indexed yet, and match nothing about
-replication. Repeat until all three are listed:
-
-```sh
-dl -d $DL/b search authors:herbert
-# Split on the two spaces the listing uses, not on whitespace: split on
-# whitespace, `$2` is "Dune" for *Dune Messiah* as well and this picks two items.
-DUNE=$(dl -d $DL/b search authors:herbert | awk -F'  +' '$2=="Dune"{print $1}')
-```
-
-Then wait for the item's *file* to be projected, which is separate again and arrives on
-its own schedule. `files       1`, not `files       0`:
-
-```sh
-dl -d $DL/b item $DUNE
-```
-
-Asking to download in between is the one confusing failure in this run: `this item has
-no files yet`, about an item the search just listed.
-
-### Bob downloads it
-
-```sh
-mkdir -p $DL/b-books
-dl -d $DL/b download $DUNE --dest $DL/b-books      # expect: fetched
-cmp $DL/b-books/dune.epub $DL/books/dune.epub
-```
-
-Then bob reads it and tidies up, which is load-bearing: with the exported file still
-lying there, bob would appear to go on serving the blob even if the export had *moved*
-it out of his store rather than copied it.
-
-```sh
-rm $DL/b-books/dune.epub
-```
-
-### Bob restarts
-
-**Ctrl-C or `systemctl stop`, not `kill -9`.** The membership log survives any of them,
-but the blob store writes its metadata when the node closes it on the way out — a node
-that never got to shut down comes back with the downloaded blob's bytes still on disk
-and no record that it holds them, and re-fetches what it already has. `SIGINT` and
-`SIGTERM` are both answered, so a supervisor's ordinary stop is fine; `kill -9` is not,
-and nothing can make it so. See P2-25.
-
-In terminal b: Ctrl-C, wait for `shutting down` and the prompt, then:
-
-```sh
-dl -d $DL/b -v run                    # wait for members=3
-dl -d $DL/b item $DUNE                # wait for files       1 again: the read model
-                                      # is rebuilt on the way up, so the gap between
-                                      # "item is here" and "its files are here" reopens
-dl -d $DL/b download $DUNE --dest $DL/b-books     # expect: had it
-```
-
-`had it` rather than `fetched` is the whole of this step: bob answered out of his own
-store, having restarted.
-
-### Alice leaves, and carol fetches from bob
-
-Ctrl-C terminal a. Then:
-
-```sh
-rm $DL/b-books/dune.epub
-mkdir -p $DL/c-books
-dl -d $DL/c download $DUNE --dest $DL/c-books     # expect: fetched
-cmp $DL/c-books/dune.epub $DL/books/dune.epub
-```
-
-**Pass**: `fetched`, and `cmp` is silent. The only node left holding those bytes is bob,
-restarted, so that is where they came from — §9's sentence, all of it.
-
-**If it hangs instead**, carol has no working address for bob. With alice stopped there
-is nothing to fix it with, and the log says so: `no core node said where the providers
-are`. Start over and check that carol was running before bob.
-
-### After
-
-```sh
-pgrep -af distlib
-rm -rf $DL
-```
-
----
-
-## 11. Everything from phase 2, through the browser (phase 3)
-
-> *Everything from Phase 2 done through the browser; download progress streams live.*
-
-The Playwright suite (`npm run e2e`) drives each flow on one node on every PR, and the
-Vitest suite pins every page's behaviour. What neither does is a **person, two nodes and
-two browser windows**: an item added on one node's page and watched arriving on the
-other's, a download big enough to watch and to reload in the middle of, and whether the
-pages say what is going on in words that make sense to somebody who did not write them.
-
-Independent of everything above — stop everything and start clean:
-
-```sh
-pgrep -af distlib       # must be empty
-rm -rf $DL
-```
-
-### Setup
-
-**Build the UI first.** A debug build reads `crates/distlib-ui/web/dist` as it runs, so
-the order does not matter for `cargo build` — but without a built UI every page is the
-placeholder that says so.
-
-```sh
-(cd crates/distlib-ui/web && npm ci && npm run build)
-cargo build
-```
-
-Two nodes. **Alice is core; bob follows** and gets a small upload cap, so that a refusal
-can be seen on his page without making a 16 GB file.
-
-```sh
-for n in a b; do dl -d $DL/$n init; done
-A=$(dl -d $DL/a whoami | awk '/^identity/{print $2}')
-B=$(dl -d $DL/b whoami | awk '/^identity/{print $2}')
-
-cat > $DL/a/config.toml <<EOF
-[net]
-bind_addr_v4 = "127.0.0.1:11204"
-relay_mode = "disabled"
-relay_urls = []
-
-[consensus]
-core = [ { member = "$A", name = "alice", addrs = ["127.0.0.1:11204"] } ]
-
-[api]
-enabled = true
-bind_addr = "127.0.0.1:11280"
-EOF
-
-cat > $DL/b/config.toml <<EOF
-[net]
-bind_addr_v4 = "127.0.0.1:11205"
-relay_mode = "disabled"
-relay_urls = []
-
-[consensus]
-core = []
-
-[api]
-enabled = true
-bind_addr = "127.0.0.1:11281"
-max_upload_bytes = 2000000
-EOF
-```
-
-Something to upload: three small books, and **one file of a gigabyte**, which is what
-makes a download on loopback last long enough to watch and to reload in the middle of.
+Something to share: three small books, a fourth by somebody else, and one **1 GB**
+recording — big enough that a download takes long enough to watch.
 
 ```sh
 mkdir -p $DL/files
-for f in dune dune-messiah children-of-dune; do
+for f in dune dune-messiah children-of-dune left-hand; do
   yes "$f, in full" | head -20000 > $DL/files/$f.epub
 done
 head -c 1G /dev/urandom > $DL/files/lectures.mkv
-head -c 5M /dev/urandom > $DL/files/too-big.pdf
 ```
 
-**On WSL** a Windows browser reaches the nodes on `127.0.0.1` as usual, and the file
-picker finds these under `\\wsl.localhost\<distro>` followed by the path `echo $DL/files`
+**On WSL** a Windows browser reaches the nodes on `127.0.0.1` as usual, and its file
+picker finds these under `\\wsl.localhost\<distro>` followed by what `echo $DL/files`
 prints.
 
-### Alice's page, and bob arriving on it
+---
 
-Terminal a:
+## 1. Three friends found the group
+
+Bob and carol first — they will say they are in no group yet — then alice founds it:
 
 ```sh
-dl -d $DL/a -v run --found-group      # wait for members=1
+dl -d $DL/b run                   # terminal b
+dl -d $DL/c run                   # terminal c
+dl -d $DL/a run --found-group     # terminal a
 ```
 
-Terminal 0:
+Each first line names its data directory and config file, and each says `listening
+addr=127.0.0.1:1120…` with its own port. `(absent, using defaults)` after the config path
+means the file is not where the node looked.
+
+**Pass:** a `membership … members=3 core=3` line on **all three** — bob and carol were
+told nothing, they received it.
+
+```sh
+dl -d $DL/b status       # group; role core member; a Raft leader
+```
+
+---
+
+## 2. Alice opens her page
 
 ```sh
 dl -d $DL/a ui
 ```
 
-Open the link. **Pass:** the page shows **Live**; the address bar has no `#token=` left in
-it; **Node** shows this node, its group and alice as the one member. Keep the tab open.
+Open the link in the first browser window. **Pass:** the page says **Live**; the address
+bar no longer shows a `#token=`; **Node** shows alice's node, the group, and three
+members. Leave it open on **Node**.
+
+---
+
+## 3. Dave and erin join
+
+Alice admits them, and sends them a ticket:
 
 ```sh
-dl -d $DL/a admit $B --name bob
+dl -d $DL/a admit $D --name dave      # admitted  <dave's id>
+dl -d $DL/a admit $E --name erin
+TICKET=$(dl -d $DL/a ticket | head -1)
+dl -d $DL/d join $TICKET
+dl -d $DL/e join $TICKET
 ```
 
-**Pass:** bob appears in alice's **Members** without a reload.
+**Pass:** each admission says `admitted` — one core member's word is enough to let
+somebody in — and both appear on alice's **Node** page without a reload.
 
 ```sh
-dl -d $DL/b join $(dl -d $DL/a ticket | head -1)
+dl -d $DL/d run                   # terminal d
+dl -d $DL/e run                   # terminal e
 ```
 
-Terminal b:
+**Pass:** each prints a `membership … members=5 core=3` line.
 
 ```sh
-dl -d $DL/b -v run                    # wait for members=2
+dl -d $DL/d status       # role member; "follows the log to index N"; no Raft lines
+dl -d $DL/d members      # five, three of them core
 ```
 
-Terminal 0 — **in a second browser window**, so both pages are in view at once:
+---
+
+## 4. Alice and bob share things
+
+From the command line — the three Dune books as one item, and bob's book from his node:
 
 ```sh
-dl -d $DL/b ui
+dl -d $DL/a add $DL/files/dune.epub $DL/files/dune-messiah.epub $DL/files/children-of-dune.epub \
+  --kind ebook --title "Dune" --author "Frank Herbert"
+dl -d $DL/b add $DL/files/left-hand.epub \
+  --kind ebook --title "The Left Hand of Darkness" --author "Ursula K. Le Guin"
 ```
 
-A tab signs in only itself: each tab keeps its token for itself, so a new tab needs the link
-again.
+**Pass:** `added  <id>  Dune`, and the same for bob's.
 
-### Alice adds items in her page
+And from alice's page: **Add**, choose `lectures.mkv`, title **Lectures**, type video,
+**Add**. **Pass:** the bar moves steadily — the gigabyte is written twice, once as it
+arrives and once into the store, so it takes a while — and the item's page opens.
 
-On alice's page, **Add**. Choose the three `.epub` files, type **Dune** as the title and
-**Frank Herbert** as the author, set the type to ebook, and **Add**.
+---
 
-**Pass:** a bar reads `Uploading 1 of 3 …`, then `2 of 3`, `3 of 3`; alice's page moves
-to the new item, with all three files listed.
+## 5. Dave finds them and downloads
 
-**Add** again with `lectures.mkv` alone, title **Lectures**, type video. It takes a while
-— the bytes are written twice, once to staging and once into the store (D5). **Pass:** the
-bar moves steadily, and the item's page opens.
-
-### Bob finds them
-
-Watch bob's **Library** while alice adds. **Pass:** each item appears in bob's list
-without a reload — possibly first with a title and no author, as the fields arrive on
-their own schedules.
-
-Search `herbert` on bob's page. **Pass:** Dune is found; the address bar now carries
-`?q=herbert`; a reload keeps the search; **back** returns to the full list. Open Dune.
-**Pass:** the page shows its author, type, the three files ordered by name, and when it
-was last changed.
-
-### Bob downloads, and reloads in the middle
-
-Open **Lectures** on bob's page and **Download**.
-
-**Pass:** a bar with files and bytes starts climbing. **Reload the page** while it is
-somewhere in the middle. **Pass:** the bar comes back by itself, at or past where it was,
-without a click, and runs on to the end; then the file's path and `fetched`.
+From the command line:
 
 ```sh
-cmp $DL/b/downloads/lectures.mkv $DL/files/lectures.mkv
+dl -d $DL/d search herbert
+DUNE=$(dl -d $DL/d search herbert | awk '{print $1; exit}')
+dl -d $DL/d item $DUNE           # three files, by name, with sizes
+mkdir -p $DL/d-books
+dl -d $DL/d download $DUNE --dest $DL/d-books     # fetched, three times
+cmp $DL/d-books/dune.epub $DL/files/dune.epub
 ```
 
-**Download** again. **Pass:** `already there` — nothing fetched, nothing written.
-
-Now start one from the command line while bob's page is open on the Dune item:
+And from dave's page, in the second browser window:
 
 ```sh
-mkdir -p $DL/b-cli
-dl -d $DL/b download <dune's id, from the page's address> --dest $DL/b-cli
+dl -d $DL/d ui
 ```
 
-**Pass:** the page picks it up and shows it, though nobody clicked there.
-
-### Bob edits, alice sees it
-
-On bob's Dune page, **Edit**. Change the title to **Dune (1965)**, add a year, **Save**.
-**Pass:** the form closes and the page shows the new title. On alice's page, open Dune —
-or leave it open: **Pass:** it shows the new title and the year shortly after, without a
-reload.
-
-**Edit** again, empty the title, **Save**. **Pass:** refused, naming the title; nothing is
-sent. **Cancel**.
-
-### Bob's page refuses what it should
-
-On bob's page, **Add**, choose `too-big.pdf` (5 MB against bob's 2 MB cap), give it a
-title, **Add**. **Pass:** refused with a message that says the file is too large — the
-node's own words, not a broken connection — and nothing left behind:
+**Pass:** the **Library** lists all three items. Search `herbert`: Dune is found, and the
+address bar now carries `?q=herbert`. Clear it, open **Lectures**, **Download**: a bar
+with files and bytes climbs to the end, then shows where the file went.
 
 ```sh
-ls -A $DL/b/uploads 2>/dev/null       # prints nothing
+cmp $DL/d/downloads/lectures.mkv $DL/files/lectures.mkv
 ```
 
-### The node goes away
+---
 
-Ctrl-C terminal b. **Pass:** bob's page says **Cannot reach the node** and keeps showing
-what it had. Start bob again:
+## 6. Dave corrects a detail; alice sees it
+
+On dave's page, open **Dune**, **Edit**, set the year to **1965**, **Save**. **Pass:** the
+form closes and the page shows the year. On alice's page open **Dune** — or have it open
+already — **Pass:** the year appears without a reload, a moment later.
+
+---
+
+## 7. Erin leaves
+
+Bob takes her out. She is not a voter, so one core member decides it:
 
 ```sh
-dl -d $DL/b -v run
+dl -d $DL/b expel $E --reason "moved away"        # expelled  <erin's id>
 ```
 
-**Pass:** the page goes back to **Live** by itself, within about thirty seconds, and
-answers clicks again. A reload stays signed in.
+**Pass:**
 
-### After
+- `expelled`, not `proposed`;
+- **erin's terminal** says `this node has been expelled from the group; it will stop
+  following` and shuts down;
+- she disappears from alice's **Node** page without a reload;
+- `dl -d $DL/d members` lists four.
+
+---
+
+## 8. Dave is trusted with a vote
+
+Adding a voter changes who decides things, so it takes a majority of the voters — two of
+the three. Alice proposes, and that is her approval:
 
 ```sh
-pgrep -af distlib
+dl -d $DL/a core set $D --addr 127.0.0.1:11207
+```
+
+**Pass:** `proposed … waiting for core approval — 1 of 2 so far`, with the number to
+approve it by. Bob looks, and agrees:
+
+```sh
+dl -d $DL/b pending              # what it is, who proposed it, 1 of 2
+dl -d $DL/b approve <N>          # approved <N> — it has taken effect
+```
+
+**Pass:** dave's terminal says `the log says this node votes now; taking a seat in
+consensus`, then `this node is now a voter`.
+
+```sh
+dl -d $DL/d status               # role core member; Raft role Follower (or Leader)
+```
+
+---
+
+## 9. Carol steps back
+
+Removing a voter also takes a majority — now three of the four. Dave proposes it, and his
+own approval counts:
+
+```sh
+dl -d $DL/d expel $C --reason "stepping back"     # proposed … 1 of 3 so far
+dl -d $DL/d pending              # 1 of 3 approvals (yours among them)
+```
+
+Alice agrees — and, by mistake, agrees again:
+
+```sh
+dl -d $DL/a approve <N>          # approved <N> — 2 of 3, still waiting for others
+dl -d $DL/a approve <N>          # approved <N> (you had already) — 2 of 3, …
+```
+
+**Pass:** the second says so, and nothing has happened to carol yet. Bob decides it:
+
+```sh
+dl -d $DL/b approve <N>          # approved <N> — it has taken effect
+dl -d $DL/a members              # three, all core: alice, bob, dave
+```
+
+Carol's terminal first gives up her seat — `this node is now a follower` — then says it
+has been expelled, as erin's did, and shuts down.
+
+---
+
+## 10. The leader goes down
+
+```sh
+dl -d $DL/b status               # the "Raft leader" line names it
+```
+
+It is most likely alice. Ctrl-C that node's terminal, and **straight away**, from one of
+the other two:
+
+```sh
+time dl -d $DL/<a survivor> admit $F --name frank
+```
+
+**Pass:** `admitted` within seconds — two of three voters are still a majority — and
+`dl -d $DL/d members` lists frank.
+
+If it was alice: her page now says **Cannot reach the node**, and keeps showing what it
+had. Start her again:
+
+```sh
+dl -d $DL/a run                   # terminal a
+```
+
+**Pass:** her terminal prints a `membership` line that includes frank — she caught up on
+what she missed — and her page goes back to **Live** by itself within about thirty
+seconds, answering clicks again.
+
+---
+
+## 11. Afterwards
+
+Ctrl-C every terminal, then:
+
+```sh
+pgrep -af distlib       # must be empty
 rm -rf $DL
 ```
 
 ---
 
-## Watch for, beyond pass/fail
+## Watch for, beyond pass and fail
 
 - Does any error leave you without a next step?
-- Does `join` preserve what was set before it? It re-renders the whole config file.
-- Does a follower's `status` read sensibly while it is behind?
-- How long does a change take to reach a follower — gossip, or the 30-second poll?
-- Anything the README quickstart gets wrong now that followers exist.
-- Does `pending` tell you enough to decide, without going to the log for it?
-- Is it obvious from `admit`/`expel` output alone whether anything actually happened?
-- Does `core set` say enough for you to tell an applied change from a waiting one?
-- Is a node in the middle of being promoted alarming to watch? It goes quiet, and
-  `status` says it is in no group. Nothing explains that while it is happening — should
-  it?
-- Is there anything that tells you a core node is unreachable *before* you notice it
-  has stopped keeping up?
-- Does `download` say enough about *where* the bytes came from, or only that they came?
-- Is "this item has no files yet" readable as "wait a moment", or as "something is
-  broken"?
-- Is there anything that tells you a fetch is in progress on a large file?
-- Does any page leave you without a next step — a refusal, an empty library, a node that
-  went away, a tab that is not signed in?
-- Is it clear while an upload is being *added*, after its bar is full, that something is
-  still happening?
-- Is "already in the library" after an **Add** readable as "your details were not
-  applied"?
+- Is it obvious from `admit`, `expel` and `approve` alone whether anything happened yet?
+- Does `pending` tell you enough to decide, without going to a log?
+- Is a node taking its seat (§8) alarming to watch? It goes quiet for a moment.
+- How long does a change take to show up on another node — on the command line, and in
+  the other browser window?
 - Does an item that arrives field by field look broken while it does?
-- Do two windows on two nodes ever disagree for longer than a sync should take?
+- Does any page leave you without a next step — an empty library, a node that went away,
+  a tab that is not signed in?
+- Is it clear, after an upload's bar is full, that the node is still adding it?
+- Is there anything that tells you a core node is unreachable *before* you notice it has
+  stopped keeping up?
+- Anything the README's quickstart gets wrong.
+
+Write what you find down; it becomes the next round of fixes.

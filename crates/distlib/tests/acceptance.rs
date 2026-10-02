@@ -261,11 +261,11 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // `library.download`'s directory refresh cannot rescue it, because with
     // the only core node stopped there is nobody left to ask. Pinning it here
     // would mean sleeping until the swarm happened to settle, which is a test
-    // that passes on timing rather than on the property. It is proven twice
+    // that passes on timing rather than on the property. It is proven
     // elsewhere instead: in process, watching the fetch, by `download.rs`'s
-    // `a_node_that_downloads_a_file_serves_it_after_a_restart`, and by hand
-    // in `docs/manual-check.md` §10, which runs the whole of §9's criterion
-    // across three processes. See delta P2-25.
+    // `a_node_that_downloads_a_file_serves_it_after_a_restart`. The by-hand
+    // runbook ran it across three processes until it became one story of a
+    // group (P3-28); see delta P2-25.
     bob_node.stop();
     let mut bob_node = bob.run(false);
     bob_node.wait_for("members=3");
