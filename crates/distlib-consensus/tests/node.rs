@@ -872,14 +872,22 @@ async fn a_demoted_node_promoted_again_votes_again() {
         peers[2].node.raft().is_some()
     })
     .await;
+    // One config of three, not three voters counted. openraft adds a voter
+    // through a joint config, `[{0, 1}, {0, 1, 2}]`, whose `voter_ids` is the
+    // union — three already — while a commit still needs a majority of the old
+    // pair as well. Stopping a voter below in that window leaves nothing able
+    // to commit, and the proposal after it waited for ever (macOS and Windows
+    // CI, about one local run in six).
     until_upto(PATIENTLY, "openraft to count it a voter again", || {
         peers[0].node.raft().is_some_and(|raft| {
-            raft.metrics()
+            let metrics = raft.metrics();
+            let configs = metrics
                 .borrow()
                 .membership_config
-                .voter_ids()
-                .count()
-                == 3
+                .membership()
+                .get_joint_config()
+                .clone();
+            configs.len() == 1 && configs[0].len() == 3
         })
     })
     .await;
