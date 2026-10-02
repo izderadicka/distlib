@@ -139,8 +139,11 @@ async fn main() -> Result<()> {
 /// - `tantivy` reports each merge and garbage collection at `info`, and the
 ///   search index is rebuilt at every start, so every start lists the old
 ///   segments being deleted.
+/// - `iroh_util` says "Handing out ConnectionRef" at `info` for every connection
+///   a download borrows from its pool — nineteen times on one node in one run
+///   of the manual check.
 const DEFAULT_FILTER: &str = "info,openraft=warn,iroh::protocol=error,iroh_docs=error,\
-                              noq_proto::connection=error,tantivy=warn";
+                              noq_proto::connection=error,tantivy=warn,iroh_util=warn";
 
 fn init_tracing(verbose: u8) {
     let filter = match verbose {
@@ -150,7 +153,8 @@ fn init_tracing(verbose: u8) {
         1 => EnvFilter::new(
             "info,distlib=debug,distlib_net=debug,distlib_core=debug,\
              distlib_consensus=debug,openraft=info,iroh::protocol=error,iroh_docs=warn,\
-             iroh_docs::engine::state=error,noq_proto::connection=error,tantivy=warn",
+             iroh_docs::engine::state=error,noq_proto::connection=error,tantivy=warn,\
+             iroh_util=warn",
         ),
         _ => EnvFilter::new(
             "debug,distlib=trace,distlib_net=trace,distlib_core=trace,\

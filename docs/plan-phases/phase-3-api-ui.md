@@ -7,9 +7,10 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 ## Context
 
-**Status: built.** Every sub-phase below is merged, in nineteen PRs (#58–#76), and so is C12. One
-end-of-phase item is not done: running the by-hand §11 in `manual-check.md`, which is written but
-has not been run — see [Verification](#verification). What the phase leaves open is listed in
+**Status: built.** Every sub-phase below is merged, in nineteen PRs (#58–#76), and so is C12. The
+by-hand check has been run, and what it found was fixed in #78–#80 (P3-26, P3-27) — after which
+`manual-check.md` was rewritten as one story rather than a section per phase (P3-28). What the
+phase leaves open is listed in
 [Carried out of Phase 3](#carried-out-of-phase-3--open-and-where-it-goes).
 
 Phase 2 is complete and merged: the catalogue converges across the group, every node answers queries
