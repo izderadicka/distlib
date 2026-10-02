@@ -75,13 +75,15 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 ///
 /// For waiting on something whose guarantee is a node's own timer.
 ///
-/// Deliberately longer than [`SOON`], and longer than `distlib-sync`'s
-/// `OFFER_AGAIN`. A document's peers are offered again promptly when an address
-/// is learned, but the thing that recovers a document stranded by the departure
-/// of the node that introduced its members is the timer behind that. A test
-/// bounded at [`SOON`] would be asserting a promptness the design does not
-/// offer — the same reasoning as the consensus harness's `PATIENTLY`, which
-/// sits above the follow loop's idle poll for exactly this reason.
+/// Deliberately longer than [`SOON`]. A document's peers are offered again
+/// promptly when an address is learned, and the gossip swarm carries a change
+/// between followers once the node that introduced them has gone — but neither
+/// is as prompt as a direct write, and a test bounded at [`SOON`] would be
+/// asserting a promptness the design does not offer.
+///
+/// Not longer than `distlib-sync`'s `OFFER_AGAIN`, as it once was: that timer
+/// is two minutes now, it is the repair path behind both, and no test here
+/// waits for it.
 const PATIENTLY: Duration = Duration::from_secs(60);
 
 /// Reads one key, waiting out the window where the entry is here and its
