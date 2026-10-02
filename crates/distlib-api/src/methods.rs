@@ -205,16 +205,23 @@ impl Api {
     /// So a proposal can be one approval away today and two away tomorrow, and
     /// this reports what is true when asked rather than what was true when it
     /// was proposed.
+    ///
+    /// `approved_by_you` because the list is the same for everyone who asks,
+    /// and the one thing that differs — whether *this* member has already
+    /// agreed — is what decides whether there is anything left for them to do.
     fn pending(&self) -> Result<Value, Error> {
         let membership = self.node.membership();
+        let me = self.node.id();
         let pending: Vec<Value> = membership
             .pending()
             .map(|(proposal, entry)| {
+                let approvals: Vec<_> = membership.approvals_counting(entry).collect();
                 json!({
                     "proposal": proposal,
                     "proposer": entry.proposer(),
                     "what": describe(entry.event(), &membership),
-                    "approvals": membership.approvals_counting(entry).collect::<Vec<_>>(),
+                    "approved_by_you": approvals.contains(&me),
+                    "approvals": approvals,
                     "needed": membership.approvals_needed(entry.event()),
                     // A count of further *changes*, not a duration: it only
                     // moves when the group commits something. Named so a
@@ -238,12 +245,25 @@ impl Api {
     /// "applied", which is true of the approval and says nothing about the
     /// thing it was cast on. The caller wants to know whether the change has
     /// happened yet, and that is a question about the proposal's index.
+    ///
+    /// A repeat is committed, not refused — the fold accepts it on purpose, see
+    /// `MembershipState::approve` — but answered with `already_approved`, read
+    /// before committing since afterwards the two cases look the same.
     async fn approve(&self, params: Proposal) -> Result<Value, Error> {
+        let me = self.node.id();
+        let membership = self.node.membership();
+        let already = membership
+            .pending()
+            .find(|(index, _)| *index == params.proposal)
+            .is_some_and(|(_, entry)| membership.approvals_counting(entry).any(|a| a == me));
+
         self.commit(MembershipEvent::Approved {
             proposal: params.proposal,
         })
         .await?;
-        Ok(self.outcome(params.proposal))
+        let mut answer = self.outcome(params.proposal);
+        answer["already_approved"] = json!(already);
+        Ok(answer)
     }
 
     /// `group.withdraw` — take back a proposal of your own.
@@ -1152,6 +1172,11 @@ impl Api {
     /// just approved it, because they are asking the same question — has this
     /// change happened yet, and if not what is it waiting for — and two
     /// implementations of it would be free to disagree.
+    ///
+    /// Reads this node's membership, which is only an answer because
+    /// `MembershipNode::propose` returns once the entry is applied *here*.
+    /// Before that, a node that was not the leader found nothing pending under
+    /// the index and reported a waiting proposal as applied.
     fn outcome(&self, proposal: u64) -> Value {
         let membership = self.node.membership();
         let waiting = membership
