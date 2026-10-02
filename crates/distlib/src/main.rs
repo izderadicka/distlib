@@ -124,7 +124,23 @@ async fn main() -> Result<()> {
 /// refusal line is the one worth keeping and is summarised per peer
 /// (`AllowlistHooks::note_refusal`); this one carries nothing that line does
 /// not. `-vv` puts it back for anyone debugging the router itself.
-const DEFAULT_FILTER: &str = "info,openraft=warn,iroh::protocol=error";
+///
+/// The rest was found by hand after phase 3, in a quiet group's log:
+///
+/// - `iroh_docs` logs every catalogue sync at `info`, including the ones that
+///   find nothing to exchange, and warns about each one that fails — a peer
+///   that is offline, or one we refuse because it was expelled. Errors only;
+///   `-v` brings the failures back.
+/// - `iroh_docs::engine::state` warns "sync state finish called but not in
+///   running state" when two nodes sync at each other at once, which the
+///   engine then sorts out itself.
+/// - `noq_proto::connection` warns `MultipathNotNegotiated` when closing a
+///   path on a connection that never had more than one.
+/// - `tantivy` reports each merge and garbage collection at `info`, and the
+///   search index is rebuilt at every start, so every start lists the old
+///   segments being deleted.
+const DEFAULT_FILTER: &str = "info,openraft=warn,iroh::protocol=error,iroh_docs=error,\
+                              noq_proto::connection=error,tantivy=warn";
 
 fn init_tracing(verbose: u8) {
     let filter = match verbose {
@@ -133,7 +149,8 @@ fn init_tracing(verbose: u8) {
             .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER)),
         1 => EnvFilter::new(
             "info,distlib=debug,distlib_net=debug,distlib_core=debug,\
-             distlib_consensus=debug,openraft=info,iroh::protocol=error",
+             distlib_consensus=debug,openraft=info,iroh::protocol=error,iroh_docs=warn,\
+             iroh_docs::engine::state=error,noq_proto::connection=error,tantivy=warn",
         ),
         _ => EnvFilter::new(
             "debug,distlib=trace,distlib_net=trace,distlib_core=trace,\
