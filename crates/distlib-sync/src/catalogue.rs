@@ -597,8 +597,9 @@ async fn open_when_founded(opening: Opening) {
 /// an expelled member included — and runs a set reconciliation with each. So
 /// a quiet group of N spent N × (N − 1) syncs every interval finding nothing,
 /// which a manual check after phase 3 saw as a log that never stopped. The
-/// timer is the repair path, not the way changes travel, and no test needed it
-/// at fifteen. What it costs is how long a stranded document takes to recover,
+/// timer is the repair path, not the way changes travel — but it is a repair
+/// that happens: on Windows CI two followers whose introducer had gone met only
+/// through it. What it costs is how long a stranded document takes to recover,
 /// and how long an item whose bytes the content sweep fetched waits to be
 /// re-read (P2-19): up to this, rather than up to fifteen seconds. Phase 4's
 /// heartbeats are meant to replace it with "offer whoever newly appears".
