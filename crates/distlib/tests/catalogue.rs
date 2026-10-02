@@ -84,10 +84,9 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 /// sits above the follow loop's idle poll for exactly this reason.
 ///
 /// Not padding: on Linux and macOS the followers usually meet directly and this
-/// passes in about 13 s, but on Windows CI they did not, and with the timer at
-/// two minutes a bound of sixty seconds failed (P3-27). Paid only by a run that
-/// needs the timer.
-const PATIENTLY: Duration = Duration::from_secs(150);
+/// passes in about 13 s, but on Windows CI they do not (C25), and with the
+/// timer briefly at two minutes a bound of sixty seconds failed (P3-27).
+const PATIENTLY: Duration = Duration::from_secs(60);
 
 /// Reads one key, waiting out the window where the entry is here and its
 /// content is not.

@@ -39,9 +39,9 @@
 //! (`live.rs:613-620`), and the catalogue re-offers its peers on a timer
 //! whether or not anything changed — which produces a round. Measured on a
 //! quiet two-node group rather than argued, when that timer was fifteen
-//! seconds: nudges at 0.03 s, 14.9 s, 29.9 s and 44.9 s. It is two minutes now
-//! (P3-27), so an item repaired behind the engine's back is re-read within
-//! about two minutes. A node with no reachable peer gets no rounds and no
+//! seconds: nudges at 0.03 s, 14.9 s, 29.9 s and 44.9 s. It is thirty seconds
+//! now (P3-27), so an item repaired behind the engine's back is re-read within
+//! about thirty seconds. A node with no reachable peer gets no rounds and no
 //! nudge, which costs nothing: with no peer there is nothing for the sweep to
 //! fetch either.
 
