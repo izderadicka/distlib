@@ -475,8 +475,13 @@ pub async fn pending(paths: &Paths) -> Result<()> {
             proposal["proposal"].as_u64().unwrap_or(0),
             proposal["what"].as_str().unwrap_or("?")
         );
+        let yours = if proposal["approved_by_you"].as_bool().unwrap_or(false) {
+            " (yours among them)"
+        } else {
+            ""
+        };
         println!(
-            "        {} of {} approvals, proposed by {}",
+            "        {} of {} approvals{yours}, proposed by {}",
             proposal["approvals"].as_array().map_or(0, Vec::len),
             proposal["needed"].as_u64().unwrap_or(0),
             proposal["proposer"].as_str().unwrap_or("?")
@@ -504,12 +509,17 @@ pub async fn approve(paths: &Paths, proposal: u64) -> Result<()> {
     // would tell an operator a change had happened when it may still be one
     // approval short. `group.approve` answers about the proposal for exactly
     // this reason.
+    let again = if answer["already_approved"].as_bool().unwrap_or(false) {
+        " (you had already)"
+    } else {
+        ""
+    };
     if answer["applied"].as_bool().unwrap_or(false) {
-        println!("approved    {proposal} — it has taken effect");
+        println!("approved    {proposal}{again} — it has taken effect");
     } else {
         let held = answer["waiting"]["approvals"].as_u64().unwrap_or(0);
         let needed = answer["waiting"]["needed"].as_u64().unwrap_or(0);
-        println!("approved    {proposal} — {held} of {needed}, still waiting for others");
+        println!("approved    {proposal}{again} — {held} of {needed}, still waiting for others");
     }
     Ok(())
 }

@@ -52,3 +52,9 @@ cluster = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(founding) or binary(acceptance) or binary_id(distlib::catalogue) or binary_id(distlib::read_model) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
 test-group = 'cluster'
+
+# CI only (`--profile ci`): a test still running after five minutes is killed
+# and its output printed. Without it a hang shows as the job's own timeout an
+# hour later — cancelled, with nothing to say which step it was stuck on.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 5 }
