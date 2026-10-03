@@ -212,6 +212,29 @@ below exists because the prose and the code disagree.
     `RUST_LOG`; what was missing was a log line at each of our own steps, and a way to tell three
     in-process nodes apart in them.
 
+
+18. **C25 is not about Windows, and its cause is one failed dial (found in 4.0).**
+    - **iroh-gossip strands a peer after one failed dial.** A message to a peer with no connection
+      leaves it `Pending { queue }`, and a dial starts only when that queue is empty
+      (`iroh-gossip net.rs:695-700`). When the dial fails, hyparview drops the peer from its passive
+      view and emits no `DisconnectPeer` (`proto/hyparview.rs:346-354`), which is the only thing that
+      removes the entry (`net.rs:732-736`). So the queue is never empty again, and every later message
+      to that peer — a `Join` included — waits for ever. It ends only if the other side dials *us*.
+      Upstream knows the area (open PRs n0-computer/iroh-gossip#159, and #146/#147 closed unmerged);
+      0.101.0 is the latest release.
+    - **The peer state is per peer, not per topic.** One `Gossip` serves every topic (ground truth 3),
+      so a dial that fails on the membership topic strands that peer for the catalogue document too.
+    - **And we cause the failed dial.** `join_topic`
+      ([`node.rs:1377-1382`](../../crates/distlib-consensus/src/node.rs)) bootstraps the membership
+      topic with *every* member id. A follower that has just started knows only the core group's
+      addresses, so its dial to every other follower fails — and two followers that start together
+      strand each other. `sync_with` already filters to members with an address, for the same reason
+      in different words; the membership topic does not.
+    - **What the test showed.** Two followers are never gossip neighbours of each other, on any
+      platform. The C25 test passes in seconds only because their first offers to each other happen
+      to land just after bob's write; delayed by four seconds, the same test takes 36 s on Linux. On
+      Windows in the full suite it took 41 s, and alone, with logging, 14 s — a race the slower,
+      busier runner loses, not a Windows fault.
 ---
 
 ## The structural decision: availability is never replicated
@@ -459,9 +482,11 @@ a time, review before the next.
   `RUST_LOG`; the Windows job runs the C25 test with `--success-output final`; and a debug line at
   each step — address learned → offer → dial result → document `NeighborUp` → `SyncFinished`.
   No fix.
-  *As built:* the debug lines carry a `catalogue{me=…}` span, so each names its node; the CI step runs
-  on all three platforms, so Windows can be read against a run where the test is fast.
-  **Acceptance:** a Windows CI log that names the step that does not happen.
+  *As built:* the debug lines carry a `catalogue{me=…}` span, so each names its node. The CI step ran
+  on all three platforms and was removed again in the same PR: alone, the test is fast on Windows
+  too, so the log showed the fast path everywhere. Delaying alice's shutdown reproduced C25 on Linux,
+  and its log named the step — ground truth 18.
+  **Acceptance:** a log that names the step that does not happen — met locally, not on Windows.
   **Watch for:** it goes first because its answer arrives on CI's schedule, while other work goes on.
 
 ### 4a — foundations (3 PRs)
@@ -483,10 +508,16 @@ a time, review before the next.
   no call that reports current neighbours (`Doc::get_sync_peers` is the remembered peers, not live
   ones), so the record has to start before `start_sync` does — subscribed when the document opens.
 
-- **4a-3 — targeted re-offers (D7 b, c), with the timer still in place.** Revised in the light of
-  4.0's log.
-  **Acceptance:** the C25 test converges in under 10 s on all three CI platforms, and its bound is
-  tightened to match.
+- **4a-3 — C25: the membership topic stops dialling members it cannot reach.** *Revised by 4.0
+  (ground truth 18).* `join_topic` bootstraps with the members that have an address — the rule
+  `sync_with` already follows — and the rest join as their addresses are heard. The C25 test is made
+  deterministic first: alice goes only after the two followers have offered each other, which today
+  takes about 30 s to converge.
+  **Acceptance:** with 4a-2's neighbour record, the two followers are catalogue neighbours of each
+  other before alice goes; the C25 test then converges in seconds on all three platforms, and its
+  bound is tightened to match.
+  **Watch for:** D7's (b) and (c) are re-weighed after this, not assumed — they cover the other way a
+  peer is stranded (C30), not this one.
 
 ### 4b — availability (7 PRs)
 
@@ -595,7 +626,7 @@ Every open C-number appears here once.
 | **C15**–**C19** | Read-only admin; Windows file privacy and service; clearing a field; downloads as in-memory tasks | **Unchanged.** |
 | **C20** | The CSP allows `style-src 'unsafe-inline'` | **Revisited in 4c-6**, the first new page. |
 | **C21**–**C24** | Title sort; consensus test peers that cannot restart; release publishing; the expelled leader's lost answer | **Unchanged.** |
-| **C25** | On Windows, two followers meet only through the timed re-offer | **Closed by 4a-3**, as 4.0 directs. |
+| **C25** | On Windows, two followers meet only through the timed re-offer | **Closed by 4a-3.** Not Windows-specific: a dial on the membership topic to a member with no address strands that peer in iroh-gossip for every topic (ground truth 18). |
 
 **New in phase 4:**
 
@@ -605,6 +636,7 @@ Every open C-number appears here once.
 | **C27** | **Heartbeat traffic has not been measured above N = 50** | **No phase.** Measured on five nodes here; a larger group is the trigger. |
 | **C28** | **The `item → members` map lives in memory** (D3) — about 1 GB per node at 10M distinct items | **No phase.** Moves to a local SQLite table when a group reaches the 10M end — Ivan's call. Never replicated either way. |
 | **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
+| **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; 4b's heartbeat appearances and D7 (b, c) are what would notice if it did not. |
 
 ---
 

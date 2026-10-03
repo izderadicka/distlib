@@ -114,17 +114,5 @@ jobs:
       # `--profile ci` kills a test that hangs, so the log says which one and
       # where, rather than the job timing out an hour later with nothing.
       - run: cargo nextest run --workspace --all-features --no-fail-fast --profile ci
-      # C25's diagnosis: on Windows two followers whose introducer has gone
-      # meet only through the timed re-offer, and the test passes — so nextest
-      # never shows its output. This runs it once more with the steps logged
-      # and the output kept, on every platform, so Windows can be read against
-      # a platform where it works. Removed once C25 is fixed (phase 4, 4a-3).
-      - name: C25 diagnosis (log of two followers after the core node goes)
-        env:
-          RUST_LOG: info,distlib_sync=debug,distlib_net::directory=debug,iroh_docs=info,iroh_gossip=debug,noq_proto=warn
-        run: >-
-          cargo nextest run -p distlib --all-features --test catalogue --profile ci
-          --success-output final
-          -E 'test(=two_followers_keep_converging_once_the_core_node_is_gone)'
       # nextest does not run doctests, so they need their own pass.
       - run: cargo test --workspace --all-features --doc
