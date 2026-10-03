@@ -1,0 +1,673 @@
+# Phase 4 — Availability & community metadata
+
+Sequencing plan for §9's Phase 4. Written before any code, and revised in place if a PR proves part
+of it wrong — an entry that turned out to be mistaken is more useful corrected than deleted.
+
+---
+
+## Context
+
+**Status: planned, not started.**
+
+Phase 3 is complete and merged: everything phase 2 built is reachable from a page, downloads stream
+their progress live, and the by-hand check has been run as one story from founding a group to losing
+its leader. What it found was fixed in #78–#81 (P3-26 to P3-28).
+
+Phase 4 is §9's "Availability + community metadata":
+
+- heartbeats over iroh-gossip carrying an exact account of what each member holds, and an in-memory
+  TTL availability index;
+- availability badges in the library, pushed over SSE;
+- ratings, reviews and bookmarks — written, projected and shown;
+- wishes, end to end.
+
+§9's acceptance is the target: *take a providing node offline → badge flips within TTL without any
+replicated-state churn; two members rate the same item concurrently → both ratings visible
+everywhere.* The second half is close to free — §5.3's keys were designed so that two members never
+write the same key. **The first half is the phase's real work**, and its cost is stated once, under
+[Risk](#risk-stated-once).
+
+**The scale target is Ivan's, set at the review of this plan:** a group of about 100k items must be
+easy, and one of 10M must work without trouble — and some nodes will hold a large share of the
+library. Every size in this document is checked against it.
+
+The phase also takes, explicitly:
+
+- **C5** — a late joiner never learns an address it missed; the heartbeat carries it.
+- **C14** — `sync.status`, whose material is the three events the pump discards.
+- **C25** — on Windows, two followers whose introducer has gone meet only through the catalogue's
+  timed re-offer.
+- **P3-27's promise** — replace that thirty-second re-offer of every peer with "offer whoever newly
+  appears".
+- **"Held here"** in the library, which the phase-3 by-hand check asked for; "exported" was asked
+  for too and is not taken, because an export directory is not fixed.
+- **`lang`** in full-text search. Filters and sorting are a later usability phase.
+
+**This document is sequencing** — what gets built, in what order, in which PR, and what each PR has
+to demonstrate. Design deviations from [`distlib-plan.md`](../distlib-plan.md) still go into
+[`plan-deltas.md`](../plan-deltas.md), in the PR that causes them. There must not be two sources of
+truth for a deviation.
+
+---
+
+## Ground truth established before planning
+
+Verified against the tree and against the vendored crate sources in `~/.cargo/registry` — iroh 1.0.3,
+iroh-gossip 0.101.0, iroh-docs 0.101.0, iroh-blobs 0.103.0 — not against docs.rs prose. One entry
+below exists because the prose and the code disagree.
+
+1. **Nothing in this workspace speaks on a timer, on principle.**
+   [`gossip.rs:122-171`](../../crates/distlib-consensus/src/gossip.rs) ("Three triggers, no timer"),
+   [`follower.rs:307-313`](../../crates/distlib-consensus/src/raft/follower.rs),
+   [`directory.rs:80-85`](../../crates/distlib-net/src/directory.rs) and
+   [`signed_addr.rs:43-56`](../../crates/distlib-core/src/addr/signed_addr.rs) all say it, the last
+   most bluntly: "Add a timestamp, a nonce, a counter … and the group talks for as long as it is up.
+   That was measured, not feared." **A heartbeat is exactly that, on purpose.** It is the first
+   traffic in distlib that never stops, so it gets a delta of its own and the phase's one risk
+   section.
+
+2. **Gossip drops repeats, so every heartbeat has to differ, and then it is flooded.** A message's id
+   is `blake3(content)`, remembered for 90 s (`iroh-gossip plumtree.rs:31-37,326`), so a heartbeat
+   identical to the last one would never be delivered — which is what its `seq` is for. A message
+   that differs is relayed to the whole topic. `broadcast_neighbors` is one hop, neither relayed nor
+   deduplicated, and is not what this wants.
+
+3. **The gossip size limit is ours to set, but it is a wire-compatibility setting, not a tuning
+   knob.** It defaults to 4096 B (`proto.rs:69`) and is set with `Gossip::builder().max_message_size()`
+   (`net.rs:154`); [`runtime.rs:103`](../../crates/distlib/src/runtime.rs) takes the default, and that
+   one `Gossip` carries every topic in the process — membership, addresses and the catalogue's live
+   sync. Two properties decide what to do with it:
+   - **A receiver rejects any frame above its own limit** (`net/util.rs:365`), and the disconnect that
+     follows is delivered to *every* topic on the connection (`proto/state.rs:139`). Raising it means
+     raising it on every node together; one node behind breaks consensus and docs gossip with the
+     node ahead, not just heartbeats.
+   - **The sender checks only when the frame is written** (`net/util.rs:383-386`), after
+     `broadcast()` has already returned `Ok`. An oversize heartbeat is not an error anyone sees; it is
+     a dropped connection.
+
+   **It is a message limit, not a packet size.** Gossip frames are length-prefixed on QUIC streams
+   (`RecvStream`, `net/util.rs:65,162`), which split a message across as many packets as it needs —
+   "fits one UDP datagram" would be about 1.2 KB, smaller than today's limit.
+
+   **So the limit is raised to 16 KiB now, as a protocol constant, while nothing has been released**
+   (C23) and every node is a fresh build — and the heartbeat's size is still guarded when it is
+   encoded (D2). After a release, a further raise has to reach every receiver before any sender uses
+   it.
+
+   **Every `Gossip` in the workspace has to take the same constant.** `Gossip::builder()` is called in
+   [`runtime.rs:103`](../../crates/distlib/src/runtime.rs) and six times across four test files —
+   [`rpc.rs:117,254`](../../crates/distlib-api/tests/rpc.rs),
+   [`common/mod.rs:99`](../../crates/distlib-consensus/tests/common/mod.rs),
+   [`memberlog.rs:64,306`](../../crates/distlib-consensus/tests/memberlog.rs) and
+   [`converge.rs:76`](../../crates/distlib-sync/tests/converge.rs). A test node left on the default
+   would reject a 16 KiB beat from a node built the real way and drop the connection — a test failure
+   that looks like a network fault.
+
+4. **A second topic on the existing `Gossip` is cheap and cannot stall anything.** Subscribing is
+   `subscribe(topic, bootstrap)` (`iroh-gossip api.rs:157-167`). Unlike an iroh-docs subscriber, a
+   gossip subscriber that falls behind holds nothing up. HyParView's defaults — an active view of 5, a
+   passive view of 30, a shuffle every 60 s (`hyparview.rs:202-216`) — are what a heartbeat topic
+   inherits.
+
+5. **`SignedAddress` cannot carry holdings, and should not be made to.** Its signature covers
+   `(member, addr, applied)` under `b"distlib.address.v1"`
+   ([`signed_addr.rs:39,143-146`](../../crates/distlib-core/src/addr/signed_addr.rs)), and the reason
+   it carries no clock is ground truth 1. `MemberId` is a 32-byte key that deliberately serialises as
+   its 64-character hex string ([`id.rs:89-98`](../../crates/distlib-core/src/id.rs)), so postcard
+   spends 65 B on it; the `SignedAddress` keeps that encoding, because its signature covers it, and
+   the heartbeat's own fields use raw bytes. `Directory::learn`
+   ([`directory.rs:132-203`](../../crates/distlib-net/src/directory.rs)) answers `Ok(false)` for an
+   unchanged statement and keeps no TTL. **So the heartbeat is its own signed type, with the
+   `SignedAddress` inside it** — which is also how it closes C5.
+
+6. **Ordered providers come for free.** Any `Vec<EndpointId>` is a `ContentDiscovery` that is tried
+   in order (`iroh-blobs downloader.rs:562-572`); only our own
+   [`Blobs::fetch_with_progress`](../../crates/distlib-net/src/blobs.rs) shuffles, at `blobs.rs:157`.
+   A provider that lacks the blob fails and the next one is tried. **So a download can put the online
+   holders first** without any new discovery code — and a holder whose latest additions have not
+   reached us yet is still tried, just later.
+
+7. **Blob GC is off, deletion is crate-private, and awaiting `add_bytes` directly pins the blob for
+   ever.**
+   - `gc: None` (`iroh-blobs store/fs/options.rs:124`), and delete is `pub(crate)`
+     (`api/blobs.rs:152-171`). Media added by `library.add` carries an auto tag, catalogue values
+     only a temp tag, downloads none.
+   - **`store.add_bytes(x).await` creates a new, uniquely named tag on every call**
+     (`api/blobs.rs:677-685` → `with_tag`, `:717-726`), and a tagged blob is never collected. Publish
+     something a thousand times that way and a thousand copies are kept.
+     **`with_named_tag(name)`** (`:707-715`) instead points one fixed name at the new blob, which
+     leaves the previous one untagged — collectable as soon as there is a collector.
+   - `iroh_blobs::get::request::get_blob(conn, hash)` (`get/request.rs:112`) fetches a blob **into
+     memory, verified, without storing it**.
+
+8. **Community keys are invisible to the pipeline today.** `Key::parse`
+   ([`catalogue.rs:212-229`](../../crates/distlib-core/src/catalogue.rs)) accepts `item/…` only — by
+   design, its doc names phase 4's ratings as the reason — so the pump's `note`
+   ([`changes.rs:177-182`](../../crates/distlib-sync/src/changes.rs)) and the replay's `item_ids`
+   ([`catalogue.rs:444-459`](../../crates/distlib-sync/src/catalogue.rs)) skip them.
+
+9. **A forged community entry would win every read we do today.** iroh-docs keeps one record per
+   (namespace, author, key) and checks only that the entry is signed by its own author. Every read in
+   [`catalogue.rs`](../../crates/distlib-sync/src/catalogue.rs) is an *unfiltered*
+   `single_latest_per_key`, which picks the newest record for a key across all authors — so a newer
+   `rating/X/bob` written by carol would hide bob's real one. **The crate disagrees with itself about
+   the obvious fix:** its doc says a `single_latest_per_key` query applies the author filter *after*
+   grouping (`iroh-docs store.rs:278-279`), and the fs store applies it *before*
+   (`store/fs/query.rs:108-117`). A **flat** `Query::author(a).key_exact(k)` is unambiguous either
+   way, and since a node's author key is its own key
+   ([`catalogue.rs:194`](../../crates/distlib-sync/src/catalogue.rs)), `a` is the member id the key
+   names, byte for byte.
+
+10. **Writing a key prunes that author's longer keys beneath it** (`iroh-docs ranger.rs:551-583`,
+    with the production bounds at `store/fs.rs:871-887`). Writing `bookmark/X/m` would silently delete
+    every `bookmark/X/m/…` that `m` had written. **Community keys must never be a prefix of another
+    key by the same author**, which holds as long as every key ends in a fixed-length id and nothing
+    writes the bare prefix. Deleting is `Doc::del(author, prefix)` (`iroh-docs api.rs:356`), which
+    clears only that author's entries.
+
+11. **The pump already sees what C14 needs, and throws it away — and must stay trivial.**
+    `NeighborUp`, `NeighborDown` and `SyncFinished(peer)` reach it and answer `false`
+    ([`changes.rs:158-162`](../../crates/distlib-sync/src/changes.rs)). A second docs subscription to
+    get them is phase 3's ground truth 3 over again: it stalls the live actor
+    (`iroh-docs live.rs:950-967`). So the pump records them, synchronously, with no `.await`.
+
+12. **The thirty-second re-offer has a second job nobody asked it to do.** Every sync round ends with
+    `PendingContentReady` (`iroh-docs live.rs:600-620`), and that is the only thing that makes the
+    read model re-read an item whose bytes the content sweep fetched behind the engine's back
+    ([`projection.rs:37-46`](../../crates/distlib-store/src/projection.rs)). **Removing the timer
+    without giving the sweep its own nudge would leave repaired items half-projected** until something
+    else touched them — so both go in the same PR.
+
+13. **A schema change today stops `distlib run`.** The read model has no version: no
+    `user_version`, every table `IF NOT EXISTS`, and a failed upsert only warns. A changed tantivy
+    schema makes `SearchIndex::open` fail, which is fatal
+    ([`runtime.rs:153-155`](../../crates/distlib/src/runtime.rs)). The read model is replayed in full
+    at every start anyway (C7), so rebuilding it on a mismatch costs nothing extra. `lang` is an SQL
+    column and an API field, but not an index field ([`index.rs:84-95`](../../crates/distlib-store/src/index.rs)).
+
+14. **The search index holds one document per item, replaced whole.** The upsert deletes by `id` and
+    adds the document back ([`index.rs:337-362`](../../crates/distlib-store/src/index.rs)). A review is
+    therefore folded into its item's document, and a changed review means re-projecting the item; a
+    separate document per review would need a kind field, its own deletes, and would turn one item
+    into several hits. Bookmarks are searched in SQL instead (D13) and leave the index alone.
+
+15. **Nothing tracks what this node holds.** `Blobs::has` means `Complete`
+    ([`blobs.rs:86-97`](../../crates/distlib-net/src/blobs.rs)); `item_files` has no index on `blob`
+    ([`schema.rs:53-65`](../../crates/distlib-store/src/schema.rs)); `library.download` offers every
+    member but itself, in no order ([`methods.rs:869-876`](../../crates/distlib-api/src/methods.rs));
+    and `library.item` says outright "No ratings or availability" (`methods.rs:454-458`).
+
+16. **The API's seams.** Dispatch is a string match
+    ([`methods.rs:84-106`](../../crates/distlib-api/src/methods.rs)); a hit's fields come from
+    `summary()` (`:1205-1216`); events are an enum in
+    [`event.rs:25-71`](../../crates/distlib-core/src/event.rs), and the UI's `NodeEvent` already
+    passes unknown names through; routes go through `router.svelte.ts`. The config has no durations
+    yet — sizes are plain numbers, like `max_upload_bytes`
+    ([`config.rs:99`](../../crates/distlib-core/src/config.rs)) — so the interval is
+    `beat_interval_secs`.
+
+17. **CI has never shown us C25's log.** On Windows the test passes, slowly, and nextest hides the
+    output of a passing test. The integration tests set up no tracing at all.
+
+---
+
+## The structural decision: availability is never replicated
+
+**What "availability" means here:** whether an item's content can be fetched right now — which
+members are online, and which items each of them holds locally. §5.6 already decides where it lives
+("Never in replicated state. Reachability is liveness: per-observer, minute-to-minute"), and the
+decision is restated because it is the rule this phase's PRs are reviewed against:
+
+**Nothing about availability is written to the document, the read model or the Raft log.** Every
+node works it out in memory from the heartbeats it hears, and forgets it when it stops. §9's
+acceptance asserts exactly this — across the offline flip, the document's entry count and the log's
+position do not move — and the test does it with counters, not by inspection.
+
+**Where it lives:**
+
+- **The pure parts in `distlib-core::availability`** — the wire format, signing, the holdings list's
+  encoding, the size guard. Same reasoning, and same place, as `SignedAddress`.
+- **The service in `distlib-sync::availability`** — the topic, the beat, the receiving side, the TTL
+  index, the held set and the base list. `distlib-sync` already depends on consensus, net, gossip
+  and blobs, and its offer loop is the main consumer of "somebody appeared".
+- **Consensus gains one getter**, `own_address()`: a watch of the `SignedAddress` that
+  `announce_address` already signs.
+- **Rejected: `distlib-net`, where §8 puts it.** It sits below consensus, so the group id, the
+  membership and this node's own address would all have to be handed down to it from above.
+
+---
+
+## Design decisions taken up front
+
+**D1 — The heartbeat is its own signed type, carrying the signed address.**
+
+```text
+SignedHeartbeat
+  address        SignedAddress     its signer is the heartbeat's signer
+  epoch          u64               random per start
+  seq            u64               +1 per beat
+  interval_secs  u32               the sender's current interval
+  holdings
+    count        u64               items held now
+    base         Option<Hash>      the last published full list, a blob (D3, D5)
+    added        Vec<[u8; 32]>     held now, not in base
+    removed      Vec<[u8; 32]>     in base, no longer held
+  leaving        bool
+  signature      over b"distlib.heartbeat.v1" || group_id || postcard(the above)
+```
+
+The group id is signed but not sent, so a heartbeat cannot be replayed into another group. There is
+no separate member field — the address names the member, and the receiver checks the two signatures
+agree. Item ids travel as raw bytes, not as the hex strings they are elsewhere. Apart from the delta,
+the size is fixed: about 720 B with an address of up to about twenty direct addresses.
+
+**D2 — The frame is 16 KiB, and the size is guarded when the heartbeat is encoded.**
+One constant, `GOSSIP_MAX_MESSAGE`, set on every `Gossip` the workspace builds (ground truth 3). The
+heartbeat's payload is capped a little under it, and the delta — `added` and `removed` together — at
+12 KiB, about 380 ids. When the next change would overflow the delta, the node publishes a new base
+first (D5). If a heartbeat is still over the cap — an absurd address list — the node logs an error and
+sends nothing. **An oversize frame is never sent**, because the failure it causes is a dropped
+connection on every topic.
+
+**D3 — Holdings are an exact base list plus a cumulative delta — Ivan's call, at the review of this
+plan.** It is what §5.6 sketches — a `holds_manifest_hash` in the heartbeat, "announced only when
+changed" — with the change itself carried alongside.
+
+- **The base** is the sorted list of every item the node held when it was published: a format byte,
+  then raw 32-byte ids. Sorted only so that one set always makes the same bytes, and so the same
+  hash — nothing ever searches it.
+- **The delta is counted from the base, not from the previous beat.** Every heartbeat is complete on
+  its own, so a receiver that missed one — gossip can lose a message, a node can be down for a minute
+  — loses nothing: the next beat says the same and more. That is also why no Merkle tree or set hash
+  is needed: the base's own hash says exactly which list the delta applies to.
+- **A receiver** that already holds the member's `base` applies `added` and `removed`; one that does
+  not fetches the base once (D5), then applies them. The one check is free:
+  `len(base) + len(added) − len(removed) == count`. A mismatch is logged and the base fetched again.
+- **The receiver keeps one inverted map, `item → members holding it`,** with members as `u16` indexes
+  into the current membership. That map is what the library page asks ("n online") and what a later
+  "available now" filter would need. A member's base changing, or the member going away, is one pass
+  over the map.
+
+What a base costs on the wire, once per publish and receiver:
+
+| Held by the member | Base list |
+|---|---|
+| 10k | 320 KB |
+| 100k | 3.2 MB |
+| 1M | 32 MB |
+
+And what the map costs each receiver in memory — about 60–100 B per distinct item held by anyone, plus
+two bytes per further copy:
+
+| Distinct items held in the group | Receiver's map |
+|---|---|
+| 100k | ~10 MB |
+| 1M | ~100 MB |
+| 10M | ~1 GB |
+
+Up to the "100k easily" target this is nothing. **At the 10M end the map belongs in SQLite** — a
+local table, still never replicated — which is C28, Ivan's call, taken when a group gets there.
+
+Rejected at review: **a Bloom filter** in place of the list. It buys one thing, size — about 27 times
+smaller — at the price of false positives, sizing arithmetic and a `providers` count that can be
+wrong, and the size only matters at the 10M end. The base's format byte keeps it, or 8-byte id
+prefixes, open as a compatible change if that end is ever measured and found wanting.
+
+**D4 — Cadence, TTL and budget.**
+
+- **The interval is configurable** — `[availability] beat_interval_secs`, default 60, with ±10%
+  jitter so the group does not beat in step. A change to what this node holds triggers an extra beat,
+  at most once every 10 s. Tests set the interval in code, around 300 ms.
+- **The budget is a constant — Ivan's call.** With N members, each beat reaches all of them, so every
+  node receives N beats per interval. Each sender stretches its own interval to
+  `beat_interval × ⌈N/50⌉`, which keeps what any node receives at about fifty beats a minute
+  whatever N is. **The interval and the TTL grow linearly with N; the traffic per node stays flat.**
+  At the default, N = 200 beats every 4 minutes and goes offline after 12.
+- **TTL = 3 × the sender's `interval_secs`**, read from the heartbeat and clamped to 1 s – 1 h. The
+  sender says how long to trust it, so two nodes with different configs, or different views of N,
+  still agree. At the default that is 180 s, against §5.6's "~5 min" — a delta, **Ivan's call**.
+- **A `leaving` beat on graceful shutdown** removes the member at once, before the router stops. A
+  kill still waits out the TTL.
+
+The receiving side, in order:
+
+1. check the size, then decode;
+2. verify the signature, and that the address inside is signed by the same member;
+3. the signer is a current member, and not this node;
+4. a new `epoch` is accepted as an **appearance**; within an epoch, only a higher `seq`;
+5. hand the address to `Directory::learn` — which is how C5 closes;
+6. stamp the entry with this node's own `Instant` — the sender's clock is never used;
+7. if `base` is not the one this node holds for the member, fetch it (D5); then apply the delta
+   and check the count (D3).
+
+Expiry is one `sleep_until` on the earliest deadline. A member who leaves the allowlist is dropped at
+once rather than at the TTL.
+
+**D5 — The base list: when it is published, how it is fetched, and what it leaves behind.**
+
+- **Published** into the node's own blob store with
+  `add_bytes(..).with_named_tag("distlib/availability/base")`. In plain words: the one tag name
+  `distlib/availability/base` always points at the newest list, so the previous one is no longer
+  protected. Awaiting `add_bytes` directly would give every list a tag of its own and keep all of
+  them for ever (ground truth 7).
+- **Re-published — consolidated —** at start; when the next change would overflow the delta; and
+  **when the delta is not empty and nothing has been added for ten minutes.** Without the last rule a
+  node that once downloaded three hundred items would send a 10 KB heartbeat for the rest of its life.
+  With it, a burst of downloads costs one base fetch per receiver, at its end, and an idle node's
+  heartbeat is back to about 0.8 KB. Removals go into `removed` like any other change.
+- **Fetched** by a receiver only when a heartbeat names a base it does not hold, with `get_blob` from
+  the sender, **parsed into the map as it streams — never buffered whole, never stored**, so a
+  receiver leaves no garbage. Capped at ten million ids, 320 MB on the wire.
+- **Until a member's base has arrived, it counts as unknown**, not as "holds nothing".
+- **Superseded lists stay on the publisher's disk** until phase 5 brings GC, together with quotas and
+  custodianship: one per download burst. **C26.**
+
+**D6 — "Held here" is a set the node maintains, not a question it asks the blob store per row.**
+An item is held when every `role: content` file is `Complete` locally — covers and other roles do not
+count, as they do not count towards an item's identity. A `Holdings` set in `distlib-sync::availability`,
+with `recheck(&Item)`, called by:
+
+- the **projection**, for every item it projects — which covers replay, reindex and every document
+  change, including another member adding a file this node lacks;
+- **`library.add`**, after its import;
+- **`library.download`**, when it finishes.
+
+The pump is not touched. 4a-1 adds the missing index on `item_files(blob)`.
+
+**D7 — Targeted re-offers replace the timer.** The catalogue's offer loop keeps its two existing arms
+— an address learned, the membership changed — and gains three:
+
+- **(a) an appearance** (D4): a new member, or a known one with a new epoch, is offered;
+- **(b) unconfirmed offers**: a peer offered with no `SyncFinished` within 10 s is offered again,
+  backing off to five minutes;
+- **(c) zero neighbours**: when the document's gossip neighbour count drops to 0, every member with
+  an address is offered; the availability topic calls `join_peers` the same way.
+
+`OFFER_AGAIN` goes. The content sweep gets its own nudge (ground truth 12). **A slow backstop sweep,
+every ten minutes, stays** — for the split where a group of four falls into two pairs, each of which
+still has a neighbour and so triggers nothing. **Ivan's call.** Exactly which arm fixes C25 is
+settled by 4.0's diagnosis, not assumed here.
+
+**D8 — Community keys are a type of their own; `Key` stays item-only.**
+A `CommunityKey` enum in `distlib-core::community`, with §5.3's key formats except one:
+
+| Key | Value (JSON) |
+|---|---|
+| `rating/{item}/{member}` | `1..5` |
+| `review/{item}/{member}` | a string, capped at 16 KiB |
+| `bookmark/{item}/{member}/{bookmark}` | `{position, note, created_at, updated_at}` |
+| `wish/{wish}/{member}` | `{title?, authors?, description?, created_at?, status, item_id?}` |
+| `wish_comment/{wish}/{member}` | a string |
+
+**Bookmarks gain a fourth segment — Ivan's call, and a delta against §5.3.** A bookmark is a
+**shared pointer**, so a member may leave several on one item: `bookmark` is 16 random bytes in hex,
+`position` is free text (a page, a chapter, `01:23:45`), and `note` is capped at 4 KiB. Clearing or
+deleting anything is `Doc::del` on your own full key (ground truth 10).
+
+**D9 — An entry counts only if its author is the member its key names.**
+Reads are flat `Query::author(m).key_exact(k)`, or a prefix scan that keeps only entries whose author
+matches the key's member segment — **never `single_latest_per_key`** (ground truth 9). Writes build
+the member segment from this node's own author, never from what a caller sent. **An expelled
+member's entries stop counting:** the projection filters by current membership, and a membership
+change re-projects the items, wishes and bookmarks it touches.
+
+**D10 — Wishes are resolved, not stored.**
+`wish_id` is 32 random bytes in hex. The creator is whoever wrote the earliest entry carrying a
+title. Fulfilment is §5.3's: the fulfiller writes their own `wish/W/{me}` with
+`{status: "fulfilled", item_id}`, and the reader resolves it. One comment per member per wish,
+editable, as §5.3 has it; threads would be C29. **Ivan's call.**
+
+**D11 — Events stay ids only (phase 3's D2).**
+
+- `availability.changed {member_id}` — a delta against §7.2's `{item_id, providers}`. One node going
+  offline touches every item it holds — thousands of ids in one event — so the event names the member
+  and the page refetches what
+  it shows.
+- `wish.changed {wish_id}`, `bookmark.changed {item_id}`, and `sync.status` with no payload.
+- **Ratings and reviews need no event of their own**: the item is re-projected, and they arrive as
+  `catalogue.item_changed`.
+
+The availability service publishes with `let _ = tx.send(..)` and never awaits — phase 3's rule.
+
+**D12 — The read model gets a version.**
+`READ_MODEL_VERSION`, kept in SQLite's `PRAGMA user_version` and in a `VERSION` file beside the
+index. On a mismatch, or a tantivy schema error, delete the database (with its `-wal` and `-shm`) and
+the index, and let the replay that runs anyway refill them. `lang` joins the default search fields at
+a low boost, 0.5, so a language code does not outrank a title.
+
+**D13 — Bookmarks are shared pointers — Ivan's call.**
+Every member sees every bookmark; **"mine" is only a filter.** The projection keeps all members'
+bookmarks except an expelled member's. The item page lists an item's bookmarks — member, position,
+note — with your own editable. A **Bookmarks page** lists all of them, newest first, with a search
+over the note, the item's title and the member's name, and filters for "mine" and for one member.
+The search is SQL `LIKE`: the number of bookmarks a group makes is small next to its catalogue, and
+it keeps the search index untouched (ground truth 14). §7.1 gains `community.bookmarks`.
+
+---
+
+## Sub-phases
+
+Seventeen PRs. Each ends compiling, tested, and demonstrable by hand with the CLI or a page. One PR at
+a time, review before the next.
+
+### 4.0 — diagnose C25 (1 PR, CI only)
+
+- **4.0 — find out which step fails on Windows.** Tracing for the integration tests, gated on
+  `RUST_LOG`; the Windows job runs the C25 test with `--success-output final`; and a debug line at
+  each step — address learned → offer → dial result → document `NeighborUp` → `SyncFinished`.
+  No fix.
+  **Acceptance:** a Windows CI log that names the step that does not happen.
+  **Watch for:** it goes first because its answer arrives on CI's schedule, while other work goes on.
+
+### 4a — foundations (3 PRs)
+
+- **4a-1 — read-model version, `lang` in the index, `item_files(blob)` indexed (D12).**
+  **Acceptance:** a phase-3 data directory opens, rebuilds and is searchable; `lang:cs` finds a Czech
+  item, and so does a bare `cs`. Mutation-checked: without the version check the old directory fails
+  to open; without the field the search finds nothing.
+  **Watch for:** this goes before any other schema change, because every later one bumps the version
+  it introduces.
+
+- **4a-2 — `sync.status` (C14).** The pump records neighbours and the last sync per peer into a
+  `watch<SyncState>`, synchronously (ground truth 11); `node.status` gains a sync block; the
+  `sync.status` event exists.
+  **Acceptance:** two nodes show one neighbour each; stop one, the other drops to zero and the event
+  fires.
+
+- **4a-3 — targeted re-offers (D7 b, c), with the timer still in place.** Revised in the light of
+  4.0's log.
+  **Acceptance:** the C25 test converges in under 10 s on all three CI platforms, and its bound is
+  tightened to match.
+
+### 4b — availability (7 PRs)
+
+- **4b-1 — wire format, list encoding, size guard and the 16 KiB frame (D1–D3).** The pure parts in
+  `distlib-core`, and `GOSSIP_MAX_MESSAGE` on every `Gossip` — `runtime.rs` and all five test
+  harnesses (ground truth 3).
+  **Acceptance**, as property tests: one set always encodes to the same bytes, whatever order it was
+  built in; base and heartbeat round-trip; the encoded heartbeat never exceeds the cap for 0–64
+  addresses and a full delta; a tampered body, the wrong group, or an address signed by someone else
+  fails. And one real 16 KiB message crosses between two nodes without dropping the connection.
+
+- **4b-2 — "held here" (D6).**
+  **Acceptance:** held after an add, after a download and after a replay; not held once another
+  member adds a content file this node lacks.
+
+- **4b-3 — the heartbeat service, presence only (D4).** The topic,
+  `blake3("distlib.availability.v1" || group_id)`; the TTL index; `Directory::learn`;
+  `own_address()`; the config key and the budget; `leaving` before the router stops.
+  **Acceptance:** a member is online, then gone within the TTL when aborted and at once when stopped
+  cleanly; a sender's interval sets its receiver's TTL; a node that missed an address announcement
+  learns it from a heartbeat (C5); `a_settled_group_stops_talking_about_addresses` still passes.
+
+- **4b-4 — holdings on the wire: the base list and the delta (D3, D5).**
+  **Acceptance:** a receiver's map matches the sender's held set exactly — after the base, after
+  additions, after a removal; a dropped heartbeat changes nothing; a base is fetched only when a
+  heartbeat names a new one, counted; overflowing the delta, and ten quiet minutes with a delta, each
+  publish a new base, and the named tag moves to it; the receiver's blob store is unchanged.
+
+- **4b-5 — availability in the API and CLI.** Hits gain `held` and `providers` — an exact count of
+  online holders, `null` while any online member's base is still unknown;
+  `library.item` gains `availability`; `library.download` orders its providers — online holders,
+  then other online members, then the rest, each tier shuffled; `availability.changed`.
+  **Acceptance — §9's first half:** stop the provider and `providers` drops within the TTL, while the
+  document's entry count and the log's position stay where they were; a download with one offline
+  provider does not wait out a dial timeout on it.
+
+- **4b-6 — `OFFER_AGAIN` goes (D7 a, the sweep's nudge, the backstop).**
+  **Acceptance:** a quiet group makes no `start_sync` call in two minutes, counted; an item repaired
+  by the sweep is re-projected with no timer; the C25 bound from 4a-3 still holds.
+  **Watch for:** ground truth 12 — the nudge and the removal are one PR, never two.
+
+- **4b-7 — availability in the UI.** A library column — held here / n online / none online /
+  unknown — the same on the item page, and neighbours and last sync on the Node page.
+  **Acceptance:** Vitest, mutation-checked; the badge changes on `availability.changed` without a
+  reload.
+
+### 4c — community (7 PRs)
+
+Needs only 4a-1, so it can interleave with 4b.
+
+- **4c-1 — keys, reads, writes and the author check (D8, D9).** The pump routes community keys: an
+  item's ratings and reviews mark the item dirty; bookmarks and wishes go to `Batch.bookmarks` and
+  `Batch.wishes`.
+  **Acceptance:** a forged `rating/X/bob` written by carol is ignored on every node; two concurrent
+  ratings of one item both survive.
+
+- **4c-2 — the projection (a version bump).** Tables for ratings, reviews, bookmarks (everyone's),
+  wish entries and comments; reviews folded into the item's search document; expelled members
+  filtered out.
+  **Acceptance:** a word that appears only in a review finds the item; an expelled member's rating and
+  bookmarks disappear; a second replay changes nothing.
+
+- **4c-3 — ratings, reviews and bookmarks in the API and CLI.** `community.rate`,
+  `community.review`, `community.bookmark` (create, edit or delete your own) and
+  `community.bookmarks {q?, member?, item_id?}`; the CLI's `rate`, `review`, `bookmark` and
+  `bookmarks`; `library.item` gains `ratings {average, count, mine}`, `reviews` and `bookmarks`.
+  **Acceptance — §9's second half:** two members rate one item at once, and both ratings show on all
+  three nodes. And: two bookmarks by one member on one item both survive, and another member finds
+  one by a word from its note.
+
+- **4c-4 — wishes in the API and CLI (D10).** `community.wish_create`, `wish_list`, `wish_comment`,
+  `wish_fulfill`, as §7.1 names them.
+  **Acceptance:** A creates a wish, B comments, C fulfils it with an item; A sees it fulfilled and
+  linked to the item.
+
+- **4c-5 — community on the item page** — ratings, reviews, bookmarks.
+  **Acceptance:** Vitest; one Playwright test that rates, reviews and bookmarks.
+
+- **4c-6 — the Wishes page** — route, nav, create, a picker to fulfil with, comments.
+  **Acceptance:** Vitest; one Playwright test.
+  **Watch for:** C20 — a new page is when the CSP's inline styles are revisited.
+
+- **4c-7 — the Bookmarks page** — route, nav, search, the "mine" and member filters.
+  **Acceptance:** Vitest; one Playwright test.
+
+**Order:** 4.0 first; 4a-1 before any schema change; 4a-2 before 4a-3 and 4b-6; 4b-1 and 4b-2
+before 4b-3, then 4b-4; 4b-3 before 4b-6. 4c needs only 4a-1.
+
+---
+
+## Carried forward from Phase 3 — take or defer, explicitly
+
+Every open C-number appears here once.
+
+| # | Item | Phase 4 |
+|---|---|---|
+| **C1** | A full peer offer is O(N²) dials | **Narrowed.** A full offer happens only on a membership change and the ten-minute backstop; appearances are offered one at a time (D7). |
+| **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
+| **C5** | Nothing asks again when a member cannot be resolved | **Closed by 4b-3.** Every heartbeat carries the sender's signed address. |
+| **C6** | A field blinks out of the read model while its newest value is in flight | **Mitigated for community rows**: an old row is kept while its new value is in flight. Items unchanged. |
+| **C7** | The read model is replayed in full at every start | **Deferred**, and now relied on: D12's rebuild costs nothing because of it. |
+| **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **Deferred again.** Nothing in §9's phase-4 list wants it. |
+| **C9** | `PENDING_EXPIRY` is one fixed count | **Phase 5.** |
+| **C13** | Gossip does not change sides when a node is promoted | **Deferred.** |
+| **C14** | `sync.status` does not exist | **Closed by 4a-2.** |
+| **C15**–**C19** | Read-only admin; Windows file privacy and service; clearing a field; downloads as in-memory tasks | **Unchanged.** |
+| **C20** | The CSP allows `style-src 'unsafe-inline'` | **Revisited in 4c-6**, the first new page. |
+| **C21**–**C24** | Title sort; consensus test peers that cannot restart; release publishing; the expelled leader's lost answer | **Unchanged.** |
+| **C25** | On Windows, two followers meet only through the timed re-offer | **Closed by 4a-3**, as 4.0 directs. |
+
+**New in phase 4:**
+
+| # | Item | Where it goes |
+|---|---|---|
+| **C26** | **Superseded base lists stay on the publisher's disk** (D5), one per download burst | **Phase 5**, with GC, quotas and custodianship. |
+| **C27** | **Heartbeat traffic has not been measured above N = 50** | **No phase.** Measured on five nodes here; a larger group is the trigger. |
+| **C28** | **The `item → members` map lives in memory** (D3) — about 1 GB per node at 10M distinct items | **No phase.** Moves to a local SQLite table when a group reaches the 10M end — Ivan's call. Never replicated either way. |
+| **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
+
+---
+
+## Testing and the lanes
+
+**Fast lane:** canonical list encoding and the size guard, as property tests; applying a delta to a
+base, including a missed beat; consolidation on overflow and after ten quiet minutes, under
+`tokio::time::pause`; signing round trips and tampering; the epoch/seq rule; the TTL index under `tokio::time::pause`, including a
+sender-declared interval; community keys and the author check; the read-model rebuild on a version
+mismatch.
+
+**Slow lane:** the online/offline flip; C5; a 16 KiB message between two nodes; bases fetched on
+change only; the quiet-group counters;
+C25; both halves of §9's acceptance; a forged and an expelled entry; provider order on download.
+
+Heartbeat tests run at about 300 ms intervals with a TTL of about a second, and **assert "within",
+never an exact sequence** — the same rule as phase 3's SSE tests, for the same reason.
+
+Every mechanism is mutation-checked. UI: Vitest first, Playwright for the happy paths only.
+
+---
+
+## Risk, stated once
+
+**The first traffic that never stops.** Ground truth 1 is a principle this workspace measured, and a
+heartbeat breaks it deliberately: every member sends one per interval for as long as it is up, and
+every other member receives it.
+
+A beat is about 0.8 KB while its sender is idle, and up to 16 KB only while the sender has a delta —
+during a download burst and for at most ten quiet minutes after it (D5). Each node receives N beats
+per interval and forwards roughly as many again. At the default 60 s, what each node receives:
+
+| Members | All idle, per day | Every member mid-burst, per hour |
+|---|---|---|
+| 5 | ~6 MB | ~5 MB |
+| 50 | ~58 MB | ~48 MB |
+| more than 50 | the N = 50 figure — D4's budget stretches the interval instead | the same |
+
+A base costs its own size times N once per consolidation — once per download burst, or every ~380
+changes during a long one. A node holding 100k items and 50 members: about 160 MB sent, per burst.
+
+The fences, each a rule PRs are reviewed against:
+
+- **the size guard at encode** (D2), property-tested — an oversize frame is a dropped connection on
+  every topic;
+- **jitter**, and **a floor between beats**, so a burst of changes is one beat, not many;
+- **TTL-only state** — nothing to clean up, nothing replicated;
+- **a measured rate** on a five-node run in 4b-3, recorded in its delta.
+
+The rest are bounded and named: superseded bases (C26), forged entries (D9), and a receiver's memory
+at the 10M end (D3's table, C28).
+
+---
+
+## Verification
+
+Per PR, before review:
+
+- `cargo fmt --all` and `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test-all` — green.
+- Any test asserting a new mechanism gets a **mutation check**: delete the line the test is about,
+  confirm the test fails, restore.
+- For UI PRs: `npm run check`, `npm test` and `npm run e2e`.
+
+At the end of the phase, [`manual-check.md`](../manual-check.md) grows within its one story:
+
+- dave's library shows what is **held here**;
+- **a new step after downloads:** bob's book shows "1 online"; Ctrl-C on bob flips it at once,
+  `kill -9` within the TTL, and a restart flips it back;
+- **in the edit step:** alice and dave rate Dune at the same moment, both ratings show on both pages,
+  and a word from dave's review finds it;
+- dave leaves two bookmarks with notes on Lectures, and alice finds one by its note on the Bookmarks
+  page;
+- **a wishes step, before erin leaves:** erin wishes for a book, dave comments, bob fulfils it;
+- **when the leader goes down:** the Node page shows the neighbour count drop.

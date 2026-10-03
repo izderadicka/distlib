@@ -22,7 +22,7 @@ See [docs/distlib-plan.md](docs/distlib-plan.md) for the design,
 deliberately diverged from it, and [docs/plan-phases/](docs/plan-phases/) for the
 sequencing plan of the phase currently being built.
 
-> **Status: phases 1 and 2 complete, phase 3 (API + UI) nearly done.**
+> **Status: phases 1–3 complete; phase 4 (availability + community metadata) planned.**
 >
 > - **Membership:** a group can be founded, and members admitted, expelled and handed a
 >   join ticket. Every node, voting or not, derives what it will talk to from the
@@ -31,12 +31,12 @@ sequencing plan of the phase currently being built.
 >   browsed from a local read model. An item's files are downloaded from whoever holds
 >   them, and a node that has fetched a file then serves it too.
 > - **Web UI:** served by the node itself (`distlib ui` prints a signed-in link). You can
->   browse and search the library, read an item, download it with live progress, and add
->   an item from files chosen in the browser.
+>   browse and search the library, read and edit an item, download it with live progress,
+>   and add an item from files chosen in the browser. Release builds and a Dockerfile exist.
 >
-> Still to come in phase 3: editing an item's metadata from the UI, and packaging
-> (release builds, Docker). Availability tracking, community metadata and custodianship
-> are later phases.
+> Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
+> see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and
+> quotas are phase 5.
 
 ## AI Usage
 

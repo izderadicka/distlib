@@ -153,7 +153,7 @@ Phase 1 is complete against §9's acceptance criteria, which run as a test on ev
 
 ## Phase 2 — Catalogue & library basics
 
-*In progress.* The sequencing plan — sub-phases, PR boundaries, per-PR acceptance, and
+*Complete.* The sequencing plan — sub-phases, PR boundaries, per-PR acceptance, and
 which carried-forward items it takes — is [`plan-phases/phase-2-catalogue.md`](plan-phases/phase-2-catalogue.md).
 That document is sequencing only: **deviations from the design still land here**, in the PR that
 causes them.
@@ -201,7 +201,7 @@ which are taken (P1-23) and which are deferred, and why.
 
 ## Phase 3 — API + UI
 
-*In progress.* The sequencing plan is [`plan-phases/phase-3-api-ui.md`](plan-phases/phase-3-api-ui.md);
+*Complete.* The sequencing plan is [`plan-phases/phase-3-api-ui.md`](plan-phases/phase-3-api-ui.md);
 as in phase 2, deviations from the design land here, in the PR that causes them.
 
 | # | §  | Doc says | We do | Why |
@@ -237,7 +237,9 @@ as in phase 2, deviations from the design land here, in the PR that causes them.
 
 ## Phase 4 — Availability + community metadata
 
-*Not started.*
+*Not started.* The sequencing plan is
+[`plan-phases/phase-4-availability-community.md`](plan-phases/phase-4-availability-community.md);
+as before, deviations from the design land here, in the PR that causes them.
 
 ## Phase 5 — Custodianship & quotas
 
