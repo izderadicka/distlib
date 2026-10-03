@@ -237,9 +237,13 @@ as in phase 2, deviations from the design land here, in the PR that causes them.
 
 ## Phase 4 — Availability + community metadata
 
-*Not started.* The sequencing plan is
+*In progress.* The sequencing plan is
 [`plan-phases/phase-4-availability-community.md`](plan-phases/phase-4-availability-community.md);
 as before, deviations from the design land here, in the PR that causes them.
+
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P4-1 | §5.4 | "tantivy indexes `title, authors, description, genres, series, reviews`"; nothing about the read model's format changing | **`lang` is indexed too**, as a default search field at a boost of 0.5 — below everything else, so `cs` finds the Czech items without outranking something called "CS". **And the read model has a version**, `READ_MODEL_VERSION`, kept in SQLite's `user_version` and a `VERSION` file in the index directory. A read model of another version is thrown away and refilled by the replay every start runs anyway (C7) — tables dropped, index directory emptied — and an index whose schema tantivy rejects despite a matching version is started afresh the same way. | **`lang`: the phase-3 by-hand check**, which found a book could not be searched for by its language; Ivan's call was full text now, filters and sorting in a later usability phase. **The version: before it, any schema change stopped `distlib run`** — tantivy refuses an index with other fields, which was fatal at start, and SQLite's `CREATE TABLE IF NOT EXISTS` would keep an old table's shape and fail every write. Phase 4 changes both several times. **Tables are dropped rather than the file deleted**, which D12 planned: the same result, with no open file to remove on Windows, and the same code for a database in memory. All of them, not the ones this build knows, so a read model from a newer build is cleared too. **Two checks on the index, not one**, because each catches what the other cannot: the version catches a change in what fields *mean* with their names unchanged, tantivy's schema check a field changed without the bump. Each is pinned by its own test, and each test fails with its check removed. |
 
 ## Phase 5 — Custodianship & quotas
 

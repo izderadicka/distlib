@@ -357,3 +357,59 @@ async fn a_store_reopens_onto_what_it_already_held() {
         .expect("the store opens again");
     assert_eq!(second.item(id).await.expect("read"), Some(stored));
 }
+
+/// **A read model of another version is thrown away, not migrated**: its tables
+/// go, whatever they were, and the replay at every start refills them.
+///
+/// The old database here has an `items` table of another shape and a table this
+/// build has never heard of — what a version from before or after this one
+/// leaves behind. Kept, the first would refuse every write this build makes.
+#[tokio::test]
+async fn a_store_of_another_version_is_started_afresh() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    {
+        let old = rusqlite::Connection::open(dir.path().join("read-model.sqlite"))
+            .expect("the file opens");
+        old.execute_batch(
+            "CREATE TABLE items (id TEXT PRIMARY KEY, title TEXT, last_modified INTEGER);
+             INSERT INTO items VALUES ('left over', 'Left over', 1);
+             CREATE TABLE someday (x INTEGER);",
+        )
+        .expect("an old read model is written");
+    }
+
+    let store = Store::open(Some(dir.path().to_path_buf()))
+        .await
+        .expect("an old read model opens");
+    let id = ItemId::from_bytes([3; 32]);
+    let stored = StoredItem {
+        item: Item {
+            title: Some("Neuromancer".to_owned()),
+            lang: Some("en".to_owned()),
+            ..Item::new(id)
+        },
+        last_modified: 42,
+    };
+    store.upsert_item(stored.clone()).await.expect("written");
+    assert_eq!(store.item(id).await.expect("read"), Some(stored));
+    drop(store);
+
+    let db =
+        rusqlite::Connection::open(dir.path().join("read-model.sqlite")).expect("the file opens");
+    let version: u32 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("the version reads");
+    assert_eq!(version, distlib_store::schema::READ_MODEL_VERSION);
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .expect("the tables are listed")
+        .query_map([], |row| row.get(0))
+        .expect("the tables are listed")
+        .collect::<rusqlite::Result<_>>()
+        .expect("the tables are listed");
+    assert_eq!(tables, ["item_files", "items", "members"]);
+    let left: i64 = db
+        .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+        .expect("the rows are counted");
+    assert_eq!(left, 1, "only the row written since, not the one left over");
+}

@@ -1,9 +1,9 @@
 //! The tantivy half of §5.4's read model: `title, authors, description,
-//! genres, series`, searchable with per-field boosts.
+//! genres, series` and `lang`, searchable with per-field boosts.
 //!
 //! **SQLite answers `item`; this answers `search`.** [`crate::store::Store`]
 //! is the record — every column §5.2 names, queryable by id. This is a
-//! ranking over five of those columns, and it is deliberately not a second
+//! ranking over six of those columns, and it is deliberately not a second
 //! copy of them: a hit carries only the item id, and the caller reads the
 //! item back out of the store the same way `library.item` would. That is what
 //! keeps content in one place — a title that changed would otherwise have to
@@ -38,6 +38,7 @@ use tantivy::{
 use crate::{
     Page,
     error::{Result, StoreError},
+    schema::READ_MODEL_VERSION,
 };
 
 /// tantivy refuses less than this per indexing thread; see
@@ -65,10 +66,18 @@ const AUTHORS_BOOST: f32 = 2.0;
 const SERIES_BOOST: f32 = 1.5;
 const GENRES_BOOST: f32 = 1.25;
 const DESCRIPTION_BOOST: f32 = 1.0;
+/// Below everything else, so a language code never outranks a title: `cs` is
+/// meant to find the Czech items, not to beat one called "CS Lewis".
+const LANG_BOOST: f32 = 0.5;
+
+/// The file in the index directory that says which [`READ_MODEL_VERSION`] the
+/// index was written by. Missing means a phase-3 index, which had no version.
+const VERSION_FILE: &str = "VERSION";
 
 /// The tantivy fields §5.4 names, minus `reviews` — phase 4/5 owns that table
 /// and nothing writes it yet, the same argument schema.rs makes for the SQL
-/// side having three tables and not eight.
+/// side having three tables and not eight — plus `lang`, which §5.4 leaves out
+/// and the phase-3 by-hand check asked for.
 #[derive(Debug, Clone, Copy)]
 struct Fields {
     /// `STRING` (untokenized) and `STORED`: this is the one field a hit is
@@ -79,6 +88,7 @@ struct Fields {
     genres: Field,
     series: Field,
     description: Field,
+    lang: Field,
 }
 
 fn schema() -> (Schema, Fields) {
@@ -90,6 +100,7 @@ fn schema() -> (Schema, Fields) {
         genres: builder.add_text_field("genres", TEXT),
         series: builder.add_text_field("series", TEXT),
         description: builder.add_text_field("description", TEXT),
+        lang: builder.add_text_field("lang", TEXT),
     };
     (builder.build(), fields)
 }
@@ -136,10 +147,7 @@ impl SearchIndex {
                     path: dir.to_path_buf(),
                     source,
                 };
-                std::fs::create_dir_all(dir).map_err(|source| failed(source.into()))?;
-                let directory = MmapDirectory::open(dir).map_err(|source| failed(source.into()))?;
-                TantivyIndex::open_or_create(directory, schema)
-                    .map_err(|source| failed(source.into()))?
+                open_versioned(dir, schema).map_err(failed)?
             }
             None => TantivyIndex::create_in_ram(schema),
         };
@@ -249,7 +257,7 @@ impl SearchIndex {
     /// The best-matching item ids for `query` from the `offset`-th on, at
     /// most `limit` of them, and how many match in all.
     ///
-    /// A plain word searches all five fields; `title:foo` searches just one,
+    /// A plain word searches all six fields; `title:foo` searches just one,
     /// tantivy's own query syntax. Reading the actual title back is the
     /// caller's job — this is a ranking, not a second copy of the row.
     ///
@@ -271,6 +279,7 @@ impl SearchIndex {
                 fields.series,
                 fields.genres,
                 fields.description,
+                fields.lang,
             ],
         );
         parser.set_field_boost(fields.title, TITLE_BOOST);
@@ -278,6 +287,7 @@ impl SearchIndex {
         parser.set_field_boost(fields.series, SERIES_BOOST);
         parser.set_field_boost(fields.genres, GENRES_BOOST);
         parser.set_field_boost(fields.description, DESCRIPTION_BOOST);
+        parser.set_field_boost(fields.lang, LANG_BOOST);
         let parsed = parser
             .parse_query(query)
             .map_err(|source| StoreError::Query {
@@ -332,6 +342,49 @@ impl SearchIndex {
     }
 }
 
+/// Opens the index in `dir`, starting it afresh if another version wrote it.
+///
+/// **Thrown away, not migrated**, for the reason [`READ_MODEL_VERSION`] gives:
+/// the replay that runs at every start refills it. Also started afresh when
+/// tantivy finds a schema it does not expect although the version matched —
+/// a field changed without the bump — since refusing to start over a cache
+/// would be the worse of the two mistakes. The version is written last, so an
+/// open that fails half way is judged again next time.
+fn open_versioned(
+    dir: &Path,
+    schema: Schema,
+) -> std::result::Result<TantivyIndex, Box<dyn std::error::Error + Send + Sync>> {
+    let version = dir.join(VERSION_FILE);
+    let current = READ_MODEL_VERSION.to_string();
+    if std::fs::read_to_string(&version).ok().as_deref() != Some(current.as_str()) {
+        start_afresh(dir)?;
+    }
+    let index = match open_or_create(dir, schema.clone()) {
+        Err(tantivy::TantivyError::SchemaError(reason)) => {
+            tracing::warn!(%reason, "the search index did not match its version; starting it afresh");
+            start_afresh(dir)?;
+            open_or_create(dir, schema)?
+        }
+        opened => opened?,
+    };
+    std::fs::write(&version, current)?;
+    Ok(index)
+}
+
+fn open_or_create(dir: &Path, schema: Schema) -> tantivy::Result<TantivyIndex> {
+    let directory = MmapDirectory::open(dir)?;
+    TantivyIndex::open_or_create(directory, schema)
+}
+
+/// Empties `dir`, keeping the directory itself — or makes it, the first time.
+fn start_afresh(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    std::fs::create_dir_all(dir)
+}
+
 /// Deletes whatever this item's id held, then adds it back — an upsert,
 /// because tantivy has no such operation of its own.
 fn upsert(writer: &IndexWriter, fields: Fields, item: &Item) -> Result<()> {
@@ -354,6 +407,9 @@ fn upsert(writer: &IndexWriter, fields: Fields, item: &Item) -> Result<()> {
     }
     if let Some(description) = &item.description {
         doc.add_text(fields.description, description);
+    }
+    if let Some(lang) = &item.lang {
+        doc.add_text(fields.lang, lang);
     }
     writer
         .add_document(doc)
