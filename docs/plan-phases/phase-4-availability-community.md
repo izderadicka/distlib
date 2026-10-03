@@ -207,7 +207,10 @@ below exists because the prose and the code disagree.
     `beat_interval_secs`.
 
 17. **CI has never shown us C25's log.** On Windows the test passes, slowly, and nextest hides the
-    output of a passing test. The integration tests set up no tracing at all.
+    output of a passing test. **Corrected in 4.0:** the follower harness in
+    [`tests/catalogue.rs`](../../crates/distlib/tests/catalogue.rs) already initialises tracing from
+    `RUST_LOG`; what was missing was a log line at each of our own steps, and a way to tell three
+    in-process nodes apart in them.
 
 ---
 
@@ -456,6 +459,8 @@ a time, review before the next.
   `RUST_LOG`; the Windows job runs the C25 test with `--success-output final`; and a debug line at
   each step — address learned → offer → dial result → document `NeighborUp` → `SyncFinished`.
   No fix.
+  *As built:* the debug lines carry a `catalogue{me=…}` span, so each names its node; the CI step runs
+  on all three platforms, so Windows can be read against a run where the test is fast.
   **Acceptance:** a Windows CI log that names the step that does not happen.
   **Watch for:** it goes first because its answer arrives on CI's schedule, while other work goes on.
 
@@ -473,6 +478,10 @@ a time, review before the next.
   `sync.status` event exists.
   **Acceptance:** two nodes show one neighbour each; stop one, the other drops to zero and the event
   fires.
+  **Watch for:** found in 4.0 — the pump subscribes after the catalogue opens, so a `NeighborUp` that
+  fires in between is never seen, and a node can show zero neighbours while it has one. iroh-docs has
+  no call that reports current neighbours (`Doc::get_sync_peers` is the remembered peers, not live
+  ones), so the record has to start before `start_sync` does — subscribed when the document opens.
 
 - **4a-3 — targeted re-offers (D7 b, c), with the timer still in place.** Revised in the light of
   4.0's log.

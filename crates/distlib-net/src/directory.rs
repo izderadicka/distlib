@@ -191,6 +191,7 @@ impl Directory {
         // Replace rather than add. See the module docs: `add_endpoint_info`
         // merges, and a member that moves would otherwise keep every address it
         // has ever had.
+        tracing::debug!(%member, addr = ?endpoint_addr, "learned where a member is");
         self.lookup.remove_endpoint_info(member.endpoint_id());
         self.lookup.add_endpoint_info(endpoint_addr);
         heard.insert(member, announced.clone());
