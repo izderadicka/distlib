@@ -44,6 +44,7 @@ use iroh_docs::{
     store::{Query, Store as DocumentStore},
 };
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
+use tracing::Instrument as _;
 
 use crate::{
     changes::Changes,
@@ -198,15 +199,24 @@ impl Catalogue {
             .map_err(SyncError::docs("given this node's author key"))?;
 
         let (opened, open) = watch::channel(None);
-        let task = tokio::spawn(open_when_founded(Opening {
-            docs: docs.clone(),
-            blobs: blobs.clone(),
-            downloader,
-            membership,
-            me: MemberId::from(key.public()),
-            opened,
-            directory: transport.directory.clone(),
-        }));
+        let me = MemberId::from(key.public());
+        // Names the node on every line the catalogue logs, which several nodes
+        // in one test process otherwise share (C25's diagnosis). Debug, so the
+        // default filter never builds it; a root, so it does not inherit
+        // whichever node's span happened to be current when this was called.
+        let span = tracing::debug_span!(parent: None, "catalogue", %me);
+        let task = tokio::spawn(
+            open_when_founded(Opening {
+                docs: docs.clone(),
+                blobs: blobs.clone(),
+                downloader,
+                membership,
+                me,
+                opened,
+                directory: transport.directory.clone(),
+            })
+            .instrument(span),
+        );
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -462,7 +472,7 @@ impl Catalogue {
     ///
     /// Start this **before** replaying the document: see [`Changes`].
     pub fn changes(&self) -> Result<Changes> {
-        Ok(Changes::start(self.document()?))
+        Ok(Changes::start(self.document()?, self.inner.author))
     }
 
     /// This node's author id, which is its member id.
@@ -730,12 +740,19 @@ async fn offer_peers_as_they_are_learned(
             // one: `start_sync` would still read the remembered peers out of the
             // store and dial them.
             tracing::trace!("nothing new to offer the catalogue");
-        } else if let Err(error) = doc.start_sync(peers).await {
-            // Not fatal: whatever was already syncing goes on, and the sweep
-            // above offers these again within `OFFER_AGAIN`. Not the next
-            // address learned — that is a reaction, and these peers are already
-            // written down as offered.
-            tracing::debug!(%error, "could not offer the catalogue's peers again");
+        } else {
+            tracing::debug!(
+                repair,
+                peers = ?peers.iter().map(|peer| peer.id).collect::<Vec<_>>(),
+                "offering the catalogue's peers",
+            );
+            if let Err(error) = doc.start_sync(peers).await {
+                // Not fatal: whatever was already syncing goes on, and the sweep
+                // above offers these again within `OFFER_AGAIN`. Not the next
+                // address learned — that is a reaction, and these peers are
+                // already written down as offered.
+                tracing::debug!(%error, "could not offer the catalogue's peers again");
+            }
         }
         // Unconditional, including after a round that offered nothing. The floor
         // is there to coalesce a burst of arrivals, and a burst is exactly when

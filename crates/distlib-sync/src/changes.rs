@@ -31,8 +31,9 @@ use std::{
 
 use distlib_core::{ItemId, Key};
 use futures_lite::stream::StreamExt as _;
-use iroh_docs::{api::Doc, engine::LiveEvent};
+use iroh_docs::{AuthorId, api::Doc, engine::LiveEvent};
 use tokio::{sync::watch, task::JoinHandle};
+use tracing::Instrument as _;
 
 /// Everything that has changed since the reader last looked.
 ///
@@ -84,10 +85,13 @@ impl Drop for Changes {
 
 impl Changes {
     /// Subscribes to `doc` and starts coalescing what it reports.
-    pub(crate) fn start(doc: Doc) -> Self {
+    ///
+    /// `me` only names the node in the pump's log lines.
+    pub(crate) fn start(doc: Doc, me: AuthorId) -> Self {
         let pending = Arc::new(Mutex::new(Batch::default()));
         let (woke, woken) = watch::channel(0);
-        let pump = tokio::spawn(pump(doc, Arc::clone(&pending), woke));
+        let span = tracing::debug_span!(parent: None, "catalogue", %me);
+        let pump = tokio::spawn(pump(doc, Arc::clone(&pending), woke).instrument(span));
         Self {
             pending,
             woken,
@@ -156,8 +160,24 @@ async fn pump(doc: Doc, pending: Arc<Mutex<Batch>>, woke: watch::Sender<u64>) {
                 first
             }
             // Neighbours and sync rounds are the swarm's business, not the read
-            // model's: what a sync *found* arrives as the inserts above.
-            LiveEvent::NeighborUp(_) | LiveEvent::NeighborDown(_) | LiveEvent::SyncFinished(_) => {
+            // model's: what a sync *found* arrives as the inserts above. Logged,
+            // synchronously, because they are the steps between offering a peer
+            // and hearing from it (C25).
+            LiveEvent::NeighborUp(peer) => {
+                tracing::debug!(%peer, "catalogue neighbour up");
+                false
+            }
+            LiveEvent::NeighborDown(peer) => {
+                tracing::debug!(%peer, "catalogue neighbour down");
+                false
+            }
+            LiveEvent::SyncFinished(sync) => {
+                tracing::debug!(
+                    peer = %sync.peer,
+                    origin = ?sync.origin,
+                    error = sync.result.as_ref().err(),
+                    "catalogue sync round finished",
+                );
                 false
             }
         };

@@ -536,6 +536,9 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         b"The Dispossessed"
     );
 
+    // Markers for the log, which is what C25's diagnosis reads: the steps after
+    // these are the ones Windows takes thirty seconds over.
+    tracing::info!(%bob_id, %carol_id, "test: shutting alice down");
     group.alice.shutdown().await;
 
     group
@@ -544,6 +547,7 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         .put("item/3/year", "1974")
         .await
         .unwrap();
+    tracing::info!("test: bob wrote the year; waiting for carol to read it");
     assert_eq!(
         &read_upto(group.carol.catalogue(), "item/3/year", PATIENTLY).await[..],
         b"1974",
