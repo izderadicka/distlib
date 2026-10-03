@@ -87,7 +87,7 @@ impl Store {
     }
 
     fn open_blocking(dir: Option<&Path>) -> Result<Self> {
-        let conn = match dir {
+        let mut conn = match dir {
             Some(dir) => {
                 let failed = |source: Box<dyn std::error::Error + Send + Sync>| StoreError::Open {
                     path: dir.to_path_buf(),
@@ -103,8 +103,16 @@ impl Store {
         };
         conn.execute_batch(schema::PRAGMAS)
             .map_err(StoreError::sql("set up"))?;
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(StoreError::sql("asked its version"))?;
+        if version != schema::READ_MODEL_VERSION {
+            discard_tables(&mut conn).map_err(StoreError::sql("cleared for a new version"))?;
+        }
         conn.execute_batch(schema::TABLES)
             .map_err(StoreError::sql("given its tables"))?;
+        conn.pragma_update(None, "user_version", schema::READ_MODEL_VERSION)
+            .map_err(StoreError::sql("given its version"))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -314,6 +322,30 @@ const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_ind
 
 /// The `item_files` columns, in the order [`files_of`] reads them.
 const FILE_COLUMNS: &str = "item, blob, role, format, size, filename, seq, disc, title, duration";
+
+/// Drops every table a read model of another version left behind.
+///
+/// Every table, not the ones this build knows: a read model written by a newer
+/// build can hold tables this one has never heard of. Equivalent to deleting the
+/// file and simpler — no open file to remove on Windows, and the same for a
+/// database in memory. Foreign keys are off while it runs, so the order the
+/// tables go in does not matter; SQLite ignores that pragma inside a
+/// transaction, which is why it is set around one rather than in it.
+fn discard_tables(conn: &mut Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let tx = conn.transaction()?;
+    let tables: Vec<String> = tx
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for table in tables {
+        tx.execute_batch(&format!("DROP TABLE \"{}\"", table.replace('"', "\"\"")))?;
+    }
+    tx.commit()?;
+    conn.pragma_update(None, "foreign_keys", true)
+}
 
 fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Upserted> {
     let item = &stored.item;

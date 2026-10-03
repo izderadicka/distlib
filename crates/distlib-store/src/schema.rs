@@ -17,6 +17,20 @@
 //! group. `last_modified` is the exception, and it is the exception precisely
 //! because it needs no field — the document already timestamps every entry.
 
+/// Which shape of read model this build writes: its tables here, and the
+/// search index's fields in `index.rs`.
+///
+/// **Bump it with any change to either**, in the PR that makes the change.
+/// Everything in the read model is derived from the document and replayed in
+/// full at every start (C7), so a read model of another version is not
+/// migrated: it is thrown away and the replay that runs anyway refills it. A
+/// phase-3 read model has no version at all, which reads as 0.
+///
+/// Kept in SQLite's `PRAGMA user_version` and in the index directory's
+/// `VERSION` file, because each half can be opened, and so has to be judged,
+/// on its own.
+pub const READ_MODEL_VERSION: u32 = 1;
+
 /// Run on every connection, before anything else.
 ///
 /// `foreign_keys` is off by default in SQLite, so the `REFERENCES` clause below
@@ -63,6 +77,11 @@ CREATE TABLE IF NOT EXISTS item_files (
     duration INTEGER,
     PRIMARY KEY (item, blob)
 ) STRICT;
+
+-- Which items a blob is part of, which the primary key cannot answer: it
+-- leads with the item. Asked when a blob arrives or goes, to decide whether
+-- its items are now held here (phase 4).
+CREATE INDEX IF NOT EXISTS item_files_by_blob ON item_files (blob);
 
 CREATE TABLE IF NOT EXISTS members (
     id           TEXT    PRIMARY KEY,

@@ -218,3 +218,153 @@ async fn an_index_reopens_onto_what_it_already_held() {
         .expect("the index opens again");
     assert_eq!(second.search("Neuromancer", 10).await.unwrap(), vec![id]);
 }
+
+/// `lang` is searchable, by field and as a plain word — the phase-3 by-hand
+/// check found a Czech book could not be found by its language.
+#[tokio::test]
+async fn an_item_is_found_by_its_language() {
+    let index = empty().await;
+    let czech = ItemId::from_bytes([1; 32]);
+    for (seed, lang) in [(1, "cs"), (2, "en")] {
+        index
+            .index_item(Item {
+                title: Some(format!("Book {seed}")),
+                lang: Some(lang.to_owned()),
+                ..item(seed)
+            })
+            .await
+            .unwrap();
+    }
+    index.commit().await.unwrap();
+
+    assert_eq!(index.search("lang:cs", 10).await.unwrap(), vec![czech]);
+    assert_eq!(index.search("cs", 10).await.unwrap(), vec![czech]);
+}
+
+/// A language code is a weak signal: an item *called* the word ranks above one
+/// merely written in a language with that code.
+#[tokio::test]
+async fn a_title_outranks_a_language() {
+    let index = empty().await;
+    let titled = ItemId::from_bytes([2; 32]);
+    index
+        .index_item(Item {
+            title: Some("Book".to_owned()),
+            lang: Some("cs".to_owned()),
+            ..item(1)
+        })
+        .await
+        .unwrap();
+    index
+        .index_item(Item {
+            title: Some("CS".to_owned()),
+            ..item(2)
+        })
+        .await
+        .unwrap();
+    index.commit().await.unwrap();
+
+    assert_eq!(index.search("cs", 10).await.unwrap()[0], titled);
+}
+
+/// An index directory as phase 3 left it: the fields it had then, no `lang`,
+/// and no `VERSION` file.
+fn a_phase_three_index(dir: &std::path::Path) {
+    use tantivy::{
+        Index,
+        schema::{STORED, STRING, Schema, TEXT, TantivyDocument},
+    };
+    let mut builder = Schema::builder();
+    let id = builder.add_text_field("id", STRING | STORED);
+    let title = builder.add_text_field("title", TEXT);
+    for field in ["authors", "genres", "series", "description"] {
+        builder.add_text_field(field, TEXT);
+    }
+    let index = Index::create_in_dir(dir, builder.build()).unwrap();
+    let mut writer = index.writer_with_num_threads(1, 15_000_000).unwrap();
+    let mut doc = TantivyDocument::default();
+    doc.add_text(id, ItemId::from_bytes([9; 32]).to_string());
+    doc.add_text(title, "Left over");
+    writer.add_document(doc).unwrap();
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+}
+
+/// **A phase-3 index opens**, rather than stopping `distlib run` with a schema
+/// error: it is started afresh — the replay at every start refills it — and is
+/// then written to and searched like any other.
+#[tokio::test]
+async fn an_index_from_before_versions_is_started_afresh() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    a_phase_three_index(dir.path());
+
+    let index = SearchIndex::open(Some(dir.path().to_path_buf()))
+        .await
+        .expect("an old index opens");
+    assert_eq!(
+        index.search("over", 10).await.unwrap(),
+        Vec::new(),
+        "what the old index held is gone, not carried into the new one"
+    );
+    index
+        .index_item(Item {
+            lang: Some("cs".to_owned()),
+            ..item(1)
+        })
+        .await
+        .unwrap();
+    index.commit().await.unwrap();
+    assert_eq!(
+        index.search("lang:cs", 10).await.unwrap(),
+        vec![ItemId::from_bytes([1; 32])]
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("VERSION")).unwrap(),
+        distlib_store::schema::READ_MODEL_VERSION.to_string()
+    );
+}
+
+/// A field changed without the version being bumped still opens: tantivy's
+/// schema check is the second line, behind the version.
+#[tokio::test]
+async fn an_index_whose_schema_changed_without_a_bump_is_started_afresh() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    a_phase_three_index(dir.path());
+    std::fs::write(
+        dir.path().join("VERSION"),
+        distlib_store::schema::READ_MODEL_VERSION.to_string(),
+    )
+    .unwrap();
+
+    let index = SearchIndex::open(Some(dir.path().to_path_buf()))
+        .await
+        .expect("a mismatched index opens");
+    assert_eq!(index.search("over", 10).await.unwrap(), Vec::new());
+}
+
+/// The version is judged on its own, not only through tantivy's schema check:
+/// a bump can change what the fields *mean* — a tokenizer, a boost written into
+/// the documents — while their names and types stay the same.
+#[tokio::test]
+async fn an_index_of_another_version_is_started_afresh_even_with_the_same_fields() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let first = SearchIndex::open(Some(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    first
+        .index_item(Item {
+            title: Some("Neuromancer".to_owned()),
+            ..item(1)
+        })
+        .await
+        .unwrap();
+    first.commit().await.unwrap();
+    first.close().await.unwrap();
+    drop(first);
+    std::fs::write(dir.path().join("VERSION"), "0").unwrap();
+
+    let second = SearchIndex::open(Some(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    assert_eq!(second.search("Neuromancer", 10).await.unwrap(), Vec::new());
+}

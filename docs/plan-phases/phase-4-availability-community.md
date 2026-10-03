@@ -497,6 +497,8 @@ a time, review before the next.
   to open; without the field the search finds nothing.
   **Watch for:** this goes before any other schema change, because every later one bumps the version
   it introduces.
+  *As built (P4-1):* the SQLite half drops every table rather than deleting the file, and the index
+  also starts afresh when tantivy rejects its schema although the version matched.
 
 - **4a-2 — `sync.status` (C14).** The pump records neighbours and the last sync per peer into a
   `watch<SyncState>`, synchronously (ground truth 11); `node.status` gains a sync block; the
