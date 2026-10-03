@@ -15,8 +15,8 @@ its leader. What it found was fixed in #78–#81 (P3-26 to P3-28).
 
 Phase 4 is §9's "Availability + community metadata":
 
-- heartbeats carrying a digest of what each member holds, over iroh-gossip, and an in-memory TTL
-  availability index;
+- heartbeats over iroh-gossip carrying an exact account of what each member holds, and an in-memory
+  TTL availability index;
 - availability badges in the library, pushed over SSE;
 - ratings, reviews and bookmarks — written, projected and shown;
 - wishes, end to end.
@@ -85,9 +85,23 @@ below exists because the prose and the code disagree.
      `broadcast()` has already returned `Ok`. An oversize heartbeat is not an error anyone sees; it is
      a dropped connection.
 
-   **So the limit stays at 4096 B and the heartbeat's size is guarded when it is encoded** (D2). A
-   bigger frame would not reach the scale target anyway — a Bloom filter grows with what a node holds
-   (D3), and no frame fits a million items.
+   **It is a message limit, not a packet size.** Gossip frames are length-prefixed on QUIC streams
+   (`RecvStream`, `net/util.rs:65,162`), which split a message across as many packets as it needs —
+   "fits one UDP datagram" would be about 1.2 KB, smaller than today's limit.
+
+   **So the limit is raised to 16 KiB now, as a protocol constant, while nothing has been released**
+   (C23) and every node is a fresh build — and the heartbeat's size is still guarded when it is
+   encoded (D2). After a release, a further raise has to reach every receiver before any sender uses
+   it.
+
+   **Every `Gossip` in the workspace has to take the same constant.** `Gossip::builder()` is called in
+   [`runtime.rs:103`](../../crates/distlib/src/runtime.rs) and six times across four test files —
+   [`rpc.rs:117,254`](../../crates/distlib-api/tests/rpc.rs),
+   [`common/mod.rs:99`](../../crates/distlib-consensus/tests/common/mod.rs),
+   [`memberlog.rs:64,306`](../../crates/distlib-consensus/tests/memberlog.rs) and
+   [`converge.rs:76`](../../crates/distlib-sync/tests/converge.rs). A test node left on the default
+   would reject a 16 KiB beat from a node built the real way and drop the connection — a test failure
+   that looks like a network fault.
 
 4. **A second topic on the existing `Gossip` is cheap and cannot stall anything.** Subscribing is
    `subscribe(topic, bootstrap)` (`iroh-gossip api.rs:157-167`). Unlike an iroh-docs subscriber, a
@@ -95,7 +109,7 @@ below exists because the prose and the code disagree.
    passive view of 30, a shuffle every 60 s (`hyparview.rs:202-216`) — are what a heartbeat topic
    inherits.
 
-5. **`SignedAddress` cannot carry a digest, and should not be made to.** Its signature covers
+5. **`SignedAddress` cannot carry holdings, and should not be made to.** Its signature covers
    `(member, addr, applied)` under `b"distlib.address.v1"`
    ([`signed_addr.rs:39,143-146`](../../crates/distlib-core/src/addr/signed_addr.rs)), and the reason
    it carries no clock is ground truth 1. `MemberId` is a 32-byte key that deliberately serialises as
@@ -106,13 +120,12 @@ below exists because the prose and the code disagree.
    unchanged statement and keeps no TTL. **So the heartbeat is its own signed type, with the
    `SignedAddress` inside it** — which is also how it closes C5.
 
-6. **Ordered providers come for free, and a wrong provider costs one attempt.** Any
-   `Vec<EndpointId>` is a `ContentDiscovery` that is tried in order (`iroh-blobs
-   downloader.rs:562-572`); only our own
+6. **Ordered providers come for free.** Any `Vec<EndpointId>` is a `ContentDiscovery` that is tried
+   in order (`iroh-blobs downloader.rs:562-572`); only our own
    [`Blobs::fetch_with_progress`](../../crates/distlib-net/src/blobs.rs) shuffles, at `blobs.rs:157`.
-   A provider that lacks the blob fails and the next one is tried. **So nothing has to confirm that a
-   member really holds an item before a download** — a Bloom filter's false positive is one failed
-   attempt, not a wrong answer.
+   A provider that lacks the blob fails and the next one is tried. **So a download can put the online
+   holders first** without any new discovery code — and a holder whose latest additions have not
+   reached us yet is still tried, just later.
 
 7. **Blob GC is off, deletion is crate-private, and awaiting `add_bytes` directly pins the blob for
    ever.**
@@ -212,10 +225,10 @@ position do not move — and the test does it with counters, not by inspection.
 
 **Where it lives:**
 
-- **The pure parts in `distlib-core::availability`** — the wire format, signing, the Bloom filter,
-  the size guard. Same reasoning, and same place, as `SignedAddress`.
+- **The pure parts in `distlib-core::availability`** — the wire format, signing, the holdings list's
+  encoding, the size guard. Same reasoning, and same place, as `SignedAddress`.
 - **The service in `distlib-sync::availability`** — the topic, the beat, the receiving side, the TTL
-  index, the held set and the digest blob. `distlib-sync` already depends on consensus, net, gossip
+  index, the held set and the base list. `distlib-sync` already depends on consensus, net, gossip
   and blobs, and its offer loop is the main consumer of "somebody appeared".
 - **Consensus gains one getter**, `own_address()`: a watch of the `SignedAddress` that
   `announce_address` already signs.
@@ -235,48 +248,70 @@ SignedHeartbeat
   seq            u64               +1 per beat
   interval_secs  u32               the sender's current interval
   holdings
-    count        u64
-    digest       Option<Hash>      the Bloom blob (D3, D5)
-    recent       Vec<u64>          8-byte prefixes of items added since that digest
+    count        u64               items held now
+    base         Option<Hash>      the last published full list, a blob (D3, D5)
+    added        Vec<[u8; 32]>     held now, not in base
+    removed      Vec<[u8; 32]>     in base, no longer held
   leaving        bool
   signature      over b"distlib.heartbeat.v1" || group_id || postcard(the above)
 ```
 
 The group id is signed but not sent, so a heartbeat cannot be replayed into another group. There is
 no separate member field — the address names the member, and the receiver checks the two signatures
-agree. Apart from `recent`, the size is fixed: about 720 B with an address of up to about twenty
-direct addresses.
+agree. Item ids travel as raw bytes, not as the hex strings they are elsewhere. Apart from the delta,
+the size is fixed: about 720 B with an address of up to about twenty direct addresses.
 
-**D2 — The size is guarded when the heartbeat is encoded, and the frame limit stays.**
-The cap is 3584 B of payload, leaving room for gossip's framing under 4096 B (ground truth 3).
-`recent` holds what fits — about 350 prefixes — and when the next addition would overflow it, the
-node publishes a new digest and empties `recent`. If a heartbeat is still over the cap — an absurd
-address list — the node logs an error and sends nothing. **An oversize frame is never sent**, because
-the failure it causes is a dropped connection on every topic.
+**D2 — The frame is 16 KiB, and the size is guarded when the heartbeat is encoded.**
+One constant, `GOSSIP_MAX_MESSAGE`, set on every `Gossip` the workspace builds (ground truth 3). The
+heartbeat's payload is capped a little under it, and the delta — `added` and `removed` together — at
+12 KiB, about 380 ids. When the next change would overflow the delta, the node publishes a new base
+first (D5). If a heartbeat is still over the cap — an absurd address list — the node logs an error and
+sends nothing. **An oversize frame is never sent**, because the failure it causes is a dropped
+connection on every topic.
 
-**D3 — A member's holdings are a Bloom filter, published as a blob — Ivan's call, at the review of
-this plan.** The heartbeat carries the digest's hash, which is what §5.6 sketches
-(`holds_manifest_hash`, "announced only when changed").
+**D3 — Holdings are an exact base list plus a cumulative delta — Ivan's call, at the review of this
+plan.** It is what §5.6 sketches — a `holds_manifest_hash` in the heartbeat, "announced only when
+changed" — with the change itself carried alongside.
 
-A digest's size depends on what **that node** holds, not on the group's total. About 10 bits per held
-item with `k = 7` gives about 1% false positives. Item ids are already uniform BLAKE3 output, so the
-`k` positions come from double hashing over the id's own bytes — no hashing crate, no new dependency.
+- **The base** is the sorted list of every item the node held when it was published: a format byte,
+  then raw 32-byte ids. Sorted only so that one set always makes the same bytes, and so the same
+  hash — nothing ever searches it.
+- **The delta is counted from the base, not from the previous beat.** Every heartbeat is complete on
+  its own, so a receiver that missed one — gossip can lose a message, a node can be down for a minute
+  — loses nothing: the next beat says the same and more. That is also why no Merkle tree or set hash
+  is needed: the base's own hash says exactly which list the delta applies to.
+- **A receiver** that already holds the member's `base` applies `added` and `removed`; one that does
+  not fetches the base once (D5), then applies them. The one check is free:
+  `len(base) + len(added) − len(removed) == count`. A mismatch is logged and the base fetched again.
+- **The receiver keeps one inverted map, `item → members holding it`,** with members as `u16` indexes
+  into the current membership. That map is what the library page asks ("n online") and what a later
+  "available now" filter would need. A member's base changing, or the member going away, is one pass
+  over the map.
 
-| Held by the node | Digest |
+What a base costs on the wire, once per publish and receiver:
+
+| Held by the member | Base list |
 |---|---|
-| 1k | 1.25 KB |
-| 100k | 125 KB |
-| 1M | 1.25 MB |
-| 10M | 12.5 MB |
+| 10k | 320 KB |
+| 100k | 3.2 MB |
+| 1M | 32 MB |
 
-A receiver keeps one digest per online member, so its memory is the sum: fifty members each holding
-a million items is about 63 MB.
+And what the map costs each receiver in memory — about 60–100 B per distinct item held by anyone, plus
+two bytes per further copy:
 
-Two alternatives were rejected at review. **A bigger gossip frame with the Bloom inline:** no frame
-fits a million held items, and a frame is flooded to every member on every beat, so its size is paid
-N times per interval. **The exact set** (what the first draft of this plan fetched alongside the
-Bloom): 32 B per item, twenty-seven times the size, to correct an error that costs one failed
-provider attempt (ground truth 6) and a count that can be one too high (C28).
+| Distinct items held in the group | Receiver's map |
+|---|---|
+| 100k | ~10 MB |
+| 1M | ~100 MB |
+| 10M | ~1 GB |
+
+Up to the "100k easily" target this is nothing. **At the 10M end the map belongs in SQLite** — a
+local table, still never replicated — which is C28, Ivan's call, taken when a group gets there.
+
+Rejected at review: **a Bloom filter** in place of the list. It buys one thing, size — about 27 times
+smaller — at the price of false positives, sizing arithmetic and a `providers` count that can be
+wrong, and the size only matters at the 10M end. The base's format byte keeps it, or 8-byte id
+prefixes, open as a compatible change if that end is ever measured and found wanting.
 
 **D4 — Cadence, TTL and budget.**
 
@@ -302,30 +337,30 @@ The receiving side, in order:
 4. a new `epoch` is accepted as an **appearance**; within an epoch, only a higher `seq`;
 5. hand the address to `Directory::learn` — which is how C5 closes;
 6. stamp the entry with this node's own `Instant` — the sender's clock is never used;
-7. if `digest` changed, fetch it (D5).
+7. if `base` is not the one this node holds for the member, fetch it (D5); then apply the delta
+   and check the count (D3).
 
 Expiry is one `sleep_until` on the earliest deadline. A member who leaves the allowlist is dropped at
 once rather than at the TTL.
 
-**D5 — The digest blob: how it is published, fetched and forgotten.**
+**D5 — The base list: when it is published, how it is fetched, and what it leaves behind.**
 
 - **Published** into the node's own blob store with
-  `add_bytes(..).with_named_tag("distlib/availability/digest")`. In plain words: the one tag name
-  `distlib/availability/digest` always points at the newest digest, so the previous one is no longer
-  protected. Awaiting `add_bytes` directly would give every digest a tag of its own and keep all of
+  `add_bytes(..).with_named_tag("distlib/availability/base")`. In plain words: the one tag name
+  `distlib/availability/base` always points at the newest list, so the previous one is no longer
+  protected. Awaiting `add_bytes` directly would give every list a tag of its own and keep all of
   them for ever (ground truth 7).
-- **Re-published** at start; when `recent` would overflow; and when an item stops being held — a Bloom
-  filter cannot remove an entry — at most once per beat. Removals are rare until phase 5 releases
-  content.
-- **Fetched** by a receiver only when the hash in a heartbeat changes, with `get_blob` from the
-  sender, **into memory, nothing stored** — so receivers leave no garbage. Capped at 64 MiB, which is
-  about fifty million held items. Only the newest hash per member is fetched, and the digest is
-  dropped when the member expires.
-- **A member holds an item** when `recent` contains the id's prefix, or the digest says "maybe".
-  Until a member's digest has arrived, it counts as **unknown**, not as "no".
-- **Superseded digests stay on the publisher's disk** until phase 5 brings GC, together with quotas
-  and custodianship. They are re-published about every 350 additions, so a node holding a million
-  items and downloading hard leaves a few MB a day, and an idle node nothing. **C26.**
+- **Re-published — consolidated —** at start; when the next change would overflow the delta; and
+  **when the delta is not empty and nothing has been added for ten minutes.** Without the last rule a
+  node that once downloaded three hundred items would send a 10 KB heartbeat for the rest of its life.
+  With it, a burst of downloads costs one base fetch per receiver, at its end, and an idle node's
+  heartbeat is back to about 0.8 KB. Removals go into `removed` like any other change.
+- **Fetched** by a receiver only when a heartbeat names a base it does not hold, with `get_blob` from
+  the sender, **parsed into the map as it streams — never buffered whole, never stored**, so a
+  receiver leaves no garbage. Capped at ten million ids, 320 MB on the wire.
+- **Until a member's base has arrived, it counts as unknown**, not as "holds nothing".
+- **Superseded lists stay on the publisher's disk** until phase 5 brings GC, together with quotas and
+  custodianship: one per download burst. **C26.**
 
 **D6 — "Held here" is a set the node maintains, not a question it asks the blob store per row.**
 An item is held when every `role: content` file is `Complete` locally — covers and other roles do not
@@ -385,7 +420,8 @@ editable, as §5.3 has it; threads would be C29. **Ivan's call.**
 **D11 — Events stay ids only (phase 3's D2).**
 
 - `availability.changed {member_id}` — a delta against §7.2's `{item_id, providers}`. One node going
-  offline touches every item it holds, and a Bloom filter cannot list them; the page refetches what
+  offline touches every item it holds — thousands of ids in one event — so the event names the member
+  and the page refetches what
   it shows.
 - `wish.changed {wish_id}`, `bookmark.changed {item_id}`, and `sync.status` with no payload.
 - **Ratings and reviews need no event of their own**: the item is re-projected, and they arrive as
@@ -445,10 +481,13 @@ a time, review before the next.
 
 ### 4b — availability (7 PRs)
 
-- **4b-1 — wire format, Bloom digest and size guard (D1–D3).** Pure, in `distlib-core`.
-  **Acceptance**, as property tests: no false negatives; a measured false-positive rate of about 1% at
-  1k, 100k and 1M items; the encoded heartbeat never exceeds the cap for 0–64 addresses and a full
-  `recent`; a tampered body, the wrong group, or an address signed by someone else fails.
+- **4b-1 — wire format, list encoding, size guard and the 16 KiB frame (D1–D3).** The pure parts in
+  `distlib-core`, and `GOSSIP_MAX_MESSAGE` on every `Gossip` — `runtime.rs` and all five test
+  harnesses (ground truth 3).
+  **Acceptance**, as property tests: one set always encodes to the same bytes, whatever order it was
+  built in; base and heartbeat round-trip; the encoded heartbeat never exceeds the cap for 0–64
+  addresses and a full delta; a tampered body, the wrong group, or an address signed by someone else
+  fails. And one real 16 KiB message crosses between two nodes without dropping the connection.
 
 - **4b-2 — "held here" (D6).**
   **Acceptance:** held after an add, after a download and after a replay; not held once another
@@ -461,12 +500,14 @@ a time, review before the next.
   cleanly; a sender's interval sets its receiver's TTL; a node that missed an address announcement
   learns it from a heartbeat (C5); `a_settled_group_stops_talking_about_addresses` still passes.
 
-- **4b-4 — holdings on the wire: the digest blob and `recent` (D5).**
-  **Acceptance:** a receiver answers "holds X" correctly from `recent` alone, and then from the
-  digest; the digest is fetched again only when its hash changes, counted; filling `recent`
-  publishes a new digest and the named tag moves to it; the receiver's blob store is unchanged.
+- **4b-4 — holdings on the wire: the base list and the delta (D3, D5).**
+  **Acceptance:** a receiver's map matches the sender's held set exactly — after the base, after
+  additions, after a removal; a dropped heartbeat changes nothing; a base is fetched only when a
+  heartbeat names a new one, counted; overflowing the delta, and ten quiet minutes with a delta, each
+  publish a new base, and the named tag moves to it; the receiver's blob store is unchanged.
 
-- **4b-5 — availability in the API and CLI.** Hits gain `held` and `providers` (`null` is unknown);
+- **4b-5 — availability in the API and CLI.** Hits gain `held` and `providers` — an exact count of
+  online holders, `null` while any online member's base is still unknown;
   `library.item` gains `availability`; `library.download` orders its providers — online holders,
   then other online members, then the rest, each tier shuffled; `availability.changed`.
   **Acceptance — §9's first half:** stop the provider and `providers` drops within the TTL, while the
@@ -551,21 +592,23 @@ Every open C-number appears here once.
 
 | # | Item | Where it goes |
 |---|---|---|
-| **C26** | **Superseded digests stay on the publisher's disk** (D5) | **Phase 5**, with GC, quotas and custodianship. |
+| **C26** | **Superseded base lists stay on the publisher's disk** (D5), one per download burst | **Phase 5**, with GC, quotas and custodianship. |
 | **C27** | **Heartbeat traffic has not been measured above N = 50** | **No phase.** Measured on five nodes here; a larger group is the trigger. |
-| **C28** | **About 1% of `providers` counts are one too high** — a Bloom false positive (D3) | **No phase.** A download is unaffected (ground truth 6). |
+| **C28** | **The `item → members` map lives in memory** (D3) — about 1 GB per node at 10M distinct items | **No phase.** Moves to a local SQLite table when a group reaches the 10M end — Ivan's call. Never replicated either way. |
 | **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
 
 ---
 
 ## Testing and the lanes
 
-**Fast lane:** the Bloom filter and the size guard, as property tests; signing round trips and
-tampering; the epoch/seq rule; the TTL index under `tokio::time::pause`, including a
+**Fast lane:** canonical list encoding and the size guard, as property tests; applying a delta to a
+base, including a missed beat; consolidation on overflow and after ten quiet minutes, under
+`tokio::time::pause`; signing round trips and tampering; the epoch/seq rule; the TTL index under `tokio::time::pause`, including a
 sender-declared interval; community keys and the author check; the read-model rebuild on a version
 mismatch.
 
-**Slow lane:** the online/offline flip; C5; digests fetched on change only; the quiet-group counters;
+**Slow lane:** the online/offline flip; C5; a 16 KiB message between two nodes; bases fetched on
+change only; the quiet-group counters;
 C25; both halves of §9's acceptance; a forged and an expelled entry; provider order on download.
 
 Heartbeat tests run at about 300 ms intervals with a TTL of about a second, and **assert "within",
@@ -581,17 +624,18 @@ Every mechanism is mutation-checked. UI: Vitest first, Playwright for the happy 
 heartbeat breaks it deliberately: every member sends one per interval for as long as it is up, and
 every other member receives it.
 
-A beat is about 0.8 KB idle and at most 3.5 KB with `recent` full. Each node receives N beats per
-interval and forwards roughly as many again. At the default 60 s, what each node receives:
+A beat is about 0.8 KB while its sender is idle, and up to 16 KB only while the sender has a delta —
+during a download burst and for at most ten quiet minutes after it (D5). Each node receives N beats
+per interval and forwards roughly as many again. At the default 60 s, what each node receives:
 
-| Members | Per node, per day |
-|---|---|
-| 5 | 6–25 MB |
-| 50 | 60–250 MB |
-| more than 50 | the N = 50 figure — D4's budget stretches the interval instead |
+| Members | All idle, per day | Every member mid-burst, per hour |
+|---|---|---|
+| 5 | ~6 MB | ~5 MB |
+| 50 | ~58 MB | ~48 MB |
+| more than 50 | the N = 50 figure — D4's budget stretches the interval instead | the same |
 
-Digests add their own size times N per publish, and a publish is rare: about every 350 additions, or
-on a removal.
+A base costs its own size times N once per consolidation — once per download burst, or every ~380
+changes during a long one. A node holding 100k items and 50 members: about 160 MB sent, per burst.
 
 The fences, each a rule PRs are reviewed against:
 
@@ -601,8 +645,8 @@ The fences, each a rule PRs are reviewed against:
 - **TTL-only state** — nothing to clean up, nothing replicated;
 - **a measured rate** on a five-node run in 4b-3, recorded in its delta.
 
-The rest are bounded and named: digest garbage (C26), forged entries (D9), and a receiver's memory
-for large holders (D3's table, with a 64 MiB cap per digest).
+The rest are bounded and named: superseded bases (C26), forged entries (D9), and a receiver's memory
+at the 10M end (D3's table, C28).
 
 ---
 
