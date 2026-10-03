@@ -47,7 +47,7 @@ use tokio::{sync::watch, task::JoinHandle, time::Instant};
 use tracing::Instrument as _;
 
 use crate::{
-    changes::Changes,
+    changes::{self, Changes, Feed, Pump, SyncState},
     error::{Result, SyncError},
 };
 
@@ -129,6 +129,8 @@ struct Inner {
     author: AuthorId,
     /// The document, once there is a group to derive it from.
     open: watch::Receiver<Option<Doc>>,
+    /// What the document's one subscription reports, from when it opened.
+    feed: Feed,
     /// Waiting for the group, then opening and syncing. Aborted on shutdown.
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -199,6 +201,7 @@ impl Catalogue {
             .map_err(SyncError::docs("given this node's author key"))?;
 
         let (opened, open) = watch::channel(None);
+        let (pump, feed) = changes::feed();
         let me = MemberId::from(key.public());
         // Names the node on every line the catalogue logs, which several nodes
         // in one test process otherwise share (C25's diagnosis). Debug, so the
@@ -213,6 +216,7 @@ impl Catalogue {
                 membership,
                 me,
                 opened,
+                pump,
                 directory: transport.directory.clone(),
             })
             .instrument(span),
@@ -224,6 +228,7 @@ impl Catalogue {
                 docs,
                 author: author_id,
                 open,
+                feed,
                 task: Mutex::new(Some(task)),
             }),
         })
@@ -470,9 +475,17 @@ impl Catalogue {
 
     /// Watches the catalogue for what a read model has to re-read.
     ///
-    /// Start this **before** replaying the document: see [`Changes`].
+    /// Take this **before** replaying the document: see [`Changes`]. One
+    /// reader only — see [`Feed::changes`].
     pub fn changes(&self) -> Result<Changes> {
-        Ok(Changes::start(self.document()?, self.inner.author))
+        self.document()?;
+        Ok(self.inner.feed.changes())
+    }
+
+    /// Who this node is connected to for the catalogue, and how its last sync
+    /// round with each peer went — the empty state until the document opens.
+    pub fn sync_status(&self) -> watch::Receiver<SyncState> {
+        self.inner.feed.sync_status()
     }
 
     /// This node's author id, which is its member id.
@@ -519,6 +532,7 @@ struct Opening {
     membership: watch::Receiver<MembershipState>,
     me: MemberId,
     opened: watch::Sender<Option<Doc>>,
+    pump: Pump,
     directory: Directory,
 }
 
@@ -530,6 +544,7 @@ async fn open_when_founded(opening: Opening) {
         mut membership,
         me,
         opened,
+        pump,
         directory,
     } = opening;
     let learned = directory.learned();
@@ -555,6 +570,18 @@ async fn open_when_founded(opening: Opening) {
     };
     tracing::info!(%group, document = %doc.id(), "opened the catalogue");
 
+    // Subscribed before syncing starts, so the first neighbours and rounds are
+    // seen: iroh-docs reports them once and has no call to ask again. Without
+    // it the read model has only what its first replay found, and the swarm's
+    // state stays empty — worth saying, not worth stopping the catalogue for.
+    let events = match doc.subscribe().await {
+        Ok(events) => Some(events),
+        Err(error) => {
+            tracing::error!(%error, "could not watch the catalogue for changes; the read model will only have what the first replay found");
+            None
+        }
+    };
+
     // The core group, because those are the members whose addresses the log
     // carries. Everyone else joins through the same gossip swarm iroh-docs
     // runs for the document, which is how a follower reaches another
@@ -578,9 +605,19 @@ async fn open_when_founded(opening: Opening) {
     // document is already syncing and takes whatever peers it is given. What it
     // does *not* do is take only the new ones — it dials every peer in the list,
     // which is why what it is handed is kept narrow.
-    // Both until shutdown, which only the first can see: it holds `opened`, so
-    // when its receivers go it returns and the other is dropped with it.
+    // All three until shutdown, which only the first can see: it holds
+    // `opened`, so when its receivers go it returns and the others are dropped
+    // with it.
     tokio::select! {
+        () = async move {
+            match events {
+                Some(events) => pump.run(events).await,
+                // Dropped, so a reader waiting on it hears that nothing will come.
+                None => drop(pump),
+            }
+            // The stream ends at shutdown. The other two arms go on until then.
+            std::future::pending::<()>().await;
+        } => {}
         () = offer_peers_as_they_are_learned(
             doc.clone(),
             membership.clone(),

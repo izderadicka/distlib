@@ -282,6 +282,42 @@ async fn an_item_written_on_one_node_is_read_on_the_other() {
     bob.shutdown().await;
 }
 
+/// **4a-2's acceptance (C14): each node of a pair shows the other as its
+/// neighbour, and when one stops, the other shows none — and says so.**
+///
+/// Also the regression for what 4.0 found: the document's events were
+/// subscribed only when the read model first asked, after syncing had started,
+/// so the first `NeighborUp` went unheard and a node showed no neighbours while
+/// it had one.
+#[tokio::test]
+async fn each_of_a_pair_shows_the_other_as_its_neighbour_until_it_stops() {
+    let (_dir, alice, bob) = a_founded_pair().await;
+    let alice_id = MemberId::from(alice.endpoint().id());
+    let bob_id = MemberId::from(bob.endpoint().id());
+
+    for (who, runtime, other) in [("alice", &alice, bob_id), ("bob", &bob, alice_id)] {
+        let mut sync = runtime.catalogue().sync_status();
+        tokio::time::timeout(
+            SOON,
+            sync.wait_for(|state| state.neighbours.iter().eq([&other])),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{who} never showed the other as a neighbour"))
+        .unwrap();
+    }
+
+    // A graceful stop, as Ctrl-C makes, rather than a crash: the case iroh-gossip
+    // left a minute stale until the runtime closed its connections first (P4-2).
+    let mut sync = bob.catalogue().sync_status();
+    alice.shutdown().await;
+    tokio::time::timeout(SOON, sync.wait_for(|state| state.neighbours.is_empty()))
+        .await
+        .expect("bob still shows alice as a neighbour after she stopped")
+        .unwrap();
+
+    bob.shutdown().await;
+}
+
 /// The composed version of the agreement test `distlib-consensus` has.
 ///
 /// The endpoint is bound from [`distlib::alpns`] before any handler exists, so

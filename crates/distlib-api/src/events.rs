@@ -17,7 +17,6 @@
 use std::{convert::Infallible, time::Duration};
 
 use axum::response::sse::Event as Frame;
-use distlib_consensus::MembershipState;
 use distlib_core::Event;
 use futures_lite::{Stream, StreamExt as _, stream};
 use tokio::sync::{
@@ -93,19 +92,21 @@ fn frame(name: &str, data: &impl serde::Serialize) -> Frame {
         .expect("an event is plain data and always serialises")
 }
 
-/// Publishes `membership.changed` whenever the membership moves.
+/// Publishes `event` whenever `changes` moves — `membership.changed` for the
+/// membership, `sync.status` for the catalogue's swarm.
 ///
-/// Never borrows the membership: the event has no payload, and a borrow of a
-/// `watch` is a read lock that the Raft state machine's next `send_replace`
-/// would have to wait behind.
-pub(crate) async fn publish_membership(
-    mut memberships: watch::Receiver<MembershipState>,
+/// Never borrows the value: the events have no payload, and a borrow of a
+/// `watch` is a read lock that its writer's next update — the Raft state
+/// machine's, or the catalogue's pump — would have to wait behind.
+pub(crate) async fn publish_whenever<T>(
+    mut changes: watch::Receiver<T>,
     events: broadcast::Sender<Event>,
+    event: Event,
 ) {
-    while memberships.changed().await.is_ok() {
+    while changes.changed().await.is_ok() {
         // Nobody watching is the ordinary case, not a failure — see the module
         // docs.
-        let _ = events.send(Event::MembershipChanged);
+        let _ = events.send(event.clone());
     }
 }
 
@@ -152,5 +153,28 @@ mod tests {
         // Not the end: the watcher was moved past what it missed.
         let second = format!("{:?}", frames.next().await.unwrap().unwrap());
         assert!(second.contains("membership.changed"), "got {second}");
+    }
+
+    /// Every change to the watched value is one event, and the publisher stops
+    /// when the value's writer goes — which is how `sync.status` follows the
+    /// catalogue's swarm.
+    #[tokio::test]
+    async fn a_change_is_announced_and_the_publisher_stops_with_its_source() {
+        let (source, watched) = watch::channel(0_u32);
+        let (events, mut heard) = broadcast::channel(4);
+        let publisher = tokio::spawn(publish_whenever(watched, events, Event::SyncStatus));
+
+        source.send_replace(1);
+        let event = tokio::time::timeout(Duration::from_secs(5), heard.recv())
+            .await
+            .expect("the change is announced")
+            .unwrap();
+        assert_eq!(event, Event::SyncStatus);
+
+        drop(source);
+        tokio::time::timeout(Duration::from_secs(5), publisher)
+            .await
+            .expect("the publisher stops once nothing can change")
+            .unwrap();
     }
 }

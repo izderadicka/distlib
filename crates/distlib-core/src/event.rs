@@ -31,6 +31,15 @@ pub enum Event {
     #[serde(rename = "membership.changed")]
     MembershipChanged,
 
+    /// The catalogue's swarm changed: a neighbour came or went, or a sync round
+    /// with a peer finished (C14).
+    ///
+    /// No payload, for the same reason — `node.status` says what it looks like
+    /// now. Fires with every sync round, so a quiet group still sends one now
+    /// and then.
+    #[serde(rename = "sync.status")]
+    SyncStatus,
+
     /// An item this node's read model did not hold is now in it — searchable
     /// and readable, since it is published only after both are committed.
     #[serde(rename = "catalogue.item_added")]
@@ -104,6 +113,7 @@ impl Event {
     pub fn name(&self) -> &'static str {
         match self {
             Self::MembershipChanged => "membership.changed",
+            Self::SyncStatus => "sync.status",
             Self::ItemAdded { .. } => "catalogue.item_added",
             Self::ItemChanged { .. } => "catalogue.item_changed",
             Self::DownloadProgress { .. } => "download.progress",
