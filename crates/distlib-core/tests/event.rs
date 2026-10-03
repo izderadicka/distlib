@@ -14,6 +14,7 @@ fn every_event() -> Vec<Event> {
     let task_id = TaskId(1);
     let all = vec![
         Event::MembershipChanged,
+        Event::SyncStatus,
         Event::ItemAdded { item_id },
         Event::ItemChanged { item_id },
         Event::DownloadProgress {
@@ -32,6 +33,7 @@ fn every_event() -> Vec<Event> {
     for event in &all {
         match event {
             Event::MembershipChanged
+            | Event::SyncStatus
             | Event::ItemAdded { .. }
             | Event::ItemChanged { .. }
             | Event::DownloadProgress { .. }

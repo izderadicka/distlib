@@ -930,6 +930,11 @@ async fn node_status_reports_the_group_this_node_founded() {
     assert_eq!(status["core"], json!(true), "a founder is a voter");
     assert_eq!(status["members"], json!(1));
     assert_eq!(status["raft"], json!("Leader"));
+    assert_eq!(
+        status["sync"],
+        json!({"neighbours": [], "last_sync": []}),
+        "a node alone has nobody to be a neighbour of (C14)"
+    );
 
     harness.shutdown().await;
 }

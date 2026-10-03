@@ -17,7 +17,7 @@ use distlib_core::{
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
-use distlib_sync::{Catalogue, SyncError};
+use distlib_sync::{Catalogue, SyncError, SyncState};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -146,6 +146,7 @@ impl Api {
             // A count, not a listing. Status is a summary and every other field
             // in it is one line; `group.pending` is where the detail lives.
             "pending": membership.pending().count(),
+            "sync": sync_block(&self.catalogue.sync_status().borrow()),
         }))
     }
 
@@ -1196,6 +1197,29 @@ impl Api {
             "waiting": waiting,
         })
     }
+}
+
+/// `node.status`'s view of the catalogue's swarm (C14): who this node is a
+/// gossip neighbour of, and how its last sync round with each peer went.
+///
+/// Times in microseconds since the epoch, like `last_modified`. A clock that
+/// reads before 1970 gives 0 rather than an error: it is a display, and the
+/// rest of the status is worth more than refusing over it.
+fn sync_block(sync: &SyncState) -> Value {
+    let last_sync: Vec<Value> = sync
+        .last_sync
+        .iter()
+        .map(|(member, last)| {
+            let finished = last
+                .finished
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| {
+                    u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+                });
+            json!({ "member": member, "finished": finished, "ok": last.ok })
+        })
+        .collect();
+    json!({ "neighbours": sync.neighbours, "last_sync": last_sync })
 }
 
 /// The fields shown for a search hit — a summary, not `library.item`'s full

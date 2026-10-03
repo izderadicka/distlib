@@ -57,6 +57,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use distlib_core::Event;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::Value;
@@ -71,9 +72,9 @@ use uploads::UploadError;
 pub struct Server {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
-    /// Turns membership changes into events. Owned here so that it stops with
-    /// the server rather than outliving it.
-    membership: tokio::task::JoinHandle<()>,
+    /// Turn membership and catalogue-swarm changes into events. Owned here so
+    /// that they stop with the server rather than outliving it.
+    publishers: [tokio::task::JoinHandle<()>; 2],
 }
 
 impl Server {
@@ -88,7 +89,9 @@ impl Server {
     /// Stops serving.
     pub fn shutdown(&self) {
         self.task.abort();
-        self.membership.abort();
+        self.publishers
+            .iter()
+            .for_each(tokio::task::JoinHandle::abort);
     }
 }
 
@@ -101,8 +104,8 @@ struct Shared {
 /// Binds `addr` and serves the API until the returned [`Server`] is shut down.
 ///
 /// The event bus is `api.tasks`' — see [`events::bus`]. The server subscribes
-/// a receiver per watcher, and publishes the membership's changes into it
-/// itself, since the membership node is already in `api`.
+/// a receiver per watcher, and publishes the membership's and the catalogue
+/// swarm's changes into it itself, since both are already in `api`.
 ///
 /// Returns once the listener is bound, so a caller that immediately connects
 /// will not race the server into existence.
@@ -110,10 +113,18 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
-    let membership = tokio::spawn(events::publish_membership(
-        api.node.subscribe(),
-        api.tasks.events().clone(),
-    ));
+    let publishers = [
+        tokio::spawn(events::publish_whenever(
+            api.node.subscribe(),
+            api.tasks.events().clone(),
+            Event::MembershipChanged,
+        )),
+        tokio::spawn(events::publish_whenever(
+            api.catalogue.sync_status(),
+            api.tasks.events().clone(),
+            Event::SyncStatus,
+        )),
+    ];
     let shared = Arc::new(Shared { api, token });
     // The token guards these routes rather than the whole router, so that
     // the UI's files are served beside them unguarded (D3) and an unknown path
@@ -145,7 +156,7 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
     Ok(Server {
         addr,
         task,
-        membership,
+        publishers,
     })
 }
 
