@@ -265,6 +265,15 @@ impl Runtime {
     /// with different failure modes, and moving ownership is not the change
     /// that should make it.
     pub async fn shutdown(&self) {
+        // **Connections first, so peers hear one goodbye that reaches every
+        // gossip topic** (P4-2). Left to the subsystems, the membership topic
+        // says goodbye on its own when `node.shutdown` drops it — and a peer
+        // hearing that drops this node from *all* its topics' bookkeeping
+        // without telling the others, so the catalogue's topic keeps a
+        // neighbour that is gone until it next tries to send to it, about a
+        // minute later. A closed connection, by contrast, is reported to every
+        // topic at once. Nothing below needs the network to stop.
+        self.router.endpoint().close().await;
         self.node.shutdown().await;
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.

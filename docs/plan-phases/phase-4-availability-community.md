@@ -352,7 +352,7 @@ prefixes, open as a compatible change if that end is ever measured and found wan
 - **TTL = 3 × the sender's `interval_secs`**, read from the heartbeat and clamped to 1 s – 1 h. The
   sender says how long to trust it, so two nodes with different configs, or different views of N,
   still agree. At the default that is 180 s, against §5.6's "~5 min" — a delta, **Ivan's call**.
-- **A `leaving` beat on graceful shutdown** removes the member at once, before the router stops. A
+- **A `leaving` beat on graceful shutdown** removes the member at once, sent before the endpoint closes (P4-2). A
   kill still waits out the TTL.
 
 The receiving side, in order:
@@ -509,6 +509,10 @@ a time, review before the next.
   fires in between is never seen, and a node can show zero neighbours while it has one. iroh-docs has
   no call that reports current neighbours (`Doc::get_sync_peers` is the remembered peers, not live
   ones), so the record has to start before `start_sync` does — subscribed when the document opens.
+  *As built (P4-2):* the document's one subscription is the catalogue's, opened before syncing, and the
+  projection reads from it. Graceful shutdown turned out to leave a neighbour shown for a minute —
+  iroh-gossip forgets a peer on every topic when it leaves one, and tells only that one — so
+  `Runtime::shutdown` now closes the endpoint first.
 
 - **4a-3 — C25: the membership topic stops dialling members it cannot reach.** *Revised by 4.0
   (ground truth 18).* `join_topic` bootstraps with the members that have an address — the rule
@@ -537,7 +541,8 @@ a time, review before the next.
 
 - **4b-3 — the heartbeat service, presence only (D4).** The topic,
   `blake3("distlib.availability.v1" || group_id)`; the TTL index; `Directory::learn`;
-  `own_address()`; the config key and the budget; `leaving` before the router stops.
+  `own_address()`; the config key and the budget; `leaving` before the endpoint closes, which
+  `Runtime::shutdown` now does first (P4-2).
   **Acceptance:** a member is online, then gone within the TTL when aborted and at once when stopped
   cleanly; a sender's interval sets its receiver's TTL; a node that missed an address announcement
   learns it from a heartbeat (C5); `a_settled_group_stops_talking_about_addresses` still passes.

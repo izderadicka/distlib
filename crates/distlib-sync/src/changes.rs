@@ -20,20 +20,20 @@
 //! with `sender.send(event).await` (`iroh-docs-0.101.0/src/engine.rs:212`,
 //! `engine/live.rs:877`), so a subscriber that is slow does not drop events —
 //! it **stalls iroh-docs' own live actor**, and with it the document's sync. So
-//! the pump parses a key, touches a set, and goes back to the stream. Every
+//! the pump parses a key, touches a set or a `watch`, and goes back to the stream. Every
 //! slow thing — reading entries, reading content, writing SQLite — happens on
 //! the reader's side of this type.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
-use distlib_core::{ItemId, Key};
-use futures_lite::stream::StreamExt as _;
-use iroh_docs::{AuthorId, api::Doc, engine::LiveEvent};
-use tokio::{sync::watch, task::JoinHandle};
-use tracing::Instrument as _;
+use distlib_core::{ItemId, Key, MemberId};
+use futures_lite::stream::{Stream, StreamExt as _};
+use iroh_docs::engine::LiveEvent;
+use tokio::sync::watch;
 
 /// Everything that has changed since the reader last looked.
 ///
@@ -64,41 +64,97 @@ impl Batch {
     }
 }
 
+/// What the document's swarm looks like from here: who this node is directly
+/// connected to for the catalogue, and how its last sync round with each peer
+/// went (C14).
+///
+/// Kept by the pump from the events iroh-docs sends anyway, because iroh-docs
+/// has no call that answers it: `Doc::get_sync_peers` is the peers it
+/// *remembers*, not the ones it is connected to now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncState {
+    /// The members this node is a gossip neighbour of for the catalogue —
+    /// what live changes travel over, as opposed to sync rounds.
+    pub neighbours: BTreeSet<MemberId>,
+    /// The last sync round with each peer that has had one.
+    pub last_sync: BTreeMap<MemberId, LastSync>,
+}
+
+/// How the last sync round with one peer ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastSync {
+    /// When it finished, by this node's clock.
+    pub finished: SystemTime,
+    /// Whether it succeeded.
+    pub ok: bool,
+}
+
+/// The two halves of the one subscription to the document: the [`Pump`] that
+/// reads it and the [`Feed`] that is read from.
+///
+/// Made when the catalogue starts and subscribed when the document opens —
+/// **before** it starts syncing, so nothing it reports is missed. A
+/// subscription made later, by whoever asks for [`Changes`] first, misses the
+/// neighbours the document found while nobody was listening, and then shows
+/// none while it has some (found in phase 4's 4.0).
+pub(crate) fn feed() -> (Pump, Feed) {
+    let pending = Arc::new(Mutex::new(Batch::default()));
+    let (woke, woken) = watch::channel(0);
+    let (sync, synced) = watch::channel(SyncState::default());
+    (
+        Pump {
+            pending: Arc::clone(&pending),
+            woke,
+            sync,
+        },
+        Feed {
+            pending,
+            woken,
+            synced,
+        },
+    )
+}
+
+/// The reading end: what [`Changes`] and [`SyncState`] are read from.
+#[derive(Debug)]
+pub(crate) struct Feed {
+    pending: Arc<Mutex<Batch>>,
+    woken: watch::Receiver<u64>,
+    synced: watch::Receiver<SyncState>,
+}
+
+impl Feed {
+    /// The document's changes, from when it opened.
+    ///
+    /// **One reader**: every `Changes` drains the same batch, so two would
+    /// each see some of the changes. The projection is the one.
+    pub(crate) fn changes(&self) -> Changes {
+        Changes {
+            pending: Arc::clone(&self.pending),
+            woken: self.woken.clone(),
+        }
+    }
+
+    /// The swarm's state, kept current for as long as the document is open.
+    pub(crate) fn sync_status(&self) -> watch::Receiver<SyncState> {
+        self.synced.clone()
+    }
+}
+
 /// A live view of what the document is changing, coalesced.
 ///
-/// Start it *before* replaying the document, not after: anything landing
-/// between a replay and a subscription is otherwise lost until something else
-/// happens to touch the same item. Subscribing first costs nothing, because
-/// what arrives in the gap merges into the set the first [`Self::take`] drains.
+/// Take it *before* replaying the document, not after: anything landing
+/// between a replay and the first [`Self::take`] is then in the set it
+/// drains. Anything from before is there too, since the set has been kept
+/// since the document opened — which costs one spare re-read of each, and a
+/// re-read is idempotent.
 #[derive(Debug)]
 pub struct Changes {
     pending: Arc<Mutex<Batch>>,
     woken: watch::Receiver<u64>,
-    pump: JoinHandle<()>,
-}
-
-impl Drop for Changes {
-    fn drop(&mut self) {
-        self.pump.abort();
-    }
 }
 
 impl Changes {
-    /// Subscribes to `doc` and starts coalescing what it reports.
-    ///
-    /// `me` only names the node in the pump's log lines.
-    pub(crate) fn start(doc: Doc, me: AuthorId) -> Self {
-        let pending = Arc::new(Mutex::new(Batch::default()));
-        let (woke, woken) = watch::channel(0);
-        let span = tracing::debug_span!(parent: None, "catalogue", %me);
-        let pump = tokio::spawn(pump(doc, Arc::clone(&pending), woke).instrument(span));
-        Self {
-            pending,
-            woken,
-            pump,
-        }
-    }
-
     /// Waits until there is something to do, then takes all of it.
     ///
     /// `None` once the document's event stream has ended, which is shutdown.
@@ -124,51 +180,64 @@ impl Changes {
     }
 }
 
-/// Reads the document's events and records what they are about.
-///
-/// See the module docs for why there is nothing else in this loop.
-async fn pump(doc: Doc, pending: Arc<Mutex<Batch>>, woke: watch::Sender<u64>) {
-    let mut events = match doc.subscribe().await {
-        Ok(events) => events,
-        Err(error) => {
-            tracing::error!(%error, "could not watch the catalogue for changes; the read model will only have what the first replay found");
-            return;
-        }
-    };
+/// The writing end, run by the catalogue's task once the document is open.
+#[derive(Debug)]
+pub(crate) struct Pump {
+    pending: Arc<Mutex<Batch>>,
+    woke: watch::Sender<u64>,
+    sync: watch::Sender<SyncState>,
+}
 
-    while let Some(event) = events.next().await {
-        let event = match event {
-            Ok(event) => event,
-            // One event failing to arrive is not the stream ending, and the
-            // reader's own sweep is what covers the gap.
-            Err(error) => {
-                tracing::warn!(%error, "a catalogue change could not be read");
-                continue;
+impl Pump {
+    /// Reads the document's events and records what they are about, until the
+    /// stream ends.
+    ///
+    /// See the module docs for why there is nothing else in this loop: every
+    /// arm is a lock or a `watch` update, and nothing awaits but the stream.
+    pub(crate) async fn run<S>(self, mut events: S)
+    where
+        S: Stream<Item = anyhow::Result<LiveEvent>> + Unpin,
+    {
+        while let Some(event) = events.next().await {
+            let event = match event {
+                Ok(event) => event,
+                // One event failing to arrive is not the stream ending, and the
+                // reader's own sweep is what covers the gap.
+                Err(error) => {
+                    tracing::warn!(%error, "a catalogue change could not be read");
+                    continue;
+                }
+            };
+            if self.note(event) {
+                self.woke.send_modify(|woke| *woke = woke.wrapping_add(1));
             }
-        };
+        }
+    }
 
-        let mut batch = pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let news = match event {
+    /// Records one event, answering whether the read model has news.
+    fn note(&self, event: LiveEvent) -> bool {
+        match event {
             LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. } => {
-                note(&mut batch, entry.key())
+                note(&mut self.batch(), entry.key())
             }
             LiveEvent::ContentReady { .. } | LiveEvent::PendingContentReady => {
+                let mut batch = self.batch();
                 let first = !batch.content_arrived;
                 batch.content_arrived = true;
                 first
             }
             // Neighbours and sync rounds are the swarm's business, not the read
-            // model's: what a sync *found* arrives as the inserts above. Logged,
-            // synchronously, because they are the steps between offering a peer
-            // and hearing from it (C25).
+            // model's: what a sync *found* arrives as the inserts above.
             LiveEvent::NeighborUp(peer) => {
                 tracing::debug!(%peer, "catalogue neighbour up");
+                self.sync
+                    .send_if_modified(|state| state.neighbours.insert(MemberId::from(peer)));
                 false
             }
             LiveEvent::NeighborDown(peer) => {
                 tracing::debug!(%peer, "catalogue neighbour down");
+                self.sync
+                    .send_if_modified(|state| state.neighbours.remove(&MemberId::from(peer)));
                 false
             }
             LiveEvent::SyncFinished(sync) => {
@@ -178,14 +247,24 @@ async fn pump(doc: Doc, pending: Arc<Mutex<Batch>>, woke: watch::Sender<u64>) {
                     error = sync.result.as_ref().err(),
                     "catalogue sync round finished",
                 );
+                self.sync.send_modify(|state| {
+                    state.last_sync.insert(
+                        MemberId::from(sync.peer),
+                        LastSync {
+                            finished: sync.finished,
+                            ok: sync.result.is_ok(),
+                        },
+                    );
+                });
                 false
             }
-        };
-        drop(batch);
-
-        if news {
-            woke.send_modify(|woke| *woke = woke.wrapping_add(1));
         }
+    }
+
+    fn batch(&self) -> std::sync::MutexGuard<'_, Batch> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
