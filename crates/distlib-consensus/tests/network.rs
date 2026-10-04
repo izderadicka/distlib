@@ -34,6 +34,8 @@ use redb::Database;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
+mod common;
+
 /// One node: its Raft, the router serving it, and the files it lives in.
 struct Node {
     id: RawMemberId,
@@ -46,6 +48,7 @@ struct Node {
 impl Node {
     /// Builds a node that admits `peers` and listens on loopback.
     async fn start(secret: SecretKey, peers: Vec<MemberId>) -> Self {
+        common::init_logging();
         let me = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
         // These nodes drive Raft directly rather than founding through

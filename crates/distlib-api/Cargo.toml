@@ -54,6 +54,8 @@ iroh-gossip = { workspace = true }
 # an in-memory one costs nothing these tests need to pay for.
 iroh-blobs = { workspace = true }
 tempfile = { workspace = true }
+# Logs a failing test's steps, from `RUST_LOG` — see the CI workflow.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

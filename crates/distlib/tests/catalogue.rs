@@ -22,7 +22,7 @@ use iroh::SecretKey;
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, following, record};
+use common::{bound, config, following, init_logging, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -41,6 +41,7 @@ const AMPLY: Duration = Duration::from_secs(10);
 
 /// Two runtimes, founded as one group, sharing one catalogue.
 async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
@@ -173,9 +174,7 @@ struct Group {
 /// written down nowhere — which is the whole question this file's follower
 /// tests exist to answer.
 async fn a_group_with_two_followers() -> Group {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
@@ -756,9 +755,7 @@ async fn a_late_joiner_still_learns_where_the_others_are() {
 /// out.
 #[tokio::test]
 async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+    init_logging();
     let dir = TempDir::new().unwrap();
 
     let alice_key = SecretKey::generate();

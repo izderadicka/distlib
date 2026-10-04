@@ -40,6 +40,19 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+/// Logs to this test's output, filtered by `RUST_LOG`.
+///
+/// CI sets `RUST_LOG`, and nextest shows a test's output only when it fails,
+/// so a failure that will not reproduce arrives with the log of what led to
+/// it. Unset, only errors are logged. One subscriber serves every node in the
+/// process: the first call installs it and the rest do nothing.
+fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 /// The upload cap the harness serves with: above axum's two-megabyte default
 /// body limit, so a test can show that limit is not the one in force.
 const MAX_UPLOAD: u64 = 4_000_000;
@@ -90,6 +103,7 @@ impl Harness {
     /// for the tests that need to control what answers `admin.reindex`
     /// rather than have nothing behind it.
     async fn start_with(reindex_handle: ReindexHandle) -> Self {
+        init_logging();
         let store = Store::open(None).await.unwrap();
         let search = SearchIndex::open(None).await.unwrap();
         let secret = SecretKey::generate();
@@ -211,6 +225,7 @@ impl Harness {
         use std::time::Duration;
         use tokio::time::timeout;
 
+        init_logging();
         let dir = TempDir::new().unwrap();
         let secrets: Vec<SecretKey> = (0..voters).map(|_| SecretKey::generate()).collect();
         let ids: Vec<MemberId> = secrets

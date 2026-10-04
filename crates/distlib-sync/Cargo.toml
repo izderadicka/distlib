@@ -37,6 +37,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Logs a failing test's steps, from `RUST_LOG` — see the CI workflow.
+tracing-subscriber = { workspace = true }
 data-encoding = { workspace = true }
 
 [lints]

@@ -113,6 +113,14 @@ jobs:
       # not the first one and a count of the rest that never ran.
       # `--profile ci` kills a test that hangs, so the log says which one and
       # where, rather than the job timing out an hour later with nothing.
+      # `RUST_LOG` is for the failures that will not reproduce: the multi-node
+      # harnesses log through it, and so does the binary `founding` runs, but
+      # nextest prints a test's output only when it fails — so a passing run
+      # is as quiet as ever, and a flaky one arrives with its log. Our own
+      # crates and gossip at debug, since gossip is where the failures so far
+      # have been (C25); QUIC's packet-level noise is cut.
       - run: cargo nextest run --workspace --all-features --no-fail-fast --profile ci
+        env:
+          RUST_LOG: info,distlib=debug,distlib_consensus=debug,distlib_net=debug,distlib_sync=debug,iroh_gossip=debug,noq_proto=warn
       # nextest does not run doctests, so they need their own pass.
       - run: cargo test --workspace --all-features --doc

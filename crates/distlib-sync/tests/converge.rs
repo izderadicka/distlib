@@ -29,6 +29,19 @@ use iroh_blobs::store::mem::MemStore;
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use tokio::sync::watch;
 
+/// Logs to this test's output, filtered by `RUST_LOG`.
+///
+/// CI sets `RUST_LOG`, and nextest shows a test's output only when it fails,
+/// so a failure that will not reproduce arrives with the log of what led to
+/// it. Unset, only errors are logged. One subscriber serves every node in the
+/// process: the first call installs it and the rest do nothing.
+fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 /// A member with a catalogue, and the transport under it.
 struct Node {
     catalogue: Catalogue,
@@ -54,6 +67,7 @@ impl Node {
         membership: watch::Receiver<MembershipState>,
         documents: Option<PathBuf>,
     ) -> Self {
+        init_logging();
         let endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .secret_key(secret.clone())
