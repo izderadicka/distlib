@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_core::{
-    Config, ContentHash, DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
+    Config, ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
     NetConfig, Series,
 };
 use distlib_store::StoredItem;
@@ -324,6 +324,15 @@ async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
 /// projection, because that is the only way to get the index to disagree with
 /// the document without waiting on a race: a corruption the projection would
 /// otherwise repair on its own the moment anything touched the item again.
+///
+/// **Which is why the drift waits for the projection to be done with the item**,
+/// and "searchable" is not that. `write` puts an item one entry at a time, and
+/// each entry's event reaches the projection on its own schedule: a pass that
+/// ran after the first has the item indexed, and one more entry arriving after
+/// the drift writes "Dune" straight back over it. That happened on a loaded
+/// Windows runner, and waiting for the whole item in SQLite would not have
+/// stopped it — a pass reads the whole item from the document, so the row can
+/// be complete while its later entries' events are still on their way.
 #[tokio::test(flavor = "multi_thread")]
 async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
     let dir = TempDir::new().unwrap();
@@ -341,21 +350,36 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
 
     let item_id = ItemId::from_bytes([9; 32]);
     runtime.catalogue().ready().await;
+    let mut events = runtime.events().subscribe();
     runtime
         .catalogue()
         .write(&an_item(9, "Dune"))
         .await
         .unwrap();
+
+    // So a marker, written after it: the document reports its entries in the
+    // order they were written, and a pass takes everything reported so far, so
+    // the pass that projects the marker has every one of the item's entries
+    // behind it — and its event is published only after its index commit.
+    let marker = ItemId::from_bytes([0xff; 32]);
+    runtime
+        .catalogue()
+        .write(&Item {
+            title: Some("a marker".to_owned()),
+            ..Item::new(marker)
+        })
+        .await
+        .unwrap();
     tokio::time::timeout(SOON, async {
-        loop {
-            if runtime.search().search("Dune", 10).await.unwrap() == vec![item_id] {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        while events.recv().await.unwrap() != (Event::ItemAdded { item_id: marker }) {}
     })
     .await
-    .expect("the item becomes searchable");
+    .expect("the marker is projected, and the item before it");
+    assert_eq!(
+        runtime.search().search("Dune", 10).await.unwrap(),
+        vec![item_id],
+        "the item is searchable before it is drifted"
+    );
 
     // Drift the index away from what the document says, directly.
     runtime

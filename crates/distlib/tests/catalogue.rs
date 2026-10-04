@@ -84,9 +84,10 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 /// offer — the same reasoning as the consensus harness's `PATIENTLY`, which
 /// sits above the follow loop's idle poll for exactly this reason.
 ///
-/// Not padding: on Linux and macOS the followers usually meet directly and this
-/// passes in about 13 s, but on Windows CI they do not (C25), and with the
-/// timer briefly at two minutes a bound of sixty seconds failed (P3-27).
+/// Not padding: with the timer briefly at two minutes a bound of sixty seconds
+/// failed (P3-27). It was also C25's bound, while two followers met only
+/// through the timer; since 4a-3 they meet on their first offer, and that test
+/// is bounded at [`SOON`].
 const PATIENTLY: Duration = Duration::from_secs(60);
 
 /// Reads one key, waiting out the window where the entry is here and its
@@ -94,18 +95,14 @@ const PATIENTLY: Duration = Duration::from_secs(60);
 ///
 /// `MissingContent` is that window and this poll is meant to sit through it —
 /// see `Catalogue::get`. Anything else is a real failure and is not retried.
-async fn read(catalogue: &distlib_sync::Catalogue, key: &str) -> Vec<u8> {
-    read_upto(catalogue, key, SOON).await
-}
-
-/// [`read`] with the bound named, for reads that outlast [`SOON`].
 ///
 /// On giving up it says *which* of the two ways it was still waiting, because
 /// they have different causes and a bare timeout sends you log-diving to find
 /// out which: no entry at all means the document did not reach this node, while
 /// an entry whose content has not landed means the document arrived and the
 /// blob behind it did not.
-async fn read_upto(catalogue: &distlib_sync::Catalogue, key: &str, bound: Duration) -> Vec<u8> {
+async fn read(catalogue: &distlib_sync::Catalogue, key: &str) -> Vec<u8> {
+    let bound = SOON;
     let last = std::sync::Arc::new(std::sync::Mutex::new("nothing was read"));
     let seen = std::sync::Arc::clone(&last);
     tokio::time::timeout(bound, async move {
@@ -558,6 +555,27 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         .unwrap_or_else(|_| panic!("{who} never learned where the other follower is"));
     }
 
+    // **4a-3's acceptance: they are each other's neighbours before alice goes.**
+    // Knowing an address is not being connected. Each follower used to dial the
+    // other on the membership topic before it knew where the other was, and
+    // that one failed dial stranded the peer in iroh-gossip on every topic
+    // (ground truth 18) — so they met only once the catalogue's timer offered
+    // them again, thirty seconds on. Bounded well under that timer, so it is
+    // the first introduction that has to work, not the repair.
+    for (who, runtime, other) in [
+        ("carol", &group.carol, bob_id),
+        ("bob", &group.bob, carol_id),
+    ] {
+        let mut sync = runtime.catalogue().sync_status();
+        tokio::time::timeout(
+            AMPLY,
+            sync.wait_for(|state| state.neighbours.contains(&other)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{who} never became the other follower's neighbour"))
+        .unwrap();
+    }
+
     // Something crosses first, so a failure after the shutdown is about the
     // shutdown rather than about a group that never converged at all.
     group
@@ -571,8 +589,7 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         b"The Dispossessed"
     );
 
-    // Markers for the log, which is what C25's diagnosis reads: the steps after
-    // these are the ones Windows takes thirty seconds over.
+    // Markers for the log, for whoever has to read a failure of what follows.
     tracing::info!(%bob_id, %carol_id, "test: shutting alice down");
     group.alice.shutdown().await;
 
@@ -584,7 +601,7 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         .unwrap();
     tracing::info!("test: bob wrote the year; waiting for carol to read it");
     assert_eq!(
-        &read_upto(group.carol.catalogue(), "item/3/year", PATIENTLY).await[..],
+        &read(group.carol.catalogue(), "item/3/year").await[..],
         b"1974",
         "a follower must reach a follower without the core node in the middle"
     );

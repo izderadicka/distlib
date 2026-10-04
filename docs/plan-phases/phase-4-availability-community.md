@@ -524,6 +524,16 @@ a time, review before the next.
   bound is tightened to match.
   **Watch for:** D7's (b) and (c) are re-weighed after this, not assumed — they cover the other way a
   peer is stranded (C30), not this one.
+  *As built:* the rule is consensus's `gossip::reachable` — a core member with its address from the
+  log, anyone else once its address is heard — and the catalogue's `sync_with` now calls it too, so
+  the two topics cannot drift apart again. **Nothing joins the rest later**, which the plan above
+  said would: a task that added each member to the membership topic as its address arrived was
+  built and dropped, because removing it failed no test — once nobody is stranded, gossip introduces
+  its own peers, and the catalogue already offers each member as it is heard. The C25 test now waits
+  for the two followers to be catalogue neighbours, bounded at 10 s (under `OFFER_AGAIN`'s 30 s, so
+  only the first introduction can pass it), before alice goes: before the fix it failed there every
+  time, after it the whole test takes about 9 s. Its final read is bounded at `SOON` rather than
+  `PATIENTLY`.
 
 ### 4b — availability (7 PRs)
 
