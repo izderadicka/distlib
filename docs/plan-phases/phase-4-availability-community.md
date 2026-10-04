@@ -654,6 +654,7 @@ Every open C-number appears here once.
 | **C28** | **The `item → members` map lives in memory** (D3) — about 1 GB per node at 10M distinct items | **No phase.** Moves to a local SQLite table when a group reaches the 10M end — Ivan's call. Never replicated either way. |
 | **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
 | **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; 4b's heartbeat appearances and D7 (b, c) are what would notice if it did not. |
+| **C31** | **A write made as two nodes connect can miss both paths to the other** — broadcast before the gossip neighbour is up, and after the running sync round compared the two sides; iroh-docs drops the sync it would start for the new neighbour because a round is already running, and only a `SyncReport` queues one (`engine/state.rs:195-206`). Found from the macOS CI log of `what_one_member_writes_the_other_reads`, write and neighbour 0.1 ms apart; repaired only by `OFFER_AGAIN`, which 4b-6 removes | **Worked around** after 4a-3: the pump asks for one more round with a neighbour whose round began before it came up (`Pump::began_before_neighbour`). Upstream: `NewNeighbor` should queue a resync the way `SyncReport` does — an issue to open. |
 
 ---
 

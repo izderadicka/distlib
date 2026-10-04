@@ -159,6 +159,15 @@ fn record(id: MemberId, name: &str) -> MemberRecord {
 /// that a broken sync fails the run rather than hanging it.
 const SOON: Duration = Duration::from_secs(30);
 
+/// For a write crossing between two nodes that have both opened the catalogue.
+///
+/// Under the catalogue's 30 s re-offer, deliberately: a write made just as the
+/// two connect can miss both the broadcast and the first sync round, and what
+/// must carry it is the round the pump asks for, not the timer behind it (C31).
+/// At [`SOON`] the timer passed for the fix — once, on macOS, by milliseconds
+/// too late.
+const PROMPTLY: Duration = Duration::from_secs(10);
+
 #[tokio::test]
 async fn what_one_member_writes_the_other_reads() {
     let alice_key = SecretKey::generate();
@@ -192,7 +201,7 @@ async fn what_one_member_writes_the_other_reads() {
 
     alice.catalogue.put("item/1/title", "Dune").await.unwrap();
 
-    let read = tokio::time::timeout(SOON, async {
+    let read = tokio::time::timeout(PROMPTLY, async {
         loop {
             // `MissingContent` is "the entry is here and its value is still
             // being fetched", which is a moment this poll is meant to wait
@@ -273,7 +282,7 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
 
     alice.catalogue.write(&item).await.unwrap();
 
-    let read = tokio::time::timeout(SOON, async {
+    let read = tokio::time::timeout(PROMPTLY, async {
         loop {
             // An item arrives entry by entry, so a read during the crossing is
             // a partial item rather than a failure — wait for the whole thing.
@@ -300,7 +309,7 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
     correction.description = Some("Two planets, one wall.".to_owned());
     alice.catalogue.write(&correction).await.unwrap();
 
-    tokio::time::timeout(SOON, async {
+    tokio::time::timeout(PROMPTLY, async {
         loop {
             if let Ok(Some(read)) = bob.catalogue.item(item.id).await
                 && read.description == correction.description
@@ -435,7 +444,7 @@ async fn a_node_that_lost_its_content_asks_for_it_again() {
         .unwrap();
 
     alice.catalogue.put("item/1/title", "Dune").await.unwrap();
-    tokio::time::timeout(SOON, async {
+    tokio::time::timeout(PROMPTLY, async {
         while bob
             .catalogue
             .get("item/1/title")

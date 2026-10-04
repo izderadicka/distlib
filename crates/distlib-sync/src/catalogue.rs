@@ -43,7 +43,11 @@ use iroh_docs::{
     protocol::Docs,
     store::{Query, Store as DocumentStore},
 };
-use tokio::{sync::watch, task::JoinHandle, time::Instant};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+    time::Instant,
+};
 use tracing::Instrument as _;
 
 use crate::{
@@ -606,17 +610,18 @@ async fn open_when_founded(opening: Opening) {
     // does *not* do is take only the new ones — it dials every peer in the list,
     // which is why what it is handed is kept narrow.
     //
-    // All three arms run until shutdown, which only the re-offering one can
+    // All four arms run until shutdown, which only the re-offering one can
     // see: it holds `opened`, so when its receivers go it returns and the
     // others are dropped with it.
+    let (sync_again, asked) = mpsc::unbounded_channel();
     tokio::select! {
         () = async move {
             match events {
-                Some(events) => pump.run(events).await,
+                Some(events) => pump.run(events, &sync_again).await,
                 // Dropped, so a reader waiting on it hears that nothing will come.
                 None => drop(pump),
             }
-            // The stream ends at shutdown. The other two arms go on until then.
+            // The stream ends at shutdown. The other arms go on until then.
             std::future::pending::<()>().await;
         } => {}
         () = offer_peers_as_they_are_learned(
@@ -627,8 +632,27 @@ async fn open_when_founded(opening: Opening) {
             opened,
             directory.clone(),
         ) => {}
+        () = sync_again_when_asked(doc.clone(), asked) => {}
         () = fetch_content_nobody_offered(doc, blobs, downloader, membership, me, directory) => {}
     }
+}
+
+/// Syncs once more with each neighbour the pump says may have missed
+/// something — see `Pump::began_before_neighbour` (C31).
+///
+/// `start_sync` because it is the only way to ask iroh-docs for a round. It
+/// dials the document's remembered peers too, at most five of them, and this
+/// is asked for at most once per round that began before its neighbour did —
+/// a startup's worth, not a steady cost.
+async fn sync_again_when_asked(doc: Doc, mut asked: mpsc::UnboundedReceiver<EndpointId>) {
+    while let Some(peer) = asked.recv().await {
+        tracing::debug!(%peer, "syncing again with a neighbour that came up mid-round");
+        if let Err(error) = doc.start_sync(vec![EndpointAddr::new(peer)]).await {
+            tracing::warn!(%error, %peer, "could not sync again with a neighbour");
+        }
+    }
+    // The pump has stopped, which is shutdown; ending here would end the rest.
+    std::future::pending::<()>().await;
 }
 
 /// How often the document's peers are offered again regardless.
