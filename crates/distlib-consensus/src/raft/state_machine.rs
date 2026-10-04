@@ -18,15 +18,15 @@
 use std::{
     io::Cursor,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 use distlib_core::{MemberId, NodeAddr};
 use openraft::{
-    EntryPayload, ErrorSubject, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
-    StoredMembership, storage::RaftStateMachine,
+    EntryPayload, ErrorSubject, ErrorVerb, LogId, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
+    StorageError, StorageIOError, StoredMembership, storage::RaftStateMachine,
 };
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -134,7 +134,7 @@ impl StateMachineStore {
             read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
             store.inner.membership.send_replace(applied.state.clone());
-            *store.lock() = applied;
+            *store.lock()? = applied;
         }
         Ok(store)
     }
@@ -156,7 +156,7 @@ impl StateMachineStore {
     /// The point of the whole crate: this is what feeds the connection
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
-        self.lock().state.clone()
+        self.peek().state.clone()
     }
 
     /// The last log index this node has applied.
@@ -165,7 +165,7 @@ impl StateMachineStore {
     /// but not yet part of anybody's membership, and serving them would hand
     /// out a decision the group has not finished making.
     pub fn last_applied_index(&self) -> u64 {
-        self.lock().last_applied.map_or(0, |log_id| log_id.index)
+        self.peek().last_applied.map_or(0, |log_id| log_id.index)
     }
 
     /// How far this node has got through the log, whichever way it gets it.
@@ -181,7 +181,7 @@ impl StateMachineStore {
     /// survives a restart because it is derived from a log this node has
     /// already written down. See [`distlib_core::SignedAddress::applied`].
     pub fn position(&self) -> u64 {
-        let state = self.lock();
+        let state = self.peek();
         state
             .last_applied
             .map_or(0, |log_id| log_id.index)
@@ -190,7 +190,7 @@ impl StateMachineStore {
 
     /// How far this node has followed a log it does not vote on.
     pub fn followed_upto(&self) -> u64 {
-        self.lock().followed_upto
+        self.peek().followed_upto
     }
 
     /// Folds fetched events in, and records how far they reached.
@@ -217,7 +217,7 @@ impl StateMachineStore {
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is held across an await.
         let (encoded, derived) = {
-            let mut applied = self.lock();
+            let mut applied = self.lock()?;
             for (index, event) in events {
                 let verdict = applied.state.apply(*index, event);
                 if let Err(error) = &verdict {
@@ -309,7 +309,7 @@ impl StateMachineStore {
     /// promote again.
     pub async fn reset_for_promotion(&self) -> StorageResult<()> {
         let encoded = {
-            let mut applied = self.lock();
+            let mut applied = self.lock()?;
             *applied = Applied::default();
             encode(&*applied, ErrorSubject::StateMachine)?
         };
@@ -354,7 +354,7 @@ impl StateMachineStore {
     /// cursors are comparable, and this is the one place that relies on it.
     pub async fn resume_following(&self) -> StorageResult<()> {
         let encoded = {
-            let mut applied = self.lock();
+            let mut applied = self.lock()?;
             applied.followed_upto = applied.last_applied.map_or(0, |at| at.index);
             encode(&*applied, ErrorSubject::StateMachine)?
         };
@@ -379,7 +379,7 @@ impl StateMachineStore {
         // once they agree, but only the projection is built from the log, and
         // a follower runs no Raft at all — reading openraft's copy meant a
         // follower answered "no core nodes" about the group it was following.
-        self.lock()
+        self.peek()
             .state
             .core()
             .iter()
@@ -407,18 +407,51 @@ impl StateMachineStore {
         }
     }
 
-    /// A poison-tolerant lock.
+    /// The applied state, for anything that will persist it or hand it on.
     ///
-    /// Nothing here panics while holding it — the guard covers in-memory
-    /// mutation only, never I/O — so a poisoned lock means an unrelated panic
-    /// elsewhere, and refusing to serve the state afterwards would turn that
-    /// into a second failure.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Applied> {
+    /// **A poisoned lock is a storage failure**, and so fatal to Raft. A panic
+    /// while holding it can only come from the fold — `apply` and
+    /// `apply_followed` run a whole batch under one guard — so what it leaves
+    /// behind may be half a batch, or half an event. Everything that takes this
+    /// lock goes on to write what it finds to disk or into a snapshot a peer
+    /// installs, and doing that with a half-applied state would persist a
+    /// membership no other node has: a divergence a restart could no longer
+    /// undo. Refused instead, the disk keeps the last whole state, and a
+    /// restart resumes from it.
+    ///
+    /// On a core node openraft stops at the first such error. A follower runs
+    /// no Raft: its loop retries, and fails and logs, until the node restarts.
+    fn lock(&self) -> StorageResult<MutexGuard<'_, Applied>> {
+        self.inner.applied.lock().map_err(|_| poisoned())
+    }
+
+    /// The applied state, for a getter: tolerant of a poisoned lock.
+    ///
+    /// What it returns is only read — never written, never announced; the
+    /// membership watch moves only after a commit — so after a panic the worst
+    /// a reader sees is the half batch [`Self::lock`] refuses to persist, until
+    /// the restart that poisoning calls for anyway. Failing here instead would
+    /// turn every caller, from the allowlist to the API, fallible over a state
+    /// that cannot reach them otherwise.
+    fn peek(&self) -> MutexGuard<'_, Applied> {
         self.inner
             .applied
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The error a poisoned lock is reported as — see [`StateMachineStore::lock`].
+///
+/// Built from a message rather than from the `PoisonError`, which borrows the
+/// store and so cannot be the error's source.
+fn poisoned() -> StorageError<NodeId> {
+    StorageIOError::new(
+        ErrorSubject::StateMachine,
+        ErrorVerb::Read,
+        anyerror::AnyError::error("a panic while applying entries poisoned the applied state"),
+    )
+    .into()
 }
 
 impl RaftStateMachine<TypeConfig> for StateMachineStore {
@@ -427,7 +460,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     async fn applied_state(
         &mut self,
     ) -> StorageResult<(Option<LogId<NodeId>>, StoredMembership<NodeId, NodeAddr>)> {
-        let applied = self.lock();
+        let applied = self.lock()?;
         Ok((applied.last_applied, applied.membership.clone()))
     }
 
@@ -441,7 +474,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is ever held across an await.
         let (encoded, derived) = {
-            let mut applied = self.lock();
+            let mut applied = self.lock()?;
             for entry in entries {
                 let index = entry.log_id.index;
                 applied.last_applied = Some(entry.log_id);
@@ -518,10 +551,12 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         // A copy taken now, so later applies cannot change what this builder
-        // produces — which is what the trait asks for.
+        // produces — which is what the trait asks for. None if the lock is
+        // poisoned: the trait gives no way to fail here, so the builder fails
+        // instead, before it writes anything.
         SnapshotBuilder {
             db: Arc::clone(&self.inner.db),
-            applied: self.lock().clone(),
+            applied: self.lock().ok().map(|applied| applied.clone()),
             seq: self.inner.snapshot_seq.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -549,7 +584,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         )?;
 
         let membership = applied.state.clone();
-        *self.lock() = applied;
+        *self.lock()? = applied;
 
         // Both keys in one transaction. The applied state and the snapshot it
         // came from cannot then disagree after a crash, and it is one fsync
@@ -593,26 +628,28 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 #[derive(Debug)]
 pub struct SnapshotBuilder {
     db: Arc<Database>,
-    applied: Applied,
+    /// None if the state was poisoned when this was created.
+    applied: Option<Applied>,
     seq: u64,
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
     async fn build_snapshot(&mut self) -> StorageResult<Snapshot<TypeConfig>> {
+        let applied = self.applied.as_ref().ok_or_else(poisoned)?;
         // Two snapshots can share a `last_log_id`, so the sequence number is
         // what keeps their ids distinct during a transfer.
-        let snapshot_id = match self.applied.last_applied {
+        let snapshot_id = match applied.last_applied {
             Some(log_id) => format!("{}-{}-{}", log_id.leader_id, log_id.index, self.seq),
             None => format!("--{}", self.seq),
         };
         let meta = SnapshotMeta {
-            last_log_id: self.applied.last_applied,
-            last_membership: self.applied.membership.clone(),
+            last_log_id: applied.last_applied,
+            last_membership: applied.membership.clone(),
             snapshot_id,
         };
 
         let subject = ErrorSubject::Snapshot(Some(meta.signature()));
-        let data = encode(&self.applied, subject.clone())?;
+        let data = encode(applied, subject.clone())?;
         let stored = encode(
             &StoredSnapshot {
                 meta: meta.clone(),
@@ -621,7 +658,7 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
             subject.clone(),
         )?;
 
-        let ours = self.applied.last_applied;
+        let ours = applied.last_applied;
         let insert_subject = subject.clone();
         write_txn(&self.db, subject, move |txn| {
             let fail = writing(insert_subject);
@@ -663,5 +700,65 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
             meta,
             snapshot: Box::new(Cursor::new(data)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_poisoned_state_is_never_persisted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = StateMachineStore::open(dir.path().join("sm.redb")).unwrap();
+        store.apply_followed(3, &[]).await.unwrap();
+        let before = store
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        // A fold that panics halfway: the guard is dropped mid-change.
+        std::thread::scope(|scope| {
+            let half_applied = scope.spawn(|| {
+                let mut applied = store.inner.applied.lock().unwrap();
+                applied.followed_upto = 99;
+                panic!("a bug in the fold");
+            });
+            assert!(half_applied.join().is_err());
+        });
+
+        assert!(store.apply_followed(5, &[]).await.is_err());
+        assert!(store.apply(Vec::new()).await.is_err());
+        assert!(store.resume_following().await.is_err());
+        assert!(store.reset_for_promotion().await.is_err());
+        assert!(store.applied_state().await.is_err());
+        let snapshot = Box::new(Cursor::new(before.snapshot.get_ref().clone()));
+        assert!(
+            store
+                .install_snapshot(&before.meta, snapshot)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .get_snapshot_builder()
+                .await
+                .build_snapshot()
+                .await
+                .is_err()
+        );
+
+        // Readers still answer, with what the panic left behind…
+        assert_eq!(store.followed_upto(), 99);
+        // …but the disk holds the last whole state, which is what a restart
+        // resumes from.
+        let restarted = StateMachineStore::from_database(Arc::clone(&store.inner.db)).unwrap();
+        assert_eq!(restarted.followed_upto(), 3);
+        let current = restarted.stored_snapshot().unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, before.meta.snapshot_id);
     }
 }
