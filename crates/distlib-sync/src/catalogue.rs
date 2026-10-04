@@ -605,9 +605,10 @@ async fn open_when_founded(opening: Opening) {
     // document is already syncing and takes whatever peers it is given. What it
     // does *not* do is take only the new ones — it dials every peer in the list,
     // which is why what it is handed is kept narrow.
-    // All three until shutdown, which only the first can see: it holds
-    // `opened`, so when its receivers go it returns and the others are dropped
-    // with it.
+    //
+    // All three arms run until shutdown, which only the re-offering one can
+    // see: it holds `opened`, so when its receivers go it returns and the
+    // others are dropped with it.
     tokio::select! {
         () = async move {
             match events {
