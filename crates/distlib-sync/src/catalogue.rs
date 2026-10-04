@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::MembershipState;
+use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{Absorbed, ContentHash, GroupId, Item, ItemId, Key, MemberId};
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -1036,22 +1036,14 @@ async fn content_not_here(doc: &Doc, blobs: &BlobStore) -> Result<HashSet<Hash>>
 ///
 /// So the set grows instead: the core group at first, because the log carries
 /// their addresses, and every other member as its address is heard. That is
-/// what [`offer_peers_as_they_are_learned`] is for.
+/// what [`offer_peers_as_they_are_learned`] is for. The rule itself is
+/// consensus's [`reachable`], since the membership topic has to follow it too.
 fn sync_with(
     membership: &MembershipState,
     me: MemberId,
     directory: &Directory,
 ) -> Vec<EndpointAddr> {
-    let core = membership.core();
-    membership
-        .allowlist()
-        .filter(|member| *member != me)
-        .filter_map(|member| {
-            let addr = core
-                .get(&member)
-                .cloned()
-                .or_else(|| directory.address_of(member))?;
-            addr.to_endpoint_addr(member).ok()
-        })
+    reachable(membership, me, directory)
+        .filter_map(|(member, addr)| addr.to_endpoint_addr(member).ok())
         .collect()
 }

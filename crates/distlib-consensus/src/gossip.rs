@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use distlib_core::{GroupId, NodeAddr, SignedAddress};
+use distlib_core::{GroupId, MemberId, NodeAddr, SignedAddress};
 use futures_lite::StreamExt as _;
 use iroh::{Endpoint, SecretKey, Watcher as _};
 use iroh_gossip::{
@@ -38,7 +38,7 @@ use tokio::sync::watch;
 
 use distlib_net::Directory;
 
-use crate::raft::state_machine::StateMachineStore;
+use crate::{raft::state_machine::StateMachineStore, state::MembershipState};
 
 /// Why the follow loop should look at the log again.
 ///
@@ -90,6 +90,32 @@ enum Announcement {
 /// deriving it any other way would be a second thing to agree on.
 pub fn topic_for(group: GroupId) -> TopicId {
     TopicId::from_bytes(*group.as_bytes())
+}
+
+/// Every other member this node knows how to reach, and where.
+///
+/// A core member's address is in the log; anybody else's is known only once
+/// they have announced it. **The one rule for whom to dial**, shared by the
+/// membership topic and the catalogue, because naming a member with no address
+/// is not harmless: the dial fails, and in iroh-gossip one failed dial strands
+/// that peer on *every* topic until it dials us (phase 4's ground truth 18 —
+/// C25 was two followers stranding each other this way at startup).
+pub fn reachable<'a>(
+    membership: &'a MembershipState,
+    me: MemberId,
+    directory: &'a Directory,
+) -> impl Iterator<Item = (MemberId, NodeAddr)> + 'a {
+    let core = membership.core();
+    membership
+        .allowlist()
+        .filter(move |member| *member != me)
+        .filter_map(move |member| {
+            let addr = core
+                .get(&member)
+                .cloned()
+                .or_else(|| directory.address_of(member))?;
+            Some((member, addr))
+        })
 }
 
 /// Announces this node's applied index whenever the membership changes.

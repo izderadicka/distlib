@@ -1372,13 +1372,14 @@ async fn join_topic(
         }
     };
 
-    // Everyone else in the group. Gossip finds its own way from there — this is
-    // only the first handful of introductions.
-    let bootstrap: Vec<_> = state_machine
-        .membership()
-        .allowlist()
-        .filter(|member| *member != me)
-        .map(|member| member.endpoint_id())
+    // Everyone else in the group *that this node can reach* — for a follower
+    // that has just started, the core group and nobody else. A member named
+    // here with no address is not merely skipped by gossip: the dial fails, and
+    // that strands them on every topic until they dial us (C25). The rest need
+    // no introduction from here: gossip finds its own way once nobody is
+    // stranded, and the catalogue offers each member as its address is heard.
+    let bootstrap = gossip::reachable(&memberships.borrow_and_update(), me, &directory)
+        .map(|(member, _)| member.endpoint_id())
         .collect();
 
     let topic = match swarm.subscribe(gossip::topic_for(group), bootstrap).await {
