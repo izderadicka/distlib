@@ -22,6 +22,19 @@ use iroh::{
 use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
+/// Logs to this test's output, filtered by `RUST_LOG`.
+///
+/// CI sets `RUST_LOG`, and nextest shows a test's output only when it fails,
+/// so a failure that will not reproduce arrives with the log of what led to
+/// it. Unset, only errors are logged. One subscriber serves every node in the
+/// process: the first call installs it and the rest do nothing.
+pub fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 /// A member, its endpoint and its running consensus.
 pub struct Peer {
     pub secret: SecretKey,
@@ -69,6 +82,7 @@ impl Peer {
         bootstrap: Vec<MemberId>,
         core: Vec<(MemberId, NodeAddr)>,
     ) -> Self {
+        init_logging();
         let id = MemberId::from(secret.public());
         let dir = TempDir::new().unwrap();
 

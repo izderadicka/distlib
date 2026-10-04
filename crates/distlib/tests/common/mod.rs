@@ -18,6 +18,19 @@ use distlib::Runtime;
 use distlib_consensus::MemberRecord;
 use distlib_core::{Config, CoreMember, MemberId, NodeAddr};
 
+/// Logs to this test's output, filtered by `RUST_LOG`.
+///
+/// CI sets `RUST_LOG`, and nextest shows a test's output only when it fails,
+/// so a failure that will not reproduce arrives with the log of what led to
+/// it. Unset, only errors are logged. One subscriber serves every node in the
+/// process: the first call installs it and the rest do nothing.
+pub fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 /// A follower's configuration: one core node, and where it is.
 ///
 /// The address has to be here. A follower has no log yet, so configuration is

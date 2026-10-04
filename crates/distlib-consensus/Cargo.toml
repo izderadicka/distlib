@@ -42,6 +42,8 @@ distlib-core = { workspace = true, features = ["testing"] }
 iroh = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+# Logs a failing test's steps, from `RUST_LOG` — see the CI workflow.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
