@@ -915,6 +915,17 @@ impl Api {
                     // waiting on that finds the item held. A download is the
                     // one way content arrives that the document never hears
                     // of, so nothing else would recheck it.
+                    //
+                    // **The item as it is now**, not as it was when the
+                    // download was asked for: an item's id is frozen at
+                    // creation, so a chapter can be added under it mid-
+                    // transfer, and rechecking the old file list would call
+                    // held an item that is missing it. The snapshot only if
+                    // the catalogue cannot be read.
+                    let item = match api.catalogue.item(item.id).await {
+                        Ok(Some(now)) => now,
+                        _ => item,
+                    };
                     if let Err(error) = api.catalogue.holdings().recheck(&item).await {
                         tracing::warn!(item = %item.id, %error, "could not work out whether this node now holds an item");
                     }
