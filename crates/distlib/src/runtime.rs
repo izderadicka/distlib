@@ -273,15 +273,13 @@ impl Runtime {
         self.router.endpoint()
     }
 
-    /// Stops the node, then the transport under it.
+    /// Says goodbye, closes the connections, then stops everything else.
     ///
-    /// The order is the one `MembershipNode::shutdown` used to have on its
-    /// own, and it is kept deliberately: the node's tasks stop, then Raft,
-    /// then the gossip task, and only then does the router stop accepting and
-    /// close the endpoint. Shutting the router first is defensible — it stops
-    /// new connections arriving mid-teardown — but it is a different choice
-    /// with different failure modes, and moving ownership is not the change
-    /// that should make it.
+    /// In this order: the heartbeat's goodbye, while there is an endpoint to
+    /// carry it; the endpoint's connections (P4-2); then the node, the
+    /// projection, the catalogue's task and the search index; and last the
+    /// router, which shuts down its protocol handlers. Each step says below
+    /// why it comes where it does.
     pub async fn shutdown(&self) {
         // **The heartbeat's goodbye before anything else**, while there is
         // still an endpoint to carry it: the group then counts this node

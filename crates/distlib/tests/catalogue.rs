@@ -13,11 +13,11 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU32, time::Duration};
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{DataDir, MemberId, NodeAddr};
+use distlib_core::{Config, DataDir, MemberId, NodeAddr};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
@@ -171,15 +171,19 @@ struct Group {
 /// written down nowhere — which is the whole question this file's follower
 /// tests exist to answer.
 async fn a_group_with_two_followers() -> Group {
+    a_group_with_two_followers_beating(Config::default().availability.beat_interval_secs).await
+}
+
+/// [`a_group_with_two_followers`], every node beating every `interval`
+/// seconds.
+async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
     init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
 
-    // Beating every second, so the quiet a settled group must manage holds
-    // with heartbeats in it, not merely between them.
-    let beating = |mut config: distlib_core::Config| {
-        config.availability.beat_interval_secs = 1.try_into().unwrap();
+    let beating = |mut config: Config| {
+        config.availability.beat_interval_secs = interval;
         config
     };
     let alice = Runtime::start(
@@ -491,7 +495,9 @@ async fn a_follower_learns_where_another_follower_is() {
 /// arrives and this fails on the timeout.
 #[tokio::test]
 async fn a_settled_group_stops_talking_about_addresses() {
-    let group = a_group_with_two_followers().await;
+    // Beating every second, so the quiet a settled group must manage holds
+    // with heartbeats in it, not merely between them.
+    let group = a_group_with_two_followers_beating(NonZeroU32::MIN).await;
     let everyone = [
         ("alice", &group.alice),
         ("bob", &group.bob),

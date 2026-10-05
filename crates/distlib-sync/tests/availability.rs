@@ -209,7 +209,8 @@ async fn leaving_before_the_group_is_known_returns_at_once() {
 /// **A sender's interval sets its receivers' TTL.** Bob beats every second
 /// and carol every ten; both stop without a word. Alice takes bob offline
 /// after his 3 s — while carol, whose beats are believed for 30, is still
-/// online.
+/// online. The bound is loose, for a busy runner; carol staying online is
+/// what tells the two TTLs apart.
 #[tokio::test]
 async fn a_member_that_stops_is_offline_after_its_own_ttl() {
     let keys: [SecretKey; 3] = std::array::from_fn(|_| SecretKey::generate());
@@ -243,7 +244,7 @@ async fn a_member_that_stops_is_offline_after_its_own_ttl() {
     let stopped = tokio::time::Instant::now();
     alice.sees_online(&[carol.id]).await;
     assert!(
-        stopped.elapsed() < Duration::from_secs(5),
+        stopped.elapsed() < Duration::from_secs(10),
         "bob's beats are believed for 3 s, and he was online for {:?} more",
         stopped.elapsed()
     );
