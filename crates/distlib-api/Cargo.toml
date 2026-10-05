@@ -48,8 +48,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 distlib-net = { workspace = true }
-# The tests assemble a node the way production does, gossip and all.
-iroh-gossip = { workspace = true }
 # For `MemStore`: the harness's own catalogue needs a blob store to open, and
 # an in-memory one costs nothing these tests need to pay for.
 iroh-blobs = { workspace = true }

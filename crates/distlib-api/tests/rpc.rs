@@ -35,7 +35,6 @@ use iroh::{
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
-use iroh_gossip::net::Gossip;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -128,7 +127,7 @@ impl Harness {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
-        let swarm = Gossip::builder().spawn(endpoint.clone());
+        let swarm = distlib_net::spawn_gossip(&endpoint);
         let transport = Transport::new(endpoint.clone(), swarm).unwrap();
         let node = Arc::new(
             MembershipNode::start(
@@ -266,7 +265,7 @@ impl Harness {
                 direct: endpoint.bound_sockets().into_iter().collect(),
             });
             let core = ids.iter().map(|id| (*id, NodeAddr::default())).collect();
-            let swarm = Gossip::builder().spawn(endpoint.clone());
+            let swarm = distlib_net::spawn_gossip(&endpoint);
             let transport = Transport::new(endpoint.clone(), swarm).unwrap();
             let node = Arc::new(
                 MembershipNode::start(

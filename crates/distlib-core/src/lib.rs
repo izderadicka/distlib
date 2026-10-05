@@ -5,6 +5,7 @@
 //! deliberately has no knowledge of transport, storage or consensus.
 
 pub mod addr;
+pub mod availability;
 pub mod catalogue;
 pub mod config;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod ticket;
 pub mod token;
 
 pub use addr::{BadRelayUrl, NodeAddr, SignedAddress};
+pub use availability::{GOSSIP_MAX_MESSAGE, Heartbeat, Holdings, SignedHeartbeat};
 pub use catalogue::{
     Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
 };

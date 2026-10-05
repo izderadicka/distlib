@@ -24,7 +24,6 @@ use iroh::{
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
-use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
 /// A founded group of one, and somebody outside it who may ask for the log.
@@ -61,7 +60,7 @@ impl Group {
             relay: None,
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
-        let swarm = Gossip::builder().spawn(endpoint.clone());
+        let swarm = distlib_net::spawn_gossip(&endpoint);
         let node = MembershipNode::start(
             Transport::new(endpoint.clone(), swarm).unwrap(),
             hooks,
@@ -303,7 +302,7 @@ async fn a_node_with_no_group_hands_over_nothing() {
         relay: None,
         direct: endpoint.bound_sockets().into_iter().collect(),
     };
-    let swarm = Gossip::builder().spawn(endpoint.clone());
+    let swarm = distlib_net::spawn_gossip(&endpoint);
     let unfounded = MembershipNode::start(
         Transport::new(endpoint.clone(), swarm).unwrap(),
         hooks,
