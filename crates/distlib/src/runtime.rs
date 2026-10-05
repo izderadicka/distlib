@@ -143,8 +143,9 @@ impl Runtime {
         )
         .await
         .context("could not start the catalogue")?;
-        // On the same swarm, a topic of its own. It beats once this node knows
-        // its group and where it is, and both arrive from the node.
+        // On the same swarm, one topic the whole group shares, apart from the
+        // membership and catalogue topics. It beats once this node knows its
+        // group and where it is, and both arrive from the node.
         let availability = Availability::start(
             &transport,
             secret,
