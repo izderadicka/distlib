@@ -23,7 +23,8 @@ pub use catalogue::{
     Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
 };
 pub use config::{
-    ApiConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig, RelayMode,
+    ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
+    RelayMode,
 };
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};

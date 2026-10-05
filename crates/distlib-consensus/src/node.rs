@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_core::{MemberId, NodeAddr, RawMemberId};
+use distlib_core::{MemberId, NodeAddr, RawMemberId, SignedAddress};
 use distlib_net::{
     AddressBook, AllowlistHooks, AllowlistWriter, Connections, Directory, Protocols, Transport,
     alpn, ping::PingProtocol,
@@ -281,6 +281,9 @@ pub struct MembershipNode {
     /// this node actually reach" is a question worth being able to answer,
     /// and the only way to answer it is to ask.
     known_addresses: Directory,
+    /// The address statement this node last announced — see
+    /// [`Self::own_address`].
+    own_address: watch::Receiver<Option<SignedAddress>>,
     /// The handlers this node needs served, kept so [`Self::protocols`] can
     /// hand them out after the node exists. All three are cheap clones over
     /// the state they answer from.
@@ -504,6 +507,7 @@ impl MembershipNode {
         // group. A founder has none for the moment before it founds one, and a
         // new follower has none until its first fetch — so the task waits for
         // one rather than the caller having to order any of that.
+        let (said, own_address) = watch::channel(None);
         let gossip = tokio::spawn(join_topic(
             swarm.clone(),
             state_machine.clone(),
@@ -517,6 +521,7 @@ impl MembershipNode {
                 // signed by the same identity the group already authenticates.
                 secret: endpoint.secret_key().clone(),
                 directory: directory.clone(),
+                said,
             },
         ));
 
@@ -578,6 +583,7 @@ impl MembershipNode {
             state_machine,
             endpoint,
             known_addresses,
+            own_address,
             raft_protocol,
             memberlog_protocol,
             swarm,
@@ -675,6 +681,16 @@ impl MembershipNode {
     /// a follower's address — see [`distlib_net::Directory`] and P2-14.
     pub fn known_addresses(&self) -> &Directory {
         &self.known_addresses
+    }
+
+    /// Where this node last told the group it is, as it signed it — `None`
+    /// until it has said so once.
+    ///
+    /// For the availability heartbeat, which carries the same statement
+    /// (phase 4's D1): signed at this node's log position, so a receiver's
+    /// directory weighs it exactly as it weighs the announcement.
+    pub fn own_address(&self) -> watch::Receiver<Option<SignedAddress>> {
+        self.own_address.clone()
     }
 
     /// Asks a core node, once, where the group's members are — and answers
@@ -1346,6 +1362,9 @@ struct TopicParts {
     endpoint: Endpoint,
     secret: SecretKey,
     directory: Directory,
+    /// Where each address statement is kept once signed — see
+    /// [`MembershipNode::own_address`].
+    said: watch::Sender<Option<SignedAddress>>,
 }
 
 async fn join_topic(
@@ -1360,6 +1379,7 @@ async fn join_topic(
         endpoint,
         secret,
         directory,
+        said,
     } = joining;
     let mut memberships = state_machine.subscribe();
     let group = loop {
@@ -1411,6 +1431,7 @@ async fn join_topic(
             &state_machine,
             &sender,
             directory.learned(),
+            &said,
         ),
         async {
             if is_core {

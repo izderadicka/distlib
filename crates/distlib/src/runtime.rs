@@ -16,6 +16,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
@@ -24,7 +25,7 @@ use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
-use distlib_sync::Catalogue;
+use distlib_sync::{Availability, Catalogue};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
 use tokio::sync::broadcast;
@@ -37,6 +38,8 @@ use tokio::sync::broadcast;
 pub struct Runtime {
     node: Arc<MembershipNode>,
     catalogue: Catalogue,
+    /// The heartbeat, and who else is online.
+    availability: Availability,
     /// Media in and out of the same store the catalogue hands iroh-docs and
     /// `BlobsProtocol` serves from — so what `library.download` fetches is
     /// held, and served, by this node from the moment the fetch returns.
@@ -132,7 +135,7 @@ impl Runtime {
         // provider of it.
         let media = Blobs::new(&blobs, &endpoint);
         let catalogue = Catalogue::start(
-            transport,
+            transport.clone(),
             (*blobs).clone(),
             Some(data_dir.docs_dir()),
             secret,
@@ -140,6 +143,16 @@ impl Runtime {
         )
         .await
         .context("could not start the catalogue")?;
+        // On the same swarm, a topic of its own. It beats once this node knows
+        // its group and where it is, and both arrive from the node.
+        let availability = Availability::start(
+            &transport,
+            secret,
+            node.subscribe(),
+            node.own_address(),
+            Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
+        )
+        .context("could not start the heartbeat")?;
 
         // The read model, and the task that fills it. After the catalogue
         // because it is derived from it, and before the router because the
@@ -186,6 +199,7 @@ impl Runtime {
         Ok(Self {
             node,
             catalogue,
+            availability,
             blobs: media,
             store,
             search,
@@ -206,6 +220,11 @@ impl Runtime {
     /// The group's catalogue.
     pub fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// The heartbeat, and who else is online.
+    pub fn availability(&self) -> &Availability {
+        &self.availability
     }
 
     /// Media transfer: what `library.download` fetches and exports with.
@@ -264,7 +283,12 @@ impl Runtime {
     /// with different failure modes, and moving ownership is not the change
     /// that should make it.
     pub async fn shutdown(&self) {
-        // **Connections first, so peers hear one goodbye that reaches every
+        // **The heartbeat's goodbye before anything else**, while there is
+        // still an endpoint to carry it: the group then counts this node
+        // offline at once, not a TTL later (D4). It is a message on one topic,
+        // not the connection-level goodbye below.
+        self.availability.leave().await;
+        // **Then connections, so peers hear one goodbye that reaches every
         // gossip topic** (P4-2). Left to the subsystems, the membership topic
         // says goodbye on its own when `node.shutdown` drops it — and a peer
         // hearing that drops this node from *all* its topics' bookkeeping

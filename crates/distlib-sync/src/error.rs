@@ -76,6 +76,13 @@ pub enum SyncError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The operating system would not provide randomness, which this run's
+    /// heartbeat epoch is drawn from.
+    /// As a message, the way `CoreError::Random` has it: `getrandom`'s error
+    /// is a standard error only with a feature nothing else here needs.
+    #[error("could not draw a heartbeat epoch: {message}")]
+    Random { message: String },
 }
 
 impl SyncError {

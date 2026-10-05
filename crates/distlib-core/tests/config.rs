@@ -104,6 +104,18 @@ fn an_unknown_key_is_rejected() {
     });
 }
 
+/// A beat interval of zero would beat without pause, so it is refused rather
+/// than run.
+#[test]
+fn a_beat_interval_of_zero_is_rejected() {
+    Jail::expect_with(|jail| {
+        jail.create_file(CONFIG, "[availability]\nbeat_interval_secs = 0\n")?;
+
+        assert!(Config::load(Path::new(CONFIG)).is_err());
+        Ok(())
+    });
+}
+
 #[test]
 fn the_core_group_parses_member_ids() {
     let member = a_member();
@@ -182,6 +194,9 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         },
         library: distlib_core::LibraryConfig {
             download_dir: "/srv/books".into(),
+        },
+        availability: distlib_core::AvailabilityConfig {
+            beat_interval_secs: 17.try_into().unwrap(),
         },
     };
 

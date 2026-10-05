@@ -343,7 +343,7 @@ prefixes, open as a compatible change if that end is ever measured and found wan
 
 - **The interval is configurable** — `[availability] beat_interval_secs`, default 60, with ±10%
   jitter so the group does not beat in step. A change to what this node holds triggers an extra beat,
-  at most once every 10 s. Tests set the interval in code, around 300 ms.
+  at most once every 10 s. Tests set the interval in code, at 1 s.
 - **The budget is a constant — Ivan's call.** With N members, each beat reaches all of them, so every
   node receives N beats per interval. Each sender stretches its own interval to
   `beat_interval × ⌈N/50⌉`, which keeps what any node receives at about fifty beats a minute
@@ -573,6 +573,25 @@ a time, review before the next.
   **Acceptance:** a member is online, then gone within the TTL when aborted and at once when stopped
   cleanly; a sender's interval sets its receiver's TTL; a node that missed an address announcement
   learns it from a heartbeat (C5); `a_settled_group_stops_talking_about_addresses` still passes.
+  *As built:* `Availability` in `distlib-sync::availability`, started by the runtime beside the
+  catalogue; `online()` is a watch of the other members online. The receive rules are a plain table,
+  `Online`, unit-tested without a network: **a member taken offline keeps its last `(epoch, seq)`**,
+  so a beat older than the goodbye — gossip does not keep order — cannot bring it back for a TTL; the
+  entry goes only when the member leaves the group. `MembershipNode::own_address()` is a watch of the
+  statement the announcer last signed, woken only when it changes. Beats go out at once, every
+  interval, when that statement changes — and **when a neighbour comes up**, which the plan did not
+  say: the first beat of all goes out before any neighbour is connected, to nobody, and at the default
+  interval a node would otherwise be unseen for a minute. **The goodbye waits 250 ms before the
+  endpoint closes**: broadcasting only hands the beat to the gossip actor, and closing the connection
+  drops what it has not written — without the wait the runtime test failed on its first run, with it
+  20 of 20. `beat_interval_secs` is a `NonZeroU32`, so 0 is refused when the config is read. A beat
+  states its interval in whole seconds, so the shortest TTL is 3 s, and the tests beat every 1 s and
+  10 s rather than every 300 ms. **No floor between beats yet**: the extra beats here are an address
+  change, already floored by the announcer, and a new neighbour; the floor comes with 4b-4's
+  holdings change, the burst it is for. **Measured, five nodes beating every second for a minute on
+  loopback:** a beat is about 310 B; each node receives 4 beats and about 15 gossip control messages
+  per interval, about 2.3 KB — about 3.3 MB a day at the default 60 s — and the node gossip made the
+  hub forwards about 5 KB per interval, about 7 MB a day.
 
 - **4b-4 — holdings on the wire: the base list and the delta (D3, D5).**
   **Acceptance:** a receiver's map matches the sender's held set exactly — after the base, after
@@ -687,7 +706,7 @@ mismatch.
 change only; the quiet-group counters;
 C25; both halves of §9's acceptance; a forged and an expelled entry; provider order on download.
 
-Heartbeat tests run at about 300 ms intervals with a TTL of about a second, and **assert "within",
+Heartbeat tests run at 1 s intervals with a TTL of 3 s, and **assert "within",
 never an exact sequence** — the same rule as phase 3's SSE tests, for the same reason.
 
 Every mechanism is mutation-checked. UI: Vitest first, Playwright for the happy paths only.

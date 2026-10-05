@@ -9,6 +9,7 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -49,6 +50,7 @@ pub struct Config {
     /// The local control API.
     pub api: ApiConfig,
     pub library: LibraryConfig,
+    pub availability: AvailabilityConfig,
 }
 
 /// How this node talks to the network.
@@ -124,6 +126,24 @@ impl Default for LibraryConfig {
     fn default() -> Self {
         Self {
             download_dir: PathBuf::from("downloads"),
+        }
+    }
+}
+
+/// How this node tells the group it is online.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AvailabilityConfig {
+    /// Seconds between this node's heartbeats in a group of up to fifty;
+    /// stretched in proportion above that. Its peers count it offline after
+    /// three missed. Never zero, which would beat without pause.
+    pub beat_interval_secs: NonZeroU32,
+}
+
+impl Default for AvailabilityConfig {
+    fn default() -> Self {
+        Self {
+            beat_interval_secs: NonZeroU32::new(60).expect("sixty is not zero"),
         }
     }
 }
@@ -308,7 +328,13 @@ impl Config {
              # Where a download started from the web UI writes its files, created\n\
              # when first needed. Relative to the data directory, or absolute.\n\
              # `distlib download` writes to the working directory, or --dest.\n\
-             download_dir = \"{download_dir}\"\n",
+             download_dir = \"{download_dir}\"\n\
+             \n\
+             [availability]\n\
+             # Seconds between the heartbeats that tell the group this node is\n\
+             # online, stretched in groups of more than fifty. Peers count the\n\
+             # node offline after three missed.\n\
+             beat_interval_secs = {beat_interval}\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
@@ -316,6 +342,7 @@ impl Config {
             api_bind = self.api.bind_addr,
             max_upload = self.api.max_upload_bytes,
             download_dir = self.library.download_dir.display(),
+            beat_interval = self.availability.beat_interval_secs,
             core = self
                 .consensus
                 .core
