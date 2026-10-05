@@ -76,6 +76,26 @@ pub enum CoreError {
     #[error("could not encode an address statement")]
     AddressEncoding(#[from] postcard::Error),
 
+    /// A heartbeat is not signed by the member whose address it carries, or
+    /// not for this group.
+    ///
+    /// Data rather than a bug, like [`Self::BadAddressSignature`]: heartbeats
+    /// arrive relayed over gossip.
+    #[error("the heartbeat from {member} is not signed by them for this group")]
+    BadHeartbeatSignature { member: crate::id::MemberId },
+
+    /// A heartbeat is bigger than a gossip frame can safely carry.
+    #[error("a heartbeat of {size} bytes is over the {max}-byte limit")]
+    HeartbeatTooLarge { size: usize, max: usize },
+
+    /// A heartbeat could not be encoded, or what arrived is not one.
+    #[error("could not encode or decode a heartbeat")]
+    HeartbeatEncoding(#[source] postcard::Error),
+
+    /// A member's published list of held items cannot be read.
+    #[error("a base list cannot be read: {reason}")]
+    BadBaseList { reason: &'static str },
+
     /// A command that must not invent an identity was pointed at a data
     /// directory that holds none.
     #[error(

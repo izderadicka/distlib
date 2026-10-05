@@ -27,7 +27,6 @@ use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::Catalogue;
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
-use iroh_gossip::net::Gossip;
 use tokio::sync::broadcast;
 
 /// A node and the transport it is served on.
@@ -100,7 +99,7 @@ impl Runtime {
         // iroh-docs will be handed this same instance in 2a-2; two would mean
         // two swarms over one endpoint, and a topic joined on one is invisible
         // to the other.
-        let swarm = Gossip::builder().spawn(endpoint.clone());
+        let swarm = distlib_net::spawn_gossip(&endpoint);
 
         // `Transport::new` installs the directory on the endpoint, so the
         // thing consensus fills and the thing iroh resolves against cannot be

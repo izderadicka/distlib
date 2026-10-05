@@ -36,4 +36,4 @@ pub use error::{IsRejection, NetError, Result};
 pub use hooks::{AllowlistHooks, NOT_A_VOTER_REASON, close_code};
 pub use node::Node;
 pub use router::{Protocols, serve};
-pub use transport::Transport;
+pub use transport::{Transport, spawn_gossip};

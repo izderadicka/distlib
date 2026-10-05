@@ -12,10 +12,24 @@
 //! transport this node is served on" is not consensus's idea; it is this
 //! crate's, and consensus is one of its users.
 
+use distlib_core::GOSSIP_MAX_MESSAGE;
 use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 
 use crate::{Directory, error::Result};
+
+/// Spawns the gossip a process speaks on, with the frame every node agrees on.
+///
+/// **The one way the workspace builds a `Gossip`**, tests included, because
+/// the limit is a wire-compatibility setting: a node on iroh-gossip's 4 KiB
+/// default drops the connection to one sending a 16 KiB heartbeat, on every
+/// topic at once — a failure that looks like a network fault (phase 4,
+/// ground truth 3). See [`GOSSIP_MAX_MESSAGE`].
+pub fn spawn_gossip(endpoint: &Endpoint) -> Gossip {
+    Gossip::builder()
+        .max_message_size(GOSSIP_MAX_MESSAGE)
+        .spawn(endpoint.clone())
+}
 
 /// The endpoint a node answers on, and the gossip over it.
 ///

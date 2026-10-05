@@ -544,6 +544,14 @@ a time, review before the next.
   built in; base and heartbeat round-trip; the encoded heartbeat never exceeds the cap for 0–64
   addresses and a full delta; a tampered body, the wrong group, or an address signed by someone else
   fails. And one real 16 KiB message crosses between two nodes without dropping the connection.
+  *As built:* `distlib-core::availability` — `SignedHeartbeat` (`sign`, `encode` with the guard,
+  `decode`, `open` checking both signatures), `encode_base` and a `BaseDecoder` fed in chunks of any
+  size, ready for D5's streamed fetch. `GOSSIP_MAX_MESSAGE` lives in `distlib-core`, because the
+  heartbeat's own cap is derived from it, and is applied by **`distlib_net::spawn_gossip`, the one
+  builder** — all seven call sites use it, so no test node can drift onto the default; the binary and
+  `distlib-api`'s tests no longer depend on `iroh-gossip` at all. `HEARTBEAT_MAX` is the frame less
+  512 B for gossip's own framing, `DELTA_MAX` 384 ids. The 10M-id cap on a base list is enforced but
+  not tested: a list that long is 320 MB.
 
 - **4b-2 — "held here" (D6).**
   **Acceptance:** held after an add, after a download and after a replay; not held once another

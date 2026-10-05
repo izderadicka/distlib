@@ -26,7 +26,7 @@ use iroh::{
     protocol::Router,
 };
 use iroh_blobs::store::mem::MemStore;
-use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+use iroh_gossip::net::GOSSIP_ALPN;
 use tokio::sync::watch;
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
@@ -87,7 +87,7 @@ impl Node {
             direct: endpoint.bound_sockets().into_iter().collect(),
         };
 
-        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let gossip = distlib_net::spawn_gossip(&endpoint);
         let transport = Transport::new(endpoint.clone(), gossip.clone()).unwrap();
         let directory = transport.directory.clone();
         // In memory: this test is about convergence, not about what survives a

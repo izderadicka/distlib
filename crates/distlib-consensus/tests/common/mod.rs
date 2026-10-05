@@ -19,7 +19,6 @@ use iroh::{
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
-use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
@@ -110,7 +109,7 @@ impl Peer {
         // The same assembly production does, in the same order: gossip before
         // the node that announces on it, the router after the node that says
         // what it serves. See `distlib::Runtime`.
-        let swarm = Gossip::builder().spawn(endpoint.clone());
+        let swarm = distlib_net::spawn_gossip(&endpoint);
         let node = MembershipNode::start(
             Transport::new(endpoint.clone(), swarm).unwrap(),
             hooks.clone(),
