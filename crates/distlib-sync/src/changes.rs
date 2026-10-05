@@ -20,20 +20,22 @@
 //! with `sender.send(event).await` (`iroh-docs-0.101.0/src/engine.rs:212`,
 //! `engine/live.rs:877`), so a subscriber that is slow does not drop events —
 //! it **stalls iroh-docs' own live actor**, and with it the document's sync. So
-//! the pump parses a key, touches a set or a `watch`, and goes back to the stream. Every
+//! the pump parses a key, touches a set or a `watch` or sends on an unbounded
+//! channel, and goes back to the stream. Every
 //! slow thing — reading entries, reading content, writing SQLite — happens on
 //! the reader's side of this type.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::SystemTime,
 };
 
 use distlib_core::{ItemId, Key, MemberId};
 use futures_lite::stream::{Stream, StreamExt as _};
-use iroh_docs::engine::LiveEvent;
-use tokio::sync::watch;
+use iroh::EndpointId;
+use iroh_docs::engine::{LiveEvent, SyncEvent};
+use tokio::sync::{mpsc, watch};
 
 /// Everything that has changed since the reader last looked.
 ///
@@ -106,6 +108,7 @@ pub(crate) fn feed() -> (Pump, Feed) {
             pending: Arc::clone(&pending),
             woke,
             sync,
+            up_since: HashMap::new(),
         },
         Feed {
             pending,
@@ -186,6 +189,9 @@ pub(crate) struct Pump {
     pending: Arc<Mutex<Batch>>,
     woke: watch::Sender<u64>,
     sync: watch::Sender<SyncState>,
+    /// When each current neighbour was heard to come up, by this node's clock
+    /// — see [`Pump::began_before_neighbour`].
+    up_since: HashMap<EndpointId, SystemTime>,
 }
 
 impl Pump {
@@ -194,8 +200,14 @@ impl Pump {
     ///
     /// See the module docs for why there is nothing else in this loop: every
     /// arm is a lock or a `watch` update, and nothing awaits but the stream.
-    pub(crate) async fn run<S>(self, mut events: S)
-    where
+    ///
+    /// A neighbour whose sync round may have missed something is sent on
+    /// `sync_again`, for the catalogue to sync with it once more.
+    pub(crate) async fn run<S>(
+        mut self,
+        mut events: S,
+        sync_again: &mpsc::UnboundedSender<EndpointId>,
+    ) where
         S: Stream<Item = anyhow::Result<LiveEvent>> + Unpin,
     {
         while let Some(event) = events.next().await {
@@ -208,14 +220,14 @@ impl Pump {
                     continue;
                 }
             };
-            if self.note(event) {
+            if self.note(event, sync_again) {
                 self.woke.send_modify(|woke| *woke = woke.wrapping_add(1));
             }
         }
     }
 
     /// Records one event, answering whether the read model has news.
-    fn note(&self, event: LiveEvent) -> bool {
+    fn note(&mut self, event: LiveEvent, sync_again: &mpsc::UnboundedSender<EndpointId>) -> bool {
         match event {
             LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. } => {
                 note(&mut self.batch(), entry.key())
@@ -230,12 +242,14 @@ impl Pump {
             // model's: what a sync *found* arrives as the inserts above.
             LiveEvent::NeighborUp(peer) => {
                 tracing::debug!(%peer, "catalogue neighbour up");
+                self.up_since.insert(peer, SystemTime::now());
                 self.sync
                     .send_if_modified(|state| state.neighbours.insert(MemberId::from(peer)));
                 false
             }
             LiveEvent::NeighborDown(peer) => {
                 tracing::debug!(%peer, "catalogue neighbour down");
+                self.up_since.remove(&peer);
                 self.sync
                     .send_if_modified(|state| state.neighbours.remove(&MemberId::from(peer)));
                 false
@@ -247,6 +261,10 @@ impl Pump {
                     error = sync.result.as_ref().err(),
                     "catalogue sync round finished",
                 );
+                if self.began_before_neighbour(&sync) {
+                    // Unbounded so the pump never waits; at most one per round.
+                    let _ = sync_again.send(sync.peer);
+                }
                 self.sync.send_modify(|state| {
                     state.last_sync.insert(
                         MemberId::from(sync.peer),
@@ -259,6 +277,29 @@ impl Pump {
                 false
             }
         }
+    }
+
+    /// Whether a sync round with a neighbour began before it became one, and
+    /// so may have missed what was written in between (C31).
+    ///
+    /// iroh-docs syncs with every new neighbour — but not while a round with
+    /// that peer is already running: `start_connect` drops the request, and
+    /// only a `SyncReport` queues another (`iroh-docs-0.101.0`
+    /// `engine/state.rs:195-206`). A write made in that window is broadcast
+    /// before the neighbour is there to hear it, and the running round compared
+    /// the two sides before the write existed, so neither carries it: it waits
+    /// for the next round with that peer, which may be the catalogue's timer.
+    /// Found on macOS CI, with the write and the neighbour 0.1 ms apart. One
+    /// round more, asked for once this one is over, is the round iroh-docs
+    /// dropped.
+    ///
+    /// "Up" is when the pump *heard* it, which is no earlier than it happened,
+    /// so the comparison can cost one spare round and never a missed one. The
+    /// round it asks for starts after that, so it never asks again.
+    fn began_before_neighbour(&self, sync: &SyncEvent) -> bool {
+        self.up_since
+            .get(&sync.peer)
+            .is_some_and(|up| sync.started < *up)
     }
 
     fn batch(&self) -> std::sync::MutexGuard<'_, Batch> {
@@ -287,4 +328,73 @@ fn note(batch: &mut Batch, key: &[u8]) -> bool {
 /// stated twice is one rule that drifts.
 pub(crate) fn items_in<'a>(keys: impl Iterator<Item = &'a [u8]>) -> BTreeSet<ItemId> {
     keys.filter_map(Key::parse).map(|key| key.item()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use std::time::Duration;
+
+    use iroh::SecretKey;
+    use iroh_docs::engine::{Origin, SyncReason};
+
+    use super::*;
+
+    fn round(peer: EndpointId, started: SystemTime) -> anyhow::Result<LiveEvent> {
+        Ok(LiveEvent::SyncFinished(SyncEvent {
+            peer,
+            origin: Origin::Connect(SyncReason::DirectJoin),
+            finished: SystemTime::now(),
+            started,
+            result: Err("only when it started matters here".to_owned()),
+        }))
+    }
+
+    /// Who the pump asks to sync with again, after it has read `events`.
+    async fn asked_after(events: Vec<anyhow::Result<LiveEvent>>) -> Vec<EndpointId> {
+        let (pump, _feed) = feed();
+        let (sync_again, mut asked) = mpsc::unbounded_channel();
+        pump.run(futures_lite::stream::iter(events), &sync_again)
+            .await;
+        drop(sync_again);
+        let mut peers = Vec::new();
+        while let Some(peer) = asked.recv().await {
+            peers.push(peer);
+        }
+        peers
+    }
+
+    #[tokio::test]
+    async fn a_round_that_began_before_its_neighbour_came_up_is_run_again() {
+        let peer = SecretKey::generate().public();
+        let before = SystemTime::now() - Duration::from_secs(1);
+        let after = SystemTime::now() + Duration::from_secs(3600);
+
+        assert_eq!(
+            asked_after(vec![Ok(LiveEvent::NeighborUp(peer)), round(peer, before)]).await,
+            vec![peer],
+            "the round iroh-docs dropped for the new neighbour is asked for"
+        );
+        assert_eq!(
+            asked_after(vec![Ok(LiveEvent::NeighborUp(peer)), round(peer, after)]).await,
+            Vec::new(),
+            "a round that began once the neighbour was up already covers it"
+        );
+        assert_eq!(
+            asked_after(vec![round(peer, before)]).await,
+            Vec::new(),
+            "a peer that is not a neighbour has nothing it could have missed by broadcast"
+        );
+        assert_eq!(
+            asked_after(vec![
+                Ok(LiveEvent::NeighborUp(peer)),
+                Ok(LiveEvent::NeighborDown(peer)),
+                round(peer, before),
+            ])
+            .await,
+            Vec::new(),
+            "nor does one that has gone again"
+        );
+    }
 }
