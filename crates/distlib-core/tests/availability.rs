@@ -7,7 +7,7 @@ use std::net::{SocketAddr, SocketAddrV6};
 use distlib_core::{
     ContentHash, CoreError, GroupId, Heartbeat, Holdings, ItemId, NodeAddr, SignedAddress,
     SignedHeartbeat,
-    availability::{BaseDecoder, DELTA_MAX, HEARTBEAT_MAX, encode_base},
+    availability::{DELTA_MAX, HEARTBEAT_MAX, decode_base, encode_base},
 };
 use iroh::{SecretKey, Signature};
 use proptest::prelude::*;
@@ -35,15 +35,6 @@ fn heartbeat(key: &SecretKey, direct: Vec<SocketAddr>, holdings: Holdings) -> He
     }
 }
 
-fn decoded(chunks: &[&[u8]]) -> Result<(Vec<ItemId>, u64), CoreError> {
-    let mut decoder = BaseDecoder::default();
-    let mut read = Vec::new();
-    for chunk in chunks {
-        decoder.feed(chunk, |id| read.push(id))?;
-    }
-    Ok((read, decoder.finish()?))
-}
-
 proptest! {
     /// The base's hash names the list, so one set has to make one list —
     /// however it was gathered, and with any repeats.
@@ -58,30 +49,16 @@ proptest! {
         prop_assert_eq!(encode_base(ids(&raw)), encode_base(ids(&repeated)));
     }
 
-    /// And it reads back as that set, however the transfer cut it up.
+    /// And it reads back as that set.
     #[test]
-    fn a_base_list_reads_back_in_chunks_of_any_size(
+    fn a_base_list_reads_back_as_its_set(
         raw in prop::collection::vec(any::<[u8; 32]>(), 0..200),
-        cuts in prop::collection::vec(1usize..100, 1..50),
     ) {
         let bytes = encode_base(ids(&raw));
-        let mut chunks = Vec::new();
-        let mut rest = bytes.as_slice();
-        for cut in cuts.iter().cycle() {
-            if rest.is_empty() {
-                break;
-            }
-            let (chunk, after) = rest.split_at((*cut).min(rest.len()));
-            chunks.push(chunk);
-            rest = after;
-        }
-
         let mut expected = ids(&raw);
         expected.sort_unstable();
         expected.dedup();
-        let (read, count) = decoded(&chunks).unwrap();
-        prop_assert_eq!(count, expected.len() as u64);
-        prop_assert_eq!(read, expected);
+        prop_assert_eq!(decode_base(&bytes).unwrap().collect::<Vec<_>>(), expected);
     }
 
     #[test]
@@ -257,7 +234,7 @@ fn a_base_list_that_is_not_one_is_refused() {
         (&list[..list.len() - 1], "cut short"),
     ] {
         assert!(
-            matches!(decoded(&[bytes]), Err(CoreError::BadBaseList { .. })),
+            matches!(decode_base(bytes), Err(CoreError::BadBaseList { .. })),
             "{why}"
         );
     }

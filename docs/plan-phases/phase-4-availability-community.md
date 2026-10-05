@@ -382,8 +382,10 @@ once rather than at the TTL.
   With it, a burst of downloads costs one base fetch per receiver, at its end, and an idle node's
   heartbeat is back to about 0.8 KB. Removals go into `removed` like any other change.
 - **Fetched** by a receiver only when a heartbeat names a base it does not hold, with `get_blob` from
-  the sender, **parsed into the map as it streams — never buffered whole, never stored**, so a
-  receiver leaves no garbage. Capped at ten million ids, 320 MB on the wire.
+  the sender, **into memory whole, read into the map and dropped — never stored**, so a receiver
+  leaves no garbage. Capped at ten million ids, 320 MB on the wire. *Whole rather than streamed —
+  Ivan's call at the review of 4b-1:* at the 100k target a list is 3.2 MB, at a million 32 MB, and
+  only for as long as it is read.
 - **Until a member's base has arrived, it counts as unknown**, not as "holds nothing".
 - **Superseded lists stay on the publisher's disk** until phase 5 brings GC, together with quotas and
   custodianship: one per download burst. **C26.**
@@ -545,8 +547,8 @@ a time, review before the next.
   addresses and a full delta; a tampered body, the wrong group, or an address signed by someone else
   fails. And one real 16 KiB message crosses between two nodes without dropping the connection.
   *As built:* `distlib-core::availability` — `SignedHeartbeat` (`sign`, `encode` with the guard,
-  `decode`, `open` checking both signatures), `encode_base` and a `BaseDecoder` fed in chunks of any
-  size, ready for D5's streamed fetch. `GOSSIP_MAX_MESSAGE` lives in `distlib-core`, because the
+  `decode`, `open` checking both signatures), `encode_base` and `decode_base` over a list fetched
+  whole (D5). `GOSSIP_MAX_MESSAGE` lives in `distlib-core`, because the
   heartbeat's own cap is derived from it, and is applied by **`distlib_net::spawn_gossip`, the one
   builder** — all seven call sites use it, so no test node can drift onto the default; the binary and
   `distlib-api`'s tests no longer depend on `iroh-gossip` at all. `HEARTBEAT_MAX` is the frame less

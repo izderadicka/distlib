@@ -204,80 +204,35 @@ pub fn encode_base(items: impl IntoIterator<Item = ItemId>) -> Vec<u8> {
     bytes
 }
 
-/// Reads a base list as it arrives, in chunks of any size.
+/// Reads a base list, fetched whole.
 ///
-/// **Never the whole list at once**: a member holding a million items
-/// publishes 32 MB, and a receiver only needs each id once, to put in its map.
-#[derive(Debug, Default)]
-pub struct BaseDecoder {
-    format_seen: bool,
-    partial: [u8; 32],
-    filled: usize,
-    count: u64,
-}
-
-impl BaseDecoder {
-    /// Takes the next chunk, handing each complete id to `each`.
-    pub fn feed(&mut self, mut chunk: &[u8], mut each: impl FnMut(ItemId)) -> Result<()> {
-        if !self.format_seen {
-            let Some((&format, rest)) = chunk.split_first() else {
-                return Ok(());
-            };
-            if format != BASE_FORMAT {
-                return Err(CoreError::BadBaseList {
-                    reason: "it is in a format this build does not read",
-                });
-            }
-            self.format_seen = true;
-            chunk = rest;
-        }
-
-        if self.filled > 0 {
-            let take = (32 - self.filled).min(chunk.len());
-            self.partial[self.filled..self.filled + take].copy_from_slice(&chunk[..take]);
-            self.filled += take;
-            chunk = &chunk[take..];
-            if self.filled < 32 {
-                return Ok(());
-            }
-            self.filled = 0;
-            self.emit(self.partial, &mut each)?;
-        }
-
-        let (ids, rest) = chunk.as_chunks::<32>();
-        for id in ids {
-            self.emit(*id, &mut each)?;
-        }
-        self.partial[..rest.len()].copy_from_slice(rest);
-        self.filled = rest.len();
-        Ok(())
+/// Whole rather than streamed — Ivan's call at review: at the "100k easily"
+/// target a list is 3.2 MB and at a million items 32 MB, held only while it is
+/// read into the receiver's map. Refuses a list in another format, one that
+/// ends partway through an id, and one longer than [`BASE_MAX`].
+pub fn decode_base(bytes: &[u8]) -> Result<impl ExactSizeIterator<Item = ItemId> + '_> {
+    let Some((&format, ids)) = bytes.split_first() else {
+        return Err(CoreError::BadBaseList {
+            reason: "it is empty",
+        });
+    };
+    if format != BASE_FORMAT {
+        return Err(CoreError::BadBaseList {
+            reason: "it is in a format this build does not read",
+        });
     }
-
-    /// Says the list has ended, answering how many ids it held.
-    pub fn finish(self) -> Result<u64> {
-        if !self.format_seen {
-            return Err(CoreError::BadBaseList {
-                reason: "it is empty",
-            });
-        }
-        if self.filled > 0 {
-            return Err(CoreError::BadBaseList {
-                reason: "it ends partway through an id",
-            });
-        }
-        Ok(self.count)
+    let (ids, rest) = ids.as_chunks::<32>();
+    if !rest.is_empty() {
+        return Err(CoreError::BadBaseList {
+            reason: "it ends partway through an id",
+        });
     }
-
-    fn emit(&mut self, bytes: [u8; 32], each: &mut impl FnMut(ItemId)) -> Result<()> {
-        self.count += 1;
-        if self.count > BASE_MAX {
-            return Err(CoreError::BadBaseList {
-                reason: "it holds more ids than any list may",
-            });
-        }
-        each(ItemId::from_bytes(bytes));
-        Ok(())
+    if ids.len() as u64 > BASE_MAX {
+        return Err(CoreError::BadBaseList {
+            reason: "it holds more ids than any list may",
+        });
     }
+    Ok(ids.iter().copied().map(ItemId::from_bytes))
 }
 
 /// Serde for item ids as raw bytes, where everywhere else they are hex.
