@@ -129,6 +129,18 @@ impl Node {
     }
 }
 
+/// How long an election or a replication may take before it is a failure.
+///
+/// On loopback either takes well under a second, and that is what a passing
+/// run shows. The bound is for a runner that stalls: an election persists each
+/// vote with an fsync, and on one Windows CI run every test touching redb went
+/// slow at once — the openraft conformance suite, which has no network at all,
+/// took 88 s against its usual 20 — so a pair that would elect in milliseconds
+/// missed a 10 s bound (`a_committed_entry_replicates_to_the_follower`, after
+/// #86). What is checked is that a leader emerges and an entry crosses; how
+/// fast is not, so the bound only has to outlast a stall.
+const ELECTED: Duration = Duration::from_secs(30);
+
 /// Waits for `predicate` to hold of the node's metrics, or gives up.
 async fn wait_for(
     raft: &Raft<TypeConfig>,
@@ -136,7 +148,7 @@ async fn wait_for(
     predicate: impl Fn(&openraft::RaftMetrics<RawMemberId, NodeAddr>) -> bool,
 ) {
     let mut metrics = raft.metrics();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(ELECTED, async {
         loop {
             if predicate(&metrics.borrow_and_update()) {
                 return;
