@@ -901,10 +901,32 @@ impl Api {
         // A clone, because the task outlives this call; every field is a
         // handle onto something shared, so it is the same node either way.
         let api = self.clone();
+        let item_id = params.item_id;
         tokio::spawn(async move {
             let mut task = task;
             match api.fetch_all(targets, &providers, &mut task).await {
-                Ok(files) => task.finish(files),
+                Ok(files) => {
+                    // Before the task says it is finished, so whoever was
+                    // waiting on that finds the item held. A download is the
+                    // one way content arrives that the document never hears
+                    // of, so nothing else would recheck it.
+                    //
+                    // **The item as it is now**, read back rather than kept
+                    // from when the download was asked for: an item's id is
+                    // frozen at creation, so a chapter can be added under it
+                    // mid-transfer, and rechecking the old file list would
+                    // call held an item that is missing it.
+                    let rechecked = async {
+                        let Some(item) = api.catalogue.item(item_id).await? else {
+                            return Ok(false);
+                        };
+                        api.catalogue.holdings().recheck(&item).await
+                    };
+                    if let Err(error) = rechecked.await {
+                        tracing::warn!(item = %item_id, %error, "could not work out whether this node now holds an item");
+                    }
+                    task.finish(files)
+                }
                 Err(error) => task.fail(error.message),
             }
         });

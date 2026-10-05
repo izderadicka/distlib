@@ -51,6 +51,7 @@ use tokio::{
 use tracing::Instrument as _;
 
 use crate::{
+    availability::Holdings,
     changes::{self, Changes, Feed, Pump, SyncState},
     error::{Result, SyncError},
 };
@@ -135,6 +136,8 @@ struct Inner {
     open: watch::Receiver<Option<Doc>>,
     /// What the document's one subscription reports, from when it opened.
     feed: Feed,
+    /// Which items this node holds — see [`Catalogue::holdings`].
+    holdings: Holdings,
     /// Waiting for the group, then opening and syncing. Aborted on shutdown.
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -229,6 +232,7 @@ impl Catalogue {
         Ok(Self {
             inner: Arc::new(Inner {
                 blobs: BlobsProtocol::new(&blobs, None),
+                holdings: Holdings::new(blobs),
                 docs,
                 author: author_id,
                 open,
@@ -490,6 +494,12 @@ impl Catalogue {
     /// round with each peer went — the empty state until the document opens.
     pub fn sync_status(&self) -> watch::Receiver<SyncState> {
         self.inner.feed.sync_status()
+    }
+
+    /// Which items this node holds in full, kept by whoever changes it: the
+    /// projection for every item it reads, and a download when it finishes.
+    pub fn holdings(&self) -> &Holdings {
+        &self.inner.holdings
     }
 
     /// This node's author id, which is its member id.

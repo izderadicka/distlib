@@ -6,10 +6,12 @@
 //! the mitigation is containment. Everything above this sees typed records and
 //! hashes, and if either crate has to be replaced, one layer is replaced.
 
+pub mod availability;
 pub mod catalogue;
 pub mod changes;
 pub mod error;
 
+pub use availability::Holdings;
 pub use catalogue::{Catalogue, ReadItem, alpns, catalogue_key};
 pub use changes::{Batch, Changes, LastSync, SyncState};
 pub use error::{Result, SyncError};
