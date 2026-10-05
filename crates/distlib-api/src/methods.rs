@@ -783,7 +783,12 @@ impl Api {
                 })?;
                 vec![(hash, record)]
             }
-            None => stored.item.files.into_iter().collect(),
+            None => stored
+                .item
+                .files
+                .iter()
+                .map(|(hash, record)| (*hash, record.clone()))
+                .collect(),
         };
         if wanted.is_empty() {
             return Err(Error::failed(format!(
@@ -901,10 +906,20 @@ impl Api {
         // A clone, because the task outlives this call; every field is a
         // handle onto something shared, so it is the same node either way.
         let api = self.clone();
+        let item = stored.item;
         tokio::spawn(async move {
             let mut task = task;
             match api.fetch_all(targets, &providers, &mut task).await {
-                Ok(files) => task.finish(files),
+                Ok(files) => {
+                    // Before the task says it is finished, so whoever was
+                    // waiting on that finds the item held. A download is the
+                    // one way content arrives that the document never hears
+                    // of, so nothing else would recheck it.
+                    if let Err(error) = api.catalogue.holdings().recheck(&item).await {
+                        tracing::warn!(item = %item.id, %error, "could not work out whether this node now holds an item");
+                    }
+                    task.finish(files)
+                }
                 Err(error) => task.fail(error.message),
             }
         });

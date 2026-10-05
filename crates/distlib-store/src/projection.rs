@@ -301,6 +301,14 @@ async fn project(
             incomplete.remove(&id);
         }
 
+        // Every pass over an item, since any change to its files can change
+        // whether it is held — including another member adding one this node
+        // lacks. Before the write below, so a row in the read model is never
+        // newer than the holdings behind it.
+        if let Err(error) = catalogue.holdings().recheck(&read.item).await {
+            tracing::warn!(%id, %error, "could not work out whether this node holds an item");
+        }
+
         if let Err(error) = index.index_item(read.item.clone()).await {
             tracing::warn!(%id, %error, "could not write a catalogue item to the search index");
         } else {

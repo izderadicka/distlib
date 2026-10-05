@@ -169,6 +169,18 @@ async fn until_projected(runtime: &Runtime, item: ItemId, files: usize, who: &st
     .unwrap_or_else(|_| panic!("{who} never projected the item with its {files} file(s)"));
 }
 
+/// Waits until `runtime` holds `item` in full (4b-2): the projection works it
+/// out on its own schedule, after the write or the replay that prompts it.
+async fn until_held(runtime: &Runtime, item: ItemId, who: &str) {
+    tokio::time::timeout(SOON, async {
+        while !runtime.catalogue().holdings().holds(item) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{who} never came to hold the item"));
+}
+
 /// A directory to download into, made fresh so an assertion about what is in
 /// it afterwards is about this download.
 fn dest(dir: &Path, who: &str) -> std::path::PathBuf {
@@ -278,6 +290,13 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     until_projected(&bob, item, 1, "bob").await;
     until_projected(&carol, item, 1, "carol").await;
 
+    // 4b-2: the adder holds it; a node that has only the record does not.
+    until_held(&alice, item, "alice, who added it").await;
+    assert!(
+        !bob.catalogue().holdings().holds(item),
+        "bob has the record, not the file"
+    );
+
     let bobs_dest = dest(dir.path(), "bob");
     let mut watching_bob = bob.events().subscribe();
     let downloaded = download(
@@ -320,6 +339,10 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
         bytes,
         "and they are the bytes alice added"
     );
+    assert!(
+        bob.catalogue().holdings().holds(item),
+        "a finished download is an item held — by the time it says finished"
+    );
 
     // Bob read the book and tidied up. **This is what makes the rest of the
     // test mean anything**: with the exported file still sitting there, bob
@@ -338,6 +361,9 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     tokio::time::timeout(SOON, bob.catalogue().ready())
         .await
         .unwrap();
+    // Held is kept in memory only; the replay every start runs works it out
+    // again from the store.
+    until_held(&bob, item, "the restarted bob").await;
     tokio::time::timeout(SOON, async {
         loop {
             if carol.node().known_addresses().address_of(bob_id).is_some() {
@@ -555,6 +581,62 @@ async fn two_chapters(runtime: &Runtime, key: &SecretKey, dir: &Path) -> (ItemId
         .expect("both files are in the item")
         .0;
     (item, second)
+}
+
+/// **An item stops being held when a content file this node lacks is added
+/// to it** (4b-2) — what happens when another member contributes a chapter.
+///
+/// Written here by the node itself, with a hash its store has never had: the
+/// projection cannot tell who wrote an entry, and that is the point — any
+/// change to an item's files is a recheck.
+#[tokio::test]
+async fn an_item_is_no_longer_held_once_a_content_file_it_lacks_is_added() {
+    let (dir, runtime, key) = a_solo_node().await;
+    let (item, _) = two_chapters(&runtime, &key, dir.path()).await;
+    until_held(&runtime, item, "the node that added it").await;
+    let lacking = |role, filename: &str, byte| {
+        let mut more = Item::new(item);
+        more.files.insert(
+            ContentHash::from_bytes([byte; 32]),
+            FileRecord {
+                role,
+                format: "jpg".to_owned(),
+                size: 1,
+                filename: filename.to_owned(),
+                seq: None,
+                disc: None,
+                title: None,
+                duration: None,
+            },
+        );
+        more
+    };
+
+    // A cover is not part of what an item is, so lacking one changes nothing.
+    runtime
+        .catalogue()
+        .write(&lacking(FileRole::Cover, "cover.jpg", 0x22))
+        .await
+        .unwrap();
+    until_projected(&runtime, item, 3, "the solo node").await;
+    assert!(
+        runtime.catalogue().holdings().holds(item),
+        "a missing cover does not make an item missing"
+    );
+
+    runtime
+        .catalogue()
+        .write(&lacking(FileRole::Content, "chapter-3.mp3", 0x33))
+        .await
+        .unwrap();
+    until_projected(&runtime, item, 4, "the solo node").await;
+
+    assert!(
+        !runtime.catalogue().holdings().holds(item),
+        "a chapter this node does not have means the item is not held here"
+    );
+
+    runtime.shutdown().await;
 }
 
 /// Asking again for an item part of which is already at its destination —

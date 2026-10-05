@@ -558,6 +558,13 @@ a time, review before the next.
 - **4b-2 — "held here" (D6).**
   **Acceptance:** held after an add, after a download and after a replay; not held once another
   member adds a content file this node lacks.
+  *As built:* `Holdings` in `distlib-sync::availability`, owned by the catalogue
+  (`Catalogue::holdings()`), in memory only. **Two callers, not three**: `library.add` writes the
+  item into the document after importing its files, so the projection's recheck already covers it;
+  a download is the one way content arrives without the document hearing of it, so it rechecks
+  before the task says finished. The projection rechecks before it writes the row. Pinned in
+  `download.rs` — the add/download/restart test gains the first three points, and a solo test adds a
+  cover the node lacks (still held) and then a chapter (not held).
 
 - **4b-3 — the heartbeat service, presence only (D4).** The topic,
   `blake3("distlib.availability.v1" || group_id)`; the TTL index; `Directory::learn`;
