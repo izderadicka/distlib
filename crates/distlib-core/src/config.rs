@@ -135,8 +135,9 @@ impl Default for LibraryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AvailabilityConfig {
     /// Seconds between this node's heartbeats in a group of up to fifty;
-    /// stretched in proportion above that. Its peers count it offline after
-    /// three missed. Never zero, which would beat without pause.
+    /// stretched in proportion above that, and never longer than 20 minutes.
+    /// Its peers count it offline after three missed. Never zero, which would
+    /// beat without pause.
     pub beat_interval_secs: NonZeroU32,
 }
 
@@ -332,8 +333,8 @@ impl Config {
              \n\
              [availability]\n\
              # Seconds between the heartbeats that tell the group this node is\n\
-             # online, stretched in groups of more than fifty. Peers count the\n\
-             # node offline after three missed.\n\
+             # online, stretched in groups of more than fifty, to at most 20\n\
+             # minutes. Peers count the node offline after three missed.\n\
              beat_interval_secs = {beat_interval}\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),

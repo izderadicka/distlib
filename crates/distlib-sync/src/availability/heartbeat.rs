@@ -32,7 +32,7 @@ use tokio::{
 };
 use tracing::Instrument as _;
 
-use super::online::Online;
+use super::online::{MAX_INTERVAL, Online};
 use crate::error::{Result, SyncError};
 
 /// The domain the topic is derived under. A wire fact, like the catalogue's:
@@ -320,10 +320,11 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
     }
 }
 
-/// D4's budget: `interval` once per fifty members, or part of fifty.
+/// D4's budget: `interval` once per fifty members, or part of fifty — and
+/// never more than [`MAX_INTERVAL`], however large the group or the setting.
 fn stretch(interval: Duration, members: usize) -> Duration {
     let times = u32::try_from(members.div_ceil(BUDGET).max(1)).unwrap_or(u32::MAX);
-    interval.saturating_mul(times)
+    interval.saturating_mul(times).min(MAX_INTERVAL)
 }
 
 /// `interval` as the beat states it: whole seconds, rounded up, never zero.
@@ -379,13 +380,19 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
         published,
     } = listening;
     let mut online = Online::new(me);
-    online.members(membership.borrow_and_update().allowlist());
     loop {
         let expiry = online.next_expiry();
         tokio::select! {
             event = receiver.next() => match event {
                 Some(Ok(Event::Received(message))) => {
-                    if let Err(error) = hear(&mut online, &directory, &group, &message.content) {
+                    let heard = hear(
+                        &mut online,
+                        &directory,
+                        &group,
+                        &membership.borrow(),
+                        &message.content,
+                    );
+                    if let Err(error) = heard {
                         tracing::warn!(
                             %error,
                             from = %message.delivered_from,
@@ -409,7 +416,8 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                 if changed.is_err() {
                     return;
                 }
-                online.members(membership.borrow_and_update().allowlist());
+                let now = membership.borrow_and_update();
+                online.retain_members(|member| now.is_member(member));
             }
         }
         let now = online.online();
@@ -438,11 +446,12 @@ fn hear(
     online: &mut Online,
     directory: &Directory,
     group: &GroupId,
+    membership: &MembershipState,
     content: &[u8],
 ) -> distlib_core::error::Result<()> {
     let signed = SignedHeartbeat::decode(content)?;
     let beat = signed.open(group)?;
-    if online.heard(beat, Instant::now())
+    if online.heard(beat, Instant::now(), |member| membership.is_member(member))
         && let Err(error) = directory.learn(&beat.address)
     {
         // `open` has verified this address already, so this is not a
@@ -455,6 +464,7 @@ fn hear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::availability::online::ttl;
 
     const SECOND: Duration = Duration::from_secs(1);
 
@@ -466,6 +476,34 @@ mod tests {
                 times * 60 * SECOND,
                 "{members}"
             );
+        }
+    }
+
+    #[test]
+    fn the_interval_stops_stretching_at_twenty_minutes() {
+        assert_eq!(stretch(60 * SECOND, 1_000), 20 * 60 * SECOND);
+        assert_eq!(stretch(60 * SECOND, 1_001), MAX_INTERVAL);
+        assert_eq!(stretch(60 * SECOND, usize::MAX), MAX_INTERVAL);
+        assert_eq!(
+            stretch(2 * 60 * 60 * SECOND, 1),
+            MAX_INTERVAL,
+            "nor the setting"
+        );
+    }
+
+    /// The TTL and the stretch are two clamps on one number: a receiver must
+    /// believe every beat for three of its sender's intervals, however large
+    /// the group or the setting.
+    #[test]
+    fn a_beat_is_always_believed_for_three_of_its_intervals() {
+        for interval in [SECOND, 60 * SECOND, 60 * 60 * SECOND] {
+            for members in [1, 50, 1_000, 1_001, 100_000, usize::MAX] {
+                let stretched = stretch(interval, members);
+                assert!(
+                    ttl(whole_seconds(stretched)) >= 3 * stretched,
+                    "{interval:?} at {members} members"
+                );
+            }
         }
     }
 

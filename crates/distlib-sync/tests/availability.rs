@@ -353,3 +353,50 @@ async fn a_member_counts_once_the_group_admits_it() {
     alice.router.shutdown().await.unwrap();
     bob.router.shutdown().await.unwrap();
 }
+
+/// **An expelled member is offline at once**, not when its beat runs out —
+/// and its beats count no more, though it is still sending them.
+#[tokio::test]
+async fn an_expelled_member_is_offline_at_once() {
+    let (alice_key, bob_key) = (SecretKey::generate(), SecretKey::generate());
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let interval = Duration::from_secs(10);
+    let alice = Node::start(alice_key.clone(), alice_sees, interval).await;
+    let bob = Node::start(bob_key.clone(), bob_sees, interval).await;
+    bob.knows(&alice, &alice_key);
+
+    let admitted = group(&[(&alice_key, &alice)], &[bob.id]);
+    to_alice.send(admitted.clone()).unwrap();
+    to_bob.send(admitted.clone()).unwrap();
+    alice.sees_online(&[bob.id]).await;
+
+    let mut expelled = admitted;
+    let event = MembershipEvent::MemberExpelled {
+        member: bob.id,
+        reason: String::new(),
+    };
+    expelled
+        .apply(
+            3,
+            &SignedEvent::sign(&alice_key, event, Timestamp::from_millis(3), 2).unwrap(),
+        )
+        .unwrap();
+    assert!(!expelled.is_member(&bob.id));
+    to_alice.send(expelled).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        alice.availability.online().wait_for(BTreeSet::is_empty),
+    )
+    .await
+    .expect("alice kept bob online for his 30 s TTL")
+    .unwrap();
+
+    // Bob, who has not heard, beats again at once; alice must not count it.
+    bob.says_where_it_is(true);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(alice.availability.online().borrow().is_empty());
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}

@@ -2,7 +2,8 @@
 //!
 //! The rules alone — no network, no clock of their own — so they are tested as
 //! rules. The service feeds this every beat, every membership change and every
-//! deadline, and publishes what [`Online::online`] says afterwards.
+//! deadline, and publishes what [`Online::online`] says afterwards. Who belongs
+//! is asked of the membership as it is at that moment, never copied here.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -12,10 +13,19 @@ use std::{
 use distlib_core::{Heartbeat, MemberId};
 use tokio::time::Instant;
 
+/// The longest a member waits between beats, however large the group (D4's
+/// budget stops stretching here).
+///
+/// Above 1,000 members at the default interval, so beyond that every node
+/// receives more beats the larger the group grows. Fine for the thousands §2
+/// aims at; a group far larger would need presence reworked (C32).
+pub(super) const MAX_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
 /// How long a beat may ask to be believed for, whatever it says: a sender
-/// cannot drop out between two packets, nor stay online an afternoon on one.
+/// cannot drop out between two packets, and the longest is three of the
+/// longest intervals — derived, so the two cannot disagree.
 const TTL_MIN: Duration = Duration::from_secs(1);
-const TTL_MAX: Duration = Duration::from_secs(60 * 60);
+const TTL_MAX: Duration = Duration::from_secs(3 * MAX_INTERVAL.as_secs());
 
 /// How long a beat from a member beating every `interval_secs` is believed:
 /// three intervals, so one or two lost beats do not take it offline.
@@ -30,7 +40,6 @@ pub(super) fn ttl(interval_secs: u32) -> Duration {
 #[derive(Debug)]
 pub(super) struct Online {
     me: MemberId,
-    members: BTreeSet<MemberId>,
     heard: HashMap<MemberId, Heard>,
 }
 
@@ -49,31 +58,31 @@ impl Online {
     pub(super) fn new(me: MemberId) -> Self {
         Self {
             me,
-            members: BTreeSet::new(),
             heard: HashMap::new(),
         }
     }
 
-    /// The group as it is now. Whoever is no longer in it is forgotten at
-    /// once, rather than left online until their beat runs out.
-    pub(super) fn members(&mut self, members: impl IntoIterator<Item = MemberId>) {
-        let Self {
-            members: now,
-            heard,
-            ..
-        } = self;
-        *now = members.into_iter().collect();
-        heard.retain(|member, _| now.contains(member));
+    /// Forgets at once whoever `is_member` no longer admits, rather than
+    /// leaving them online until their beat runs out.
+    pub(super) fn retain_members(&mut self, is_member: impl Fn(&MemberId) -> bool) {
+        self.heard.retain(|member, _| is_member(member));
     }
 
     /// Takes in one beat, verified, heard at `now`; whether it was news.
     ///
-    /// Refused: one from this node or from outside the group, and one no newer
-    /// than what is held — a new `epoch` is a restart and always news, within
-    /// an epoch only a higher `seq` is.
-    pub(super) fn heard(&mut self, beat: &Heartbeat, now: Instant) -> bool {
+    /// Refused: one from this node, one from somebody `is_member` does not
+    /// admit — a relaying neighbour may not have applied an expulsion yet,
+    /// and the connection-level allowlist checks only that neighbour — and
+    /// one no newer than what is held: a new `epoch` is a restart and always
+    /// news, within an epoch only a higher `seq` is.
+    pub(super) fn heard(
+        &mut self,
+        beat: &Heartbeat,
+        now: Instant,
+        is_member: impl Fn(&MemberId) -> bool,
+    ) -> bool {
         let member = beat.address.member();
-        if member == self.me || !self.members.contains(&member) {
+        if member == self.me || !is_member(&member) {
             return false;
         }
         if self
@@ -150,22 +159,24 @@ mod tests {
         beat
     }
 
-    /// A table of this node and `others`, all in the group.
-    fn group(others: &[&SecretKey]) -> (Online, MemberId) {
-        let me = MemberId::from(SecretKey::generate().public());
-        let mut online = Online::new(me);
-        online.members(others.iter().map(|key| id(key)).chain([me]));
-        (online, me)
+    /// A group everybody belongs to, for the tests about anything else.
+    fn anyone(_: &MemberId) -> bool {
+        true
+    }
+
+    /// A table for a node of its own, which no beat here comes from.
+    fn table() -> Online {
+        Online::new(MemberId::from(SecretKey::generate().public()))
     }
 
     #[test]
     fn a_member_is_online_for_three_of_its_own_intervals() {
         let (bob, carol) = (SecretKey::generate(), SecretKey::generate());
-        let (mut online, _) = group(&[&bob, &carol]);
+        let mut online = table();
         let start = Instant::now();
 
-        assert!(online.heard(&beat(&bob, 1, 1, 10), start));
-        assert!(online.heard(&beat(&carol, 1, 1, 1), start));
+        assert!(online.heard(&beat(&bob, 1, 1, 10), start, anyone));
+        assert!(online.heard(&beat(&carol, 1, 1, 1), start, anyone));
         assert_eq!(online.online(), BTreeSet::from([id(&bob), id(&carol)]));
         assert_eq!(online.next_expiry(), Some(start + 3 * SECOND));
 
@@ -183,11 +194,11 @@ mod tests {
     #[test]
     fn a_later_beat_moves_the_deadline() {
         let bob = SecretKey::generate();
-        let (mut online, _) = group(&[&bob]);
+        let mut online = table();
         let start = Instant::now();
 
-        online.heard(&beat(&bob, 1, 1, 1), start);
-        assert!(online.heard(&beat(&bob, 1, 2, 1), start + 2 * SECOND));
+        online.heard(&beat(&bob, 1, 1, 1), start, anyone);
+        assert!(online.heard(&beat(&bob, 1, 2, 1), start + 2 * SECOND, anyone));
         online.expire(start + 3 * SECOND);
         assert_eq!(online.online(), BTreeSet::from([id(&bob)]));
         assert_eq!(online.next_expiry(), Some(start + 5 * SECOND));
@@ -198,45 +209,46 @@ mod tests {
         assert_eq!(ttl(0), SECOND);
         assert_eq!(ttl(1), 3 * SECOND);
         assert_eq!(ttl(1_200), 3_600 * SECOND);
+        assert_eq!(ttl(1_201), 3_600 * SECOND);
         assert_eq!(ttl(u32::MAX), 3_600 * SECOND);
     }
 
     #[test]
     fn within_an_epoch_only_a_higher_seq_is_news() {
         let bob = SecretKey::generate();
-        let (mut online, _) = group(&[&bob]);
+        let mut online = table();
         let start = Instant::now();
 
-        assert!(online.heard(&beat(&bob, 1, 5, 1), start));
-        assert!(!online.heard(&beat(&bob, 1, 5, 1), start + SECOND));
-        assert!(!online.heard(&beat(&bob, 1, 4, 1), start + SECOND));
+        assert!(online.heard(&beat(&bob, 1, 5, 1), start, anyone));
+        assert!(!online.heard(&beat(&bob, 1, 5, 1), start + SECOND, anyone));
+        assert!(!online.heard(&beat(&bob, 1, 4, 1), start + SECOND, anyone));
         assert_eq!(
             online.next_expiry(),
             Some(start + 3 * SECOND),
             "a beat that was not news moves nothing"
         );
-        assert!(online.heard(&beat(&bob, 1, 6, 1), start + SECOND));
+        assert!(online.heard(&beat(&bob, 1, 6, 1), start + SECOND, anyone));
     }
 
     /// A restart starts counting again from wherever it likes.
     #[test]
     fn a_new_epoch_is_news_whatever_its_seq() {
         let bob = SecretKey::generate();
-        let (mut online, _) = group(&[&bob]);
+        let mut online = table();
         let start = Instant::now();
 
-        online.heard(&beat(&bob, 1, 5, 1), start);
-        assert!(online.heard(&beat(&bob, 2, 1, 1), start));
+        online.heard(&beat(&bob, 1, 5, 1), start, anyone);
+        assert!(online.heard(&beat(&bob, 2, 1, 1), start, anyone));
     }
 
     #[test]
     fn a_leaving_beat_takes_a_member_offline_at_once() {
         let bob = SecretKey::generate();
-        let (mut online, _) = group(&[&bob]);
+        let mut online = table();
         let start = Instant::now();
 
-        online.heard(&beat(&bob, 1, 1, 60), start);
-        assert!(online.heard(&leaving(beat(&bob, 1, 2, 60)), start));
+        online.heard(&beat(&bob, 1, 1, 60), start, anyone);
+        assert!(online.heard(&leaving(beat(&bob, 1, 2, 60)), start, anyone));
         assert!(online.online().is_empty());
         assert_eq!(online.next_expiry(), None);
     }
@@ -246,17 +258,17 @@ mod tests {
     #[test]
     fn a_beat_older_than_the_goodbye_does_not_bring_a_member_back() {
         let bob = SecretKey::generate();
-        let (mut online, _) = group(&[&bob]);
+        let mut online = table();
         let start = Instant::now();
 
-        online.heard(&leaving(beat(&bob, 1, 2, 60)), start);
-        assert!(!online.heard(&beat(&bob, 1, 1, 60), start));
+        online.heard(&leaving(beat(&bob, 1, 2, 60)), start, anyone);
+        assert!(!online.heard(&beat(&bob, 1, 1, 60), start, anyone));
         assert!(online.online().is_empty());
 
         // And the same holds once a beat has merely run out.
-        online.heard(&beat(&bob, 1, 3, 1), start);
+        online.heard(&beat(&bob, 1, 3, 1), start, anyone);
         online.expire(start + 3 * SECOND);
-        assert!(!online.heard(&beat(&bob, 1, 3, 1), start + 3 * SECOND));
+        assert!(!online.heard(&beat(&bob, 1, 3, 1), start + 3 * SECOND, anyone));
         assert!(online.online().is_empty());
     }
 
@@ -265,25 +277,28 @@ mod tests {
         let (bob, stranger) = (SecretKey::generate(), SecretKey::generate());
         let me = SecretKey::generate();
         let mut online = Online::new(id(&me));
-        online.members([id(&me), id(&bob)]);
+        let members = [id(&me), id(&bob)];
+        let is_member = |member: &MemberId| members.contains(member);
         let start = Instant::now();
 
-        assert!(!online.heard(&beat(&stranger, 1, 1, 60), start));
-        assert!(!online.heard(&beat(&me, 1, 1, 60), start));
+        assert!(!online.heard(&beat(&stranger, 1, 1, 60), start, is_member));
+        assert!(!online.heard(&beat(&me, 1, 1, 60), start, is_member));
         assert!(online.online().is_empty());
+        assert!(online.heard(&beat(&bob, 1, 1, 60), start, is_member));
     }
 
     #[test]
     fn a_member_who_leaves_the_group_is_gone_at_once() {
         let (bob, carol) = (SecretKey::generate(), SecretKey::generate());
-        let (mut online, me) = group(&[&bob, &carol]);
+        let mut online = table();
         let start = Instant::now();
-        online.heard(&beat(&bob, 1, 1, 60), start);
-        online.heard(&beat(&carol, 1, 1, 1), start);
+        online.heard(&beat(&bob, 1, 1, 60), start, anyone);
+        online.heard(&beat(&carol, 1, 1, 1), start, anyone);
 
-        online.members([me, id(&bob)]);
+        let is_member = |member: &MemberId| *member == id(&bob);
+        online.retain_members(is_member);
         assert_eq!(online.online(), BTreeSet::from([id(&bob)]));
         assert_eq!(online.next_expiry(), Some(start + 180 * SECOND));
-        assert!(!online.heard(&beat(&carol, 1, 2, 1), start));
+        assert!(!online.heard(&beat(&carol, 1, 2, 1), start, is_member));
     }
 }
