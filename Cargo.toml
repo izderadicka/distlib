@@ -35,7 +35,7 @@ iroh = "=1.0.3"
 # `rpc` is off too — it gates cross-process transport we do not use and drags in a TLS
 # stack. **Watch `constant_time_eq`**: iroh-blobs requires it with an upper bound only,
 # in a workspace that `=`-pins everything, so `cargo update` can move it.
-iroh-blobs = { version = "=0.103.0", default-features = false, features = [
+iroh-blobs = { version = "=0.103.1", default-features = false, features = [
     "fs-store",
     "hide-proto-docs",
 ] }
