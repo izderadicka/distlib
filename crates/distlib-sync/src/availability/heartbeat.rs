@@ -204,6 +204,7 @@ async fn join_when_founded(joining: Joining) {
             break group;
         }
         if membership.changed().await.is_err() {
+            tracing::error!("this node is no longer in a group; availability task ends");
             return;
         }
     };
@@ -312,7 +313,7 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
             () = tokio::time::sleep(jittered(stretched)) => {}
             () = neighbour_up.notified() => {}
             moved = own_address.changed() => if moved.is_err() {
-                tracing::debug!("this node no longer says where it is; beating no more");
+                tracing::error!("this node no longer says where it is; beating no more");
                 return;
             },
         }
@@ -353,7 +354,7 @@ async fn say(sender: &GossipSender, secret: &SecretKey, group: &GroupId, beat: H
             }
         };
     if let Err(error) = sender.broadcast(Bytes::from(encoded)).await {
-        tracing::debug!(%error, "could not send a heartbeat");
+        tracing::warn!(%error, "could not send a heartbeat");
     }
 }
 
