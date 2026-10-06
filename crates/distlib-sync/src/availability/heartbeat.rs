@@ -4,10 +4,9 @@
 //! One gossip topic per group, separate from the membership topic and the
 //! catalogue's, on the process's one swarm. Every node beats on it and listens
 //! to it. A beat carries the sender's signed address, so a member that missed
-//! an address announcement learns it here, by the next beat (C5).
-//!
-//! Presence only, for now: every beat says it holds nothing (4b-4 fills
-//! that in).
+//! an address announcement learns it here, by the next beat (C5). And it says
+//! what the sender holds — see [`super::statement`]; nobody reads that yet
+//! (4b-4's second half).
 
 use std::{
     collections::BTreeSet,
@@ -17,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use distlib_consensus::{MembershipState, gossip};
-use distlib_core::{GroupId, Heartbeat, Holdings, MemberId, SignedAddress, SignedHeartbeat};
+use distlib_core::{GroupId, Heartbeat, MemberId, SignedAddress, SignedHeartbeat};
 use distlib_net::{Directory, Transport};
 use futures_lite::StreamExt as _;
 use iroh::SecretKey;
@@ -32,7 +31,11 @@ use tokio::{
 };
 use tracing::Instrument as _;
 
-use super::online::{MAX_INTERVAL, Online};
+use super::{
+    Holdings,
+    online::{MAX_INTERVAL, Online},
+    statement::Statement,
+};
 use crate::error::{Result, SyncError};
 
 /// The domain the topic is derived under. A wire fact, like the catalogue's:
@@ -52,12 +55,27 @@ const BUDGET: usize = 50;
 /// is sent over, and a goodbye that is lost costs its peers a TTL, not more.
 const GOODBYE_GRACE: Duration = Duration::from_millis(250);
 
+/// The least time between a beat and one a change to the held set prompts,
+/// so a burst of changes — a download of many items — is one beat, not many
+/// (D4).
+const CHANGE_FLOOR: Duration = Duration::from_secs(10);
+
 /// The availability topic of `group`.
 pub fn topic_for(group: GroupId) -> TopicId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(TOPIC_TAG);
     hasher.update(group.as_bytes());
     TopicId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// What a heartbeat is made from, each as it changes.
+pub struct Sources {
+    /// The group, to wait for and to count.
+    pub membership: watch::Receiver<MembershipState>,
+    /// Where this node says it is — `MembershipNode::own_address`.
+    pub own_address: watch::Receiver<Option<SignedAddress>>,
+    /// What this node holds — `Catalogue::holdings`.
+    pub holdings: Holdings,
 }
 
 /// This node's heartbeat, and who else is online.
@@ -80,19 +98,24 @@ struct Said {
 }
 
 impl Availability {
-    /// Starts beating every `interval` once this node is in a group, with the
-    /// address in `own_address`.
+    /// Starts beating every `interval` once this node is in a group and
+    /// knows where it is.
     ///
     /// A beat goes out at once, then every interval — stretched in groups
     /// over fifty, give or take a tenth so the group does not beat in step —
-    /// and again whenever this node's address statement changes.
+    /// and again whenever this node's address statement changes, a neighbour
+    /// comes up, or what it holds changes (at most once per ten seconds).
     pub fn start(
         transport: &Transport,
         secret: &SecretKey,
-        membership: watch::Receiver<MembershipState>,
-        own_address: watch::Receiver<Option<SignedAddress>>,
+        sources: Sources,
         interval: Duration,
     ) -> Result<Self> {
+        let Sources {
+            membership,
+            own_address,
+            holdings,
+        } = sources;
         // Which run of this node a beat is from: a restart is told apart from
         // a replay by this, not by a clock.
         let epoch = getrandom::u64().map_err(|error| SyncError::Random {
@@ -108,6 +131,7 @@ impl Availability {
                 secret: secret.clone(),
                 membership,
                 own_address,
+                holdings,
                 interval,
                 epoch,
                 published,
@@ -179,6 +203,7 @@ struct Joining {
     secret: SecretKey,
     membership: watch::Receiver<MembershipState>,
     own_address: watch::Receiver<Option<SignedAddress>>,
+    holdings: Holdings,
     interval: Duration,
     epoch: u64,
     published: watch::Sender<BTreeSet<MemberId>>,
@@ -193,6 +218,7 @@ async fn join_when_founded(joining: Joining) {
         secret,
         mut membership,
         own_address,
+        holdings,
         interval,
         epoch,
         published,
@@ -239,6 +265,7 @@ async fn join_when_founded(joining: Joining) {
                 interval,
                 membership: membership.clone(),
                 own_address,
+                holdings,
                 said,
             },
             &neighbour_up,
@@ -266,6 +293,7 @@ struct Beating {
     interval: Duration,
     membership: watch::Receiver<MembershipState>,
     own_address: watch::Receiver<Option<SignedAddress>>,
+    holdings: Holdings,
     said: Arc<Mutex<Option<Said>>>,
 }
 
@@ -282,31 +310,48 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
         interval,
         membership,
         mut own_address,
+        holdings,
         said,
     } = beating;
+    let mut statement = Statement::new(holdings.blobs.clone());
+    let mut changes = holdings.changes();
     let mut seq = 0;
+    let mut last_beat = Instant::now();
     loop {
         let stretched = stretch(interval, membership.borrow().allowlist().count());
         // Nothing to say until consensus has said where this node is; its
         // first statement wakes the loop below.
         let address = own_address.borrow_and_update().clone();
         if let Some(address) = address {
-            seq += 1;
-            let beat = Heartbeat {
-                address,
-                epoch,
-                seq,
-                interval_secs: whole_seconds(stretched),
-                holdings: Holdings::default(),
-                leaving: false,
-            };
-            // Recorded before it is sent, so a goodbye always counts past it.
-            *said.lock().unwrap_or_else(PoisonError::into_inner) = Some(Said {
-                sender: sender.clone(),
-                group,
-                beat: beat.clone(),
-            });
-            say(&sender, &secret, &group, beat).await;
+            let changed_at = *changes.borrow_and_update();
+            match statement
+                .holdings(&holdings.held(), changed_at, Instant::now())
+                .await
+            {
+                Ok(stated) => {
+                    seq += 1;
+                    let beat = Heartbeat {
+                        address,
+                        epoch,
+                        seq,
+                        interval_secs: whole_seconds(stretched),
+                        holdings: stated,
+                        leaving: false,
+                    };
+                    // Recorded before it is sent, so a goodbye always counts
+                    // past it.
+                    *said.lock().unwrap_or_else(PoisonError::into_inner) = Some(Said {
+                        sender: sender.clone(),
+                        group,
+                        beat: beat.clone(),
+                    });
+                    say(&sender, &secret, &group, beat).await;
+                    last_beat = Instant::now();
+                }
+                // The next beat tries again; one that stated less than the
+                // truth would be worse than one that is late.
+                Err(error) => tracing::error!(%error, "could not state what this node holds"),
+            }
         }
 
         tokio::select! {
@@ -316,6 +361,8 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
                 tracing::error!("this node no longer says where it is; beating no more");
                 return;
             },
+            // Cannot fail: `holdings` here keeps the sending half alive.
+            _ = changes.changed() => tokio::time::sleep_until(last_beat + CHANGE_FLOOR).await,
         }
     }
 }

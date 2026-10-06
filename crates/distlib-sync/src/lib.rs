@@ -11,7 +11,7 @@ pub mod catalogue;
 pub mod changes;
 pub mod error;
 
-pub use availability::{Availability, Holdings};
+pub use availability::{Availability, Holdings, Sources};
 pub use catalogue::{Catalogue, ReadItem, alpns, catalogue_key};
 pub use changes::{Batch, Changes, LastSync, SyncState};
 pub use error::{Result, SyncError};

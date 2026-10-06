@@ -1,5 +1,6 @@
-//! The heartbeat between nodes: who is online, for how long, and what a beat
-//! teaches about where its sender is (phase 4's 4b-3).
+//! The heartbeat between nodes: who is online, for how long, what a beat
+//! teaches about where its sender is (phase 4's 4b-3), and what it says its
+//! sender holds (4b-4).
 //!
 //! Without a running `MembershipNode`, as in `converge.rs`: the membership is
 //! folded by hand, and each node's address statement is handed to it the way
@@ -10,21 +11,30 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
-use distlib_core::{MemberId, NodeAddr, SignedAddress};
+use distlib_core::{
+    ContentHash, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId, MemberId, NodeAddr,
+    SignedAddress, SignedHeartbeat,
+    availability::{DELTA_MAX, decode_base},
+};
 use distlib_net::Transport;
-use distlib_sync::Availability;
+use distlib_sync::{Availability, Holdings, Sources, availability::topic_for};
+use futures_lite::StreamExt as _;
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
-use iroh_gossip::net::GOSSIP_ALPN;
+use iroh_blobs::store::mem::MemStore;
+use iroh_gossip::{
+    api::{Event, GossipReceiver},
+    net::{GOSSIP_ALPN, Gossip},
+};
 use tokio::sync::watch;
 
 fn init_logging() {
@@ -47,6 +57,11 @@ struct Node {
     /// What the node's own announcer would hand the heartbeat. Kept for as
     /// long as the node runs: dropping it stops the beat.
     says: watch::Sender<Option<SignedAddress>>,
+    /// Where this node's content and published lists are.
+    blobs: MemStore,
+    holdings: Holdings,
+    /// For listening to the topic as it is, beside the node's own heartbeat.
+    gossip: Gossip,
     router: Router,
 }
 
@@ -73,11 +88,21 @@ impl Node {
         let gossip = distlib_net::spawn_gossip(&endpoint);
         let transport = Transport::new(endpoint.clone(), gossip.clone()).unwrap();
         let says = watch::Sender::new(None);
-        let availability =
-            Availability::start(&transport, &secret, membership, says.subscribe(), interval)
-                .unwrap();
+        let blobs = MemStore::new();
+        let holdings = Holdings::new((*blobs).clone());
+        let availability = Availability::start(
+            &transport,
+            &secret,
+            Sources {
+                membership,
+                own_address: says.subscribe(),
+                holdings: holdings.clone(),
+            },
+            interval,
+        )
+        .unwrap();
         let router = Router::builder(endpoint)
-            .accept(GOSSIP_ALPN, gossip)
+            .accept(GOSSIP_ALPN, gossip.clone())
             .spawn();
         let node = Self {
             id: MemberId::from(secret.public()),
@@ -86,6 +111,9 @@ impl Node {
             directory: transport.directory,
             secret,
             says,
+            blobs,
+            holdings,
+            gossip,
             router,
         };
         node.says_where_it_is(true);
@@ -107,6 +135,44 @@ impl Node {
             .unwrap();
     }
 
+    /// Makes item `n` held here, its one content file in the store, and
+    /// returns its id.
+    async fn holds(&self, n: u16) -> ItemId {
+        let item = item(n, self.content(n).await);
+        assert!(self.holdings.recheck(&item).await.unwrap());
+        item.id
+    }
+
+    /// Makes item `n` no longer held here: a second content file is added to
+    /// it, which this node lacks.
+    async fn no_longer_holds(&self, n: u16) {
+        let mut item = item(n, self.content(n).await);
+        item.files.insert(
+            ContentHash::from_bytes([0xee; 32]),
+            file(&format!("{n}-more")),
+        );
+        assert!(!self.holdings.recheck(&item).await.unwrap());
+    }
+
+    async fn content(&self, n: u16) -> ContentHash {
+        let tag = self
+            .blobs
+            .add_bytes(n.to_be_bytes().to_vec())
+            .await
+            .unwrap();
+        ContentHash::from_bytes(*tag.hash.as_bytes())
+    }
+
+    /// Hears the topic of `group` as it is, from the next message on.
+    async fn overhears(&self, group: GroupId) -> GossipReceiver {
+        let topic = self
+            .gossip
+            .subscribe(topic_for(group), Vec::new())
+            .await
+            .unwrap();
+        topic.split().1
+    }
+
     async fn sees_online(&self, members: &[MemberId]) {
         let expected: BTreeSet<MemberId> = members.iter().copied().collect();
         tokio::time::timeout(
@@ -124,6 +190,71 @@ impl Node {
         })
         .unwrap();
     }
+}
+
+fn item(n: u16, content: ContentHash) -> Item {
+    let mut bytes = [0; 32];
+    bytes[..2].copy_from_slice(&n.to_be_bytes());
+    let mut item = Item::new(ItemId::from_bytes(bytes));
+    item.files.insert(content, file(&n.to_string()));
+    item
+}
+
+fn file(name: &str) -> FileRecord {
+    FileRecord {
+        role: FileRole::Content,
+        format: "epub".to_owned(),
+        size: 2,
+        filename: format!("{name}.epub"),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    }
+}
+
+/// Every beat `member` sends on `group`'s topic within `window`, in order.
+async fn beats_from(
+    heard: &mut GossipReceiver,
+    group: GroupId,
+    member: MemberId,
+    window: Duration,
+) -> Vec<Heartbeat> {
+    let mut beats = Vec::new();
+    let _ = tokio::time::timeout(window, async {
+        while let Some(event) = heard.next().await {
+            if let Event::Received(message) = event.unwrap() {
+                let signed = SignedHeartbeat::decode(&message.content).unwrap();
+                if signed.member() == member {
+                    beats.push(signed.open(&group).unwrap().clone());
+                }
+            }
+        }
+    })
+    .await;
+    beats
+}
+
+/// The next beat `member` sends on `group`'s topic.
+async fn next_beat_from(heard: &mut GossipReceiver, group: GroupId, member: MemberId) -> Heartbeat {
+    tokio::time::timeout(SOON, async {
+        loop {
+            if let Some(Event::Received(message)) = heard.next().await.map(Result::unwrap) {
+                let signed = SignedHeartbeat::decode(&message.content).unwrap();
+                if signed.member() == member {
+                    return signed.open(&group).unwrap().clone();
+                }
+            }
+        }
+    })
+    .await
+    .expect("no beat from the member")
+}
+
+fn sorted(ids: impl IntoIterator<Item = ItemId>) -> Vec<ItemId> {
+    let mut ids: Vec<ItemId> = ids.into_iter().collect();
+    ids.sort_unstable();
+    ids
 }
 
 fn record(id: MemberId) -> MemberRecord {
@@ -396,6 +527,102 @@ async fn an_expelled_member_is_offline_at_once() {
     bob.says_where_it_is(true);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(alice.availability.online().borrow().is_empty());
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
+/// **A change to what a member holds is told promptly, and a burst once.**
+///
+/// Bob beats every minute, so only a change can prompt the beat that says
+/// what he now holds — and two changes half a second apart make one beat, not
+/// two, ten seconds after his last (D4's floor). Twice: the second burst
+/// comes just after a beat a change prompted, and waits out its ten seconds
+/// too.
+#[tokio::test]
+async fn a_change_to_what_a_member_holds_is_one_beat_promptly() {
+    let (alice, bob, membership) = a_pair(Duration::from_secs(60)).await;
+    let group = membership[0].borrow().group_id().unwrap();
+    alice.sees_online(&[bob.id]).await;
+    let mut heard = alice.overhears(group).await;
+
+    let mut held = Vec::new();
+    for burst in [[1, 2], [3, 4]] {
+        held.push(bob.holds(burst[0]).await);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        held.push(bob.holds(burst[1]).await);
+
+        let beats = beats_from(&mut heard, group, bob.id, Duration::from_secs(13)).await;
+        assert_eq!(beats.len(), 1, "{beats:#?}");
+        let holdings = &beats[0].holdings;
+        assert_eq!((holdings.count, holdings.base), (held.len() as u64, None));
+        assert_eq!(sorted(holdings.added.clone()), sorted(held.clone()));
+        assert!(holdings.removed.is_empty());
+    }
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
+/// **More than a beat can carry is published as a base**, in the sender's own
+/// store under the one tag, and what changes after it is counted from it.
+#[tokio::test]
+async fn what_a_beat_cannot_carry_is_published_as_a_base() {
+    let (alice, bob, membership) = a_pair(Duration::from_secs(1)).await;
+    let group = membership[0].borrow().group_id().unwrap();
+    alice.sees_online(&[bob.id]).await;
+    let mut held = HashSet::new();
+    for n in 0..=DELTA_MAX as u16 {
+        held.insert(bob.holds(n).await);
+    }
+    let mut heard = alice.overhears(group).await;
+
+    let beat = tokio::time::timeout(SOON, async {
+        loop {
+            let beat = next_beat_from(&mut heard, group, bob.id).await;
+            if beat.holdings.count == held.len() as u64 {
+                return beat;
+            }
+        }
+    })
+    .await
+    .expect("bob never said what he holds");
+    let base = beat.holdings.base.expect("a base, the delta being too big");
+    assert!(beat.holdings.added.is_empty() && beat.holdings.removed.is_empty());
+    let list = bob
+        .blobs
+        .blobs()
+        .get_bytes(iroh_blobs::Hash::from_bytes(*base.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(decode_base(&list).unwrap().collect::<HashSet<_>>(), held);
+    let tagged = bob
+        .blobs
+        .tags()
+        .get("distlib/availability/base")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tagged.hash.as_bytes(), base.as_bytes());
+
+    bob.no_longer_holds(7).await;
+    let gone = tokio::time::timeout(SOON, async {
+        loop {
+            let beat = next_beat_from(&mut heard, group, bob.id).await;
+            if !beat.holdings.removed.is_empty() {
+                return beat;
+            }
+        }
+    })
+    .await
+    .expect("bob never said he no longer holds it");
+    assert_eq!(gone.holdings.base, Some(base));
+    assert_eq!(gone.holdings.count, held.len() as u64 - 1);
+    assert_eq!(
+        gone.holdings.removed,
+        sorted([item(7, ContentHash::from_bytes([0; 32])).id])
+    );
+    assert!(gone.holdings.added.is_empty());
 
     alice.router.shutdown().await.unwrap();
     bob.router.shutdown().await.unwrap();

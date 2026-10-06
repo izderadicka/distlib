@@ -25,7 +25,7 @@ use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
-use distlib_sync::{Availability, Catalogue};
+use distlib_sync::{Availability, Catalogue, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::store::fs::FsStore;
 use tokio::sync::broadcast;
@@ -149,8 +149,11 @@ impl Runtime {
         let availability = Availability::start(
             &transport,
             secret,
-            node.subscribe(),
-            node.own_address(),
+            Sources {
+                membership: node.subscribe(),
+                own_address: node.own_address(),
+                holdings: catalogue.holdings().clone(),
+            },
             Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
         )
         .context("could not start the heartbeat")?;
