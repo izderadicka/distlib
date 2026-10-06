@@ -343,13 +343,18 @@ prefixes, open as a compatible change if that end is ever measured and found wan
 
 - **The interval is configurable** — `[availability] beat_interval_secs`, default 60, with ±10%
   jitter so the group does not beat in step. A change to what this node holds triggers an extra beat,
-  at most once every 10 s. Tests set the interval in code, around 300 ms.
+  at most once every 10 s. Tests set the interval in code, at 1 s.
 - **The budget is a constant — Ivan's call.** With N members, each beat reaches all of them, so every
   node receives N beats per interval. Each sender stretches its own interval to
-  `beat_interval × ⌈N/50⌉`, which keeps what any node receives at about fifty beats a minute
-  whatever N is. **The interval and the TTL grow linearly with N; the traffic per node stays flat.**
+  `beat_interval × ⌈N/50⌉`, which keeps what any node receives at about fifty beats a minute.
+  **The interval and the TTL grow linearly with N; the traffic per node stays flat** — up to a cap.
   At the default, N = 200 beats every 4 minutes and goes offline after 12.
-- **TTL = 3 × the sender's `interval_secs`**, read from the heartbeat and clamped to 1 s – 1 h. The
+- **The interval is capped at 20 minutes** — reached at 1,000 members at the default. Beyond it the
+  traffic per node grows with N, linearly. Linear rather than logarithmic, which would grow the
+  traffic sooner; presence for groups far beyond the thousands §2 aims at is to be reworked later
+  (C32). **Ivan's call**, at the review of 4b-3.
+- **TTL = 3 × the sender's `interval_secs`**, read from the heartbeat and clamped to 1 s – 1 h —
+  three of the capped interval, derived from it so the two clamps cannot disagree. The
   sender says how long to trust it, so two nodes with different configs, or different views of N,
   still agree. At the default that is 180 s, against §5.6's "~5 min" — a delta, **Ivan's call**.
 - **A `leaving` beat on graceful shutdown** removes the member at once, sent before the endpoint closes (P4-2). A
@@ -573,6 +578,29 @@ a time, review before the next.
   **Acceptance:** a member is online, then gone within the TTL when aborted and at once when stopped
   cleanly; a sender's interval sets its receiver's TTL; a node that missed an address announcement
   learns it from a heartbeat (C5); `a_settled_group_stops_talking_about_addresses` still passes.
+  *As built:* `Availability` in `distlib-sync::availability`, started by the runtime beside the
+  catalogue; `online()` is a watch of the other members online. The receive rules are a plain table,
+  `Online`, unit-tested without a network: **a member taken offline keeps its last `(epoch, seq)`**,
+  so a beat older than the goodbye — gossip does not keep order — cannot bring it back for a TTL; the
+  entry goes only when the member leaves the group. `MembershipNode::own_address()` is a watch of the
+  statement the announcer last signed, woken only when it changes. Beats go out at once, every
+  interval, when that statement changes — and **when a neighbour comes up**, which the plan did not
+  say: the first beat of all goes out before any neighbour is connected, to nobody, and at the default
+  interval a node would otherwise be unseen for a minute. **The goodbye waits 250 ms before the
+  endpoint closes**: broadcasting only hands the beat to the gossip actor, and closing the connection
+  drops what it has not written — without the wait the runtime test failed on its first run, with it
+  20 of 20. `beat_interval_secs` is a `NonZeroU32`, so 0 is refused when the config is read. A beat
+  states its interval in whole seconds, so the shortest TTL is 3 s, and the tests beat every 1 s and
+  10 s rather than every 300 ms. **No floor between beats yet**: the extra beats here are an address
+  change, already floored by the announcer, and a new neighbour; the floor comes with 4b-4's
+  holdings change, the burst it is for. **Measured, five nodes beating every second for a minute on
+  loopback:** a beat is about 310 B; each node receives 4 beats and about 15 gossip control messages
+  per interval, about 2.3 KB — about 3.3 MB a day at the default 60 s — and the node gossip made the
+  hub forwards about 5 KB per interval, about 7 MB a day. **At review (Ivan):** the stretched
+  interval is capped at 20 minutes and the TTL's hour derived from it — before, above 3,000 members
+  a beat's interval outran its own TTL and every member flickered offline between beats (C32 for
+  what lies beyond). And `Online` keeps no copy of the group: who belongs is asked of the membership
+  watch as it is when a beat arrives, and an expulsion drops the member at once.
 
 - **4b-4 — holdings on the wire: the base list and the delta (D3, D5).**
   **Acceptance:** a receiver's map matches the sender's held set exactly — after the base, after
@@ -672,6 +700,7 @@ Every open C-number appears here once.
 | **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
 | **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; 4b's heartbeat appearances and D7 (b, c) are what would notice if it did not. |
 | **C31** | **A write made as two nodes connect can miss both paths to the other** — broadcast before the gossip neighbour is up, and after the running sync round compared the two sides; iroh-docs drops the sync it would start for the new neighbour because a round is already running, and only a `SyncReport` queues one (`engine/state.rs:195-206`). Found from the macOS CI log of `what_one_member_writes_the_other_reads`, write and neighbour 0.1 ms apart; repaired only by `OFFER_AGAIN`, which 4b-6 removes | **Worked around** after 4a-3: the pump asks for one more round with a neighbour whose round began before it came up (`Pump::began_before_neighbour`). Upstream: `NewNeighbor` should queue a resync the way `SyncReport` does — an issue to open. |
+| **C32** | **Presence traffic grows with N above 1,000 members** — the beat interval is capped at 20 minutes (D4), so each node receives N beats per 20 minutes; at 10,000 about 400 MB a day, and full broadcast cannot serve a group of a million at any interval | **No phase — Ivan's call, KISS for now.** A larger group is the trigger: presence by sampling or aggregation rather than every member's beat reaching every other. |
 
 ---
 
@@ -687,7 +716,7 @@ mismatch.
 change only; the quiet-group counters;
 C25; both halves of §9's acceptance; a forged and an expelled entry; provider order on download.
 
-Heartbeat tests run at about 300 ms intervals with a TTL of about a second, and **assert "within",
+Heartbeat tests run at 1 s intervals with a TTL of 3 s, and **assert "within",
 never an exact sequence** — the same rule as phase 3's SSE tests, for the same reason.
 
 Every mechanism is mutation-checked. UI: Vitest first, Playwright for the happy paths only.
@@ -708,7 +737,8 @@ per interval and forwards roughly as many again. At the default 60 s, what each 
 |---|---|---|
 | 5 | ~6 MB | ~5 MB |
 | 50 | ~58 MB | ~48 MB |
-| more than 50 | the N = 50 figure — D4's budget stretches the interval instead | the same |
+| 50 to 1,000 | the N = 50 figure — D4's budget stretches the interval instead | the same |
+| more than 1,000 | N / 1,000 × the N = 50 figure — the interval is capped (D4, C32) | the same |
 
 A base costs its own size times N once per consolidation — once per download burst, or every ~380
 changes during a long one. A node holding 100k items and 50 members: about 160 MB sent, per burst.

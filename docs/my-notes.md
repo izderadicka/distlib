@@ -174,3 +174,11 @@ It takes quite some time before connecting switches to live - and all worked in 
 In library it would be good to see which items are local -  fetched and exported.
 
 Language is not in full text search?
+
+## Testing cleanup
+
+Some pub functions are used only for tests -  we should limit them with `#cfg(test)`
+
+## Clean termination
+
+Now we are extensively using task abort. Though it may work (at least agent said so), it does not feel clean -  cancellation token from tokio utils could be better I think.

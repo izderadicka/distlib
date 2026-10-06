@@ -13,11 +13,11 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::time::Duration;
+use std::{collections::BTreeSet, num::NonZeroU32, time::Duration};
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{DataDir, MemberId, NodeAddr};
+use distlib_core::{Config, DataDir, MemberId, NodeAddr};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
@@ -171,14 +171,24 @@ struct Group {
 /// written down nowhere — which is the whole question this file's follower
 /// tests exist to answer.
 async fn a_group_with_two_followers() -> Group {
+    a_group_with_two_followers_beating(Config::default().availability.beat_interval_secs).await
+}
+
+/// [`a_group_with_two_followers`], every node beating every `interval`
+/// seconds.
+async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
     init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
 
+    let beating = |mut config: Config| {
+        config.availability.beat_interval_secs = interval;
+        config
+    };
     let alice = Runtime::start(
         &alice_key,
-        &config(&[alice_id]),
+        &beating(config(&[alice_id])),
         &DataDir::new(dir.path().join("alice")),
     )
     .await
@@ -208,7 +218,7 @@ async fn a_group_with_two_followers() -> Group {
     }
 
     let where_alice_is = bound(&alice);
-    let joining = following(alice_id, &where_alice_is);
+    let joining = beating(following(alice_id, &where_alice_is));
     let bob = Runtime::start(&bob_key, &joining, &DataDir::new(dir.path().join("bob")))
         .await
         .unwrap();
@@ -312,6 +322,28 @@ async fn each_of_a_pair_shows_the_other_as_its_neighbour_until_it_stops() {
         .unwrap();
 
     bob.shutdown().await;
+}
+
+/// **A node stopped cleanly is offline to its peers at once** (4b-3): its
+/// shutdown says goodbye before the endpoint closes. At the default interval
+/// its last beat would otherwise be believed for three minutes.
+#[tokio::test]
+async fn a_node_stopped_cleanly_is_offline_at_once() {
+    let (_dir, alice, bob) = a_founded_pair().await;
+    let bob_id = MemberId::from(bob.endpoint().id());
+    let mut online = alice.availability().online();
+    tokio::time::timeout(SOON, online.wait_for(|online| online.contains(&bob_id)))
+        .await
+        .expect("alice never saw bob online")
+        .unwrap();
+
+    bob.shutdown().await;
+    tokio::time::timeout(AMPLY, online.wait_for(BTreeSet::is_empty))
+        .await
+        .expect("alice still counts bob online after he stopped")
+        .unwrap();
+
+    alice.shutdown().await;
 }
 
 /// The composed version of the agreement test `distlib-consensus` has.
@@ -463,7 +495,9 @@ async fn a_follower_learns_where_another_follower_is() {
 /// arrives and this fails on the timeout.
 #[tokio::test]
 async fn a_settled_group_stops_talking_about_addresses() {
-    let group = a_group_with_two_followers().await;
+    // Beating every second, so the quiet a settled group must manage holds
+    // with heartbeats in it, not merely between them.
+    let group = a_group_with_two_followers_beating(NonZeroU32::MIN).await;
     let everyone = [
         ("alice", &group.alice),
         ("bob", &group.bob),

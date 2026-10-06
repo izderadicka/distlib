@@ -201,6 +201,7 @@ pub async fn announce_address(
     state_machine: &StateMachineStore,
     sender: &GossipSender,
     mut newcomers: watch::Receiver<u64>,
+    said: &watch::Sender<Option<SignedAddress>>,
 ) {
     let mut addresses = endpoint.watch_addr().stream();
 
@@ -211,7 +212,18 @@ pub async fn announce_address(
         let addr = NodeAddr::from(&endpoint.addr());
         if !addr.is_empty() {
             match SignedAddress::sign(secret, addr, state_machine.position()) {
-                Ok(signed) => broadcast(sender, &Announcement::ReachableAt(Box::new(signed))).await,
+                Ok(signed) => {
+                    // Only news wakes the heartbeat: a restatement is the same
+                    // bytes, and re-sent on every newcomer this hears of.
+                    said.send_if_modified(|held| {
+                        let news = held.as_ref() != Some(&signed);
+                        if news {
+                            *held = Some(signed.clone());
+                        }
+                        news
+                    });
+                    broadcast(sender, &Announcement::ReachableAt(Box::new(signed))).await;
+                }
                 // Signing is an ed25519 operation over a short message and the
                 // encoding cannot realistically fail, so this is not a
                 // condition to handle — but it would leave this node

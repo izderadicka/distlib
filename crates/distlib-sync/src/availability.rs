@@ -1,4 +1,8 @@
-//! Which items this node holds — what its heartbeat will say (phase 4's D6).
+//! Who is online, and which items this node holds — what its heartbeat says
+//! (phase 4's D4 and D6).
+//!
+//! The heartbeat is [`Availability`]; the rest of this file is the set its
+//! holdings will be read from.
 //!
 //! **A set this node keeps, not a question asked per row.** Whether an item is
 //! held changes only when its content files do — a download lands, a member
@@ -20,6 +24,11 @@ use distlib_core::{FileRole, Item, ItemId};
 use iroh_blobs::{Hash, api::Store as BlobStore, api::proto::BlobStatus};
 
 use crate::error::{Result, SyncError};
+
+mod heartbeat;
+mod online;
+
+pub use heartbeat::{Availability, topic_for};
 
 /// The items every one of whose content files is complete in this node's
 /// store.

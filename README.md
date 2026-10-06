@@ -434,6 +434,11 @@ files — `downloads` under the data directory unless set, or an absolute path. 
 created when first needed. `distlib download` writes to the working directory, or
 `--dest`.
 
+`[availability] beat_interval_secs` is how often the node tells the group it is
+online — every 60 seconds unless set, stretched in groups of more than fifty, to at
+most 20 minutes. Its peers count it offline after three missed beats, and at once
+when it stops cleanly.
+
 The data directory is the one thing that cannot be configured in the file, since the
 file lives inside it. Use `--data-dir` or `DISTLIB_DATA_DIR`; setting `data_dir` in the
 config is an error rather than being silently ignored.
