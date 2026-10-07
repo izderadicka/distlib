@@ -23,7 +23,7 @@ docs.rs on 2026-08-23:
 
 | §  | Doc says | Reality |
 |---|---|---|
-| §3 | "the iroh family moves fast (0.10x)" | **`iroh 1.0.3`** — stable and semver-committed. The compatible set is `iroh-blobs 0.103.0`, `iroh-gossip 0.101.0`, `iroh-docs 0.101.0`, `iroh-relay 1.0.3`, `irpc 0.17.0`; `iroh-docs 0.101` itself pins `iroh-blobs ^0.103` and `iroh-gossip ^0.101`, so the set is coherent. The exact-pin policy still stands, but the churn it guards against is much reduced. |
+| §3 | "the iroh family moves fast (0.10x)" | **`iroh 1.0.3`** — stable and semver-committed. The compatible set is `iroh-blobs 0.103.0` (0.103.1 since 2026-10-06, when 0.103.0 was yanked), `iroh-gossip 0.101.0`, `iroh-docs 0.101.0`, `iroh-relay 1.0.3`, `irpc 0.17.0`; `iroh-docs 0.101` itself pins `iroh-blobs ^0.103` and `iroh-gossip ^0.101`, so the set is coherent. The exact-pin policy still stands, but the churn it guards against is much reduced. |
 | §4.1, §8 | `NodeId`, `NodeAddr` | Renamed **`EndpointId`** (an alias of `PublicKey`) and **`EndpointAddr`**. |
 | §3 | `discovery` | Renamed **`address_lookup()`** on the endpoint builder. |
 | §5.1, §9 | "allowlist hook at connection accept" (mechanism unspecified) | iroh 1.0 provides **`EndpointHooks::after_handshake(&Connection) -> AfterHandshakeOutcome`**, which fires after the TLS handshake on both incoming *and* outgoing connections. `Reject { error_code: VarInt, reason: Vec<u8> }` closes the connection. This is the mechanism. |
