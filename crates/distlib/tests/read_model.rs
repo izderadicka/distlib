@@ -29,7 +29,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, record};
+use common::{bound, config, init_logging, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// then for the projection behind that to catch up.
@@ -134,6 +134,7 @@ async fn agree_on_search(node: &Runtime, against: &Runtime, query: &str, what: &
 /// Alice and bob, founded as one group, with bob's data directory named so the
 /// test can start a second node on it.
 async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
+    init_logging();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());

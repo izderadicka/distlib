@@ -671,6 +671,20 @@ async fn an_expelled_member_stops_receiving_entries() {
         b"The Word for World Is Forest",
         "carol must be receiving before her expulsion can be said to stop it"
     );
+    // Whoever could pass her an entry must hold a connection to her first, or
+    // seeing it gone below would prove nothing.
+    let mut watches = Vec::new();
+    for (who, runtime) in [("alice", &group.alice), ("bob", &group.bob)] {
+        let mut sync = runtime.catalogue().sync_status();
+        tokio::time::timeout(
+            AMPLY,
+            sync.wait_for(|state| state.neighbours.contains(&group.carol_id)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{who} never became carol's neighbour"))
+        .unwrap();
+        watches.push((who, sync));
+    }
 
     group
         .alice
@@ -685,16 +699,22 @@ async fn an_expelled_member_stops_receiving_entries() {
         .await
         .unwrap();
 
-    // Waited for on bob, because bob is the one who has to refuse her: the
-    // expulsion has to be applied where the connection is, not merely
-    // committed where it was proposed.
-    tokio::time::timeout(SOON, async {
-        while group.bob.node().membership().is_member(&group.carol_id) {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("the expulsion must reach bob");
+    // Waited for where the connections are, because that is where she has to
+    // be refused: the expulsion has to be enforced there, not merely committed
+    // where it was proposed. Enforced, not applied: a node's membership turns
+    // before its allowlist does, and Linux CI caught bob broadcasting to carol
+    // in the 50 ms between. Alice too, because a peer still connected to her
+    // relays whatever bob sends. Carol dropping out of their neighbours is the
+    // connection actually closing.
+    for (who, mut sync) in watches {
+        tokio::time::timeout(
+            SOON,
+            sync.wait_for(|state| !state.neighbours.contains(&group.carol_id)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the expulsion must reach {who}"))
+        .unwrap();
+    }
 
     group
         .bob

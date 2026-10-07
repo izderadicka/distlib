@@ -654,9 +654,12 @@ async fn open_when_founded(opening: Opening) {
 /// dials the document's remembered peers too, at most five of them, and this
 /// is asked for at most once per round that began before its neighbour did —
 /// a startup's worth, not a steady cost.
+///
+/// **Not at once**: see [`SETTLE`].
 async fn sync_again_when_asked(doc: Doc, mut asked: mpsc::UnboundedReceiver<EndpointId>) {
     while let Some(peer) = asked.recv().await {
         tracing::debug!(%peer, "syncing again with a neighbour that came up mid-round");
+        tokio::time::sleep(SETTLE).await;
         if let Err(error) = doc.start_sync(vec![EndpointAddr::new(peer)]).await {
             tracing::warn!(%error, %peer, "could not sync again with a neighbour");
         }
@@ -664,6 +667,19 @@ async fn sync_again_when_asked(doc: Doc, mut asked: mpsc::UnboundedReceiver<Endp
     // The pump has stopped, which is shutdown; ending here would end the rest.
     std::future::pending::<()>().await;
 }
+
+/// How long a round the pump asks for waits after the round before it (C33).
+///
+/// A round is over on this side before it is over on the other: the side that
+/// accepted it still holds it as running for a few tens of milliseconds. A
+/// round asked for at once reaches it then, and is refused as `AlreadySyncing`
+/// — which iroh-docs reads as the other side dialling us at the same moment,
+/// and so leaves its own round with that peer marked running, waiting for a
+/// sync that never comes (`iroh-docs-0.101.0` `engine/live.rs:498`). From then
+/// on every round between the two is refused, both ways, until one restarts.
+/// Measured: `read_model`'s restart test failed one run in seven to twenty
+/// with no wait, and passed sixty of sixty with this one.
+const SETTLE: Duration = Duration::from_secs(1);
 
 /// How often the document's peers are offered again regardless.
 ///
