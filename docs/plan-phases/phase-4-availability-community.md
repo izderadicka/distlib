@@ -309,10 +309,12 @@ changed" — with the change itself carried alongside.
 - **A receiver** that already holds the member's `base` applies `added` and `removed`; one that does
   not fetches the base once (D5), then applies them. The one check is free:
   `len(base) + len(added) − len(removed) == count`. A mismatch is logged and the base fetched again.
+  *(As built: not fetched again — the hash fixes the bytes; see 4b-4.)*
 - **The receiver keeps one inverted map, `item → members holding it`,** with members as `u16` indexes
   into the current membership. That map is what the library page asks ("n online") and what a later
   "available now" filter would need. A member's base changing, or the member going away, is one pass
-  over the map.
+  over the map. *(As built: members keyed by `MemberId`, and "going away" is leaving the group, not
+  going offline; see 4b-4.)*
 
 What a base costs on the wire, once per publish and receiver:
 
@@ -625,6 +627,28 @@ a time, review before the next.
   seconds after the last, twice; 385 items make a base readable from the sender's store under the
   tag, and a removal after it is counted from it. Not pinned over the network: the quiet rule's
   wiring, which would take ten minutes.
+  *As built, the receiver:* `Holders` in `distlib-sync::availability` keeps the inverted map,
+  and `Availability::holders(item)` and `knows_holdings_of(member)` read it. Each beat's change
+  *replaces* the last one rather than adding to it: the previous change is undone and the new one
+  applied, so an item added and lost again before the next base is in neither list and is not
+  kept. Only the previous change is stored per member, not a copy of the base. A base is fetched
+  beside the listening loop, never in it, one fetch per member at a time, with
+  `get_verified_size` first so a list over `BASE_MAX` is refused before it is read. When it arrives,
+  the newest beat's change is applied on top, and a base no beat names any more is dropped.
+  **Three departures from D3/D5:**
+  - members are keyed by `MemberId`, not `u16` indexes — a few megabytes at the target sizes
+    (KISS; numbers decide, with C28);
+  - a statement or a list that does not add up is **not** fetched again: the hash fixes the bytes,
+    so the same base would fail the same way on every beat. The member stays unknown until a beat
+    names another base. Only a failure to reach the member is retried, by the next beat;
+  - what a member holds is kept while it is offline, and dropped only when it leaves the group,
+    so a member that comes back with the same base costs no fetch.
+  Pinned without a network: the change replacing the last, a missed beat, a new base, a stale
+  base, retry and no retry, the count check, duplicates, members apart. Over one: a receiver sees
+  exactly what a member holds after its base, after an addition, after a base item and an added
+  item are lost; the base is fetched once (counted on the sender) until a new one is named; the
+  receiver's store has no blob and no tag; an expelled member's holdings are forgotten. Not
+  pinned: the size cap, which would take a 320 MB blob.
 
 - **4b-5 — availability in the API and CLI.** Hits gain `held` and `providers` — an exact count of
   online holders, `null` while any online member's base is still unknown;

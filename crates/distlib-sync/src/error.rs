@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use distlib_core::MemberId;
+
 use thiserror::Error;
 
 /// The result of any fallible operation in this crate.
@@ -83,6 +85,29 @@ pub enum SyncError {
     /// is a standard error only with a feature nothing else here needs.
     #[error("could not draw a heartbeat epoch: {message}")]
     Random { message: String },
+
+    /// A member's base list, named by its heartbeat, could not be fetched
+    /// from it. The next beat that names it tries again.
+    #[error("could not fetch the list of what member {member} holds")]
+    BaseFetch {
+        member: MemberId,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A member named, as its base list, a blob larger than any list may be —
+    /// refused before it is fetched, since a list is read whole into memory.
+    #[error("member {member} named a list of {size} bytes, more than any list may be")]
+    BaseTooBig { member: MemberId, size: u64 },
+
+    /// A member's base list arrived and is not one: another format, cut off,
+    /// or too long.
+    #[error("the list of what member {member} holds is not readable")]
+    BadBase {
+        member: MemberId,
+        #[source]
+        source: distlib_core::error::CoreError,
+    },
 }
 
 impl SyncError {

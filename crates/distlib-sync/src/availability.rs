@@ -27,6 +27,7 @@ use tokio::{sync::watch, time::Instant};
 use crate::error::{Result, SyncError};
 
 mod heartbeat;
+mod holders;
 mod online;
 mod statement;
 
