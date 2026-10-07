@@ -354,15 +354,21 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
             }
         }
 
+        let due = Instant::now() + jittered(stretched);
         tokio::select! {
-            () = tokio::time::sleep(jittered(stretched)) => {}
+            () = tokio::time::sleep_until(due) => {}
             () = neighbour_up.notified() => {}
             moved = own_address.changed() => if moved.is_err() {
                 tracing::error!("this node no longer says where it is; beating no more");
                 return;
             },
-            // Cannot fail: `holdings` here keeps the sending half alive.
-            _ = changes.changed() => tokio::time::sleep_until(last_beat + CHANGE_FLOOR).await,
+            // Cannot fail: `holdings` here keeps the sending half alive. The
+            // floor holds back only the beat the change prompts: never past
+            // the one already due, or a busy node would beat less often than
+            // it promised, and outlive its TTL.
+            _ = changes.changed() => {
+                tokio::time::sleep_until((last_beat + CHANGE_FLOOR).min(due)).await;
+            }
         }
     }
 }

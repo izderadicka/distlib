@@ -613,7 +613,9 @@ a time, review before the next.
   `{count, base, added, removed}` for each beat, against the last base it published; nothing reads
   it yet. `Holdings` signals each change to the set — a recheck that finds what was known is none,
   or a replay would prompt a beat per item — and a change prompts a beat no sooner than ten seconds
-  after the last beat (D4's floor). **Two departures from D5:** no base is published at start — until
+  after the last beat (D4's floor), or at the regular beat if that is due sooner: the floor holds
+  back only the extra beat, so a node whose holdings keep changing still beats on its interval
+  and does not outlive its TTL (macOS CI found the floor stalling a 1 s beat). **Two departures from D5:** no base is published at start — until
   the first is, the delta is counted from an empty list, and the overflow and quiet rules publish one
   when it is needed; and the quiet rule waits for ten minutes with *no change*, not "nothing added",
   since a delta of removals alone would otherwise never be folded in. A base that cannot be published

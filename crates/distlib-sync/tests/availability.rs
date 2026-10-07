@@ -564,6 +564,34 @@ async fn a_change_to_what_a_member_holds_is_one_beat_promptly() {
     bob.router.shutdown().await.unwrap();
 }
 
+/// **A member whose holdings keep changing keeps beating.** The floor holds
+/// back only the extra beat a change prompts, never the regular one: bob beats
+/// every second, so a floor that held his beats back for ten seconds would
+/// outlast his 3 s TTL and take him offline for being busy.
+#[tokio::test]
+async fn a_member_downloading_keeps_beating() {
+    let (alice, bob, membership) = a_pair(Duration::from_secs(1)).await;
+    let group = membership[0].borrow().group_id().unwrap();
+    alice.sees_online(&[bob.id]).await;
+    let mut heard = alice.overhears(group).await;
+
+    let downloading = async {
+        for n in 0..8 {
+            bob.holds(n).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    let (beats, ()) = tokio::join!(
+        beats_from(&mut heard, group, bob.id, Duration::from_secs(4)),
+        downloading
+    );
+    assert!(beats.len() >= 3, "{beats:#?}");
+    assert!(alice.availability.online().borrow().contains(&bob.id));
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
 /// **More than a beat can carry is published as a base**, in the sender's own
 /// store under the one tag, and what changes after it is counted from it.
 #[tokio::test]
