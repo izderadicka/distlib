@@ -381,8 +381,9 @@ once rather than at the TTL.
   `distlib/availability/base` always points at the newest list, so the previous one is no longer
   protected. Awaiting `add_bytes` directly would give every list a tag of its own and keep all of
   them for ever (ground truth 7).
-- **Re-published — consolidated —** at start; when the next change would overflow the delta; and
-  **when the delta is not empty and nothing has been added for ten minutes.** Without the last rule a
+- **Re-published — consolidated —** when the next change would overflow the delta, and **when the
+  delta is not empty and the set has not changed for ten minutes.** *(As built: not also at start,
+  and "changed" rather than "added" — see 4b-4.)* Without the last rule a
   node that once downloaded three hundred items would send a 10 KB heartbeat for the rest of its life.
   With it, a burst of downloads costs one base fetch per receiver, at its end, and an idle node's
   heartbeat is back to about 0.8 KB. Removals go into `removed` like any other change.
@@ -607,6 +608,23 @@ a time, review before the next.
   additions, after a removal; a dropped heartbeat changes nothing; a base is fetched only when a
   heartbeat names a new one, counted; overflowing the delta, and ten quiet minutes with a delta, each
   publish a new base, and the named tag moves to it; the receiver's blob store is unchanged.
+  **Two PRs, not one** — too big to review as one: the sender first, the receiver second.
+  *As built, the sender:* `Statement` in `distlib-sync::availability` states
+  `{count, base, added, removed}` for each beat, against the last base it published; nothing reads
+  it yet. `Holdings` signals each change to the set — a recheck that finds what was known is none,
+  or a replay would prompt a beat per item — and a change prompts a beat no sooner than ten seconds
+  after the last beat (D4's floor), or at the regular beat if that is due sooner: the floor holds
+  back only the extra beat, so a node whose holdings keep changing still beats on its interval
+  and does not outlive its TTL (macOS CI found the floor stalling a 1 s beat). **Two departures from D5:** no base is published at start — until
+  the first is, the delta is counted from an empty list, and the overflow and quiet rules publish one
+  when it is needed; and the quiet rule waits for ten minutes with *no change*, not "nothing added",
+  since a delta of removals alone would otherwise never be folded in. A base that cannot be published
+  skips the beat rather than understating what is held. Pinned without a network — the delta both
+  ways, overflow at `DELTA_MAX + 1`, ten quiet minutes and not nine, the tag moving, nothing
+  published with nothing to fold in — and over one: two changes half a second apart make one beat ten
+  seconds after the last, twice; 385 items make a base readable from the sender's store under the
+  tag, and a removal after it is counted from it. Not pinned over the network: the quiet rule's
+  wiring, which would take ten minutes.
 
 - **4b-5 — availability in the API and CLI.** Hits gain `held` and `providers` — an exact count of
   online holders, `null` while any online member's base is still unknown;
