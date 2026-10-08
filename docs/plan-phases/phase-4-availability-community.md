@@ -631,8 +631,9 @@ a time, review before the next.
   and `Availability::holders(item)` and `knows_holdings_of(member)` read it. Each beat's change
   *replaces* the last one rather than adding to it: the previous change is undone and the new one
   applied, so an item added and lost again before the next base is in neither list and is not
-  kept. Only the previous change is stored per member, not a copy of the base. A base is fetched
-  beside the listening loop, never in it, one fetch per member at a time, with
+  kept. Only the previous change is stored per member, not a copy of the base. A base is fetched,
+  and taken into the map, by a task of its own, never in the listening loop; one fetch per member
+  at a time, with
   `get_verified_size` first so a list over `BASE_MAX` is refused before it is read. When it arrives,
   the newest beat's change is applied on top, and a base no beat names any more is dropped.
   **Three departures from D3/D5:**

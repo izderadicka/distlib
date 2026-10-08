@@ -458,8 +458,9 @@ struct Listening {
 
 /// Hears the group's beats, and publishes who is online after each change.
 ///
-/// Base lists are fetched beside the loop, never in it: a slow or unreachable
-/// sender must not hold up every other beat and every expiry.
+/// Base lists are fetched, and taken into the map, by tasks of their own, never
+/// in this loop: a slow or unreachable sender must not hold up every other beat
+/// and every expiry. The tasks end with the loop.
 async fn listen(listening: Listening, neighbour_up: &Notify) {
     let Listening {
         mut receiver,
@@ -490,7 +491,8 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                     );
                     match heard {
                         Ok(Some((member, base))) => {
-                            fetches.spawn(fetch(endpoint.clone(), member, base));
+                            reap(&mut fetches);
+                            fetches.spawn(learn(endpoint.clone(), holders.clone(), member, base));
                         }
                         Ok(None) => {}
                         Err(error) => tracing::warn!(
@@ -510,12 +512,6 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                     return;
                 }
                 None => return,
-            },
-            Some(fetched) = fetches.join_next(), if !fetches.is_empty() => match fetched {
-                Ok(fetched) => arrived(&mut lock(&holders), fetched),
-                // Only a panic gets here, and the member it was for stays
-                // unknown — logged, as it is a bug.
-                Err(error) => tracing::error!(%error, "a base list fetch failed outright"),
             },
             () = until(expiry) => online.expire(Instant::now()),
             changed = membership.changed() => {
@@ -591,8 +587,15 @@ fn hear(
         .map(|base| (member, base)))
 }
 
-/// A base list, fetched from the member whose beat names it.
-type Fetched = (MemberId, ContentHash, Result<Bytes>);
+/// Forgets the fetches that have ended, so the set holds only those running.
+fn reap(fetches: &mut JoinSet<()>) {
+    while let Some(ended) = fetches.try_join_next() {
+        if let Err(error) = ended {
+            // A panic, and the member it was for stays unknown: a bug.
+            tracing::error!(%error, "a base list fetch failed outright");
+        }
+    }
+}
 
 /// Whether fetching the same list again could end differently. Only reaching
 /// the member can: the hash fixes the bytes, so a list too big or unreadable
@@ -601,48 +604,53 @@ fn worth_retrying(error: &SyncError) -> bool {
     matches!(error, SyncError::BaseFetch { .. })
 }
 
+/// Fetches `member`'s `base` and takes it into the map.
+async fn learn(
+    endpoint: Endpoint,
+    holders: Arc<Mutex<Holders>>,
+    member: MemberId,
+    base: ContentHash,
+) {
+    let fetched = fetch(&endpoint, member, base).await;
+    take_in(&mut lock(&holders), member, base, fetched);
+}
+
 /// Fetches `member`'s `base` into memory, never into this node's store — so a
 /// receiver leaves nothing behind (D5). Its size is asked first, verified
 /// against the hash, so a member naming some huge blob as its list is refused
 /// before a byte of it is read.
-async fn fetch(endpoint: Endpoint, member: MemberId, base: ContentHash) -> Fetched {
+async fn fetch(endpoint: &Endpoint, member: MemberId, base: ContentHash) -> Result<Bytes> {
     let failed =
         |source: Box<dyn std::error::Error + Send + Sync>| SyncError::BaseFetch { member, source };
-    let fetched = async {
-        let hash = Hash::from_bytes(*base.as_bytes());
-        let connection = endpoint
-            .connect(member.endpoint_id(), iroh_blobs::ALPN)
-            .await
-            .map_err(|error| failed(error.into()))?;
-        let (size, _) = get_verified_size(&connection, &hash)
-            .await
-            .map_err(|error| failed(error.into()))?;
-        if size > BASE_BYTES_MAX {
-            return Err(SyncError::BaseTooBig { member, size });
-        }
-        get_blob(connection, hash)
-            .bytes()
-            .await
-            .map_err(|error| failed(error.into()))
-    };
-    (member, base, fetched.await)
+    let hash = Hash::from_bytes(*base.as_bytes());
+    let connection = endpoint
+        .connect(member.endpoint_id(), iroh_blobs::ALPN)
+        .await
+        .map_err(|error| failed(error.into()))?;
+    let (size, _) = get_verified_size(&connection, &hash)
+        .await
+        .map_err(|error| failed(error.into()))?;
+    if size > BASE_BYTES_MAX {
+        return Err(SyncError::BaseTooBig { member, size });
+    }
+    get_blob(connection, hash)
+        .bytes()
+        .await
+        .map_err(|error| failed(error.into()))
 }
 
-/// Takes a fetched base list into the map — or, failing, lets the next beat
-/// that names it try again, if trying again could help.
-fn arrived(holders: &mut Holders, (member, base, fetched): Fetched) {
-    let read = fetched.and_then(|bytes| {
-        let items = decode_base(&bytes).map_err(|error| SyncError::BadBase {
-            member,
-            source: error,
-        })?;
-        holders.arrived(member, base, items);
-        Ok(())
-    });
-    if let Err(error) = read {
-        tracing::warn!(%error, "could not read what a member holds");
-        holders.failed(member, base, worth_retrying(&error));
-    }
+/// Takes `member`'s fetched `base` into the map — or, failing, lets the next
+/// beat that names it try again, if trying again could help.
+fn take_in(holders: &mut Holders, member: MemberId, base: ContentHash, fetched: Result<Bytes>) {
+    let error = match fetched {
+        Ok(bytes) => match decode_base(&bytes) {
+            Ok(items) => return holders.arrived(member, base, items),
+            Err(source) => SyncError::BadBase { member, source },
+        },
+        Err(error) => error,
+    };
+    tracing::warn!(%error, "could not read what a member holds");
+    holders.failed(member, base, worth_retrying(&error));
 }
 
 #[cfg(test)]
@@ -751,7 +759,7 @@ mod tests {
             member: bob,
             source: "no route".into(),
         };
-        arrived(&mut holders, (bob, base, Err(unreachable)));
+        take_in(&mut holders, bob, base, Err(unreachable));
         assert!(named_again(&mut holders, bob, base));
     }
 
@@ -766,7 +774,7 @@ mod tests {
             }),
         ] {
             let (mut holders, bob, base) = bob_names_a_base();
-            arrived(&mut holders, (bob, base, fetched));
+            take_in(&mut holders, bob, base, fetched);
             assert!(!named_again(&mut holders, bob, base));
             assert!(!holders.is_known(&bob));
         }
@@ -777,7 +785,7 @@ mod tests {
         let (mut holders, bob, base) = bob_names_a_base();
         let item = ItemId::from_bytes([1; 32]);
         let list = distlib_core::availability::encode_base([item]);
-        arrived(&mut holders, (bob, base, Ok(Bytes::from(list))));
+        take_in(&mut holders, bob, base, Ok(Bytes::from(list)));
         assert!(holders.is_known(&bob));
         assert_eq!(holders.holders(&item), [bob]);
     }
