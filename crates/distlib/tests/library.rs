@@ -498,10 +498,16 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
     })
     .await
     .expect("bob is told the item changed, and reads the new title");
-    assert_eq!(
-        title_on(&alice_api, item_id).await.as_deref(),
-        Some("Dune Messiah")
-    );
+    // Waited for, not read once: a node's own read model is behind its own
+    // writes too (see `read_model.rs`), and macOS CI caught alice's still
+    // reading "Dune" after bob's had moved on.
+    tokio::time::timeout(SOON, async {
+        while title_on(&alice_api, item_id).await.as_deref() != Some("Dune Messiah") {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("alice reads her own edit");
 
     let on_bob = bob_api
         .call("library.item", Some(json!({ "item_id": item_id })))
