@@ -13,6 +13,10 @@
 use std::{
     collections::{BTreeSet, HashSet},
     net::{Ipv4Addr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -30,7 +34,11 @@ use iroh::{
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
-use iroh_blobs::store::mem::MemStore;
+use iroh_blobs::{
+    BlobsProtocol,
+    provider::events::{ConnectMode, EventMask, EventSender, ProviderMessage},
+    store::mem::MemStore,
+};
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{GOSSIP_ALPN, Gossip},
@@ -59,6 +67,9 @@ struct Node {
     says: watch::Sender<Option<SignedAddress>>,
     /// Where this node's content and published lists are.
     blobs: MemStore,
+    /// How many connections the store has served — one per base list a
+    /// member fetched from here.
+    served: Arc<AtomicUsize>,
     holdings: Holdings,
     /// For listening to the topic as it is, beside the node's own heartbeat.
     gossip: Gossip,
@@ -75,7 +86,7 @@ impl Node {
         let endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .secret_key(secret.clone())
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![GOSSIP_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()])
             .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .unwrap()
             .bind()
@@ -101,8 +112,27 @@ impl Node {
             interval,
         )
         .unwrap();
+        let (events, mut served_events) = EventSender::channel(
+            16,
+            EventMask {
+                connected: ConnectMode::Notify,
+                ..EventMask::DEFAULT
+            },
+        );
+        let served = Arc::new(AtomicUsize::new(0));
+        tokio::spawn({
+            let served = served.clone();
+            async move {
+                while let Some(event) = served_events.recv().await {
+                    if let ProviderMessage::ClientConnectedNotify(_) = event {
+                        served.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
         let router = Router::builder(endpoint)
             .accept(GOSSIP_ALPN, gossip.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, Some(events)))
             .spawn();
         let node = Self {
             id: MemberId::from(secret.public()),
@@ -112,6 +142,7 @@ impl Node {
             secret,
             says,
             blobs,
+            served,
             holdings,
             gossip,
             router,
@@ -173,6 +204,24 @@ impl Node {
         topic.split().1
     }
 
+    /// Waits until this node knows what `member` holds, and that it is
+    /// exactly `held` among items 0 to `upto`.
+    async fn sees_held(&self, member: MemberId, held: &HashSet<ItemId>, upto: u16) {
+        let exact = || {
+            self.availability.knows_holdings_of(&member)
+                && (0..=upto).map(id).all(|item| {
+                    self.availability.holders(&item).contains(&member) == held.contains(&item)
+                })
+        };
+        tokio::time::timeout(SOON, async {
+            while !exact() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never saw exactly what {member} holds"));
+    }
+
     async fn sees_online(&self, members: &[MemberId]) {
         let expected: BTreeSet<MemberId> = members.iter().copied().collect();
         tokio::time::timeout(
@@ -190,6 +239,11 @@ impl Node {
         })
         .unwrap();
     }
+}
+
+/// Item `n`'s id, whatever its content.
+fn id(n: u16) -> ItemId {
+    item(n, ContentHash::from_bytes([0; 32])).id
 }
 
 fn item(n: u16, content: ContentHash) -> Item {
@@ -486,7 +540,8 @@ async fn a_member_counts_once_the_group_admits_it() {
 }
 
 /// **An expelled member is offline at once**, not when its beat runs out —
-/// and its beats count no more, though it is still sending them.
+/// and its beats count no more, though it is still sending them. What it
+/// holds is forgotten with it.
 #[tokio::test]
 async fn an_expelled_member_is_offline_at_once() {
     let (alice_key, bob_key) = (SecretKey::generate(), SecretKey::generate());
@@ -501,6 +556,10 @@ async fn an_expelled_member_is_offline_at_once() {
     to_alice.send(admitted.clone()).unwrap();
     to_bob.send(admitted.clone()).unwrap();
     alice.sees_online(&[bob.id]).await;
+    assert!(
+        alice.availability.knows_holdings_of(&bob.id),
+        "nothing, so far"
+    );
 
     let mut expelled = admitted;
     let event = MembershipEvent::MemberExpelled {
@@ -522,6 +581,7 @@ async fn an_expelled_member_is_offline_at_once() {
     .await
     .expect("alice kept bob online for his 30 s TTL")
     .unwrap();
+    assert!(!alice.availability.knows_holdings_of(&bob.id));
 
     // Bob, who has not heard, beats again at once; alice must not count it.
     bob.says_where_it_is(true);
@@ -651,6 +711,56 @@ async fn what_a_beat_cannot_carry_is_published_as_a_base() {
         sorted([item(7, ContentHash::from_bytes([0; 32])).id])
     );
     assert!(gone.holdings.added.is_empty());
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
+/// **A receiver knows exactly what a member holds** — from its base, then
+/// from each beat's change on top, an item added and lost again included —
+/// and fetches a base only when a beat names a new one, into memory and not
+/// into its store.
+#[tokio::test]
+async fn a_receiver_knows_exactly_what_a_member_holds() {
+    let (alice, bob, _membership) = a_pair(Duration::from_secs(1)).await;
+    alice.sees_online(&[bob.id]).await;
+    let first = DELTA_MAX as u16 + 1;
+    let mut held = HashSet::new();
+    for n in 0..first {
+        held.insert(bob.holds(n).await);
+    }
+    alice.sees_held(bob.id, &held, 2 * first).await;
+    assert_eq!(bob.served.load(Ordering::SeqCst), 1, "one base, one fetch");
+
+    held.insert(bob.holds(first).await);
+    alice.sees_held(bob.id, &held, 2 * first).await;
+    bob.no_longer_holds(7).await;
+    held.remove(&id(7));
+    alice.sees_held(bob.id, &held, 2 * first).await;
+    bob.no_longer_holds(first).await;
+    held.remove(&id(first));
+    alice.sees_held(bob.id, &held, 2 * first).await;
+    // Beats enough to have fetched again, had they wanted to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(bob.served.load(Ordering::SeqCst), 1, "the same base");
+
+    for n in first + 1..=2 * first {
+        held.insert(bob.holds(n).await);
+    }
+    alice.sees_held(bob.id, &held, 2 * first).await;
+    assert_eq!(bob.served.load(Ordering::SeqCst), 2, "a new base, fetched");
+
+    assert!(
+        alice
+            .blobs
+            .blobs()
+            .list()
+            .hashes()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(alice.blobs.tags().list().await.unwrap().count().await, 0);
 
     alice.router.shutdown().await.unwrap();
     bob.router.shutdown().await.unwrap();
