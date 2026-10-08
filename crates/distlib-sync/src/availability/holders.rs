@@ -219,6 +219,11 @@ impl Holders {
 
 /// `item → members holding it`. Members by id, not D3's `u16` indexes: at the
 /// target sizes the difference is a few megabytes (KISS, numbers decide).
+///
+/// A `Vec` per item rather than a set: most items settle on a handful of
+/// holders, and scanning a few ids is as quick as hashing one. Only an item
+/// everybody downloads — hot news — grows towards the size of the group, and
+/// even a thousand ids is a scan of microseconds.
 #[derive(Debug, Default)]
 struct Index(HashMap<ItemId, Vec<MemberId>>);
 
