@@ -187,19 +187,12 @@ impl Holders {
         else {
             return;
         };
-        let index = &mut self.index;
-        for item in added.drain(..) {
-            *held -= u64::from(index.remove(member, &item));
-        }
-        for item in removed.drain(..) {
-            *held += u64::from(index.add(member, item));
-        }
-        for item in &holdings.added {
-            *held += u64::from(index.add(member, *item));
-        }
-        for item in &holdings.removed {
-            *held -= u64::from(index.remove(member, item));
-        }
+        // The previous change taken back — its removed come back, its added
+        // go — then the new one applied.
+        let undone = self.index.shift(member, *held, removed, added);
+        *held = self
+            .index
+            .shift(member, undone, &holdings.added, &holdings.removed);
         if *held == holdings.count {
             added.clone_from(&holdings.added);
             removed.clone_from(&holdings.removed);
@@ -251,6 +244,20 @@ impl Index {
             self.0.remove(item);
         }
         true
+    }
+
+    /// Puts `member` on every item `coming` and takes it off every item
+    /// `going`; how many items it holds after, given `held` before.
+    fn shift(&mut self, member: MemberId, held: u64, coming: &[ItemId], going: &[ItemId]) -> u64 {
+        let came: u64 = coming
+            .iter()
+            .map(|item| u64::from(self.add(member, *item)))
+            .sum();
+        let went: u64 = going
+            .iter()
+            .map(|item| u64::from(self.remove(member, item)))
+            .sum();
+        held + came - went
     }
 
     fn clear(&mut self, member: MemberId) {
