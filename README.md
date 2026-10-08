@@ -362,15 +362,15 @@ curl -s http://127.0.0.1:11280/rpc \
 | `group.pending` / `group.approve` / `group.withdraw` | Changes waiting for approvals, and acting on them. |
 | `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. |
 | `group.ticket` | A join ticket for this group. |
-| `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. |
-| `library.item` | `{item_id}` — one item's full record. |
+| `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |
+| `library.item` | `{item_id}` — one item's full record, and its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. |
 | `admin.reindex` | Rebuild the read model. |
 
-Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items,
-download progress) as server-sent events, and `POST /upload?filename=…` takes one
+Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, a
+member's availability, download progress) as server-sent events, and `POST /upload?filename=…` takes one
 file for `library.add`. Both need the same token.
 
 **Loopback and a token, deliberately.** Whoever can call this can make the node

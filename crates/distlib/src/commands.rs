@@ -144,6 +144,7 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
                     blobs: runtime.blobs().clone(),
                     store: runtime.store().clone(),
                     search: runtime.search().clone(),
+                    availability: runtime.availability().clone(),
                     tasks: runtime.tasks().clone(),
                     downloads: runtime.downloads().to_path_buf(),
                     uploads: runtime.uploads().clone(),
@@ -633,6 +634,7 @@ pub async fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
             hit["item_id"].as_str().unwrap_or("?"),
             hit["title"].as_str().unwrap_or("(no title)")
         );
+        println!("  {}", availability(&hit["held"], &hit["providers"]));
         if let Some(authors) = hit["authors"].as_array().filter(|list| !list.is_empty()) {
             println!("  {}", join_strings(authors));
         }
@@ -673,6 +675,20 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     }
     if let Some(description) = answer["description"].as_str() {
         println!("description {description}");
+    }
+
+    let found = &answer["availability"];
+    println!(
+        "available   {}",
+        availability(&found["held"], &found["providers"])
+    );
+    for (label, members) in [
+        ("online", &found["holders"]),
+        ("unknown", &found["unknown"]),
+    ] {
+        for member in members.as_array().map_or(&[][..], |members| members) {
+            println!("  {label:<9} {}", member.as_str().unwrap_or("?"));
+        }
     }
 
     let files = answer["files"].as_object().map_or(0, |files| files.len());
@@ -835,6 +851,21 @@ fn kind_str(kind: Kind) -> &'static str {
         Kind::Audiobook => "audiobook",
         Kind::Video => "video",
         Kind::Other => "other",
+    }
+}
+
+/// A hit's or an item's `held` and `providers`, in a phrase: "held here, 2
+/// online", "none online", "online holders unknown".
+fn availability(held: &Value, providers: &Value) -> String {
+    let online = match providers.as_u64() {
+        Some(0) => "none online".to_owned(),
+        Some(count) => format!("{count} online"),
+        None => "online holders unknown".to_owned(),
+    };
+    if held.as_bool() == Some(true) {
+        format!("held here, {online}")
+    } else {
+        online
     }
 }
 
@@ -1531,6 +1562,18 @@ mod tests {
             page_url("192.168.1.5:8080".parse().expect("a literal address")),
             "http://192.168.1.5:8080/"
         );
+    }
+
+    #[test]
+    fn availability_is_one_phrase() {
+        for (held, providers, phrase) in [
+            (true, json!(2), "held here, 2 online"),
+            (false, json!(1), "1 online"),
+            (false, json!(0), "none online"),
+            (true, Value::Null, "held here, online holders unknown"),
+        ] {
+            assert_eq!(availability(&json!(held), &providers), phrase);
+        }
     }
 
     #[test]

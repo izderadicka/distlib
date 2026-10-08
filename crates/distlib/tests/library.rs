@@ -41,6 +41,7 @@ fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         blobs: runtime.blobs().clone(),
         store: runtime.store().clone(),
         search: runtime.search().clone(),
+        availability: runtime.availability().clone(),
         tasks: runtime.tasks().clone(),
         downloads: runtime.downloads().to_path_buf(),
         uploads: runtime.uploads().clone(),
