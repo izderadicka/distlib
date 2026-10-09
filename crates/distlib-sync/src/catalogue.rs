@@ -52,7 +52,7 @@ use tracing::Instrument as _;
 
 use crate::{
     availability::Holdings,
-    changes::{self, Changes, Feed, Pump, SyncState},
+    changes::{self, Changes, Feed, News, Pump, SyncState},
     error::{Result, SyncError},
 };
 
@@ -550,6 +550,13 @@ struct Opening {
     directory: Directory,
 }
 
+/// What the content sweep fetches with, and whom it tells when it has.
+struct Fetching {
+    blobs: BlobStore,
+    downloader: Downloader,
+    news: News,
+}
+
 async fn open_when_founded(opening: Opening) {
     let Opening {
         docs,
@@ -624,11 +631,13 @@ async fn open_when_founded(opening: Opening) {
     // see: it holds `opened`, so when its receivers go it returns and the
     // others are dropped with it.
     let (sync_again, asked) = mpsc::unbounded_channel();
+    let news = pump.news();
     tokio::select! {
         () = async move {
             match events {
                 Some(events) => pump.run(events, &sync_again).await,
-                // Dropped, so a reader waiting on it hears that nothing will come.
+                // Nothing to read. The reader still hears from the content
+                // sweep, which holds its own handle on the same news.
                 None => drop(pump),
             }
             // The stream ends at shutdown. The other arms go on until then.
@@ -643,7 +652,13 @@ async fn open_when_founded(opening: Opening) {
             directory.clone(),
         ) => {}
         () = sync_again_when_asked(doc.clone(), asked) => {}
-        () = fetch_content_nobody_offered(doc, blobs, downloader, membership, me, directory) => {}
+        () = fetch_content_nobody_offered(
+            doc,
+            Fetching { blobs, downloader, news },
+            membership,
+            me,
+            directory,
+        ) => {}
     }
 }
 
@@ -681,32 +696,27 @@ async fn sync_again_when_asked(doc: Doc, mut asked: mpsc::UnboundedReceiver<Endp
 /// with no wait, and passed sixty of sixty with this one.
 const SETTLE: Duration = Duration::from_secs(1);
 
-/// How often the document's peers are offered again regardless.
+/// How often the document's peers are offered again regardless: the backstop.
 ///
-/// The same shape as the follow loop's idle poll, and for the same reason
-/// (§4.2): the prompt path is an event, and a timer behind it is what makes the
-/// guarantee. Learning an address is the event, but it is not the only thing
-/// that strands a document — the node that introduced two members can go away
-/// afterwards, and gossip does not repair a swarm it has lost its last
-/// neighbour in.
+/// **Ten minutes, and not the way anything normally travels** (phase 4's 4b-6,
+/// Ivan's call). Changes travel over gossip and the rounds iroh-docs runs with
+/// each new neighbour; a member is offered as soon as its address is heard,
+/// and everyone when the membership changes. This is for the split nothing
+/// signals — a group of four that falls into two pairs, each still with a
+/// neighbour.
 ///
-/// **Thirty seconds, not the fifteen it was.** An offer is not just a local
-/// call: iroh-docs dials every peer it is handed — and the ones it remembers,
-/// an expelled member included — and runs a set reconciliation with each. So
-/// a quiet group of N spent N × (N − 1) syncs every interval finding nothing,
-/// which a manual check after phase 3 saw as a log that never stopped. The
-/// timer is the repair path, not the way changes travel — but it is a repair
-/// that happens: on Windows two followers whose introducer had gone meet only
-/// through it (C25), which is why this is not longer. Halving the rate is what
-/// is bought now; what it costs is how long a stranded document takes to
-/// recover, and how long an item whose bytes the content sweep fetched waits to
-/// be re-read (P2-19): up to this, rather than up to fifteen seconds. Phase 4's
-/// heartbeats are meant to replace it with "offer whoever newly appears".
+/// It was thirty seconds, and that was a cost: an offer is not a local call.
+/// iroh-docs dials every peer it is handed — and the ones it remembers — and
+/// runs a set reconciliation with each, so a quiet group of N spent
+/// N × (N − 1) rounds every interval finding nothing. The round had a second
+/// job too: it ended with `PendingContentReady`, which is what made the read
+/// model re-read an item whose bytes the content sweep fetched. The sweep now
+/// says so itself (`News::content_landed`).
 ///
 /// The longest the whole set can go un-offered, rather than the longest the
 /// loop can sit idle — which are the same thing only while every wake-up offers
-/// everything, and one of them no longer does.
-const OFFER_AGAIN: Duration = Duration::from_secs(30);
+/// everything, and one of them does not.
+const BACKSTOP: Duration = Duration::from_secs(600);
 
 /// The least time between two offers of the document's peers.
 ///
@@ -728,8 +738,8 @@ const OFFER_AGAIN: Duration = Duration::from_secs(30);
 /// inside a second.
 const LEAST_BETWEEN_OFFERS: Duration = Duration::from_secs(2);
 
-/// Re-offers the document's peers, promptly when there is news and slowly
-/// regardless.
+/// Re-offers the document's peers, promptly when there is news and every
+/// [`BACKSTOP`] regardless.
 ///
 /// **Two kinds of round, and they want different things.** Hearing where one
 /// member is says nothing about the others, so it offers that member alone. A
@@ -763,7 +773,7 @@ async fn offer_peers_as_they_are_learned(
     // every other arm, so on its own it measures an *idle* gap — and now that a
     // learned address offers only that address, a group whose members keep
     // moving would push the sweep out for ever and never repair anything. This
-    // makes `OFFER_AGAIN` what its own docs say it is: the longest the whole set
+    // makes `BACKSTOP` what its own docs say it is: the longest the whole set
     // can go un-offered, whatever else happens in between.
     let mut last_full = Instant::now();
 
@@ -792,15 +802,15 @@ async fn offer_peers_as_they_are_learned(
                 true
             }
             // Deadline rather than delay: a plain `sleep` is built afresh on
-            // every iteration, so any other arm firing at T+14 would push the
-            // sweep out to T+29 and the bound below would be twice what it
-            // says.
-            () = tokio::time::sleep_until(last_full + OFFER_AGAIN) => true,
+            // every iteration, so any other arm firing just before it came due
+            // would push the sweep out by a whole interval, and the bound
+            // would be twice what it says.
+            () = tokio::time::sleep_until(last_full + BACKSTOP) => true,
         };
         // The deadline above can come due at the same moment as a learned
         // address, and `select!` picks between two ready arms at random. This
         // makes the sweep win that race rather than losing it half the time.
-        repair |= last_full.elapsed() >= OFFER_AGAIN;
+        repair |= last_full.elapsed() >= BACKSTOP;
 
         let reachable = sync_with(&membership.borrow_and_update().clone(), me, &directory);
         let peers = if repair {
@@ -836,7 +846,7 @@ async fn offer_peers_as_they_are_learned(
             );
             if let Err(error) = doc.start_sync(peers).await {
                 // Not fatal: whatever was already syncing goes on, and the sweep
-                // above offers these again within `OFFER_AGAIN`. Not the next
+                // above offers these again within `BACKSTOP`. Not the next
                 // address learned — that is a reaction, and these peers are
                 // already written down as offered.
                 tracing::debug!(%error, "could not offer the catalogue's peers again");
@@ -932,14 +942,23 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(20);
 /// *now* is asked about on the very next round instead of queueing behind every
 /// hash that has already failed — at twenty stranded hashes that queue was
 /// already twenty seconds long, and it grows with the document.
+///
+/// **What it fetches, it tells the read model about.** The bytes reach the
+/// store behind iroh-docs' back, so no `ContentReady` follows, and the item
+/// they complete would otherwise stay half-projected until something else
+/// touched it (ground truth 12).
 async fn fetch_content_nobody_offered(
     doc: Doc,
-    blobs: BlobStore,
-    downloader: Downloader,
+    fetching: Fetching,
     mut membership: watch::Receiver<MembershipState>,
     me: MemberId,
     directory: Directory,
 ) {
+    let Fetching {
+        blobs,
+        downloader,
+        news,
+    } = fetching;
     // What has been asked about this generation and did not arrive. Pruned to
     // the want set on every round, so it cannot outlive what it is about:
     // content that landed and entries that were deleted drop out by themselves.
@@ -1012,7 +1031,10 @@ async fn fetch_content_nobody_offered(
             )
             .await;
             match asked {
-                Ok(Ok(())) => tracing::debug!(%hash, "fetched content nobody offered"),
+                Ok(Ok(())) => {
+                    tracing::debug!(%hash, "fetched content nobody offered");
+                    news.content_landed();
+                }
                 // Ordinary rather than alarming: nobody reachable has it yet.
                 // Asked again when the group changes, or when this generation
                 // runs out — not on the next round.

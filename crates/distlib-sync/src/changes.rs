@@ -105,8 +105,10 @@ pub(crate) fn feed() -> (Pump, Feed) {
     let (sync, synced) = watch::channel(SyncState::default());
     (
         Pump {
-            pending: Arc::clone(&pending),
-            woke,
+            news: News {
+                pending: Arc::clone(&pending),
+                woke,
+            },
             sync,
             up_since: HashMap::new(),
         },
@@ -160,7 +162,8 @@ pub struct Changes {
 impl Changes {
     /// Waits until there is something to do, then takes all of it.
     ///
-    /// `None` once the document's event stream has ended, which is shutdown.
+    /// `None` once the catalogue's task has ended — the pump and the content
+    /// sweep both — which is shutdown.
     pub async fn take(&mut self) -> Option<Batch> {
         loop {
             // Marked seen *before* the set is looked at, so the two orderings
@@ -183,11 +186,49 @@ impl Changes {
     }
 }
 
+/// Where the read model's news is left, and what wakes it to read it.
+///
+/// The pump's, and cloned for the catalogue's content sweep (4b-6): bytes the
+/// sweep fetches reach the store behind iroh-docs' back, so no `ContentReady`
+/// ever says they landed. Every sync round used to say it anyway, with a
+/// `PendingContentReady`, because the catalogue re-offered its peers every
+/// thirty seconds. It is a ten-minute backstop now, and this does the second
+/// job that timer was doing.
+#[derive(Debug, Clone)]
+pub(crate) struct News {
+    pending: Arc<Mutex<Batch>>,
+    woke: watch::Sender<u64>,
+}
+
+impl News {
+    /// Some content landed: the reader re-reads what it left incomplete.
+    pub(crate) fn content_landed(&self) {
+        if self.mark_content_landed() {
+            self.wake();
+        }
+    }
+
+    /// Marks that content landed, answering whether that is news — once is
+    /// enough until the reader has taken the batch.
+    fn mark_content_landed(&self) -> bool {
+        !std::mem::replace(&mut self.batch().content_arrived, true)
+    }
+
+    fn wake(&self) {
+        self.woke.send_modify(|woke| *woke = woke.wrapping_add(1));
+    }
+
+    fn batch(&self) -> std::sync::MutexGuard<'_, Batch> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// The writing end, run by the catalogue's task once the document is open.
 #[derive(Debug)]
 pub(crate) struct Pump {
-    pending: Arc<Mutex<Batch>>,
-    woke: watch::Sender<u64>,
+    news: News,
     sync: watch::Sender<SyncState>,
     /// When each current neighbour was heard to come up, by this node's clock
     /// — see [`Pump::began_before_neighbour`].
@@ -195,6 +236,11 @@ pub(crate) struct Pump {
 }
 
 impl Pump {
+    /// A handle for news that does not come through the document's events.
+    pub(crate) fn news(&self) -> News {
+        self.news.clone()
+    }
+
     /// Reads the document's events and records what they are about, until the
     /// stream ends.
     ///
@@ -221,7 +267,7 @@ impl Pump {
                 }
             };
             if self.note(event, sync_again) {
-                self.woke.send_modify(|woke| *woke = woke.wrapping_add(1));
+                self.news.wake();
             }
         }
     }
@@ -230,13 +276,10 @@ impl Pump {
     fn note(&mut self, event: LiveEvent, sync_again: &mpsc::UnboundedSender<EndpointId>) -> bool {
         match event {
             LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. } => {
-                note(&mut self.batch(), entry.key())
+                note(&mut self.news.batch(), entry.key())
             }
             LiveEvent::ContentReady { .. } | LiveEvent::PendingContentReady => {
-                let mut batch = self.batch();
-                let first = !batch.content_arrived;
-                batch.content_arrived = true;
-                first
+                self.news.mark_content_landed()
             }
             // Neighbours and sync rounds are the swarm's business, not the read
             // model's: what a sync *found* arrives as the inserts above.
@@ -288,7 +331,8 @@ impl Pump {
     /// `engine/state.rs:195-206`). A write made in that window is broadcast
     /// before the neighbour is there to hear it, and the running round compared
     /// the two sides before the write existed, so neither carries it: it waits
-    /// for the next round with that peer, which may be the catalogue's timer.
+    /// for the next round with that peer, which may be the catalogue's
+    /// ten-minute backstop.
     /// Found on macOS CI, with the write and the neighbour 0.1 ms apart. One
     /// round more, asked for once this one is over, is the round iroh-docs
     /// dropped.
@@ -300,12 +344,6 @@ impl Pump {
         self.up_since
             .get(&sync.peer)
             .is_some_and(|up| sync.started < *up)
-    }
-
-    fn batch(&self) -> std::sync::MutexGuard<'_, Batch> {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -363,6 +401,29 @@ mod tests {
             peers.push(peer);
         }
         peers
+    }
+
+    /// The content sweep's nudge: one wake however often it is told, until
+    /// the reader takes it.
+    #[tokio::test]
+    async fn content_landed_behind_the_documents_back_wakes_the_reader_once() {
+        let (pump, feed) = feed();
+        let news = pump.news();
+        let mut changes = feed.changes();
+
+        news.content_landed();
+        news.content_landed();
+        assert_eq!(*feed.woken.borrow(), 1, "the second was not news");
+        assert_eq!(
+            changes.take().await,
+            Some(Batch {
+                content_arrived: true,
+                ..Batch::default()
+            })
+        );
+
+        news.content_landed();
+        assert_eq!(*feed.woken.borrow(), 2, "taken, so news again");
     }
 
     #[tokio::test]

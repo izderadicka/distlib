@@ -680,6 +680,18 @@ a time, review before the next.
   **Acceptance:** a quiet group makes no `start_sync` call in two minutes, counted; an item repaired
   by the sweep is re-projected with no timer; the C25 bound from 4a-3 still holds.
   **Watch for:** ground truth 12 — the nudge and the removal are one PR, never two.
+  *As built:* the timer is `BACKSTOP`, ten minutes, and the content sweep calls
+  `News::content_landed` — the same `content_arrived` flag `ContentReady` sets — for every hash
+  it fetches. **D7 (a) is not built (Ivan's call)**, and (b) and (c) neither, as 4a-3 said to
+  re-weigh: no test needs an appearance offer. A restarted member offers its own peers when it
+  starts, and the catalogue offers each member as its address is heard; and a partition loses
+  the availability topic's neighbours along with the catalogue's, so no appearance is heard to
+  act on. The quiet window is 45 s, not two minutes (Ivan's call) — still past the old 30 s.
+  Acceptance: three nodes, settled, finish no sync round for 45 s
+  (`a_settled_group_stops_syncing`; fails with the timer back at 30 s); bob, restarted without
+  his content or read model, projects the item whole within 20 s
+  (`an_item_whose_content_the_sweep_fetched_is_projected_whole`; fails without the nudge); the
+  C25 test still converges, in 5–8 s.
 
 - **4b-7 — availability in the UI.** A library column — held here / n online / none online /
   unknown — the same on the item page, and neighbours and last sync on the Node page.
@@ -758,7 +770,7 @@ Every open C-number appears here once.
 | **C27** | **Heartbeat traffic has not been measured above N = 50** | **No phase.** Measured on five nodes here; a larger group is the trigger. |
 | **C28** | **The `item → members` map lives in memory** (D3) — about 1 GB per node at 10M distinct items | **No phase.** Moves to a local SQLite table when a group reaches the 10M end — Ivan's call. Never replicated either way. |
 | **C29** | **One wish comment per member** (D10) | **No phase.** Threads, when somebody asks. |
-| **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; 4b's heartbeat appearances and D7 (b, c) are what would notice if it did not. |
+| **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; if it did not, the only retry left is the catalogue's ten-minute backstop offering it again — D7's appearance, unconfirmed-offer and zero-neighbour arms were not built (4b-6). |
 | **C31** | **A write made as two nodes connect can miss both paths to the other** — broadcast before the gossip neighbour is up, and after the running sync round compared the two sides; iroh-docs drops the sync it would start for the new neighbour because a round is already running, and only a `SyncReport` queues one (`engine/state.rs:195-206`). Found from the macOS CI log of `what_one_member_writes_the_other_reads`, write and neighbour 0.1 ms apart; repaired only by `OFFER_AGAIN`, which 4b-6 removes | **Worked around** after 4a-3: the pump asks for one more round with a neighbour whose round began before it came up (`Pump::began_before_neighbour`). Upstream: `NewNeighbor` should queue a resync the way `SyncReport` does — an issue to open. |
 | **C32** | **Presence traffic grows with N above 1,000 members** — the beat interval is capped at 20 minutes (D4), so each node receives N beats per 20 minutes; at 10,000 about 400 MB a day, and full broadcast cannot serve a group of a million at any interval | **No phase — Ivan's call, KISS for now.** A larger group is the trigger: presence by sampling or aggregation rather than every member's beat reaching every other. |
 | **C33** | **iroh-docs wedges a pair of peers on `AlreadySyncing`** — a connect refused because the remote is still *accepting* the round before is ignored (`engine/live.rs:498`, which assumes the remote is dialling us), so the local round stays marked running and every later round between the two is refused, both ways, until a restart. Found from Linux CI on #94: `read_model`'s restarted node never caught up. Our own trigger was the C31 workaround's round asked for the moment the last one ended | **Worked around**: that round now waits a second (`SETTLE`); 60 of 60 stress runs against one failure in seven to twenty. Other offers can still coincide with the end of a round, so **upstream** is the fix — an issue to open, with a reproduction. |

@@ -267,6 +267,67 @@ async fn a_read_model_that_was_lost_is_rebuilt_from_the_document() {
     alice.shutdown().await;
 }
 
+/// How long an item the content sweep repaired may take to be projected
+/// whole: the sweep's first round, five seconds after the catalogue opens,
+/// and room to spare — but under the thirty seconds after which a sync round
+/// used to re-read it by accident.
+const REPAIRED: Duration = Duration::from_secs(20);
+
+/// **An item whose content the sweep fetched is re-read at once** (phase 4's
+/// 4b-6, ground truth 12).
+///
+/// Bob comes back with his entries and nothing else. No read model, so the
+/// replay projects the item without the fields whose bytes are gone; no
+/// content, and iroh-docs fetches content only when an entry *arrives*, so it
+/// will never ask. The catalogue's content sweep does, behind the engine's
+/// back, and no `ContentReady` follows. The sweep's own nudge is what re-reads
+/// the item; before it, that was the next sync round, which a quiet group got
+/// only from the catalogue's thirty-second timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_whose_content_the_sweep_fetched_is_projected_whole() {
+    let dir = TempDir::new().unwrap();
+    let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
+    let item = an_item(6, "Dune");
+
+    alice.catalogue().ready().await;
+    alice.catalogue().write(&item).await.unwrap();
+    agree_on(&bob, &alice, 1, "before bob loses his content").await;
+
+    bob.shutdown().await;
+    drop(bob);
+    let bobs_dir = DataDir::new(dir.path().join("bob"));
+    std::fs::remove_dir_all(bobs_dir.db_dir()).unwrap();
+    std::fs::remove_dir_all(bobs_dir.blobs_dir()).unwrap();
+
+    let bob = Runtime::start(&bob_key, &config, &bobs_dir).await.unwrap();
+    bob.catalogue().ready().await;
+    let read = bob.catalogue().read_item(item.id).await.unwrap().unwrap();
+    assert!(
+        read.waiting_for_content,
+        "bob must come back without the content, or the sweep has nothing to repair"
+    );
+
+    let projected = tokio::time::timeout(REPAIRED, async {
+        loop {
+            if let Some(stored) = bob.store().item(item.id).await.unwrap()
+                && stored.item == item
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        projected.is_ok(),
+        "the repaired item was not projected whole within {REPAIRED:?}: {:#?}",
+        bob.store().item(item.id).await.unwrap()
+    );
+
+    bob.shutdown().await;
+    alice.shutdown().await;
+}
+
 /// 2a-3b's half of the acceptance: delete the search index alone, and the
 /// replay that rebuilds `db/` rebuilds `index/` too — because, per P2-19,
 /// a start and a reindex are one operation and there is only the one replay

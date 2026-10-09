@@ -34,16 +34,13 @@
 //! engine already gave up on. Without a second nudge, an item repaired by the
 //! sweep would stay half-projected until something else happened to touch it.
 //!
-//! `PendingContentReady` is what closes it, and not by luck: it is emitted on
-//! **every** sync round that finishes with nothing queued
-//! (`live.rs:613-620`), and the catalogue re-offers its peers on a timer
-//! whether or not anything changed — which produces a round. Measured on a
-//! quiet two-node group rather than argued, when that timer was fifteen
-//! seconds: nudges at 0.03 s, 14.9 s, 29.9 s and 44.9 s. It is thirty seconds
-//! now (P3-27), so an item repaired behind the engine's back is re-read within
-//! about thirty seconds. A node with no reachable peer gets no rounds and no
-//! nudge, which costs nothing: with no peer there is nothing for the sweep to
-//! fetch either.
+//! So the sweep gives that nudge itself: every fetch it completes sets
+//! `content_arrived`, the same flag `ContentReady` sets, and an item it
+//! repaired is re-read at once (phase 4's 4b-6). Until then a sync round did
+//! it by accident — each one ends with `PendingContentReady`
+//! (`live.rs:613-620`), and the catalogue used to re-offer its peers every
+//! thirty seconds whether or not anything had changed. That timer is a
+//! ten-minute backstop now, so a quiet group runs no rounds to lean on.
 
 //! **It tells watchers what it wrote, and only when it is news** (phase 3's
 //! D1). The projection is the one place that knows both that an item changed
