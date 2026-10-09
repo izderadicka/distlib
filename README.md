@@ -366,7 +366,7 @@ curl -s http://127.0.0.1:11280/rpc \
 | `library.item` | `{item_id}` — one item's full record, and its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
-| `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. |
+| `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
 | `admin.reindex` | Rebuild the read model. |
 
 Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, a

@@ -41,7 +41,7 @@ use iroh_blobs::{
     api::{
         Store,
         blobs::BlobStatus,
-        downloader::{DownloadProgressItem, Downloader, Shuffled},
+        downloader::{DownloadProgressItem, Downloader},
     },
 };
 
@@ -97,7 +97,8 @@ impl Blobs {
     }
 
     /// Fetches `hash` into the store this was built from, trying `providers`
-    /// in a random order.
+    /// one at a time, **in the order given**. The caller knows who is online
+    /// and who holds what; this does not, so it does not reorder them.
     ///
     /// **No address is supplied here** — only member ids. `providers` is a
     /// set this crate's caller chose (the item's custodians, say), and
@@ -109,10 +110,9 @@ impl Blobs {
     /// **A provider that does not hold the blob is skipped, not fatal**, and
     /// so is one that cannot be reached at all —
     /// `a_provider_that_does_not_hold_the_blob_is_skipped_rather_than_fatal`
-    /// in this crate's own tests. That is what lets a caller with no
-    /// availability index offer the whole membership and let the download
-    /// find the copy, which is exactly what `library.download` does until
-    /// §5.6's index exists.
+    /// in this crate's own tests. That is what lets a caller offer the whole
+    /// membership and let the download find the copy, which is what
+    /// `library.download` does — the members known to hold it first.
     ///
     /// No deadline of its own: how long is worth waiting for a media file is
     /// a question for the caller, not for a fetch primitive with no idea how
@@ -148,13 +148,13 @@ impl Blobs {
     ) -> Result<()> {
         let failed =
             |source: Box<dyn std::error::Error + Send + Sync>| NetError::Fetch { hash, source };
-        let providers = providers
+        let providers: Vec<_> = providers
             .into_iter()
             .map(|member| member.endpoint_id())
             .collect();
         let mut items = self
             .downloader
-            .download(HashAndFormat::raw(to_blobs(hash)), Shuffled::new(providers))
+            .download(HashAndFormat::raw(to_blobs(hash)), providers)
             .stream()
             .await
             .map_err(|source| failed(Box::new(source)))?;
