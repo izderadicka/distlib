@@ -22,7 +22,7 @@ use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
-use distlib_sync::Catalogue;
+use distlib_sync::{Availability, Catalogue, Sources};
 use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::{
     Request, StatusCode,
@@ -45,6 +45,29 @@ use tempfile::TempDir;
 /// so a failure that will not reproduce arrives with the log of what led to
 /// it. Unset, only errors are logged. One subscriber serves every node in the
 /// process: the first call installs it and the rest do nothing.
+/// The heartbeat `Api` reads availability from. Once a minute, which no test
+/// here waits for: they ask only what an item's availability looks like.
+fn availability(
+    transport: &Transport,
+    secret: &SecretKey,
+    node: &MembershipNode,
+    catalogue: &Catalogue,
+    tasks: &Tasks,
+) -> Availability {
+    Availability::start(
+        transport,
+        secret,
+        Sources {
+            membership: node.subscribe(),
+            own_address: node.own_address(),
+            holdings: catalogue.holdings().clone(),
+        },
+        Duration::from_secs(60),
+        tasks.events().clone(),
+    )
+    .unwrap()
+}
+
 fn init_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -148,10 +171,15 @@ impl Harness {
         // catalogue's own handler serves from.
         let media = iroh_blobs::store::mem::MemStore::new();
         let blobs = distlib_net::Blobs::new(&media, &endpoint);
-        let catalogue =
-            Catalogue::start(transport, (*media).clone(), None, &secret, node.subscribe())
-                .await
-                .unwrap();
+        let catalogue = Catalogue::start(
+            transport.clone(),
+            (*media).clone(),
+            None,
+            &secret,
+            node.subscribe(),
+        )
+        .await
+        .unwrap();
         let router = distlib_net::serve(
             endpoint,
             node.protocols()
@@ -176,6 +204,7 @@ impl Harness {
 
         let token = "0123456789abcdef".repeat(4);
         let tasks = Tasks::new(distlib_api::events::bus());
+        let availability = availability(&transport, &secret, &node, &catalogue, &tasks);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -187,6 +216,7 @@ impl Harness {
                 blobs,
                 store: store.clone(),
                 search: search.clone(),
+                availability,
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
@@ -240,6 +270,8 @@ impl Harness {
         // nothing here asks of them.
         let mut catalogue = None;
         let mut blobs = None;
+        let mut heartbeat = None;
+        let tasks = Tasks::new(distlib_api::events::bus());
         for (index, secret) in secrets.iter().enumerate() {
             let others = ids
                 .iter()
@@ -285,10 +317,16 @@ impl Harness {
             let protocols = if index == 0 {
                 let media = iroh_blobs::store::mem::MemStore::new();
                 blobs = Some(distlib_net::Blobs::new(&media, &endpoint));
-                let started =
-                    Catalogue::start(transport, (*media).clone(), None, secret, node.subscribe())
-                        .await
-                        .unwrap();
+                let started = Catalogue::start(
+                    transport.clone(),
+                    (*media).clone(),
+                    None,
+                    secret,
+                    node.subscribe(),
+                )
+                .await
+                .unwrap();
+                heartbeat = Some(availability(&transport, secret, &node, &started, &tasks));
                 let protocols = node
                     .protocols()
                     .into_iter()
@@ -333,7 +371,6 @@ impl Harness {
         let search = SearchIndex::open(None).await.unwrap();
         let catalogue = catalogue.expect("node 0 built one above");
         let token = "0123456789abcdef".repeat(4);
-        let tasks = Tasks::new(distlib_api::events::bus());
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -345,6 +382,7 @@ impl Harness {
                 blobs: blobs.expect("node 0 built one above"),
                 store: store.clone(),
                 search: search.clone(),
+                availability: heartbeat.expect("node 0 built one above"),
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),

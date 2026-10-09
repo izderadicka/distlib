@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use distlib_core::{Event, ItemId, Progress, TaskId};
+use distlib_core::{Event, ItemId, MemberId, Progress, TaskId};
 
 /// Every variant, once.
 ///
@@ -17,6 +17,9 @@ fn every_event() -> Vec<Event> {
         Event::SyncStatus,
         Event::ItemAdded { item_id },
         Event::ItemChanged { item_id },
+        Event::AvailabilityChanged {
+            member_id: MemberId::from(iroh::SecretKey::generate().public()),
+        },
         Event::DownloadProgress {
             task_id,
             item_id,
@@ -36,6 +39,7 @@ fn every_event() -> Vec<Event> {
             | Event::SyncStatus
             | Event::ItemAdded { .. }
             | Event::ItemChanged { .. }
+            | Event::AvailabilityChanged { .. }
             | Event::DownloadProgress { .. }
             | Event::DownloadFinished { .. }
             | Event::DownloadFailed { .. } => {}

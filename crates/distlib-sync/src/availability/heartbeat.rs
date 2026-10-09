@@ -18,7 +18,7 @@ use std::{
 use bytes::Bytes;
 use distlib_consensus::{MembershipState, gossip};
 use distlib_core::{
-    ContentHash, GroupId, Heartbeat, ItemId, MemberId, SignedAddress, SignedHeartbeat,
+    ContentHash, Event, GroupId, Heartbeat, ItemId, MemberId, SignedAddress, SignedHeartbeat,
     availability::{BASE_MAX, decode_base},
 };
 use distlib_net::{Directory, Transport};
@@ -29,11 +29,11 @@ use iroh_blobs::{
     get::request::{get_blob, get_verified_size},
 };
 use iroh_gossip::{
-    api::{Event, GossipReceiver, GossipSender},
+    api::{Event as GossipEvent, GossipReceiver, GossipSender},
     proto::TopicId,
 };
 use tokio::{
-    sync::{Notify, watch},
+    sync::{Notify, broadcast, watch},
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
@@ -41,7 +41,7 @@ use tracing::Instrument as _;
 
 use super::{
     Holdings,
-    holders::Holders,
+    holders::{Heard, Holders},
     online::{MAX_INTERVAL, Online},
     statement::Statement,
 };
@@ -91,12 +91,20 @@ pub struct Sources {
 }
 
 /// This node's heartbeat, who else is online, and what they hold.
+///
+/// Cheap to clone; every clone is the same heartbeat.
+#[derive(Clone)]
 pub struct Availability {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     secret: SecretKey,
     online: watch::Receiver<BTreeSet<MemberId>>,
+    /// Shared with the listening half, which fills it.
     holders: Arc<Mutex<Holders>>,
     /// The last beat sent, and where — what a goodbye follows. `None` until
-    /// the first beat.
+    /// the first beat. Shared with the beating half, which records it.
     said: Arc<Mutex<Option<Said>>>,
     /// Waiting for the group, then beating and listening.
     task: Mutex<Option<JoinHandle<()>>>,
@@ -118,11 +126,15 @@ impl Availability {
     /// over fifty, give or take a tenth so the group does not beat in step —
     /// and again whenever this node's address statement changes, a neighbour
     /// comes up, or what it holds changes (at most once per ten seconds).
+    ///
+    /// Says on `events` whenever what it can tell about a member changes —
+    /// `availability.changed`, never awaited.
     pub fn start(
         transport: &Transport,
         secret: &SecretKey,
         sources: Sources,
         interval: Duration,
+        events: broadcast::Sender<Event>,
     ) -> Result<Self> {
         let Sources {
             membership,
@@ -150,34 +162,37 @@ impl Availability {
                 epoch,
                 published,
                 holders: holders.clone(),
+                events,
                 said: said.clone(),
             })
             .instrument(span),
         );
         Ok(Self {
-            secret: secret.clone(),
-            online,
-            holders,
-            said,
-            task: Mutex::new(Some(task)),
+            inner: Arc::new(Inner {
+                secret: secret.clone(),
+                online,
+                holders,
+                said,
+                task: Mutex::new(Some(task)),
+            }),
         })
     }
 
     /// The other members online now, by their heartbeats.
     pub fn online(&self) -> watch::Receiver<BTreeSet<MemberId>> {
-        self.online.clone()
+        self.inner.online.clone()
     }
 
     /// The other members known to hold `item`, online or not — by their
     /// beats, and the base lists those name.
     pub fn holders(&self, item: &ItemId) -> Vec<MemberId> {
-        lock(&self.holders).holders(item).to_vec()
+        lock(&self.inner.holders).holders(item).to_vec()
     }
 
     /// Whether what `member` holds is known: until its base list has arrived,
     /// it is unknown rather than "holds nothing" (D5).
     pub fn knows_holdings_of(&self, member: &MemberId) -> bool {
-        lock(&self.holders).is_known(member)
+        lock(&self.inner.holders).is_known(member)
     }
 
     /// Stops beating and tells the group this node is going — before the
@@ -192,6 +207,7 @@ impl Availability {
             let _ = task.await;
         }
         let said = self
+            .inner
             .said
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -206,7 +222,7 @@ impl Availability {
         };
         beat.seq += 1;
         beat.leaving = true;
-        say(&sender, &self.secret, &group, beat).await;
+        say(&sender, &self.inner.secret, &group, beat).await;
         tokio::time::sleep(GOODBYE_GRACE).await;
     }
 
@@ -218,7 +234,8 @@ impl Availability {
     }
 
     fn take_task(&self) -> Option<JoinHandle<()>> {
-        self.task
+        self.inner
+            .task
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
@@ -236,6 +253,7 @@ struct Joining {
     epoch: u64,
     published: watch::Sender<BTreeSet<MemberId>>,
     holders: Arc<Mutex<Holders>>,
+    events: broadcast::Sender<Event>,
     said: Arc<Mutex<Option<Said>>>,
 }
 
@@ -252,6 +270,7 @@ async fn join_when_founded(joining: Joining) {
         epoch,
         published,
         holders,
+        events,
         said,
     } = joining;
     let me = MemberId::from(secret.public());
@@ -310,6 +329,7 @@ async fn join_when_founded(joining: Joining) {
                 endpoint: transport.endpoint.clone(),
                 published,
                 holders,
+                events,
             },
             &neighbour_up,
         ),
@@ -454,6 +474,7 @@ struct Listening {
     endpoint: Endpoint,
     published: watch::Sender<BTreeSet<MemberId>>,
     holders: Arc<Mutex<Holders>>,
+    events: broadcast::Sender<Event>,
 }
 
 /// Hears the group's beats, and publishes who is online after each change.
@@ -471,6 +492,7 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
         endpoint,
         published,
         holders,
+        events,
     } = listening;
     let mut online = Online::new(me);
     let mut fetches = JoinSet::new();
@@ -478,7 +500,7 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
         let expiry = online.next_expiry();
         tokio::select! {
             event = receiver.next() => match event {
-                Some(Ok(Event::Received(message))) => {
+                Some(Ok(GossipEvent::Received(message))) => {
                     let heard = hear(
                         Hearing {
                             online: &mut online,
@@ -486,13 +508,19 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                             directory: &directory,
                             group: &group,
                             membership: &membership.borrow(),
+                            events: &events,
                         },
                         &message.content,
                     );
                     match heard {
-                        Ok(Some((member, base))) => {
+                        Ok(Some(fetch)) => {
                             reap(&mut fetches);
-                            fetches.spawn(learn(endpoint.clone(), holders.clone(), member, base));
+                            fetches.spawn(learn(
+                                endpoint.clone(),
+                                holders.clone(),
+                                events.clone(),
+                                fetch,
+                            ));
                         }
                         Ok(None) => {}
                         Err(error) => tracing::warn!(
@@ -502,7 +530,7 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                         ),
                     }
                 }
-                Some(Ok(Event::NeighborUp(_))) => neighbour_up.notify_one(),
+                Some(Ok(GossipEvent::NeighborUp(_))) => neighbour_up.notify_one(),
                 // Neighbours going, and beats dropped before they were read:
                 // every beat is whole on its own, so the next one makes up for
                 // whatever was missed.
@@ -524,12 +552,14 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
             }
         }
         let now = online.online();
-        published.send_if_modified(|held| {
-            let news = *held != now;
-            if news {
-                *held = now;
+        published.send_if_modified(|was| {
+            if *was == now {
+                return false;
             }
-            news
+            was.symmetric_difference(&now)
+                .for_each(|member| tell(&events, *member));
+            *was = now;
+            true
         });
     }
 }
@@ -553,6 +583,19 @@ struct Hearing<'a> {
     directory: &'a Directory,
     group: &'a GroupId,
     membership: &'a MembershipState,
+    events: &'a broadcast::Sender<Event>,
+}
+
+/// A member's base list, to be fetched from it.
+struct Fetch {
+    member: MemberId,
+    base: ContentHash,
+}
+
+/// Says that what this node can tell about `member` changed. Never awaited:
+/// nobody watching is not a failure (phase 3's rule).
+fn tell(events: &broadcast::Sender<Event>, member: MemberId) {
+    let _ = events.send(Event::AvailabilityChanged { member_id: member });
 }
 
 /// D4's receive rule for one message: decoded within the size, both
@@ -560,16 +603,14 @@ struct Hearing<'a> {
 /// than what is held — and then its address goes to the directory, and what
 /// it holds to the map. The base list to fetch, if the beat names one this
 /// node lacks.
-fn hear(
-    hearing: Hearing<'_>,
-    content: &[u8],
-) -> distlib_core::error::Result<Option<(MemberId, ContentHash)>> {
+fn hear(hearing: Hearing<'_>, content: &[u8]) -> distlib_core::error::Result<Option<Fetch>> {
     let Hearing {
         online,
         holders,
         directory,
         group,
         membership,
+        events,
     } = hearing;
     let signed = SignedHeartbeat::decode(content)?;
     let beat = signed.open(group)?;
@@ -582,9 +623,11 @@ fn hear(
         tracing::warn!(%error, "a verified heartbeat's address was refused");
     }
     let member = beat.address.member();
-    Ok(holders
-        .heard(member, &beat.holdings)
-        .map(|base| (member, base)))
+    let Heard { fetch, changed } = holders.heard(member, &beat.holdings);
+    if changed {
+        tell(events, member);
+    }
+    Ok(fetch.map(|base| Fetch { member, base }))
 }
 
 /// Forgets the fetches that have ended, so the set holds only those running.
@@ -604,15 +647,15 @@ fn worth_retrying(error: &SyncError) -> bool {
     matches!(error, SyncError::BaseFetch { .. })
 }
 
-/// Fetches `member`'s `base` and takes it into the map.
+/// Fetches a member's base and takes it into the map.
 async fn learn(
     endpoint: Endpoint,
     holders: Arc<Mutex<Holders>>,
-    member: MemberId,
-    base: ContentHash,
+    events: broadcast::Sender<Event>,
+    wanted: Fetch,
 ) {
-    let fetched = fetch(&endpoint, member, base).await;
-    take_in(&mut lock(&holders), member, base, fetched);
+    let fetched = fetch(&endpoint, wanted.member, wanted.base).await;
+    take_in(&mut lock(&holders), &events, wanted, fetched);
 }
 
 /// Fetches `member`'s `base` into memory, never into this node's store — so a
@@ -639,12 +682,22 @@ async fn fetch(endpoint: &Endpoint, member: MemberId, base: ContentHash) -> Resu
         .map_err(|error| failed(error.into()))
 }
 
-/// Takes `member`'s fetched `base` into the map — or, failing, lets the next
-/// beat that names it try again, if trying again could help.
-fn take_in(holders: &mut Holders, member: MemberId, base: ContentHash, fetched: Result<Bytes>) {
+/// Takes a member's fetched base into the map, and says so — or, failing,
+/// lets the next beat that names it try again, if trying again could help.
+fn take_in(
+    holders: &mut Holders,
+    events: &broadcast::Sender<Event>,
+    Fetch { member, base }: Fetch,
+    fetched: Result<Bytes>,
+) {
     let error = match fetched {
         Ok(bytes) => match decode_base(&bytes) {
-            Ok(items) => return holders.arrived(member, base, items),
+            Ok(items) => {
+                if holders.arrived(member, base, items) {
+                    tell(events, member);
+                }
+                return;
+            }
             Err(source) => SyncError::BadBase { member, source },
         },
         Err(error) => error,
@@ -739,7 +792,7 @@ mod tests {
             base: Some(base),
             ..Default::default()
         };
-        assert_eq!(holders.heard(bob, &stated), Some(base));
+        assert_eq!(holders.heard(bob, &stated).fetch, Some(base));
         (holders, bob, base)
     }
 
@@ -749,7 +802,7 @@ mod tests {
             base: Some(base),
             ..Default::default()
         };
-        holders.heard(bob, &stated).is_some()
+        holders.heard(bob, &stated).fetch.is_some()
     }
 
     #[test]
@@ -759,8 +812,15 @@ mod tests {
             member: bob,
             source: "no route".into(),
         };
-        take_in(&mut holders, bob, base, Err(unreachable));
+        let (events, mut told) = broadcast::channel(4);
+        take_in(
+            &mut holders,
+            &events,
+            Fetch { member: bob, base },
+            Err(unreachable),
+        );
         assert!(named_again(&mut holders, bob, base));
+        assert!(told.try_recv().is_err(), "nothing new to tell");
     }
 
     /// The hash fixes the bytes: what was wrong with them once always is.
@@ -774,19 +834,32 @@ mod tests {
             }),
         ] {
             let (mut holders, bob, base) = bob_names_a_base();
-            take_in(&mut holders, bob, base, fetched);
+            let (events, mut told) = broadcast::channel(4);
+            take_in(&mut holders, &events, Fetch { member: bob, base }, fetched);
             assert!(!named_again(&mut holders, bob, base));
             assert!(!holders.is_known(&bob));
+            assert!(told.try_recv().is_err(), "nothing new to tell");
         }
     }
 
     #[test]
-    fn a_list_that_arrives_is_read_into_the_map() {
+    fn a_list_that_arrives_is_read_into_the_map_and_told() {
         let (mut holders, bob, base) = bob_names_a_base();
         let item = ItemId::from_bytes([1; 32]);
         let list = distlib_core::availability::encode_base([item]);
-        take_in(&mut holders, bob, base, Ok(Bytes::from(list)));
+        let (events, mut told) = broadcast::channel(4);
+        take_in(
+            &mut holders,
+            &events,
+            Fetch { member: bob, base },
+            Ok(Bytes::from(list)),
+        );
         assert!(holders.is_known(&bob));
         assert_eq!(holders.holders(&item), [bob]);
+        assert_eq!(
+            told.try_recv().ok(),
+            Some(Event::AvailabilityChanged { member_id: bob }),
+            "what bob holds is known now"
+        );
     }
 }

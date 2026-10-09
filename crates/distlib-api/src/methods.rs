@@ -17,12 +17,13 @@ use distlib_core::{
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
-use distlib_sync::{Catalogue, SyncError, SyncState};
+use distlib_sync::{Availability, Catalogue, SyncError, SyncState};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
+    availability::Seen,
     rpc::Error,
     tasks::{self, Downloaded, Source, Tasks},
     uploads::{UploadId, Uploads},
@@ -68,6 +69,9 @@ pub struct Api {
     /// What `library.search` ranks against. Only a ranking — see its own doc
     /// comment — so a hit's fields still come from `store`.
     pub search: SearchIndex,
+    /// Who is online and what they hold, for a hit's `providers` and
+    /// `library.item`'s `availability`.
+    pub availability: Availability,
     /// The downloads this node is running or has recently run, and the event
     /// bus they — and everything else — publish to.
     pub tasks: Tasks,
@@ -414,6 +418,7 @@ impl Api {
             .await
             .map_err(query_error)?;
 
+        let seen = self.seen();
         let mut results = Vec::with_capacity(page.items.len());
         for id in page.items {
             // `item_fields`, not `item`: a hit is shown a summary, and reading
@@ -426,7 +431,7 @@ impl Api {
                 .await
                 .map_err(|error| Error::failed(error.to_string()))?
             {
-                results.push(summary(&stored));
+                results.push(hit(&stored, &seen));
             }
         }
         Ok(json!({ "results": results, "total": page.total }))
@@ -446,17 +451,20 @@ impl Api {
             .page(params.offset, params.limit.min(MAX_PAGE))
             .await
             .map_err(|error| Error::failed(error.to_string()))?;
-        let results: Vec<Value> = page.items.iter().map(summary).collect();
+        let seen = self.seen();
+        let results: Vec<Value> = page.items.iter().map(|stored| hit(stored, &seen)).collect();
         Ok(json!({ "results": results, "total": page.total }))
     }
 
-    /// `library.item` — the full record the read model holds for one item.
+    /// `library.item` — the full record the read model holds for one item,
+    /// and its `availability`: `held`, `providers`, and the online `holders`
+    /// and `unknown` members behind them.
     ///
-    /// **No ratings or availability**, though the plan's sketch promises both
-    /// in this answer: nothing populates either yet. `schema.rs` gives the
-    /// same reason for leaving the `reviews` table out of `distlib-store`
-    /// altogether — a field nothing fills is a commitment made before the
-    /// thing it describes exists.
+    /// **No ratings**, though the plan's sketch promises them in this answer:
+    /// nothing populates them yet. `schema.rs` gives the same reason for
+    /// leaving the `reviews` table out of `distlib-store` altogether — a field
+    /// nothing fills is a commitment made before the thing it describes
+    /// exists.
     async fn item(&self, params: ItemParams) -> Result<Value, Error> {
         let stored = self
             .store
@@ -471,7 +479,13 @@ impl Api {
         record["replicas"] = json!(stored.item.replicas);
         record["files"] = json!(stored.item.files);
         record["last_modified"] = json!(stored.last_modified);
+        record["availability"] = self.seen().of(&params.item_id);
         Ok(record)
+    }
+
+    /// Who is online and what they hold, as of now.
+    fn seen(&self) -> Seen<'_> {
+        Seen::now(&self.availability, self.catalogue.holdings())
     }
 
     /// `library.edit_metadata` — writes the fields given, and only those.
@@ -1242,6 +1256,14 @@ fn sync_block(sync: &SyncState) -> Value {
         })
         .collect();
     json!({ "neighbours": sync.neighbours, "last_sync": last_sync })
+}
+
+/// A search or list hit: the summary, `held` and `providers`.
+fn hit(stored: &StoredItem, seen: &Seen<'_>) -> Value {
+    let mut hit = summary(stored);
+    hit["held"] = json!(seen.held(&stored.item.id));
+    hit["providers"] = json!(seen.providers(&stored.item.id));
+    hit
 }
 
 /// The fields shown for a search hit — a summary, not `library.item`'s full

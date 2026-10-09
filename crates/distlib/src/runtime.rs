@@ -143,6 +143,8 @@ impl Runtime {
         )
         .await
         .context("could not start the catalogue")?;
+        // The event bus, before anything that publishes into it.
+        let tasks = Tasks::new(distlib_api::events::bus());
         // On the same swarm, one topic the whole group shares, apart from the
         // membership and catalogue topics. It beats once this node knows its
         // group and where it is, and both arrive from the node.
@@ -155,6 +157,7 @@ impl Runtime {
                 holdings: catalogue.holdings().clone(),
             },
             Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
+            tasks.events().clone(),
         )
         .context("could not start the heartbeat")?;
 
@@ -169,7 +172,6 @@ impl Runtime {
         let search = SearchIndex::open(Some(data_dir.index_dir()))
             .await
             .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
-        let tasks = Tasks::new(distlib_api::events::bus());
         // Clears what a previous run was sent and never added — which can be
         // a large file's worth of removal, so off the async threads.
         let uploads = {
