@@ -2,13 +2,14 @@
   // One item: everything the read model holds for it, and its files. Kept
   // current by the event stream — news of this item reloads it, including
   // its arrival, so a page opened before sync brought the item in shows it
-  // when it comes.
+  // when it comes. So does news of any member's availability, which is named
+  // by member rather than by item.
   import { onMount } from "svelte";
 
   import Download from "./Download.svelte";
   import EditItem from "./EditItem.svelte";
   import type { Listen } from "./lib/events";
-  import { bytes, instant } from "./lib/format";
+  import { availability, bytes, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { call, type FileRecord, type ItemRecord, Unauthorised } from "./lib/rpc";
 
@@ -37,7 +38,11 @@
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {
     const stop = listen((event) => {
-      if (event.type === "resync" || ("item_id" in event && event.item_id === id)) {
+      if (
+        event.type === "resync" ||
+        event.type === "availability.changed" ||
+        ("item_id" in event && event.item_id === id)
+      ) {
         reload();
       }
     });
@@ -86,6 +91,8 @@
       {#if item.lang}<dt>Language</dt><dd>{item.lang}</dd>{/if}
       {#if item.genres}<dt>Genres</dt><dd>{item.genres.join(", ")}</dd>{/if}
       {#if item.replicas !== null}<dt>Copies kept</dt><dd>{item.replicas}</dd>{/if}
+      <dt>Availability</dt>
+      <dd>{availability(item.availability)}</dd>
       <dt>Changed</dt>
       <dd><time datetime={last?.toISOString()}>{last?.toLocaleString()}</time></dd>
       <dt>Item</dt>

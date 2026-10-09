@@ -17,6 +17,7 @@ const MLOCI: ItemRecord = {
   replicas: null,
   files: {},
   last_modified: 1790521054348270,
+  availability: { held: false, providers: 1 },
 };
 
 describe("what a form says about an item", () => {

@@ -2,10 +2,12 @@
   // The library: every item by title, or with a query, the items that match
   // it, best first — a page at a time, with the search and the page in the
   // address. Kept current by the event stream: any change to the catalogue
-  // may move what belongs on this page, so any one reloads it.
+  // may move what belongs on this page, so any one reloads it — and so does
+  // any member's availability, which is named by member rather than by item.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
+  import { availability } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { href, navigate, type Route } from "./lib/router.svelte";
   import { call, type ItemPage, type ItemSummary, Unauthorised } from "./lib/rpc";
@@ -52,7 +54,11 @@
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {
     const stop = listen((event) => {
-      if (event.type === "resync" || event.type.startsWith("catalogue.")) {
+      if (
+        event.type === "resync" ||
+        event.type.startsWith("catalogue.") ||
+        event.type === "availability.changed"
+      ) {
         reload();
       }
     });
@@ -95,7 +101,9 @@
     </p>
     <table>
       <thead>
-        <tr><th>Title</th><th>Authors</th><th>Series</th><th class="number">Year</th><th>Type</th></tr>
+        <tr>
+          <th>Title</th><th>Authors</th><th>Series</th><th class="number">Year</th><th>Type</th><th>Availability</th>
+        </tr>
       </thead>
       <tbody>
         {#each found.results as item (item.item_id)}
@@ -109,6 +117,7 @@
             <td>{series(item)}</td>
             <td class="number">{item.year ?? ""}</td>
             <td>{item.kind ?? ""}</td>
+            <td>{availability(item)}</td>
           </tr>
         {/each}
       </tbody>

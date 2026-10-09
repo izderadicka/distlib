@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import LibraryPage from "./LibraryPage.svelte";
 import { router } from "./lib/router.svelte";
-import { call, type ItemPage, type ItemSummary, RpcError, Unauthorised } from "./lib/rpc";
+import { call, type Hit, type ItemPage, RpcError, Unauthorised } from "./lib/rpc";
 import { fakeListen } from "./testing";
 
 vi.mock("./lib/rpc", async (original) => ({
@@ -12,7 +12,7 @@ vi.mock("./lib/rpc", async (original) => ({
 }));
 
 // As a node answers `library.list`, taken from a running one.
-const MLOCI: ItemSummary = {
+const MLOCI: Hit = {
   authors: ["Karel Čapek"],
   genres: ["satire"],
   item_id: "5e70b15a0c92500ec3c5ac1c02014271939be7721f4159d016b98ab63a0a81f0",
@@ -20,8 +20,10 @@ const MLOCI: ItemSummary = {
   series: { index: 1.0, name: "Mloci" },
   title: "Válka s mloky",
   year: 1936,
+  held: true,
+  providers: 2,
 };
-const UNTITLED: ItemSummary = {
+const UNTITLED: Hit = {
   authors: null,
   genres: null,
   item_id: "d0d36315be2bc663e895b2ae7a8a21205921aae069ff783d6125f0a1bd85ea97",
@@ -29,10 +31,12 @@ const UNTITLED: ItemSummary = {
   series: null,
   title: null,
   year: null,
+  held: false,
+  providers: 0,
 };
 
 /** `count` items with titles of their own. */
-function items(count: number): ItemSummary[] {
+function items(count: number): Hit[] {
   return Array.from({ length: count }, (_, n) => ({
     ...UNTITLED,
     item_id: n.toString(16).padStart(64, "0"),
@@ -80,8 +84,20 @@ describe("the library page", () => {
     expect(mloci).toContain("Mloci #1");
     expect(mloci).toContain("1936");
     expect(mloci).toContain("audiobook");
+    expect(mloci).toContain("held here, 2 online");
     expect(untitled).toContain("no title");
     expect(untitled).toContain("ebook");
+    expect(untitled).toContain("none online");
+  });
+
+  it("shows a change in who has an item when any member's availability changes", async () => {
+    const { events } = open();
+    await screen.findByText("held here, 2 online");
+
+    answer = { results: [{ ...MLOCI, providers: null }, UNTITLED], total: 2 };
+    events.tell({ type: "availability.changed", member_id: "x" });
+
+    await screen.findByText("held here, online holders unknown");
   });
 
   it("links each item, titled or not, to its own page", async () => {

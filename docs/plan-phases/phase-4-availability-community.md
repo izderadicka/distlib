@@ -697,6 +697,13 @@ a time, review before the next.
   unknown — the same on the item page, and neighbours and last sync on the Node page.
   **Acceptance:** Vitest, mutation-checked; the badge changes on `availability.changed` without a
   reload.
+  *As built:* one phrase everywhere, in the CLI's words — `held here, 2 online`, `1 online`,
+  `none online`, `online holders unknown` — from one `availability()` in `format.ts`. The library
+  and item pages reload on any `availability.changed`, since it names a member, not an item. The
+  item page shows the phrase only, not who the holders are (Ivan's call). The Node page's members
+  table gains two columns, Neighbour and Last sync (a failed round says so), and reloads on
+  `sync.status`. Eleven mutations, every one caught by Vitest; the e2e browse path also checks
+  the phrase against a real node's answer, since the Vitest fixtures are written by hand.
 
 ### 4c — community (7 PRs)
 

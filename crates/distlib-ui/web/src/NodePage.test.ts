@@ -25,7 +25,12 @@ const STATUS: NodeStatus = {
   leader: ME,
   followed_upto: null,
   pending: 1,
+  sync: { neighbours: [], last_sync: [] },
 };
+
+/** When a sync round finished, as a node answers it, and the moment it is. */
+const FINISHED = 1790521054348270;
+const FINISHED_AT = "2026-09-27T14:57:34.348Z";
 
 function members(...extra: Members["members"]): Members {
   return {
@@ -50,6 +55,13 @@ function open() {
   const page = render(NodePage, { listen: events.listen, onUnauthorised });
   return { events, onUnauthorised, page };
 }
+
+/** The members table's rows, header left out, as their cells' text. */
+const cells = () =>
+  screen
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent?.trim()));
 
 /**
  * Matches a `tag` whose whole text, however many pieces it was rendered in,
@@ -85,6 +97,44 @@ describe("the node page", () => {
     expect(rows[1]).toContain("carol");
     expect(rows[1]).toContain("follower");
     expect(rows[1]).toContain("0 B");
+  });
+
+  it("shows each member's place in the catalogue's swarm", async () => {
+    answer = {
+      status: {
+        ...STATUS,
+        sync: {
+          neighbours: [CAROL],
+          last_sync: [
+            { member: CAROL, finished: FINISHED, ok: true },
+            { member: DAVE, finished: FINISHED, ok: false },
+          ],
+        },
+      },
+      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }),
+    };
+    open();
+
+    await screen.findByText("dave");
+    const [me, carol, dave] = cells();
+    expect(me.slice(-2)).toEqual(["—", "—"]);
+    expect(carol[4]).toBe("yes");
+    expect(carol[5]).not.toContain("failed");
+    expect(dave[4]).toBe("—");
+    expect(dave[5]).toMatch(/ failed$/);
+    const times = [...document.querySelectorAll("td time")].map((time) => time.getAttribute("datetime"));
+    expect(times).toEqual([FINISHED_AT, FINISHED_AT]);
+  });
+
+  it("loads again when the catalogue's swarm changes", async () => {
+    const { events } = open();
+    await screen.findByText("carol");
+    expect(cells()[1][4]).toBe("—");
+
+    answer = { ...answer, status: { ...STATUS, sync: { neighbours: [CAROL], last_sync: [] } } };
+    events.tell({ type: "sync.status" });
+
+    await waitFor(() => expect(cells()[1][4]).toBe("yes"));
   });
 
   it("loads again when the membership changes", async () => {

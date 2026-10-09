@@ -113,6 +113,8 @@ test("an item added from the CLI can be browsed, searched for and opened", async
 
   // Without a reload: the catalogue's own event brings it.
   await expect(rows(page).filter({ hasText: "Válka s mloky" })).toContainText("Karel Čapek");
+  // Added here, and nobody else is online to have it.
+  await expect(rows(page).filter({ hasText: "Válka s mloky" })).toContainText("held here, none online");
 
   await page.getByRole("searchbox").fill("čapek");
   await page.getByRole("button", { name: "Search" }).click();
@@ -135,6 +137,7 @@ test("an item added from the CLI can be browsed, searched for and opened", async
   expect(new URL(page.url()).pathname).toMatch(/^\/items\/[0-9a-f]{64}$/);
   // Read from the node's own answer, so its shape is the one the page expects.
   await expect(page.getByText("Karel Čapek")).toBeVisible();
+  await expect(page.getByText("held here, none online")).toBeVisible();
   const file = rows(page).filter({ hasText: "mloci.epub" });
   await expect(file).toContainText("epub");
   await expect(file).toContainText("6 B");
