@@ -95,14 +95,19 @@ pub struct Sources {
 /// Cheap to clone; every clone is the same heartbeat.
 #[derive(Clone)]
 pub struct Availability {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     secret: SecretKey,
     online: watch::Receiver<BTreeSet<MemberId>>,
+    /// Shared with the listening half, which fills it.
     holders: Arc<Mutex<Holders>>,
     /// The last beat sent, and where — what a goodbye follows. `None` until
-    /// the first beat.
+    /// the first beat. Shared with the beating half, which records it.
     said: Arc<Mutex<Option<Said>>>,
     /// Waiting for the group, then beating and listening.
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// The last beat this node sent, and the topic it went to.
@@ -163,29 +168,31 @@ impl Availability {
             .instrument(span),
         );
         Ok(Self {
-            secret: secret.clone(),
-            online,
-            holders,
-            said,
-            task: Arc::new(Mutex::new(Some(task))),
+            inner: Arc::new(Inner {
+                secret: secret.clone(),
+                online,
+                holders,
+                said,
+                task: Mutex::new(Some(task)),
+            }),
         })
     }
 
     /// The other members online now, by their heartbeats.
     pub fn online(&self) -> watch::Receiver<BTreeSet<MemberId>> {
-        self.online.clone()
+        self.inner.online.clone()
     }
 
     /// The other members known to hold `item`, online or not — by their
     /// beats, and the base lists those name.
     pub fn holders(&self, item: &ItemId) -> Vec<MemberId> {
-        lock(&self.holders).holders(item).to_vec()
+        lock(&self.inner.holders).holders(item).to_vec()
     }
 
     /// Whether what `member` holds is known: until its base list has arrived,
     /// it is unknown rather than "holds nothing" (D5).
     pub fn knows_holdings_of(&self, member: &MemberId) -> bool {
-        lock(&self.holders).is_known(member)
+        lock(&self.inner.holders).is_known(member)
     }
 
     /// Stops beating and tells the group this node is going — before the
@@ -200,6 +207,7 @@ impl Availability {
             let _ = task.await;
         }
         let said = self
+            .inner
             .said
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -214,7 +222,7 @@ impl Availability {
         };
         beat.seq += 1;
         beat.leaving = true;
-        say(&sender, &self.secret, &group, beat).await;
+        say(&sender, &self.inner.secret, &group, beat).await;
         tokio::time::sleep(GOODBYE_GRACE).await;
     }
 
@@ -226,7 +234,8 @@ impl Availability {
     }
 
     fn take_task(&self) -> Option<JoinHandle<()>> {
-        self.task
+        self.inner
+            .task
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()

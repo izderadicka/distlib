@@ -94,10 +94,10 @@ pub struct Holdings {
     /// The member's last published list — see [`encode_base`] — or `None`
     /// before it has published one.
     pub base: Option<ContentHash>,
-    /// Held now and not in `base`.
+    /// Held now and not in `base`, sorted.
     #[serde(with = "raw_ids")]
     pub added: Vec<ItemId>,
-    /// In `base` and no longer held.
+    /// In `base` and no longer held, sorted.
     #[serde(with = "raw_ids")]
     pub removed: Vec<ItemId>,
 }
