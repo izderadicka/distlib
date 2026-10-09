@@ -882,13 +882,14 @@ impl Api {
         }
 
         let me = self.node.id();
-        let providers: Vec<MemberId> = self
-            .node
-            .membership()
-            .members()
-            .map(|record| record.member_id)
-            .filter(|member| *member != me)
-            .collect();
+        let providers = self.seen().ask_order(
+            &params.item_id,
+            self.node
+                .membership()
+                .members()
+                .map(|record| record.member_id)
+                .filter(|member| *member != me),
+        );
 
         let bytes = targets.iter().map(|target| target.record.size).sum();
         let task = self.tasks.start_download(

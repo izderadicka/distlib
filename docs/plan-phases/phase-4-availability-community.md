@@ -667,6 +667,14 @@ a time, review before the next.
   one phrase. Acceptance: bob stops beating without a word, and alice's `providers` drops within
   the TTL while her catalogue's item ids, the item itself and the log's position stay as they were.
   The document's raw entry count is not exposed, so the item and its ids stand in for it.
+  *As built, the provider order:* `Blobs::fetch` tries providers in the order given — no longer
+  shuffled inside it — and `library.download` gives them online holders first, then the other
+  online members, then the rest, each tier shuffled (ground truth 6: any `Vec` is a
+  `ContentDiscovery` tried in order). The downloader's connect timeout is one second
+  (`iroh-util`'s pool default), so an offline member asked first costs a second per file.
+  Acceptance: carol is a member and stopped, bob online holds a four-file item, and alice's
+  download finishes in under that second; with each file's providers shuffled as before, it
+  failed 3 runs in 3.
 
 - **4b-6 — `OFFER_AGAIN` goes (D7 a, the sweep's nudge, the backstop).**
   **Acceptance:** a quiet group makes no `start_sync` call in two minutes, counted; an item repaired
