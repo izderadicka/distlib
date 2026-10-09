@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ItemId;
+use crate::{ItemId, MemberId};
 
 /// One thing a watcher may want to refetch.
 ///
@@ -53,6 +53,15 @@ pub enum Event {
     /// refetch is the whole cost of that.
     #[serde(rename = "catalogue.item_changed")]
     ItemChanged { item_id: ItemId },
+
+    /// What this node can say about one member's availability changed: it
+    /// came online or went offline, or what it holds changed, or became known.
+    ///
+    /// The member, not the items: one member going offline touches every item
+    /// it holds, thousands of ids in one event, so a page refetches what it
+    /// shows instead (phase 4's D11).
+    #[serde(rename = "availability.changed")]
+    AvailabilityChanged { member_id: MemberId },
 
     /// How far a download has got, in bytes and in files, across all of the
     /// files it is fetching.
@@ -116,6 +125,7 @@ impl Event {
             Self::SyncStatus => "sync.status",
             Self::ItemAdded { .. } => "catalogue.item_added",
             Self::ItemChanged { .. } => "catalogue.item_changed",
+            Self::AvailabilityChanged { .. } => "availability.changed",
             Self::DownloadProgress { .. } => "download.progress",
             Self::DownloadFinished { .. } => "download.finished",
             Self::DownloadFailed { .. } => "download.failed",

@@ -658,6 +658,15 @@ a time, review before the next.
   **Acceptance — §9's first half:** stop the provider and `providers` drops within the TTL, while the
   document's entry count and the log's position stay where they were; a download with one offline
   provider does not wait out a dial timeout on it.
+  **Two PRs** — Ivan's call: the read side first, the provider order second.
+  *As built, the read side:* hits carry `held` and `providers`; `library.item`'s `availability` is
+  `{held, providers, holders, unknown}` — the online holders, and the online members whose holdings
+  are why `providers` is `null` (Ivan's call). `availability.changed {member_id}` is said when a
+  member comes online or goes, when a beat says something new about what it holds, and when its
+  base arrives — not for a beat that repeats the last. The CLI's `search` and `item` print it in
+  one phrase. Acceptance: bob stops beating without a word, and alice's `providers` drops within
+  the TTL while her catalogue's item ids, the item itself and the log's position stay as they were.
+  The document's raw entry count is not exposed, so the item and its ids stand in for it.
 
 - **4b-6 — `OFFER_AGAIN` goes (D7 a, the sweep's nudge, the backstop).**
   **Acceptance:** a quiet group makes no `start_sync` call in two minutes, counted; an item repaired

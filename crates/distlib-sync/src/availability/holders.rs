@@ -22,6 +22,16 @@ pub(super) struct Holders {
     stated: HashMap<MemberId, Stated>,
 }
 
+/// What taking in one statement did.
+#[derive(Debug, PartialEq)]
+pub(super) struct Heard {
+    /// The base to fetch, if this node needs it and is not already fetching
+    /// it.
+    pub(super) fetch: Option<ContentHash>,
+    /// Whether what this node can say the member holds changed.
+    pub(super) changed: bool,
+}
+
 /// Where this node is with one member's holdings.
 #[derive(Debug)]
 enum Stated {
@@ -47,13 +57,21 @@ enum Stated {
 }
 
 impl Holders {
-    /// Takes in one member's newest statement; the base to fetch, if this
-    /// node needs it and is not already fetching it.
-    pub(super) fn heard(&mut self, member: MemberId, holdings: &Holdings) -> Option<ContentHash> {
+    /// Takes in one member's newest statement.
+    pub(super) fn heard(&mut self, member: MemberId, holdings: &Holdings) -> Heard {
         match self.stated.get_mut(&member) {
-            Some(Stated::Known { base, .. }) if *base == holdings.base => {
+            Some(Stated::Known {
+                base,
+                added,
+                removed,
+                ..
+            }) if *base == holdings.base => {
+                let same = *added == holdings.added && *removed == holdings.removed;
                 self.restate(member, holdings);
-                None
+                Heard {
+                    fetch: None,
+                    changed: !same || !self.is_known(&member),
+                }
             }
             Some(Stated::Unknown {
                 base,
@@ -61,13 +79,20 @@ impl Holders {
                 fetching,
             }) if Some(*base) == holdings.base => {
                 latest.clone_from(holdings);
-                (!std::mem::replace(fetching, true)).then_some(*base)
+                Heard {
+                    fetch: (!std::mem::replace(fetching, true)).then_some(*base),
+                    changed: false,
+                }
             }
-            Some(Stated::Broken { base }) if *base == holdings.base => None,
+            Some(Stated::Broken { base }) if *base == holdings.base => Heard {
+                fetch: None,
+                changed: false,
+            },
             // A member heard from for the first time, or with a new base.
             _ => {
                 self.index.clear(member);
-                if let Some(base) = holdings.base {
+                let fetch = holdings.base;
+                if let Some(base) = fetch {
                     self.stated.insert(
                         member,
                         Stated::Unknown {
@@ -76,22 +101,25 @@ impl Holders {
                             fetching: true,
                         },
                     );
-                    return Some(base);
+                } else {
+                    self.known(member, None, 0, holdings);
                 }
-                self.known(member, None, 0, holdings);
-                None
+                Heard {
+                    fetch,
+                    changed: true,
+                }
             }
         }
     }
 
-    /// Takes in the base `member`'s beats name, fetched. Ignored if a newer
-    /// beat has named another since.
+    /// Takes in the base `member`'s beats name, fetched; whether it was taken
+    /// in. Ignored if a newer beat has named another since.
     pub(super) fn arrived(
         &mut self,
         member: MemberId,
         base: ContentHash,
         items: impl Iterator<Item = ItemId>,
-    ) {
+    ) -> bool {
         let latest = match self.stated.remove(&member) {
             Some(Stated::Unknown {
                 base: wanted,
@@ -102,13 +130,14 @@ impl Holders {
                 if let Some(stated) = stale {
                     self.stated.insert(member, stated);
                 }
-                return;
+                return false;
             }
         };
         let held = items
             .map(|item| u64::from(self.index.add(member, item)))
             .sum();
         self.known(member, Some(base), held, &latest);
+        true
     }
 
     /// The fetch of `member`'s `base` failed. If `retry`, the next beat that
@@ -312,12 +341,56 @@ mod tests {
             .collect()
     }
 
+    /// Only news is news: the same statement again changes nothing a page
+    /// shows, so nothing is said about it.
+    #[test]
+    fn a_statement_changes_something_only_when_it_says_something_new() {
+        let bob = member();
+        let mut holders = Holders::default();
+        let changed =
+            |holders: &mut Holders, holdings: Holdings| holders.heard(bob, &holdings).changed;
+
+        assert!(
+            changed(&mut holders, stated(None, 1, &[1], &[])),
+            "first heard"
+        );
+        assert!(!changed(&mut holders, stated(None, 1, &[1], &[])));
+        assert!(changed(&mut holders, stated(None, 2, &[1, 2], &[])));
+        assert!(
+            changed(&mut holders, stated(Some(base(9)), 2, &[], &[])),
+            "now unknown"
+        );
+        assert!(
+            !changed(&mut holders, stated(Some(base(9)), 3, &[3], &[])),
+            "still unknown"
+        );
+        assert!(
+            holders.arrived(bob, base(9), [1, 2].map(item).into_iter()),
+            "now known"
+        );
+        assert!(
+            !holders.arrived(bob, base(9), [1, 2].map(item).into_iter()),
+            "already in"
+        );
+        assert!(
+            changed(&mut holders, stated(Some(base(9)), 9, &[3], &[])),
+            "broken"
+        );
+        assert!(
+            !changed(&mut holders, stated(Some(base(9)), 9, &[3], &[])),
+            "still broken"
+        );
+    }
+
     #[test]
     fn without_a_base_the_change_is_everything_held() {
         let bob = member();
         let mut holders = Holders::default();
 
-        assert_eq!(holders.heard(bob, &stated(None, 2, &[1, 2], &[])), None);
+        assert_eq!(
+            holders.heard(bob, &stated(None, 2, &[1, 2], &[])).fetch,
+            None
+        );
         assert!(holders.is_known(&bob));
         assert_eq!(map(&holders, bob), [1, 2]);
     }
@@ -328,10 +401,14 @@ mod tests {
         let mut holders = Holders::default();
 
         let first = stated(Some(base(9)), 3, &[4], &[2]);
-        assert_eq!(holders.heard(bob, &first), Some(base(9)));
+        assert_eq!(holders.heard(bob, &first).fetch, Some(base(9)));
         assert!(!holders.is_known(&bob), "unknown until the base is in");
         let newer = stated(Some(base(9)), 2, &[], &[2]);
-        assert_eq!(holders.heard(bob, &newer), None, "already being fetched");
+        assert_eq!(
+            holders.heard(bob, &newer).fetch,
+            None,
+            "already being fetched"
+        );
 
         holders.arrived(bob, base(9), [1, 2, 3].map(item).into_iter());
         assert!(holders.is_known(&bob));
@@ -388,7 +465,9 @@ mod tests {
         holders.arrived(bob, base(8), [1, 2].map(item).into_iter());
 
         assert_eq!(
-            holders.heard(bob, &stated(Some(base(9)), 2, &[], &[])),
+            holders
+                .heard(bob, &stated(Some(base(9)), 2, &[], &[]))
+                .fetch,
             Some(base(9))
         );
         assert!(!holders.is_known(&bob));
@@ -421,9 +500,9 @@ mod tests {
         holders.heard(bob, &beat);
 
         holders.failed(bob, base(8), true);
-        assert_eq!(holders.heard(bob, &beat), None, "not that fetch");
+        assert_eq!(holders.heard(bob, &beat).fetch, None, "not that fetch");
         holders.failed(bob, base(9), true);
-        assert_eq!(holders.heard(bob, &beat), Some(base(9)));
+        assert_eq!(holders.heard(bob, &beat).fetch, Some(base(9)));
     }
 
     #[test]
@@ -434,10 +513,12 @@ mod tests {
         holders.heard(bob, &beat);
 
         holders.failed(bob, base(9), false);
-        assert_eq!(holders.heard(bob, &beat), None);
+        assert_eq!(holders.heard(bob, &beat).fetch, None);
         assert!(!holders.is_known(&bob));
         assert_eq!(
-            holders.heard(bob, &stated(Some(base(7)), 1, &[], &[])),
+            holders
+                .heard(bob, &stated(Some(base(7)), 1, &[], &[]))
+                .fetch,
             Some(base(7))
         );
     }
@@ -453,13 +534,17 @@ mod tests {
 
         // 5 was never in the base, so removing it changes nothing.
         assert_eq!(
-            holders.heard(bob, &stated(Some(base(9)), 1, &[], &[5])),
+            holders
+                .heard(bob, &stated(Some(base(9)), 1, &[], &[5]))
+                .fetch,
             None
         );
         assert!(!holders.is_known(&bob));
         assert!(map(&holders, bob).is_empty());
         assert_eq!(
-            holders.heard(bob, &stated(Some(base(9)), 2, &[], &[])),
+            holders
+                .heard(bob, &stated(Some(base(9)), 2, &[], &[]))
+                .fetch,
             None
         );
         assert!(
@@ -468,7 +553,9 @@ mod tests {
         );
 
         assert_eq!(
-            holders.heard(bob, &stated(Some(base(7)), 1, &[], &[])),
+            holders
+                .heard(bob, &stated(Some(base(7)), 1, &[], &[]))
+                .fetch,
             Some(base(7))
         );
         holders.arrived(bob, base(7), [3].map(item).into_iter());

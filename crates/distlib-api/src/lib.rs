@@ -30,6 +30,7 @@
 //! Serving TLS here would mean certificates to issue, renew and trust for
 //! every node, which a proxy in front of it already knows how to do.
 
+mod availability;
 pub mod client;
 pub mod events;
 pub mod methods;

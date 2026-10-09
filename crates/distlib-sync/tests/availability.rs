@@ -22,8 +22,8 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId, MemberId, NodeAddr,
-    SignedAddress, SignedHeartbeat,
+    ContentHash, Event as NodeEvent, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId,
+    MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
     availability::{DELTA_MAX, decode_base},
 };
 use distlib_net::Transport;
@@ -43,7 +43,7 @@ use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{GOSSIP_ALPN, Gossip},
 };
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 fn init_logging() {
     let _ = tracing_subscriber::fmt()
@@ -73,6 +73,8 @@ struct Node {
     holdings: Holdings,
     /// For listening to the topic as it is, beside the node's own heartbeat.
     gossip: Gossip,
+    /// What the heartbeat says on the node's event bus.
+    events: broadcast::Sender<NodeEvent>,
     router: Router,
 }
 
@@ -101,6 +103,7 @@ impl Node {
         let says = watch::Sender::new(None);
         let blobs = MemStore::new();
         let holdings = Holdings::new((*blobs).clone());
+        let (events, _) = broadcast::channel(64);
         let availability = Availability::start(
             &transport,
             &secret,
@@ -110,9 +113,10 @@ impl Node {
                 holdings: holdings.clone(),
             },
             interval,
+            events.clone(),
         )
         .unwrap();
-        let (events, mut served_events) = EventSender::channel(
+        let (serving, mut served_events) = EventSender::channel(
             16,
             EventMask {
                 connected: ConnectMode::Notify,
@@ -132,7 +136,7 @@ impl Node {
         });
         let router = Router::builder(endpoint)
             .accept(GOSSIP_ALPN, gossip.clone())
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, Some(events)))
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, Some(serving)))
             .spawn();
         let node = Self {
             id: MemberId::from(secret.public()),
@@ -145,6 +149,7 @@ impl Node {
             served,
             holdings,
             gossip,
+            events,
             router,
         };
         node.says_where_it_is(true);
@@ -761,6 +766,43 @@ async fn a_receiver_knows_exactly_what_a_member_holds() {
             .is_empty()
     );
     assert_eq!(alice.blobs.tags().list().await.unwrap().count().await, 0);
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
+/// **Alice is told when what she can say about bob changes** — what he holds,
+/// and his going — and not for a beat that says nothing new.
+#[tokio::test]
+async fn a_change_in_a_members_availability_is_told() {
+    let (alice, bob, _membership) = a_pair(Duration::from_secs(1)).await;
+    alice.sees_online(&[bob.id]).await;
+    alice.sees_held(bob.id, &HashSet::new(), 1).await;
+    let mut told = alice.events.subscribe();
+    let about_bob = NodeEvent::AvailabilityChanged { member_id: bob.id };
+
+    let item = bob.holds(1).await;
+    let event = tokio::time::timeout(SOON, told.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event, about_bob, "what he holds");
+    alice.sees_held(bob.id, &HashSet::from([item]), 1).await;
+
+    // Beats every second, saying the same.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), told.recv())
+            .await
+            .is_err(),
+        "a beat with nothing new"
+    );
+
+    bob.availability.leave().await;
+    let event = tokio::time::timeout(SOON, told.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event, about_bob, "his going");
 
     alice.router.shutdown().await.unwrap();
     bob.router.shutdown().await.unwrap();

@@ -78,15 +78,21 @@ impl Statement {
         })
     }
 
-    /// What `held` adds to the base, and what it no longer has of it.
+    /// What `held` adds to the base, and what it no longer has of it — each
+    /// sorted, so one change is always stated the same way, and a receiver
+    /// can tell a beat that says something new from one that repeats the
+    /// last by comparing them.
     fn delta(&self, held: &HashSet<ItemId>) -> (Vec<ItemId>, Vec<ItemId>) {
-        let Some(base) = &self.base else {
-            return (held.iter().copied().collect(), Vec::new());
+        let (mut added, mut removed): (Vec<ItemId>, Vec<ItemId>) = match &self.base {
+            None => (held.iter().copied().collect(), Vec::new()),
+            Some(base) => (
+                held.difference(&base.items).copied().collect(),
+                base.items.difference(held).copied().collect(),
+            ),
         };
-        (
-            held.difference(&base.items).copied().collect(),
-            base.items.difference(held).copied().collect(),
-        )
+        added.sort_unstable();
+        removed.sort_unstable();
+        (added, removed)
     }
 
     async fn publish(&mut self, held: &HashSet<ItemId>) -> Result<()> {
@@ -144,6 +150,23 @@ mod tests {
         )
     }
 
+    /// One change is always stated the same way, whatever order the set
+    /// iterates in — which is how a receiver tells news from a repeat.
+    #[tokio::test]
+    async fn a_change_is_stated_in_order() {
+        let store = MemStore::new();
+        let mut statement = Statement::new((*store).clone());
+        let now = Instant::now();
+
+        let added = statement.holdings(&ids(0..100), now, now).await.unwrap();
+        assert_eq!(added.added, sorted(ids(0..100).into_iter().collect()));
+
+        // Four hundred overflow the beat, so they are published as the base.
+        statement.holdings(&ids(0..400), now, now).await.unwrap();
+        let removed = statement.holdings(&ids(100..400), now, now).await.unwrap();
+        assert_eq!(removed.removed, sorted(ids(0..100).into_iter().collect()));
+    }
+
     #[tokio::test]
     async fn before_any_base_everything_held_is_the_delta() {
         let store = MemStore::new();
@@ -166,7 +189,7 @@ mod tests {
         let some = statement.holdings(&held, now, now).await.unwrap();
         assert_eq!(some.count, 3);
         assert_eq!(some.base, None);
-        assert_eq!(sorted(some.added), sorted(held.into_iter().collect()));
+        assert_eq!(some.added, sorted(held.into_iter().collect()));
         assert!(some.removed.is_empty());
         assert!(
             store.tags().get(BASE_TAG).await.unwrap().is_none(),
@@ -209,10 +232,7 @@ mod tests {
         let stated = statement.holdings(&held, now, now).await.unwrap();
         assert_eq!(stated.base, Some(base));
         assert_eq!(stated.count, 501);
-        assert_eq!(
-            sorted(stated.added),
-            sorted(ids(500..502).into_iter().collect())
-        );
+        assert_eq!(stated.added, sorted(ids(500..502).into_iter().collect()));
         assert_eq!(stated.removed, ids(0..1).into_iter().collect::<Vec<_>>());
     }
 
