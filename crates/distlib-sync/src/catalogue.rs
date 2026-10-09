@@ -19,14 +19,16 @@
 //! key beside this one; nothing here has to move.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use distlib_consensus::{MembershipState, gossip::reachable};
-use distlib_core::{Absorbed, ContentHash, GroupId, Item, ItemId, Key, MemberId};
+use distlib_core::{
+    Absorbed, CommunityKey, ContentHash, GroupId, Item, ItemId, Key, MemberId, Rating, Review,
+};
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
@@ -132,6 +134,8 @@ struct Inner {
     /// handshakes and docs entries. The two are domain-separated by protocol
     /// and neither is an oracle for the other.
     author: AuthorId,
+    /// The same key as a member: who this node's community entries name.
+    me: MemberId,
     /// The document, once there is a group to derive it from.
     open: watch::Receiver<Option<Doc>>,
     /// What the document's one subscription reports, from when it opened.
@@ -235,6 +239,7 @@ impl Catalogue {
                 holdings: Holdings::new(blobs),
                 docs,
                 author: author_id,
+                me,
                 open,
                 feed,
                 task: Mutex::new(Some(task)),
@@ -456,6 +461,89 @@ impl Catalogue {
             last_modified,
             waiting_for_content,
         }))
+    }
+
+    /// Rates `item` as this node's member, replacing its earlier rating.
+    pub async fn rate(&self, item: ItemId, rating: Rating) -> Result<()> {
+        let key = CommunityKey::Rating {
+            item,
+            member: self.inner.me,
+        };
+        self.put(key.encode(), rating.encode()).await
+    }
+
+    /// Reviews `item` as this node's member, replacing its earlier review.
+    pub async fn review(&self, item: ItemId, review: &Review) -> Result<()> {
+        let key = CommunityKey::Review {
+            item,
+            member: self.inner.me,
+        };
+        self.put(key.encode(), review.encode()).await
+    }
+
+    /// Every member's rating of `item` this node holds, each counted only if
+    /// that member wrote it (D9).
+    pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {
+        self.said(CommunityKey::ratings_of(item), Rating::decode)
+            .await
+    }
+
+    /// Every member's review of `item` this node holds, each counted only if
+    /// that member wrote it (D9).
+    pub async fn reviews(&self, item: ItemId) -> Result<BTreeMap<MemberId, Review>> {
+        self.said(CommunityKey::reviews_of(item), Review::decode)
+            .await
+    }
+
+    /// What each member said under `prefix`, by member.
+    ///
+    /// **An entry counts only if its author is the member its key names**
+    /// (D9). iroh-docs checks that an entry is signed by its author and
+    /// nothing more, so carol can write `rating/X/bob`; read the way the
+    /// item's own fields are, with `single_latest_per_key`, her newer entry
+    /// would hide bob's real one (ground truth 9). So this reads every
+    /// author's entry — a flat query, one per author and key — and keeps
+    /// the one the key's own member wrote.
+    ///
+    /// Not filtered by who is still a member: that is the read model's
+    /// business, and it re-projects when the membership changes. An entry
+    /// whose content has not arrived, or which does not `decode`, is left out.
+    async fn said<T>(
+        &self,
+        prefix: String,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> Result<BTreeMap<MemberId, T>> {
+        let doc = self.document()?;
+        let entries = doc
+            .get_many(Query::all().key_prefix(prefix))
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut said = BTreeMap::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            let key = String::from_utf8_lossy(entry.key());
+            let Some(member) = CommunityKey::parse(entry.key()).map(|parsed| parsed.member())
+            else {
+                tracing::debug!(%key, "not a community key this build reads; left alone");
+                continue;
+            };
+            if entry.author().as_bytes() != member.as_bytes() {
+                tracing::debug!(%key, author = %entry.author(), "written by someone other than the member it names; ignored");
+                continue;
+            }
+            let Some(value) = self.content(&entry).await? else {
+                tracing::debug!(%key, "the content of this entry has not arrived yet; leaving it out");
+                continue;
+            };
+            let Some(value) = decode(&value) else {
+                tracing::warn!(%key, "a community entry holds a value this build cannot read");
+                continue;
+            };
+            said.insert(member, value);
+        }
+        Ok(said)
     }
 
     /// Every item this node holds an entry for.
