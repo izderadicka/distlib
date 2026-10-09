@@ -37,6 +37,7 @@ const MLOCI: ItemRecord = {
   series: { index: 1.0, name: "Mloci" },
   title: "Válka s mloky",
   year: 1936,
+  availability: { held: false, providers: 1 },
 };
 
 /** Everything nobody has said left unsaid, as a node answers it. */
@@ -93,6 +94,7 @@ describe("the item page", () => {
       Year: "1936",
       Type: "audiobook",
       Genres: "satire",
+      Availability: "1 online",
       Item: MLOCI.item_id,
     });
     expect(document.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-27T14:57:34.348Z");
@@ -108,7 +110,7 @@ describe("the item page", () => {
     open();
 
     await screen.findByText("no title");
-    expect(Object.keys(details())).toEqual(["Changed", "Item"]);
+    expect(Object.keys(details())).toEqual(["Availability", "Changed", "Item"]);
     expect(document.querySelector(".description")).toBeNull();
   });
 
@@ -174,6 +176,16 @@ describe("the item page", () => {
       events.tell(event);
       await waitFor(() => expect(call).toHaveBeenCalledTimes(asked + 1));
     }
+  });
+
+  it("shows a change in who has it when any member's availability changes", async () => {
+    const { events } = open();
+    await screen.findByText("1 online");
+
+    answer = { ...MLOCI, availability: { held: true, providers: 2 } };
+    events.tell({ type: "availability.changed", member_id: OTHER });
+
+    await screen.findByText("held here, 2 online");
   });
 
   it("does not load again for news of any other item", async () => {

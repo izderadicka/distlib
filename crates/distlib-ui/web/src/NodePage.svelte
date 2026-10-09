@@ -1,11 +1,12 @@
 <script lang="ts">
   // This node and its group, read-only (D8), kept current by the event
   // stream: the page loads when it opens, and again on every `resync` —
-  // which each connection starts with — and on `membership.changed`.
+  // which each connection starts with — on `membership.changed`, and on
+  // `sync.status`, for each member's place in the catalogue's swarm.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
-  import { bytes } from "./lib/format";
+  import { bytes, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { call, type Member, type NodeStatus, Unauthorised } from "./lib/rpc";
 
@@ -38,13 +39,16 @@
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {
     const stop = listen((event) => {
-      if (event.type === "resync" || event.type === "membership.changed") {
+      if (event.type === "resync" || event.type === "membership.changed" || event.type === "sync.status") {
         reload();
       }
     });
     reload();
     return stop;
   });
+
+  const neighbours = $derived(new Set(status?.sync.neighbours));
+  const lastSync = $derived(new Map(status?.sync.last_sync.map((last) => [last.member, last])));
 
   /** A core node says what Raft makes it; a follower has no Raft to ask. */
   function role(node: NodeStatus): string {
@@ -80,16 +84,28 @@
     <h2>Members <span class="count">{members.length}</span></h2>
     <table>
       <thead>
-        <tr><th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th></tr>
+        <tr>
+          <th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th><th>Neighbour</th><th>Last sync</th>
+        </tr>
       </thead>
       <tbody>
         {#each members as member (member.member)}
+          {@const last = lastSync.get(member.member)}
           <tr class:me={member.member === status.member}>
             <!-- A founder names nobody, themselves included. -->
             <td>{#if member.name}{member.name}{:else}<span class="unnamed">no name</span>{/if}</td>
             <td><code title={member.member}>{member.member.slice(0, 12)}…</code></td>
             <td>{member.core ? "core" : "follower"}{member.member === status.leader ? " (leader)" : ""}</td>
             <td class="number">{bytes(member.pledge_bytes)}</td>
+            <td>{neighbours.has(member.member) ? "yes" : "—"}</td>
+            <td>
+              {#if last}
+                {@const finished = instant(last.finished)}
+                <time datetime={finished.toISOString()}>{finished.toLocaleString()}</time>{last.ok ? "" : " failed"}
+              {:else}
+                —
+              {/if}
+            </td>
           </tr>
         {/each}
       </tbody>

@@ -13,7 +13,19 @@ vi.mock("./lib/rpc", async (original) => ({
 }));
 
 const ME = "a".repeat(64);
-const STATUS = { member: ME, group: null, core: true, raft: "Leader", leader: ME, pending: 0 } as NodeStatus;
+const STATUS: NodeStatus = {
+  member: ME,
+  group: null,
+  core: true,
+  members: 1,
+  core_group: [ME],
+  changed_at: 0,
+  raft: "Leader",
+  leader: ME,
+  followed_upto: null,
+  pending: 0,
+  sync: { neighbours: [], last_sync: [] },
+};
 const MEMBERS: Members = { group: null, changed_at: 1, members: [] };
 
 /** Renders the shell, and hands back what it watches the node with. */
@@ -97,6 +109,7 @@ describe("the shell", () => {
       replicas: null,
       files: {},
       last_modified: 0,
+      availability: { held: false, providers: 0 },
     })) as typeof call);
     navigate(`/items/${"a".repeat(64)}`);
     open();

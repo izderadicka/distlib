@@ -22,6 +22,20 @@ export interface NodeStatus {
   /** How far a follower has read the log; `null` on a voter. */
   followed_upto: number | null;
   pending: number;
+  /** The catalogue's swarm, as this node sees it. */
+  sync: {
+    /** The members this node is a catalogue gossip neighbour of. */
+    neighbours: string[];
+    last_sync: LastSync[];
+  };
+}
+
+/** How the last catalogue sync round with one member ended. */
+export interface LastSync {
+  member: string;
+  /** Microseconds since the epoch. */
+  finished: number;
+  ok: boolean;
 }
 
 /** One entry of `group.members`. */
@@ -60,6 +74,16 @@ export interface ItemSummary {
   year: number | null;
 }
 
+/** Who has an item: this node, and how many online members. */
+export interface Availability {
+  held: boolean;
+  /** `null` while some online member's holdings are not known yet. */
+  providers: number | null;
+}
+
+/** One result of `library.list` or `library.search`. */
+export type Hit = ItemSummary & Availability;
+
 /** One file of an item. What nobody said is left out, rather than `null`. */
 export interface FileRecord {
   role: "content" | "cover" | "subtitle" | "metadata" | "other";
@@ -82,6 +106,7 @@ export interface ItemRecord extends ItemSummary {
   files: Record<string, FileRecord>;
   /** Microseconds since the epoch. */
   last_modified: number;
+  availability: Availability;
 }
 
 /** How far a download has got, in bytes and in files written. */
@@ -114,7 +139,7 @@ export type TaskState = {
 
 /** A page of items, and how many there are in all. */
 export interface ItemPage {
-  results: ItemSummary[];
+  results: Hit[];
   total: number;
 }
 
