@@ -71,25 +71,6 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
     (dir, alice, bob)
 }
 
-/// A follower's configuration: the core group it bootstraps from, *with* an
-/// address, and this node deliberately not in it.
-///
-/// For waiting on something whose guarantee is a node's own timer.
-///
-/// Deliberately longer than [`SOON`], and longer than `distlib-sync`'s
-/// `OFFER_AGAIN`. A document's peers are offered again promptly when an address
-/// is learned, but the thing that recovers a document stranded by the departure
-/// of the node that introduced its members is the timer behind that. A test
-/// bounded at [`SOON`] would be asserting a promptness the design does not
-/// offer — the same reasoning as the consensus harness's `PATIENTLY`, which
-/// sits above the follow loop's idle poll for exactly this reason.
-///
-/// Not padding: with the timer briefly at two minutes a bound of sixty seconds
-/// failed (P3-27). It was also C25's bound, while two followers met only
-/// through the timer; since 4a-3 they meet on their first offer, and that test
-/// is bounded at [`SOON`].
-const PATIENTLY: Duration = Duration::from_secs(60);
-
 /// Reads one key, waiting out the window where the entry is here and its
 /// content is not.
 ///
@@ -557,6 +538,59 @@ async fn a_settled_group_stops_talking_about_addresses() {
     group.alice.shutdown().await;
 }
 
+/// How long a settled group must go without a catalogue sync round (phase 4's
+/// 4b-6, Ivan's call): longer than the thirty-second re-offer that used to
+/// start one between every pair, so that timer would show in it.
+const NO_ROUNDS: Duration = Duration::from_secs(45);
+
+/// **And it stops syncing, too** (4b-6).
+///
+/// A sync round is a dial and a set reconciliation, and between two nodes
+/// with nothing new it finds nothing. The catalogue used to offer every peer
+/// again every thirty seconds regardless, so a quiet group of N ran
+/// N × (N − 1) such rounds every half-minute for as long as it ran. Changes
+/// travel over gossip and the rounds a new neighbour starts; what is left of
+/// the timer is a ten-minute backstop.
+///
+/// Counted by the rounds each node has finished, with whom and when — what
+/// an offer costs, since iroh-docs dials every peer it is handed.
+#[tokio::test]
+async fn a_settled_group_stops_syncing() {
+    let group = a_group_with_two_followers().await;
+    let everyone = [&group.alice, &group.bob, &group.carol];
+    let rounds = || {
+        everyone
+            .iter()
+            .map(|runtime| runtime.catalogue().sync_status().borrow().last_sync.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Settled first: a group that is still introducing itself is supposed to
+    // sync, so this waits for a stretch with no rounds in it at all.
+    let settled = tokio::time::timeout(SOON, async {
+        loop {
+            let before = rounds();
+            tokio::time::sleep(QUIET).await;
+            if rounds() == before {
+                return before;
+            }
+        }
+    })
+    .await
+    .expect("the group never settled");
+
+    tokio::time::sleep(NO_ROUNDS).await;
+    assert_eq!(
+        rounds(),
+        settled,
+        "a settled group ran catalogue sync rounds within {NO_ROUNDS:?}"
+    );
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
 /// And so the catalogue no longer needs a core node in the middle.
 ///
 /// The test P2-14 named as the acceptance for this work. Alice is the sole
@@ -594,8 +628,9 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
     // other on the membership topic before it knew where the other was, and
     // that one failed dial stranded the peer in iroh-gossip on every topic
     // (ground truth 18) — so they met only once the catalogue's timer offered
-    // them again, thirty seconds on. Bounded well under that timer, so it is
-    // the first introduction that has to work, not the repair.
+    // them again, thirty seconds on. That timer is a ten-minute backstop now
+    // (4b-6), and this is bounded far under it: the first introduction has to
+    // work.
     for (who, runtime, other) in [
         ("carol", &group.carol, bob_id),
         ("bob", &group.bob, carol_id),
@@ -785,7 +820,7 @@ async fn a_late_joiner_still_learns_where_the_others_are() {
     .await
     .unwrap();
 
-    let found = tokio::time::timeout(PATIENTLY, async {
+    let found = tokio::time::timeout(SOON, async {
         loop {
             if let Some(addr) = latecomer.node().known_addresses().address_of(bob_id) {
                 return addr;

@@ -161,11 +161,11 @@ const SOON: Duration = Duration::from_secs(30);
 
 /// For a write crossing between two nodes that have both opened the catalogue.
 ///
-/// Under the catalogue's 30 s re-offer, deliberately: a write made just as the
-/// two connect can miss both the broadcast and the first sync round, and what
-/// must carry it is the round the pump asks for, not the timer behind it (C31).
-/// At [`SOON`] the timer passed for the fix — once, on macOS, by milliseconds
-/// too late.
+/// Under the catalogue's re-offer as it then was, thirty seconds, deliberately:
+/// a write made just as the two connect can miss both the broadcast and the
+/// first sync round, and what must carry it is the round the pump asks for, not
+/// the timer behind it (C31). At [`SOON`] the timer passed for the fix — once,
+/// on macOS, by milliseconds too late. It is a ten-minute backstop now (4b-6).
 const PROMPTLY: Duration = Duration::from_secs(10);
 
 #[tokio::test]
