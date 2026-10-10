@@ -351,7 +351,8 @@ impl Pump {
 ///
 /// One of the item's own keys, or a member's rating or review of it (D8): the
 /// read model re-reads an item whole, so either is a reason to read it again.
-/// A bookmark is not part of the item it points into, so not here.
+/// A bookmark is not part of the item it points into, and a wish and its
+/// comments are about no item at all, so none of those is here.
 /// A key this build does not recognise is left alone, for the reason
 /// [`Key::parse`] gives: the catalogue is one document for the whole group and
 /// grows keys over time.
@@ -361,7 +362,9 @@ fn note(batch: &mut Batch, key: &[u8]) -> bool {
             .map(|parsed| parsed.item())
             .or_else(|| match CommunityKey::parse(key)? {
                 CommunityKey::Rating { item, .. } | CommunityKey::Review { item, .. } => Some(item),
-                CommunityKey::Bookmark { .. } => None,
+                CommunityKey::Bookmark { .. }
+                | CommunityKey::Wish { .. }
+                | CommunityKey::WishComment { .. } => None,
             });
     item.is_some_and(|item| batch.items.insert(item))
 }
@@ -382,7 +385,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use distlib_core::BookmarkId;
+    use distlib_core::{BookmarkId, WishId};
     use iroh::SecretKey;
     use iroh_docs::engine::{Origin, SyncReason};
 
@@ -435,6 +438,14 @@ mod tests {
         assert!(
             !note(&mut Batch::default(), bookmark.encode().as_bytes()),
             "a bookmark is not part of its item"
+        );
+        let wish = CommunityKey::Wish {
+            wish: WishId::from_bytes([3; 32]),
+            member,
+        };
+        assert!(
+            !note(&mut Batch::default(), wish.encode().as_bytes()),
+            "a wish is about no item, whatever its id looks like"
         );
     }
 

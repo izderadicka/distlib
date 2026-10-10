@@ -24,8 +24,9 @@ pub use catalogue::{
     Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
 };
 pub use community::{
-    Bookmark, BookmarkId, CommunityKey, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES,
-    Rating, Review,
+    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, NOTE_MAX_BYTES,
+    POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, Review, WISH_MAX_BYTES, Wish, WishFields, WishId,
+    WishStatus,
 };
 pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,

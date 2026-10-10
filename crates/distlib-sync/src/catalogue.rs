@@ -27,8 +27,8 @@ use std::{
 
 use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{
-    Absorbed, Bookmark, BookmarkId, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
-    MemberId, Rating, Review,
+    Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
+    MemberId, Rating, Review, Wish, WishId,
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -511,6 +511,25 @@ impl Catalogue {
         self.put(key.encode(), bookmark.encode()).await
     }
 
+    /// Writes this node's member's entry for `wish`: creating it, or
+    /// fulfilling it, or both (D10). Replaces this member's earlier entry.
+    pub async fn wish(&self, wish: WishId, entry: &Wish) -> Result<()> {
+        let key = CommunityKey::Wish {
+            wish,
+            member: self.inner.me,
+        };
+        self.put(key.encode(), entry.encode()).await
+    }
+
+    /// Comments on `wish` as this node's member, replacing its earlier comment.
+    pub async fn wish_comment(&self, wish: WishId, comment: &Comment) -> Result<()> {
+        let key = CommunityKey::WishComment {
+            wish,
+            member: self.inner.me,
+        };
+        self.put(key.encode(), comment.encode()).await
+    }
+
     /// Every member's rating of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {
@@ -529,6 +548,25 @@ impl Catalogue {
         ))
     }
 
+    /// Every member's entry for `wish` this node holds, each counted only if
+    /// that member wrote it (D9). Who created it, and whether it is
+    /// fulfilled, is the reader's to resolve from these (D10).
+    pub async fn wishes(&self, wish: WishId) -> Result<BTreeMap<MemberId, Wish>> {
+        Ok(by_member(
+            self.said(CommunityKey::wish_entries_of(wish), Wish::decode)
+                .await?,
+        ))
+    }
+
+    /// Every member's comment on `wish` this node holds, each counted only if
+    /// that member wrote it (D9).
+    pub async fn wish_comments(&self, wish: WishId) -> Result<BTreeMap<MemberId, Comment>> {
+        Ok(by_member(
+            self.said(CommunityKey::comments_on(wish), Comment::decode)
+                .await?,
+        ))
+    }
+
     /// Every member's bookmarks on `item` this node holds, each counted only
     /// if that member wrote it (D9) — by member, then id.
     pub async fn bookmarks(&self, item: ItemId) -> Result<Vec<ReadBookmark>> {
@@ -537,17 +575,20 @@ impl Catalogue {
             .await?;
         let mut bookmarks: Vec<ReadBookmark> = said
             .into_iter()
-            .filter_map(|said| match said.key {
-                CommunityKey::Bookmark {
+            .filter_map(|said| {
+                // The prefix holds bookmarks and nothing else.
+                let CommunityKey::Bookmark {
                     member, bookmark, ..
-                } => Some(ReadBookmark {
+                } = said.key
+                else {
+                    return None;
+                };
+                Some(ReadBookmark {
                     member,
                     id: bookmark,
                     bookmark: said.value,
                     last_modified: said.written,
-                }),
-                // The prefix holds bookmarks and nothing else.
-                CommunityKey::Rating { .. } | CommunityKey::Review { .. } => None,
+                })
             })
             .collect();
         bookmarks.sort_unstable_by_key(|read| (read.member, read.id));
@@ -679,7 +720,7 @@ impl Catalogue {
     }
 }
 
-/// One value per member: what a member said once per item, as a rating is.
+/// One value per member: what a member says once, as a rating of an item is.
 fn by_member<T>(said: Vec<Said<T>>) -> BTreeMap<MemberId, T> {
     said.into_iter()
         .map(|said| (said.key.member(), said.value))

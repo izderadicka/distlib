@@ -3,10 +3,12 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_core::{
-    Bookmark, BookmarkId, CommunityKey, ItemId, Key, MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES,
-    REVIEW_MAX_BYTES, Rating, Review,
+    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ItemId, ItemKind, Key,
+    MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, Review, WISH_MAX_BYTES,
+    Wish, WishFields, WishId, WishStatus,
 };
 use iroh::SecretKey;
+use serde_json::json;
 
 fn member() -> MemberId {
     MemberId::from(SecretKey::generate().public())
@@ -16,6 +18,7 @@ fn member() -> MemberId {
 const ITEM: ItemId = ItemId::from_bytes([0xab; 32]);
 const A: BookmarkId = BookmarkId::from_bytes([0xa1; 16]);
 const B: BookmarkId = BookmarkId::from_bytes([0xb2; 16]);
+const WISH: WishId = WishId::from_bytes([0xcd; 32]);
 
 fn rating(member: MemberId) -> CommunityKey {
     CommunityKey::Rating { item: ITEM, member }
@@ -33,17 +36,32 @@ fn bookmark(member: MemberId, bookmark: BookmarkId) -> CommunityKey {
     }
 }
 
+fn wish(member: MemberId) -> CommunityKey {
+    CommunityKey::Wish { wish: WISH, member }
+}
+
+fn comment(member: MemberId) -> CommunityKey {
+    CommunityKey::WishComment { wish: WISH, member }
+}
+
 #[test]
 fn a_key_reads_back_as_itself() {
     let bob = member();
-    for key in [rating(bob), review(bob), bookmark(bob, A), bookmark(bob, B)] {
+    for key in [
+        rating(bob),
+        review(bob),
+        bookmark(bob, A),
+        bookmark(bob, B),
+        wish(bob),
+        comment(bob),
+    ] {
         let encoded = key.encode();
         assert_eq!(
             CommunityKey::parse(encoded.as_bytes()),
             Some(key),
             "{encoded}"
         );
-        assert_eq!((key.item(), key.member()), (ITEM, bob));
+        assert_eq!(key.member(), bob);
     }
 }
 
@@ -56,6 +74,8 @@ fn a_key_is_named_by_its_kind_the_item_and_the_member() {
         bookmark(bob, A).encode(),
         format!("bookmark/{ITEM}/{bob}/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
     );
+    assert_eq!(wish(bob).encode(), format!("wish/{WISH}/{bob}"));
+    assert_eq!(comment(bob).encode(), format!("wish_comment/{WISH}/{bob}"));
 }
 
 /// A second spelling of one member's key would be a second rating by them,
@@ -79,6 +99,11 @@ fn a_key_counts_only_in_the_spelling_it_is_written_in() {
         CommunityKey::parse(format!("bookmark/{ITEM}/{bob}/{mark}").as_bytes()),
         None
     );
+    let wished = WISH.to_string().to_uppercase();
+    assert_eq!(
+        CommunityKey::parse(format!("wish/{wished}/{bob}").as_bytes()),
+        None
+    );
     if who.parse::<MemberId>().is_ok() {
         assert_eq!(
             CommunityKey::parse(format!("rating/{ITEM}/{who}").as_bytes()),
@@ -97,7 +122,9 @@ fn anything_else_is_somebody_elses_key() {
         format!("bookmark/{ITEM}/{bob}"),
         format!("bookmark/{ITEM}/{bob}/{A}/extra"),
         format!("bookmark/{ITEM}/{bob}/a1a1"),
-        format!("wish/{ITEM}/{bob}"),
+        format!("wish/{A}/{bob}"),
+        format!("wish/{WISH}/{bob}/{A}"),
+        format!("wish_comment/{WISH}"),
         format!("item/{ITEM}/title"),
         format!("rating/{bob}/{ITEM}"),
     ] {
@@ -139,13 +166,46 @@ fn a_prefix_covers_one_kind_of_key_about_one_item() {
     );
 }
 
+/// `wish/` and `wish_comment/` share four letters, and nothing else.
+#[test]
+fn a_wishs_entries_and_its_comments_are_read_apart() {
+    let bob = member();
+    assert!(
+        wish(bob)
+            .encode()
+            .starts_with(&CommunityKey::wish_entries_of(WISH))
+    );
+    assert!(
+        comment(bob)
+            .encode()
+            .starts_with(&CommunityKey::comments_on(WISH))
+    );
+    assert!(
+        !comment(bob)
+            .encode()
+            .starts_with(&CommunityKey::wish_entries_of(WISH))
+    );
+    assert!(
+        !wish(bob)
+            .encode()
+            .starts_with(&CommunityKey::comments_on(WISH))
+    );
+}
+
 /// Writing a key prunes its author's longer keys beneath it (ground truth
 /// 10): a bare `bookmark/X/bob` would delete every bookmark bob left on X.
 #[test]
 fn no_key_of_a_members_is_a_prefix_of_another_of_theirs() {
     let bob = member();
-    let keys =
-        [rating(bob), review(bob), bookmark(bob, A), bookmark(bob, B)].map(|key| key.encode());
+    let keys = [
+        rating(bob),
+        review(bob),
+        bookmark(bob, A),
+        bookmark(bob, B),
+        wish(bob),
+        comment(bob),
+    ]
+    .map(|key| key.encode());
     for (n, key) in keys.iter().enumerate() {
         for (m, other) in keys.iter().enumerate() {
             assert!(
@@ -259,5 +319,97 @@ fn a_bookmark_id_is_sixteen_bytes_of_lowercase_hex() {
     assert_eq!(A.to_string().parse::<BookmarkId>().ok(), Some(A));
     for text in ["a1a1", &"a1".repeat(17), &"A1".repeat(16), &"zz".repeat(16)] {
         assert!(text.parse::<BookmarkId>().is_err(), "{text}");
+    }
+}
+
+fn fields(status: WishStatus) -> WishFields {
+    WishFields {
+        kind: None,
+        title: None,
+        authors: None,
+        description: None,
+        created_at: None,
+        status,
+    }
+}
+
+/// A creator says what is wished for; a fulfiller says by what — and the
+/// JSON is the plan's: `status`, and `item_id` beside it when fulfilled.
+#[test]
+fn a_wish_entry_is_what_its_member_says_and_no_more() {
+    let made = Wish::new(WishFields {
+        kind: Some(ItemKind::Audiobook),
+        title: Some("Hordubal".to_owned()),
+        authors: Some(vec!["Karel Čapek".to_owned()]),
+        created_at: Some(17),
+        ..fields(WishStatus::Open)
+    })
+    .unwrap();
+    let answered = Wish::new(fields(WishStatus::Fulfilled { item_id: ITEM })).unwrap();
+
+    let json = |wish: &Wish| serde_json::from_slice::<serde_json::Value>(&wish.encode()).unwrap();
+    assert_eq!(
+        json(&made),
+        json!({"kind": "audiobook", "title": "Hordubal", "authors": ["Karel Čapek"], "created_at": 17, "status": "open"})
+    );
+    assert_eq!(
+        json(&answered),
+        json!({"status": "fulfilled", "item_id": ITEM.to_string()})
+    );
+    for wish in [made, answered] {
+        assert_eq!(Wish::decode(&wish.encode()), Some(wish));
+    }
+}
+
+#[test]
+fn a_value_that_is_not_a_wish_entry_does_not_read_as_one() {
+    for value in [
+        json!({"status": "fulfilled"}),
+        json!({"status": "withdrawn"}),
+        json!({"title": "Hordubal"}),
+        json!({"status": "open", "title": 4}),
+        json!({"status": "open", "kind": "scroll"}),
+        json!("open"),
+    ] {
+        assert_eq!(
+            Wish::decode(&serde_json::to_vec(&value).unwrap()),
+            None,
+            "{value}"
+        );
+    }
+}
+
+/// One cap for the whole entry, as written: whatever its fields say.
+#[test]
+fn a_wish_entry_is_at_most_sixteen_kibibytes_of_json() {
+    let with = |description: String| WishFields {
+        description: Some(description),
+        ..fields(WishStatus::Open)
+    };
+    let overhead = r#"{"description":"","status":"open"}"#.len();
+    let longest = with("d".repeat(WISH_MAX_BYTES - overhead));
+    assert_eq!(serde_json::to_vec(&longest).unwrap().len(), WISH_MAX_BYTES);
+    let wish = Wish::new(longest).unwrap();
+    assert_eq!(Wish::decode(&wish.encode()), Some(wish));
+
+    let over = with("d".repeat(WISH_MAX_BYTES - overhead + 1));
+    assert!(Wish::new(over.clone()).is_err());
+    assert_eq!(Wish::decode(&serde_json::to_vec(&over).unwrap()), None);
+}
+
+#[test]
+fn a_comment_is_at_most_four_kibibytes_of_utf8() {
+    let longest = Comment::try_from("c".repeat(COMMENT_MAX_BYTES)).unwrap();
+    assert_eq!(Comment::decode(&longest.encode()), Some(longest));
+    assert!(Comment::try_from("c".repeat(COMMENT_MAX_BYTES + 1)).is_err());
+    let too_long = serde_json::to_vec(&"c".repeat(COMMENT_MAX_BYTES + 1)).unwrap();
+    assert_eq!(Comment::decode(&too_long), None);
+}
+
+#[test]
+fn a_wish_id_is_thirty_two_bytes_of_lowercase_hex() {
+    assert_eq!(WISH.to_string().parse::<WishId>().ok(), Some(WISH));
+    for text in [&"cd".repeat(16), &"CD".repeat(32), &"cd".repeat(33)] {
+        assert!(text.parse::<WishId>().is_err(), "{text}");
     }
 }
