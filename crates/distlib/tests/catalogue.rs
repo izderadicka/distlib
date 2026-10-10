@@ -13,11 +13,16 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{collections::BTreeSet, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{Config, DataDir, MemberId, NodeAddr};
+use distlib_core::{Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating, Review};
+use distlib_store::{Store, StoredItem};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
@@ -772,6 +777,142 @@ async fn an_expelled_member_stops_receiving_entries() {
     group.carol.shutdown().await;
     group.bob.shutdown().await;
     group.alice.shutdown().await;
+}
+
+/// **4c-2's acceptance: an expelled member's ratings and reviews stop counting
+/// in the read model** — and only theirs.
+///
+/// Before and after, as the test above is: bob's rating and review are in
+/// alice's read model before he is expelled, so their going proves something,
+/// and carol's stay, so it is bob's that went rather than everyone's. On the
+/// way, a rating of an item nobody has written does not make one. And a
+/// reindex afterwards changes nothing.
+#[tokio::test]
+async fn an_expelled_members_ratings_and_reviews_stop_counting() {
+    let group = a_group_with_two_followers().await;
+    let bob_id = MemberId::from(group.bob.endpoint().id());
+    let carol_id = group.carol_id;
+    let rating = |value| Rating::try_from(value).unwrap();
+    let review = |text: &str| Review::try_from(text.to_owned()).unwrap();
+
+    let id = ItemId::from_bytes([4; 32]);
+    group
+        .alice
+        .catalogue()
+        .write(&Item {
+            title: Some("The Dispossessed".to_owned()),
+            ..Item::new(id)
+        })
+        .await
+        .unwrap();
+    for (runtime, stars, words) in [(&group.bob, 2, "Too long"), (&group.carol, 5, "Too short")] {
+        runtime.catalogue().rate(id, rating(stars)).await.unwrap();
+        runtime
+            .catalogue()
+            .review(id, &review(words))
+            .await
+            .unwrap();
+    }
+    let nothing = ItemId::from_bytes([5; 32]);
+    group
+        .carol
+        .catalogue()
+        .rate(nothing, rating(3))
+        .await
+        .unwrap();
+
+    let store = group.alice.store();
+    let before = stored_when(store, id, "both members' ratings and reviews", |stored| {
+        stored.ratings.len() == 2 && stored.reviews.len() == 2
+    })
+    .await;
+    assert_eq!(
+        before.ratings,
+        BTreeMap::from([(bob_id, rating(2)), (carol_id, rating(5))])
+    );
+    assert_eq!(
+        before.reviews,
+        BTreeMap::from([
+            (bob_id, review("Too long")),
+            (carol_id, review("Too short"))
+        ])
+    );
+    tokio::time::timeout(SOON, async {
+        while !group
+            .alice
+            .catalogue()
+            .ratings(nothing)
+            .await
+            .unwrap()
+            .contains_key(&carol_id)
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("carol's rating of an item nobody wrote reaches alice");
+    assert_eq!(
+        store.item(nothing).await.unwrap(),
+        None,
+        "a rating alone is not an item"
+    );
+
+    group
+        .alice
+        .node()
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: bob_id,
+                reason: "4c-2's acceptance says so".to_owned(),
+            },
+            &group.alice_key,
+        )
+        .await
+        .unwrap();
+
+    let after = stored_when(store, id, "only carol's rating and review", |stored| {
+        stored.ratings.len() == 1 && stored.reviews.len() == 1
+    })
+    .await;
+    assert_eq!(after.ratings, BTreeMap::from([(carol_id, rating(5))]));
+    assert_eq!(
+        after.reviews,
+        BTreeMap::from([(carol_id, review("Too short"))])
+    );
+
+    let projected = store.items().await.unwrap();
+    group.alice.projection().reindex().await.unwrap();
+    assert_eq!(
+        store.items().await.unwrap(),
+        projected,
+        "a second replay changes nothing"
+    );
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// Waits for `store` to hold item `id` as `ready` says it should, and
+/// returns it — or fails saying `what` it was waiting for.
+async fn stored_when(
+    store: &Store,
+    id: ItemId,
+    what: &str,
+    ready: impl Fn(&StoredItem) -> bool,
+) -> StoredItem {
+    tokio::time::timeout(SOON, async {
+        loop {
+            if let Some(stored) = store.item(id).await.unwrap()
+                && ready(&stored)
+            {
+                return stored;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the read model never held {what} within {SOON:?}"))
 }
 
 /// **A member that joins long after everyone else still learns where they are.**

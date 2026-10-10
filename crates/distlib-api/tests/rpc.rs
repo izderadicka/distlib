@@ -8,6 +8,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -1514,6 +1515,8 @@ async fn library_item_reads_the_stored_record() {
                 authors: Some(vec!["Frank Herbert".to_owned()]),
                 ..Item::new(id)
             },
+            ratings: BTreeMap::new(),
+            reviews: BTreeMap::new(),
             last_modified: 1,
         })
         .await
@@ -1559,6 +1562,8 @@ async fn library_search_ranks_and_reads_hits_back() {
         .store
         .upsert_item(StoredItem {
             item: item.clone(),
+            ratings: BTreeMap::new(),
+            reviews: BTreeMap::new(),
             last_modified: 1,
         })
         .await
@@ -1601,6 +1606,8 @@ async fn a_long_library_reads_in_pages_with_nothing_twice_and_nothing_missed() {
             .store
             .upsert_item(StoredItem {
                 item: item.clone(),
+                ratings: BTreeMap::new(),
+                reviews: BTreeMap::new(),
                 last_modified: 1,
             })
             .await

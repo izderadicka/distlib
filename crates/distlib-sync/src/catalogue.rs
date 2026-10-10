@@ -98,7 +98,8 @@ pub fn catalogue_key(group: GroupId) -> NamespaceSecret {
     NamespaceSecret::from_bytes(hasher.finalize().as_bytes())
 }
 
-/// One item as this node currently holds it, for a reader that projects it.
+/// One item as this node currently holds it, for a reader that projects it:
+/// the item, what members said about it, and two facts about both.
 ///
 /// See [`Catalogue::read_item`] for why the two extra facts are here rather
 /// than on [`Item`]: neither is written by anybody, and both are lost the
@@ -106,10 +107,17 @@ pub fn catalogue_key(group: GroupId) -> NamespaceSecret {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadItem {
     pub item: Item,
-    /// The newest entry timestamp among the ones it was built from, in
-    /// microseconds since the epoch — iroh-docs' own clock for the record.
+    /// Every member's rating, each counted only if that member wrote it (D9)
+    /// — whoever is still a member or not, which is the reader's to filter.
+    pub ratings: BTreeMap<MemberId, Rating>,
+    /// Every member's review, counted the same way.
+    pub reviews: BTreeMap<MemberId, Review>,
+    /// The newest timestamp among the item's own entries, in microseconds
+    /// since the epoch — iroh-docs' own clock for the record. A rating or a
+    /// review is not a change to the item, so neither moves it.
     pub last_modified: u64,
-    /// Whether an entry was left out because its content has not arrived.
+    /// Whether an entry was left out because its content has not arrived —
+    /// one of the item's own, or a rating or review.
     ///
     /// The item is still worth projecting: what is here is true, and §5.2's
     /// catalogue is grow-only, so the rest only adds. This says to come back.
@@ -133,6 +141,13 @@ struct Said<T> {
     key: CommunityKey,
     value: T,
     written: u64,
+}
+
+/// What members said under one prefix, and whether an entry that would have
+/// counted was left out because its content has not arrived.
+struct Heard<T> {
+    said: Vec<Said<T>>,
+    waiting_for_content: bool,
 }
 
 /// The catalogue subsystem: the document, the stores under it, and the task
@@ -433,6 +448,11 @@ impl Catalogue {
     /// * **whether anything was left out** — an item whose content is still
     ///   arriving reads as a smaller item, and the two are indistinguishable
     ///   afterwards. A reader that projected one needs to know to come back.
+    ///
+    /// And its ratings and reviews, read as [`Self::ratings`] and
+    /// [`Self::reviews`] read them, since a re-read of the item is when they
+    /// are projected. **They do not make an item**: an item nobody has
+    /// written an entry of is still `None`, however many members rated it.
     pub async fn read_item(&self, id: ItemId) -> Result<Option<ReadItem>> {
         let doc = self.document()?;
         let query = Query::single_latest_per_key().key_prefix(Key::prefix_of(id));
@@ -476,10 +496,24 @@ impl Catalogue {
                 ),
             }
         }
-        Ok(found.then_some(ReadItem {
+        if !found {
+            return Ok(None);
+        }
+
+        let ratings = self
+            .said(CommunityKey::ratings_of(id), Rating::decode)
+            .await?;
+        let reviews = self
+            .said(CommunityKey::reviews_of(id), Review::decode)
+            .await?;
+        Ok(Some(ReadItem {
             item,
+            waiting_for_content: waiting_for_content
+                || ratings.waiting_for_content
+                || reviews.waiting_for_content,
+            ratings: by_member(ratings.said),
+            reviews: by_member(reviews.said),
             last_modified,
-            waiting_for_content,
         }))
     }
 
@@ -535,7 +569,8 @@ impl Catalogue {
     pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {
         Ok(by_member(
             self.said(CommunityKey::ratings_of(item), Rating::decode)
-                .await?,
+                .await?
+                .said,
         ))
     }
 
@@ -544,7 +579,8 @@ impl Catalogue {
     pub async fn reviews(&self, item: ItemId) -> Result<BTreeMap<MemberId, Review>> {
         Ok(by_member(
             self.said(CommunityKey::reviews_of(item), Review::decode)
-                .await?,
+                .await?
+                .said,
         ))
     }
 
@@ -554,7 +590,8 @@ impl Catalogue {
     pub async fn wishes(&self, wish: WishId) -> Result<BTreeMap<MemberId, Wish>> {
         Ok(by_member(
             self.said(CommunityKey::wish_entries_of(wish), Wish::decode)
-                .await?,
+                .await?
+                .said,
         ))
     }
 
@@ -563,7 +600,8 @@ impl Catalogue {
     pub async fn wish_comments(&self, wish: WishId) -> Result<BTreeMap<MemberId, Comment>> {
         Ok(by_member(
             self.said(CommunityKey::comments_on(wish), Comment::decode)
-                .await?,
+                .await?
+                .said,
         ))
     }
 
@@ -572,7 +610,8 @@ impl Catalogue {
     pub async fn bookmarks(&self, item: ItemId) -> Result<Vec<ReadBookmark>> {
         let said = self
             .said(CommunityKey::bookmarks_of(item), Bookmark::decode)
-            .await?;
+            .await?
+            .said;
         let mut bookmarks: Vec<ReadBookmark> = said
             .into_iter()
             .filter_map(|said| {
@@ -612,7 +651,7 @@ impl Catalogue {
         &self,
         prefix: String,
         decode: impl Fn(&[u8]) -> Option<T>,
-    ) -> Result<Vec<Said<T>>> {
+    ) -> Result<Heard<T>> {
         let doc = self.document()?;
         let entries = doc
             .get_many(Query::all().key_prefix(prefix))
@@ -621,6 +660,7 @@ impl Catalogue {
         tokio::pin!(entries);
 
         let mut said = Vec::new();
+        let mut waiting_for_content = false;
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             let key = String::from_utf8_lossy(entry.key());
@@ -634,6 +674,7 @@ impl Catalogue {
             }
             let Some(value) = self.content(&entry).await? else {
                 tracing::debug!(%key, "the content of this entry has not arrived yet; leaving it out");
+                waiting_for_content = true;
                 continue;
             };
             let Some(value) = decode(&value) else {
@@ -646,7 +687,10 @@ impl Catalogue {
                 written: entry.timestamp(),
             });
         }
-        Ok(said)
+        Ok(Heard {
+            said,
+            waiting_for_content,
+        })
     }
 
     /// Every item this node holds an entry for.

@@ -765,10 +765,25 @@ Needs only 4a-1, so it can interleave with 4b.
     comment in alice's name. Every node holds the two entries and bob's comment only.
 
 - **4c-2 — the projection (a version bump).** Tables for ratings, reviews, bookmarks (everyone's),
-  wish entries and comments; reviews folded into the item's search document; expelled members
-  filtered out.
-  **Acceptance:** a word that appears only in a review finds the item; an expelled member's rating and
-  bookmarks disappear; a second replay changes nothing.
+  wish entries and comments; expelled members filtered out. **Reviews are not searched** (P4-4,
+  Ivan's call).
+  **Acceptance:** an expelled member's rating and bookmarks disappear; a second replay changes
+  nothing.
+  *As built, in two PRs (Ivan's call): ratings and reviews first, as 4c-1 was.* 4c-2a:
+  - **`ReadItem` carries the item's ratings and reviews**, read with the author check, so a re-read
+    of the item is when they are projected. They do not make an item: one nobody has written an
+    entry of is still `None`, however many members rated it. `waiting_for_content` covers them.
+  - **Tables `ratings (item, member, rating)` and `reviews (item, member, review)`**, keyed by item
+    and member, cleared and rewritten with the item. `StoredItem` carries both; `Store::item` and
+    `items` fill them, the reads that leave `files` empty leave them empty. Version 2.
+  - **Expelled members are filtered when projecting (Ivan's call)**, not on read: the projection
+    keeps only current members' ratings and reviews, and **replays everything when the set of
+    members changes** — not on every membership change, since pledges, proposals and approvals
+    change it too. One look at the log gives both the `members` table and the filter.
+  - **Acceptance, on three nodes:** bob and carol rate and review an item; alice expels bob, and
+    her read model keeps carol's alone; a rating of an item nobody wrote makes no item; a reindex
+    afterwards changes nothing. Mutation-checked, except the content-waiting path for ratings,
+    which no harness here can arrange deterministically.
 
 - **4c-3 — ratings, reviews and bookmarks in the API and CLI.** `community.rate`,
   `community.review`, `community.bookmark` (create, edit or delete your own) and

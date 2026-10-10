@@ -74,10 +74,10 @@ const LANG_BOOST: f32 = 0.5;
 /// index was written by. Missing means a phase-3 index, which had no version.
 const VERSION_FILE: &str = "VERSION";
 
-/// The tantivy fields §5.4 names, minus `reviews` — phase 4/5 owns that table
-/// and nothing writes it yet, the same argument schema.rs makes for the SQL
-/// side having three tables and not eight — plus `lang`, which §5.4 leaves out
-/// and the phase-3 by-hand check asked for.
+/// The tantivy fields §5.4 names, minus `reviews` — a search finds an item by
+/// what it says about itself, not by what members said about it (P4-4, Ivan's
+/// call) — plus `lang`, which §5.4 leaves out and the phase-3 by-hand check
+/// asked for.
 #[derive(Debug, Clone, Copy)]
 struct Fields {
     /// `STRING` (untokenized) and `STORED`: this is the one field a hit is
