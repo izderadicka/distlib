@@ -351,13 +351,18 @@ impl Pump {
 ///
 /// One of the item's own keys, or a member's rating or review of it (D8): the
 /// read model re-reads an item whole, so either is a reason to read it again.
+/// A bookmark is not part of the item it points into, so not here.
 /// A key this build does not recognise is left alone, for the reason
 /// [`Key::parse`] gives: the catalogue is one document for the whole group and
 /// grows keys over time.
 fn note(batch: &mut Batch, key: &[u8]) -> bool {
-    let item = Key::parse(key)
-        .map(|parsed| parsed.item())
-        .or_else(|| CommunityKey::parse(key).map(|parsed| parsed.item()));
+    let item =
+        Key::parse(key)
+            .map(|parsed| parsed.item())
+            .or_else(|| match CommunityKey::parse(key)? {
+                CommunityKey::Rating { item, .. } | CommunityKey::Review { item, .. } => Some(item),
+                CommunityKey::Bookmark { .. } => None,
+            });
     item.is_some_and(|item| batch.items.insert(item))
 }
 
@@ -377,6 +382,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use distlib_core::BookmarkId;
     use iroh::SecretKey;
     use iroh_docs::engine::{Origin, SyncReason};
 
@@ -421,6 +427,15 @@ mod tests {
             assert_eq!(batch.items, BTreeSet::from([item]));
         }
         assert!(!note(&mut Batch::default(), b"bookmark/somebody-elses"));
+        let bookmark = CommunityKey::Bookmark {
+            item,
+            member,
+            bookmark: BookmarkId::from_bytes([1; 16]),
+        };
+        assert!(
+            !note(&mut Batch::default(), bookmark.encode().as_bytes()),
+            "a bookmark is not part of its item"
+        );
     }
 
     /// The content sweep's nudge: one wake however often it is told, until

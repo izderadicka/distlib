@@ -17,8 +17,8 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr,
-    Rating, Review, SignedAddress,
+    Bookmark, BookmarkId, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind,
+    MemberId, NodeAddr, Rating, Review, SignedAddress,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, catalogue_key};
@@ -351,6 +351,110 @@ async fn two_ratings_made_at_once_both_count_on_every_node() {
             },
         )
         .await;
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
+}
+
+/// Two of bob's bookmarks on one item both count, on every node — a bookmark
+/// has an id of its own, so a second is a second key (D8) — and one carol
+/// forges in his name counts on none (D9).
+#[tokio::test]
+async fn two_bookmarks_by_one_member_both_count_and_a_forged_one_on_no_node() {
+    let ([_, bob, _], nodes, _logs) = three_founders().await;
+    let item = ItemId::from_bytes([9; 32]);
+    let mark = |note: &str| Bookmark::new("ch. 3".to_owned(), note.to_owned(), 1).unwrap();
+    let ids = [1, 2, 3].map(|byte| BookmarkId::from_bytes([byte; 16]));
+
+    nodes[1]
+        .catalogue
+        .bookmark(item, ids[0], &mark("first"))
+        .await
+        .unwrap();
+    nodes[1]
+        .catalogue
+        .bookmark(item, ids[1], &mark("second"))
+        .await
+        .unwrap();
+    let forged = CommunityKey::Bookmark {
+        item,
+        member: bob,
+        bookmark: ids[2],
+    }
+    .encode();
+    nodes[2]
+        .catalogue
+        .put(forged.clone(), mark("forged").encode())
+        .await
+        .unwrap();
+
+    let wanted = [(ids[0], mark("first")), (ids[1], mark("second"))];
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        let read = || async {
+            node.catalogue
+                .bookmarks(item)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|read| (read.member, read.id, read.bookmark))
+                .collect::<Vec<_>>()
+        };
+        until(
+            &format!("bob's bookmarks and the forgery reach {name}"),
+            || async {
+                read().await.len() >= 2
+                    && node
+                        .catalogue
+                        .get(forged.clone())
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+            },
+        )
+        .await;
+        let expected: Vec<_> = wanted
+            .iter()
+            .map(|(id, mark)| (bob, *id, mark.clone()))
+            .collect();
+        assert_eq!(read().await, expected, "on {name}");
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
+}
+
+/// An edited bookmark keeps when it was made, and is dated by its entry:
+/// "updated" is not a field of its own.
+#[tokio::test]
+async fn an_edited_bookmark_keeps_when_it_was_made_and_is_dated_by_its_entry() {
+    let (_, nodes, _logs) = three_founders().await;
+    let item = ItemId::from_bytes([9; 32]);
+    let id = BookmarkId::from_bytes([1; 16]);
+    let bob = &nodes[1].catalogue;
+    let mark = |note: &str| Bookmark::new("01:23:45".to_owned(), note.to_owned(), 100).unwrap();
+
+    bob.bookmark(item, id, &mark("before")).await.unwrap();
+    let before = bob.bookmarks(item).await.unwrap()[0].last_modified;
+    bob.bookmark(item, id, &mark("after")).await.unwrap();
+
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        until(&format!("the edit reaches {name}"), || async {
+            node.catalogue
+                .bookmarks(item)
+                .await
+                .unwrap()
+                .first()
+                .map(|read| read.bookmark.note().to_owned())
+                == Some("after".to_owned())
+        })
+        .await;
+        let [read] = <[_; 1]>::try_from(node.catalogue.bookmarks(item).await.unwrap()).unwrap();
+        assert_eq!(read.bookmark.created_at(), 100, "on {name}");
+        assert!(read.last_modified > before, "on {name}: the edit dates it");
     }
 
     for node in &nodes {

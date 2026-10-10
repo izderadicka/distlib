@@ -27,7 +27,8 @@ use std::{
 
 use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{
-    Absorbed, CommunityKey, ContentHash, GroupId, Item, ItemId, Key, MemberId, Rating, Review,
+    Absorbed, Bookmark, BookmarkId, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
+    MemberId, Rating, Review,
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -113,6 +114,25 @@ pub struct ReadItem {
     /// The item is still worth projecting: what is here is true, and §5.2's
     /// catalogue is grow-only, so the rest only adds. This says to come back.
     pub waiting_for_content: bool,
+}
+
+/// One member's bookmark on an item, as this node holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadBookmark {
+    pub member: MemberId,
+    pub id: BookmarkId,
+    pub bookmark: Bookmark,
+    /// When its entry was last written, in microseconds since the epoch — the
+    /// bookmark's "updated", which it does not store itself.
+    pub last_modified: u64,
+}
+
+/// One community entry that counts: its key, its value, and when it was
+/// written.
+struct Said<T> {
+    key: CommunityKey,
+    value: T,
+    written: u64,
 }
 
 /// The catalogue subsystem: the document, the stores under it, and the task
@@ -481,21 +501,60 @@ impl Catalogue {
         self.put(key.encode(), review.encode()).await
     }
 
+    /// Leaves bookmark `id` on `item` as this node's member, or replaces it.
+    pub async fn bookmark(&self, item: ItemId, id: BookmarkId, bookmark: &Bookmark) -> Result<()> {
+        let key = CommunityKey::Bookmark {
+            item,
+            member: self.inner.me,
+            bookmark: id,
+        };
+        self.put(key.encode(), bookmark.encode()).await
+    }
+
     /// Every member's rating of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {
-        self.said(CommunityKey::ratings_of(item), Rating::decode)
-            .await
+        Ok(by_member(
+            self.said(CommunityKey::ratings_of(item), Rating::decode)
+                .await?,
+        ))
     }
 
     /// Every member's review of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn reviews(&self, item: ItemId) -> Result<BTreeMap<MemberId, Review>> {
-        self.said(CommunityKey::reviews_of(item), Review::decode)
-            .await
+        Ok(by_member(
+            self.said(CommunityKey::reviews_of(item), Review::decode)
+                .await?,
+        ))
     }
 
-    /// What each member said under `prefix`, by member.
+    /// Every member's bookmarks on `item` this node holds, each counted only
+    /// if that member wrote it (D9) — by member, then id.
+    pub async fn bookmarks(&self, item: ItemId) -> Result<Vec<ReadBookmark>> {
+        let said = self
+            .said(CommunityKey::bookmarks_of(item), Bookmark::decode)
+            .await?;
+        let mut bookmarks: Vec<ReadBookmark> = said
+            .into_iter()
+            .filter_map(|said| match said.key {
+                CommunityKey::Bookmark {
+                    member, bookmark, ..
+                } => Some(ReadBookmark {
+                    member,
+                    id: bookmark,
+                    bookmark: said.value,
+                    last_modified: said.written,
+                }),
+                // The prefix holds bookmarks and nothing else.
+                CommunityKey::Rating { .. } | CommunityKey::Review { .. } => None,
+            })
+            .collect();
+        bookmarks.sort_unstable_by_key(|read| (read.member, read.id));
+        Ok(bookmarks)
+    }
+
+    /// What members said under `prefix`.
     ///
     /// **An entry counts only if its author is the member its key names**
     /// (D9). iroh-docs checks that an entry is signed by its author and
@@ -512,7 +571,7 @@ impl Catalogue {
         &self,
         prefix: String,
         decode: impl Fn(&[u8]) -> Option<T>,
-    ) -> Result<BTreeMap<MemberId, T>> {
+    ) -> Result<Vec<Said<T>>> {
         let doc = self.document()?;
         let entries = doc
             .get_many(Query::all().key_prefix(prefix))
@@ -520,16 +579,15 @@ impl Catalogue {
             .map_err(SyncError::docs("read from"))?;
         tokio::pin!(entries);
 
-        let mut said = BTreeMap::new();
+        let mut said = Vec::new();
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             let key = String::from_utf8_lossy(entry.key());
-            let Some(member) = CommunityKey::parse(entry.key()).map(|parsed| parsed.member())
-            else {
+            let Some(parsed) = CommunityKey::parse(entry.key()) else {
                 tracing::debug!(%key, "not a community key this build reads; left alone");
                 continue;
             };
-            if entry.author().as_bytes() != member.as_bytes() {
+            if entry.author().as_bytes() != parsed.member().as_bytes() {
                 tracing::debug!(%key, author = %entry.author(), "written by someone other than the member it names; ignored");
                 continue;
             }
@@ -541,7 +599,11 @@ impl Catalogue {
                 tracing::warn!(%key, "a community entry holds a value this build cannot read");
                 continue;
             };
-            said.insert(member, value);
+            said.push(Said {
+                key: parsed,
+                value,
+                written: entry.timestamp(),
+            });
         }
         Ok(said)
     }
@@ -617,12 +679,13 @@ impl Catalogue {
     }
 }
 
-/// Opens the catalogue once the log says which group this node is in, and
-/// starts syncing it with the core group.
-///
-/// The same shape as the gossip task next door: the identity of the thing to
-/// join comes from the log, so the task waits for one rather than every
-/// caller having to order startup around it.
+/// One value per member: what a member said once per item, as a rating is.
+fn by_member<T>(said: Vec<Said<T>>) -> BTreeMap<MemberId, T> {
+    said.into_iter()
+        .map(|said| (said.key.member(), said.value))
+        .collect()
+}
+
 /// What opening the catalogue needs, gathered rather than passed one by one.
 ///
 /// Seven values, and the two loops the task ends in want overlapping subsets of
@@ -645,6 +708,12 @@ struct Fetching {
     news: News,
 }
 
+/// Opens the catalogue once the log says which group this node is in, and
+/// starts syncing it with the core group.
+///
+/// The same shape as the gossip task next door: the identity of the thing to
+/// join comes from the log, so the task waits for one rather than every
+/// caller having to order startup around it.
 async fn open_when_founded(opening: Opening) {
     let Opening {
         docs,
