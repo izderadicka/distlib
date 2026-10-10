@@ -1,0 +1,26 @@
+# TEMPORARY: measures how often the consensus cluster tests fail on Windows at
+# different parallelism. Not for merging.
+name: Windows stress (experiment)
+
+on:
+  pull_request:
+
+jobs:
+  stress:
+    if: github.head_ref == 'ci/windows-stress'
+    name: consensus x${{ matrix.threads }} threads
+    strategy:
+      fail-fast: false
+      matrix:
+        threads: [4, 8]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run -p distlib-consensus --all-features --no-run
+      - run: cargo nextest run -p distlib-consensus --all-features --no-fail-fast --test-threads ${{ matrix.threads }} --stress-count 8
+        env:
+          RUST_LOG: info,distlib=debug,distlib_consensus=debug,distlib_net=debug,distlib_sync=debug,iroh_gossip=debug,noq_proto=warn
