@@ -1,57 +1,17 @@
 [profile.default]
-# Our tests are clusters of nodes with real timers, not CPU kernels. A dozen at
-# once makes `network`'s 300–600ms election timeouts thrash, and the failure
-# then looks like the code's fault rather than the runner's — which is exactly
-# the confusion this suite is meant to be free of.
+# Our tests are clusters of nodes with real timers: they mostly wait, so they
+# run in parallel well beyond what their CPU would suggest. Eight is where the
+# whole lane stops getting faster here — it is then as long as its slowest
+# test — and running more at once stretched a few cluster tests by seconds
+# without failing any.
 #
-# Four still overlaps the slow binaries, which is where the speed comes from,
-# without oversubscribing a machine that is also building something. It matches
-# what a CI runner has anyway.
-test-threads = 4
-
-# Tests that stand up a whole cluster do not run alongside each other.
-#
-# `test-threads` above bounds how many tests run at once; it cannot say that
-# *these* five are each worth several. `founding` drives three real `distlib`
-# processes, the phase-1 acceptance criteria run five in-process nodes, and two
-# of the approval tests run four. Four threads can therefore put a dozen nodes
-# and three OS processes on one machine, which is what the note above says this
-# suite should not do.
-#
-# Kept because it measurably helps — the whole lane got *faster*, 18-27s against
-# 22-40s, since the cluster tests stop thrashing each other while the fast
-# tests keep the other threads busy.
-#
-# `distlib::catalogue` joined this list when its tests grew from two nodes to
-# three and four, each a whole `Runtime` — and `iroh-blobs`' `FsStore` spawns a
-# multi-threaded runtime of its own per node, so four threads of these is a
-# dozen runtimes plus a dozen more. It earned its place the way the note below
-# asks for: `an_expelled_member_stops_receiving_entries` failed on a two-core
-# machine under the full suite and passed alone on the same machine, which is
-# the signature of the runner rather than the code. Note the `binary_id` —
-# there is a `distlib-core::catalogue` too, and those are pure unit tests that
-# must stay on the fast threads.
-#
-# `distlib::read_model` joined for the same reason and by the same evidence: its
-# two tests each stand up two runtimes, one of them twice, and they pass
-# individually while failing together under plain `cargo test`, which puts both
-# in one process.
-#
-# It is **not** what fixed `three_friends_found_a_group`, though it was
-# introduced believing that. That test was failing about one run in ten because
-# it pinned ports drawn from the kernel's ephemeral range and something else was
-# given one before it bound; see `a_free_port` in its own file. Serialising the
-# cluster tests lowered the rate by lowering port churn, which is exactly the
-# kind of evidence that makes a wrong diagnosis look right — twelve clean runs
-# of a one-in-ten failure. Recorded here because the next person to see a
-# timeout in this suite should suspect the thing the timeout is waiting *on*,
-# not the runner.
-[test-groups]
-cluster = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'binary(founding) or binary(acceptance) or binary_id(distlib::catalogue) or binary_id(distlib::read_model) or test(a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core) or test(approving_answers_about_the_proposal_not_about_the_approval)'
-test-group = 'cluster'
+# Nothing is serialised on purpose. Every test stands up its own nodes, keys,
+# directories and ports, so a test that fails only alongside others is either
+# a deadline too tight for a busy machine or code that misbehaves when it is
+# scheduled late — and both are worth seeing rather than hiding. The last test
+# group this suite had was credited with fixing a port race it only made
+# rarer.
+test-threads = 8
 
 # CI only (`--profile ci`): a test still running after five minutes is killed
 # and its output printed. Without it a hang shows as the job's own timeout an
