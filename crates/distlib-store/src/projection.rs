@@ -250,9 +250,9 @@ async fn run(
                     tracing::error!("the membership log is gone; stopping the read model's projection");
                     return;
                 }
-                let now = project_members(&store, &mut membership).await;
-                if now != members {
-                    members = now;
+                let current_members = project_members(&store, &mut membership).await;
+                if current_members != members {
+                    members = current_members;
                     tracing::info!("the group's members changed; replaying the read model");
                     replay(&catalogue, &store, &index, &members, &mut incomplete).await;
                 }

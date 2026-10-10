@@ -99,7 +99,7 @@ pub fn catalogue_key(group: GroupId) -> NamespaceSecret {
 }
 
 /// One item as this node currently holds it, for a reader that projects it:
-/// the item, what members said about it, and two facts about both.
+/// the item, its ratings and reviews, and two facts about them.
 ///
 /// See [`Catalogue::read_item`] for why the two extra facts are here rather
 /// than on [`Item`]: neither is written by anybody, and both are lost the
@@ -135,18 +135,19 @@ pub struct ReadBookmark {
     pub last_modified: u64,
 }
 
-/// One community entry that counts: its key, its value, and when it was
+/// One community entry that counts — a rating, a review, a bookmark, a wish
+/// entry or a comment: its parsed key, its decoded value, and when it was
 /// written.
-struct Said<T> {
+struct CommunityEntry<T> {
     key: CommunityKey,
     value: T,
     written: u64,
 }
 
-/// What members said under one prefix, and whether an entry that would have
-/// counted was left out because its content has not arrived.
-struct Heard<T> {
-    said: Vec<Said<T>>,
+/// The community entries that count under one key prefix, and whether one
+/// that would have counted was left out because its content has not arrived.
+struct CommunityEntries<T> {
+    entries: Vec<CommunityEntry<T>>,
     waiting_for_content: bool,
 }
 
@@ -501,18 +502,18 @@ impl Catalogue {
         }
 
         let ratings = self
-            .said(CommunityKey::ratings_of(id), Rating::decode)
+            .read_community_entries(CommunityKey::ratings_of(id), Rating::decode)
             .await?;
         let reviews = self
-            .said(CommunityKey::reviews_of(id), Review::decode)
+            .read_community_entries(CommunityKey::reviews_of(id), Review::decode)
             .await?;
         Ok(Some(ReadItem {
             item,
             waiting_for_content: waiting_for_content
                 || ratings.waiting_for_content
                 || reviews.waiting_for_content,
-            ratings: by_member(ratings.said),
-            reviews: by_member(reviews.said),
+            ratings: values_by_member(ratings.entries),
+            reviews: values_by_member(reviews.entries),
             last_modified,
         }))
     }
@@ -567,20 +568,20 @@ impl Catalogue {
     /// Every member's rating of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {
-        Ok(by_member(
-            self.said(CommunityKey::ratings_of(item), Rating::decode)
+        Ok(values_by_member(
+            self.read_community_entries(CommunityKey::ratings_of(item), Rating::decode)
                 .await?
-                .said,
+                .entries,
         ))
     }
 
     /// Every member's review of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn reviews(&self, item: ItemId) -> Result<BTreeMap<MemberId, Review>> {
-        Ok(by_member(
-            self.said(CommunityKey::reviews_of(item), Review::decode)
+        Ok(values_by_member(
+            self.read_community_entries(CommunityKey::reviews_of(item), Review::decode)
                 .await?
-                .said,
+                .entries,
         ))
     }
 
@@ -588,45 +589,45 @@ impl Catalogue {
     /// that member wrote it (D9). Who created it, and whether it is
     /// fulfilled, is the reader's to resolve from these (D10).
     pub async fn wishes(&self, wish: WishId) -> Result<BTreeMap<MemberId, Wish>> {
-        Ok(by_member(
-            self.said(CommunityKey::wish_entries_of(wish), Wish::decode)
+        Ok(values_by_member(
+            self.read_community_entries(CommunityKey::wish_entries_of(wish), Wish::decode)
                 .await?
-                .said,
+                .entries,
         ))
     }
 
     /// Every member's comment on `wish` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn wish_comments(&self, wish: WishId) -> Result<BTreeMap<MemberId, Comment>> {
-        Ok(by_member(
-            self.said(CommunityKey::comments_on(wish), Comment::decode)
+        Ok(values_by_member(
+            self.read_community_entries(CommunityKey::comments_on(wish), Comment::decode)
                 .await?
-                .said,
+                .entries,
         ))
     }
 
     /// Every member's bookmarks on `item` this node holds, each counted only
     /// if that member wrote it (D9) — by member, then id.
     pub async fn bookmarks(&self, item: ItemId) -> Result<Vec<ReadBookmark>> {
-        let said = self
-            .said(CommunityKey::bookmarks_of(item), Bookmark::decode)
+        let entries = self
+            .read_community_entries(CommunityKey::bookmarks_of(item), Bookmark::decode)
             .await?
-            .said;
-        let mut bookmarks: Vec<ReadBookmark> = said
+            .entries;
+        let mut bookmarks: Vec<ReadBookmark> = entries
             .into_iter()
-            .filter_map(|said| {
+            .filter_map(|entry| {
                 // The prefix holds bookmarks and nothing else.
                 let CommunityKey::Bookmark {
                     member, bookmark, ..
-                } = said.key
+                } = entry.key
                 else {
                     return None;
                 };
                 Some(ReadBookmark {
                     member,
                     id: bookmark,
-                    bookmark: said.value,
-                    last_modified: said.written,
+                    bookmark: entry.value,
+                    last_modified: entry.written,
                 })
             })
             .collect();
@@ -634,7 +635,8 @@ impl Catalogue {
         Ok(bookmarks)
     }
 
-    /// What members said under `prefix`.
+    /// Reads the community entries under `prefix` that count, decoding each
+    /// value with `decode`.
     ///
     /// **An entry counts only if its author is the member its key names**
     /// (D9). iroh-docs checks that an entry is signed by its author and
@@ -647,11 +649,11 @@ impl Catalogue {
     /// Not filtered by who is still a member: that is the read model's
     /// business, and it re-projects when the membership changes. An entry
     /// whose content has not arrived, or which does not `decode`, is left out.
-    async fn said<T>(
+    async fn read_community_entries<T>(
         &self,
         prefix: String,
         decode: impl Fn(&[u8]) -> Option<T>,
-    ) -> Result<Heard<T>> {
+    ) -> Result<CommunityEntries<T>> {
         let doc = self.document()?;
         let entries = doc
             .get_many(Query::all().key_prefix(prefix))
@@ -659,7 +661,7 @@ impl Catalogue {
             .map_err(SyncError::docs("read from"))?;
         tokio::pin!(entries);
 
-        let mut said = Vec::new();
+        let mut entries_that_count = Vec::new();
         let mut waiting_for_content = false;
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
@@ -681,14 +683,14 @@ impl Catalogue {
                 tracing::warn!(%key, "a community entry holds a value this build cannot read");
                 continue;
             };
-            said.push(Said {
+            entries_that_count.push(CommunityEntry {
                 key: parsed,
                 value,
                 written: entry.timestamp(),
             });
         }
-        Ok(Heard {
-            said,
+        Ok(CommunityEntries {
+            entries: entries_that_count,
             waiting_for_content,
         })
     }
@@ -764,10 +766,12 @@ impl Catalogue {
     }
 }
 
-/// One value per member: what a member says once, as a rating of an item is.
-fn by_member<T>(said: Vec<Said<T>>) -> BTreeMap<MemberId, T> {
-    said.into_iter()
-        .map(|said| (said.key.member(), said.value))
+/// Each entry's value keyed by the member its key names — for the kinds of
+/// entry a member writes once per key, as a rating of an item is.
+fn values_by_member<T>(entries: Vec<CommunityEntry<T>>) -> BTreeMap<MemberId, T> {
+    entries
+        .into_iter()
+        .map(|entry| (entry.key.member(), entry.value))
         .collect()
 }
 
