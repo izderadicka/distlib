@@ -103,6 +103,14 @@ pub enum CoreError {
          (`distlib whoami` also creates one)"
     )]
     NoIdentity { path: PathBuf },
+
+    /// A rating is one to five.
+    #[error("a rating is from 1 to 5, not {value}")]
+    InvalidRating { value: u8 },
+
+    /// A review is longer than any review may be.
+    #[error("a review of {len} bytes is over the {max}-byte limit")]
+    ReviewTooLong { len: usize, max: usize },
 }
 
 impl CoreError {

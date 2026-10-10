@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     time::Duration,
@@ -16,7 +17,8 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr, SignedAddress,
+    CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NodeAddr,
+    Rating, Review, SignedAddress,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, catalogue_key};
@@ -220,6 +222,140 @@ async fn what_one_member_writes_the_other_reads() {
 
     alice.shutdown().await;
     bob.shutdown().await;
+}
+
+/// Three founders, each with its catalogue open — and the senders of the
+/// membership each one sees, which must outlive the test: a dropped one reads
+/// as the log having gone.
+async fn three_founders() -> (
+    [MemberId; 3],
+    [Node; 3],
+    Vec<watch::Sender<MembershipState>>,
+) {
+    let keys = [(); 3].map(|()| SecretKey::generate());
+    let ids = keys.each_ref().map(|key| MemberId::from(key.public()));
+    let mut nodes = Vec::new();
+    let mut logs = Vec::new();
+    for key in &keys {
+        let (log, sees) = watch::channel(MembershipState::new());
+        nodes.push(Node::start(key.clone(), sees).await);
+        logs.push(log);
+    }
+    let founders = ids
+        .iter()
+        .zip(&nodes)
+        .zip(["alice", "bob", "carol"])
+        .map(|((id, node), name)| (record(*id, name), node.addr.clone()))
+        .collect();
+    let founding = founded(founders, &keys[0]);
+    for log in &logs {
+        log.send(founding.clone()).unwrap();
+    }
+    for node in &nodes {
+        tokio::time::timeout(SOON, node.catalogue.ready())
+            .await
+            .expect("a founder opens its catalogue once it knows the group");
+    }
+    let nodes = nodes
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one node per key"));
+    (ids, nodes, logs)
+}
+
+/// Polls until `ready` answers true, or fails saying `what` did not happen.
+async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> F) {
+    tokio::time::timeout(PROMPTLY, async {
+        while !ready().await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what} within {PROMPTLY:?}"));
+}
+
+/// **4c-1's acceptance: a rating forged in another member's name counts on no
+/// node.**
+///
+/// iroh-docs checks that an entry is signed by its author and nothing more, so
+/// carol can write `rating/X/bob` — and being newer, hers is what a read that
+/// does not check the author answers with (ground truth 9). She forges two:
+/// bob's, over the rating he did make, and alice's, who made none.
+#[tokio::test]
+async fn a_rating_forged_in_another_members_name_counts_on_no_node() {
+    let ([alice, bob, _], nodes, _logs) = three_founders().await;
+    let item = ItemId::from_bytes([9; 32]);
+    let rating = |value| Rating::try_from(value).unwrap();
+    let key = |member| CommunityKey::Rating { item, member }.encode();
+
+    nodes[1].catalogue.rate(item, rating(5)).await.unwrap();
+    let carol = &nodes[2].catalogue;
+    carol.put(key(bob), rating(1).encode()).await.unwrap();
+    carol.put(key(alice), rating(2).encode()).await.unwrap();
+
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        // Here, and newer than bob's: the forgeries are what an item's kind
+        // of read would answer with.
+        until(
+            &format!("bob's rating and both forgeries reach {name}"),
+            || async {
+                let read = |key| async move { node.catalogue.get(key).await.ok().flatten() };
+                read(key(bob)).await.as_deref() == Some(&rating(1).encode()[..])
+                    && read(key(alice)).await.is_some()
+                    && node
+                        .catalogue
+                        .ratings(item)
+                        .await
+                        .unwrap()
+                        .contains_key(&bob)
+            },
+        )
+        .await;
+        assert_eq!(
+            node.catalogue.ratings(item).await.unwrap(),
+            BTreeMap::from([(bob, rating(5))]),
+            "on {name}"
+        );
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
+}
+
+/// **And two members rating one item at once both count**, on every node: two
+/// keys, not one written twice. A review travels the same way.
+#[tokio::test]
+async fn two_ratings_made_at_once_both_count_on_every_node() {
+    let ([alice, bob, carol], nodes, _logs) = three_founders().await;
+    let item = ItemId::from_bytes([9; 32]);
+    let (four, two) = (Rating::try_from(4).unwrap(), Rating::try_from(2).unwrap());
+    let review = Review::try_from("Better than the film.".to_owned()).unwrap();
+
+    let (rated, rated_too, reviewed) = tokio::join!(
+        nodes[0].catalogue.rate(item, four),
+        nodes[1].catalogue.rate(item, two),
+        nodes[2].catalogue.review(item, &review),
+    );
+    rated.unwrap();
+    rated_too.unwrap();
+    reviewed.unwrap();
+
+    let ratings = BTreeMap::from([(alice, four), (bob, two)]);
+    let reviews = BTreeMap::from([(carol, review)]);
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        until(
+            &format!("both ratings and the review reach {name}"),
+            || async {
+                node.catalogue.ratings(item).await.unwrap() == ratings
+                    && node.catalogue.reviews(item).await.unwrap() == reviews
+            },
+        )
+        .await;
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
 }
 
 /// A whole item, written on one node and read back on the other.

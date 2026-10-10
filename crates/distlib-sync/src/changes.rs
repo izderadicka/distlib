@@ -31,7 +31,7 @@ use std::{
     time::SystemTime,
 };
 
-use distlib_core::{ItemId, Key, MemberId};
+use distlib_core::{CommunityKey, ItemId, Key, MemberId};
 use futures_lite::stream::{Stream, StreamExt as _};
 use iroh::EndpointId;
 use iroh_docs::engine::{LiveEvent, SyncEvent};
@@ -347,23 +347,26 @@ impl Pump {
     }
 }
 
-/// Records the item an entry belongs to, answering whether it is news.
+/// Records the item an entry is about, answering whether it is news.
 ///
+/// One of the item's own keys, or a member's rating or review of it (D8): the
+/// read model re-reads an item whole, so either is a reason to read it again.
 /// A key this build does not recognise is left alone, for the reason
 /// [`Key::parse`] gives: the catalogue is one document for the whole group and
 /// grows keys over time.
 fn note(batch: &mut Batch, key: &[u8]) -> bool {
-    let Some(key) = Key::parse(key) else {
-        return false;
-    };
-    batch.items.insert(key.item())
+    let item = Key::parse(key)
+        .map(|parsed| parsed.item())
+        .or_else(|| CommunityKey::parse(key).map(|parsed| parsed.item()));
+    item.is_some_and(|item| batch.items.insert(item))
 }
 
 /// The item ids a set of keys is about, for a reader replaying a document.
 ///
-/// Here rather than in the caller because it is the same rule as [`note`] — a
-/// key this build does not recognise belongs to somebody else — and one rule
-/// stated twice is one rule that drifts.
+/// An item's own keys only: a rating with no item behind it is not an item.
+/// Here rather than in the caller because it is the rule [`note`] applies to
+/// those keys — a key this build does not recognise belongs to somebody else
+/// — and one rule stated twice is one rule that drifts.
 pub(crate) fn items_in<'a>(keys: impl Iterator<Item = &'a [u8]>) -> BTreeSet<ItemId> {
     keys.filter_map(Key::parse).map(|key| key.item()).collect()
 }
@@ -401,6 +404,23 @@ mod tests {
             peers.push(peer);
         }
         peers
+    }
+
+    /// A member's rating or review is news of the item it is about; a key
+    /// this build does not read is news of nothing.
+    #[test]
+    fn a_rating_or_a_review_is_news_of_its_item() {
+        let item = ItemId::from_bytes([3; 32]);
+        let member = MemberId::from(SecretKey::generate().public());
+        for key in [
+            CommunityKey::Rating { item, member },
+            CommunityKey::Review { item, member },
+        ] {
+            let mut batch = Batch::default();
+            assert!(note(&mut batch, key.encode().as_bytes()));
+            assert_eq!(batch.items, BTreeSet::from([item]));
+        }
+        assert!(!note(&mut Batch::default(), b"bookmark/somebody-elses"));
     }
 
     /// The content sweep's nudge: one wake however often it is told, until

@@ -714,6 +714,21 @@ Needs only 4a-1, so it can interleave with 4b.
   `Batch.wishes`.
   **Acceptance:** a forged `rating/X/bob` written by carol is ignored on every node; two concurrent
   ratings of one item both survive.
+  *As built, in two PRs (Ivan's call): ratings and reviews first, end to end.* 4c-1a:
+  - `CommunityKey` (rating and review) in `distlib-core::community`, with `Rating` (1–5) and
+    `Review` (at most 16 KiB of UTF-8). Both are checked when read as well as when made, so a raw put
+    of anything else is not one.
+  - **A key counts only in the spelling it is written in.** Ids parse from more than one spelling
+    (hex in either case), and a second spelling would be a second key by the same member, passing
+    the author check: a second rating.
+  - `Catalogue::rate`, `review`, `ratings` and `reviews`. Writes name this node's own member; reads
+    are a flat prefix scan keeping each entry whose author is the member its key names.
+  - The pump marks an item dirty for its ratings and reviews.
+  - Acceptance, on three founders: carol forges bob's rating and alice's, and every node counts
+    only bob's real one; two ratings made at once and a review all reach every node.
+
+  4c-1b is bookmarks and wishes. `Batch.bookmarks` and `Batch.wishes` move to 4c-2, where the
+  projection first reads them.
 
 - **4c-2 — the projection (a version bump).** Tables for ratings, reviews, bookmarks (everyone's),
   wish entries and comments; reviews folded into the item's search document; expelled members
@@ -755,7 +770,7 @@ Every open C-number appears here once.
 
 | # | Item | Phase 4 |
 |---|---|---|
-| **C1** | A full peer offer is O(N²) dials | **Narrowed.** A full offer happens only on a membership change and the ten-minute backstop; appearances are offered one at a time (D7). |
+| **C1** | A full peer offer is O(N²) dials | **Narrowed.** A full offer happens only on a membership change and the ten-minute backstop; a member whose address is heard is offered alone (4b-6). |
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
 | **C5** | Nothing asks again when a member cannot be resolved | **Closed by 4b-3.** Every heartbeat carries the sender's signed address. |
 | **C6** | A field blinks out of the read model while its newest value is in flight | **Mitigated for community rows**: an old row is kept while its new value is in flight. Items unchanged. |
@@ -780,7 +795,7 @@ Every open C-number appears here once.
 | **C30** | **One failed gossip dial strands that peer until it dials us** (ground truth 18) — an offline member, say, is never dialled again by gossip once it is back | **Upstream**, n0-computer/iroh-gossip#159 or its like. Meanwhile a returning member dials us, which clears it; if it did not, the only retry left is the catalogue's ten-minute backstop offering it again — D7's appearance, unconfirmed-offer and zero-neighbour arms were not built (4b-6). |
 | **C31** | **A write made as two nodes connect can miss both paths to the other** — broadcast before the gossip neighbour is up, and after the running sync round compared the two sides; iroh-docs drops the sync it would start for the new neighbour because a round is already running, and only a `SyncReport` queues one (`engine/state.rs:195-206`). Found from the macOS CI log of `what_one_member_writes_the_other_reads`, write and neighbour 0.1 ms apart; repaired only by `OFFER_AGAIN`, which 4b-6 removes | **Worked around** after 4a-3: the pump asks for one more round with a neighbour whose round began before it came up (`Pump::began_before_neighbour`). Upstream: `NewNeighbor` should queue a resync the way `SyncReport` does — an issue to open. |
 | **C32** | **Presence traffic grows with N above 1,000 members** — the beat interval is capped at 20 minutes (D4), so each node receives N beats per 20 minutes; at 10,000 about 400 MB a day, and full broadcast cannot serve a group of a million at any interval | **No phase — Ivan's call, KISS for now.** A larger group is the trigger: presence by sampling or aggregation rather than every member's beat reaching every other. |
-| **C33** | **iroh-docs wedges a pair of peers on `AlreadySyncing`** — a connect refused because the remote is still *accepting* the round before is ignored (`engine/live.rs:498`, which assumes the remote is dialling us), so the local round stays marked running and every later round between the two is refused, both ways, until a restart. Found from Linux CI on #94: `read_model`'s restarted node never caught up. Our own trigger was the C31 workaround's round asked for the moment the last one ended | **Worked around**: that round now waits a second (`SETTLE`); 60 of 60 stress runs against one failure in seven to twenty. Other offers can still coincide with the end of a round, so **upstream** is the fix — an issue to open, with a reproduction. |
+| **C33** | **iroh-docs wedges a pair of peers on `AlreadySyncing`** — a connect refused because the remote is still *accepting* the round before is ignored (`engine/live.rs:498`, which assumes the remote is dialling us), so the local round stays marked running and every later round between the two is refused, both ways, until a restart. Found from Linux CI on #94: `read_model`'s restarted node never caught up. Our own trigger was the C31 workaround's round asked for the moment the last one ended | **Worked around**: that round now waits a second (`SETTLE`); 60 of 60 stress runs against one failure in seven to twenty. Other offers can still coincide with the end of a round, so **upstream** is the fix — filed as [n0-computer/iroh-docs#121](https://github.com/n0-computer/iroh-docs/issues/121), with a test in their own suite that fails on their `main` (branch `test/already-syncing-wedge` on izderadicka/iroh-docs). |
 
 ---
 
