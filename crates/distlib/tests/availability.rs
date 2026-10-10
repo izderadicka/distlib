@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use tokio::time::Instant;
 
 mod common;
-use common::{bound, config, init_logging, record};
+use common::{bound, config, init_logging, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -190,6 +190,7 @@ async fn a_download_does_not_wait_on_an_offline_member() {
         .expect("alice sees bob online, and carol gone")
         .unwrap();
     hit_on(&alice_api, item_id, |hit| hit["providers"] == 1).await;
+    until_projected(&alice, item_id, chapters.len(), "alice").await;
 
     let dest = dir.path().join("alice-got");
     std::fs::create_dir(&dest).unwrap();

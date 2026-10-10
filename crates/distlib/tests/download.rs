@@ -37,7 +37,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 mod common;
-use common::{bound, config, following, record};
+use common::{bound, config, following, record, until_projected};
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
 /// project.
@@ -145,29 +145,6 @@ async fn add_an_ebook(api: &Api, path: &Path, bytes: &[u8], title: &str) -> Item
         .await
         .unwrap();
     serde_json::from_value(answer["item_id"].clone()).unwrap()
-}
-
-/// Waits until this node's read model holds `item` with all `files` of its
-/// files — which is what `library.download` reads, so a download asked for
-/// any sooner is asking about an item this node genuinely does not have yet.
-///
-/// **The file count, not merely the item.** An item's row appears as soon as
-/// any one of its entries has been projected, and its per-file rows are
-/// separate entries that arrive on their own schedule. Waiting only for the
-/// row is waiting for the title.
-async fn until_projected(runtime: &Runtime, item: ItemId, files: usize, who: &str) {
-    tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(stored) = runtime.store().item(item).await.unwrap()
-                && stored.item.files.len() == files
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{who} never projected the item with its {files} file(s)"));
 }
 
 /// Waits until `runtime` holds `item` in full (4b-2): the projection works it

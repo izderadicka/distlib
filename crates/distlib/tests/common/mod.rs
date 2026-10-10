@@ -12,11 +12,14 @@
 /// than the library.
 pub mod process;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 use distlib::Runtime;
 use distlib_consensus::MemberRecord;
-use distlib_core::{Config, CoreMember, MemberId, NodeAddr};
+use distlib_core::{Config, CoreMember, ItemId, MemberId, NodeAddr};
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
 ///
@@ -84,4 +87,30 @@ pub fn bound(runtime: &Runtime) -> NodeAddr {
         relay: None,
         direct: runtime.endpoint().bound_sockets().into_iter().collect(),
     }
+}
+
+/// How long a test waits for a node to project an item it was sent.
+const PROJECTED_WITHIN: Duration = Duration::from_secs(60);
+
+/// Waits until this node's read model holds `item` with all `files` of its
+/// files — which is what `library.download` reads, so a download asked for
+/// any sooner is asking about an item this node genuinely does not have yet.
+///
+/// **The file count, not merely the item.** An item's row appears as soon as
+/// any one of its entries has been projected, and its per-file rows are
+/// separate entries that arrive on their own schedule. Waiting only for the
+/// row is waiting for the title.
+pub async fn until_projected(runtime: &Runtime, item: ItemId, files: usize, who: &str) {
+    tokio::time::timeout(PROJECTED_WITHIN, async {
+        loop {
+            if let Some(stored) = runtime.store().item(item).await.unwrap()
+                && stored.item.files.len() == files
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{who} never projected the item with its {files} file(s)"));
 }
