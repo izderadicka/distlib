@@ -3,9 +3,9 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_core::{
-    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ItemId, Key, MemberId,
-    NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, Review, WISH_MAX_BYTES, Wish,
-    WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ItemId, ItemKind, Key,
+    MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, Review, WISH_MAX_BYTES,
+    Wish, WishFields, WishId, WishStatus,
 };
 use iroh::SecretKey;
 use serde_json::json;
@@ -324,6 +324,7 @@ fn a_bookmark_id_is_sixteen_bytes_of_lowercase_hex() {
 
 fn fields(status: WishStatus) -> WishFields {
     WishFields {
+        kind: None,
         title: None,
         authors: None,
         description: None,
@@ -337,6 +338,7 @@ fn fields(status: WishStatus) -> WishFields {
 #[test]
 fn a_wish_entry_is_what_its_member_says_and_no_more() {
     let made = Wish::new(WishFields {
+        kind: Some(ItemKind::Audiobook),
         title: Some("Hordubal".to_owned()),
         authors: Some(vec!["Karel Čapek".to_owned()]),
         created_at: Some(17),
@@ -348,7 +350,7 @@ fn a_wish_entry_is_what_its_member_says_and_no_more() {
     let json = |wish: &Wish| serde_json::from_slice::<serde_json::Value>(&wish.encode()).unwrap();
     assert_eq!(
         json(&made),
-        json!({"title": "Hordubal", "authors": ["Karel Čapek"], "created_at": 17, "status": "open"})
+        json!({"kind": "audiobook", "title": "Hordubal", "authors": ["Karel Čapek"], "created_at": 17, "status": "open"})
     );
     assert_eq!(
         json(&answered),
@@ -366,6 +368,7 @@ fn a_value_that_is_not_a_wish_entry_does_not_read_as_one() {
         json!({"status": "withdrawn"}),
         json!({"title": "Hordubal"}),
         json!({"status": "open", "title": 4}),
+        json!({"status": "open", "kind": "scroll"}),
         json!("open"),
     ] {
         assert_eq!(

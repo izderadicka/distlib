@@ -432,7 +432,7 @@ A `CommunityKey` enum in `distlib-core::community`, with §5.3's key formats exc
 | `rating/{item}/{member}` | `1..5` |
 | `review/{item}/{member}` | a string, capped at 16 KiB |
 | `bookmark/{item}/{member}/{bookmark}` | `{position, note, created_at, updated_at}` |
-| `wish/{wish}/{member}` | `{title?, authors?, description?, created_at?, status, item_id?}` |
+| `wish/{wish}/{member}` | `{kind?, title?, authors?, description?, created_at?, status, item_id?}` |
 | `wish_comment/{wish}/{member}` | a string |
 
 **Bookmarks gain a fourth segment — Ivan's call, and a delta against §5.3.** A bookmark is a
@@ -750,14 +750,14 @@ Needs only 4a-1, so it can interleave with 4b.
   *As built, 4c-1c:*
   - **Keys:** `wish/{wish}/{member}` and `wish_comment/{wish}/{member}`, with `WishId` (32 bytes
     of lowercase hex). One `random_id!` macro makes it and `BookmarkId`.
-  - **A wish entry is `Wish(WishFields)`** — `title?`, `authors?`, `description?`, `created_at?`
-    and `WishStatus`. `WishStatus` is `Open | Fulfilled { item_id }` (Ivan's call), so an item
-    exists exactly when the entry says fulfilled. In JSON it is the plan's `status`, with
-    `item_id` beside it.
+  - **A wish entry is `Wish(WishFields)`** — `kind?` (an `ItemKind`, as on an item; added at
+    review), `title?`, `authors?`, `description?`, `created_at?` and `WishStatus`. `WishStatus`
+    is `Open | Fulfilled { item_id }` (Ivan's call), so an item exists exactly when the entry says
+    fulfilled. In JSON it is the plan's `status`, with `item_id` beside it.
   - **Caps (Ivan's call):** a whole entry is capped at 16 KiB of JSON, one rule rather than one per
     field; a comment at 4 KiB. `Comment` and `Review` come from one `capped_text!` macro.
-  - **Catalogue:** `wish(id, &Wish)` and `comment(id, &Comment)` write under this node's own
-    member. `wishes(id)` and `comments(id)` read by member with the author check. Resolving who
+  - **Catalogue:** `wish(id, &Wish)` and `wish_comment(id, &Comment)` write under this node's own
+    member. `wishes(id)` and `wish_comments(id)` read by member with the author check. Resolving who
     created a wish and whether it is fulfilled (D10) is 4c-4's.
   - **`CommunityKey::item()` is gone**, since a wish has no item. The pump marks an item dirty for
     ratings and reviews only.

@@ -473,6 +473,7 @@ async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
     let wish = WishId::from_bytes([5; 32]);
     let item = ItemId::from_bytes([9; 32]);
     let made = Wish::new(WishFields {
+        kind: Some(ItemKind::Ebook),
         title: Some("Hordubal".to_owned()),
         authors: Some(vec!["Karel Čapek".to_owned()]),
         description: None,
@@ -481,6 +482,7 @@ async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
     })
     .unwrap();
     let fulfilled = Wish::new(WishFields {
+        kind: None,
         title: None,
         authors: None,
         description: None,
@@ -493,7 +495,7 @@ async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
     nodes[0].catalogue.wish(wish, &made).await.unwrap();
     nodes[1]
         .catalogue
-        .comment(wish, &said("I have it on paper"))
+        .wish_comment(wish, &said("I have it on paper"))
         .await
         .unwrap();
     nodes[2].catalogue.wish(wish, &fulfilled).await.unwrap();
@@ -515,7 +517,7 @@ async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
             &format!("the wish, its comment and the forgery reach {name}"),
             || async {
                 node.catalogue.wishes(wish).await.unwrap() == entries
-                    && !node.catalogue.comments(wish).await.unwrap().is_empty()
+                    && !node.catalogue.wish_comments(wish).await.unwrap().is_empty()
                     && node
                         .catalogue
                         .get(forged.clone())
@@ -527,7 +529,7 @@ async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
         )
         .await;
         assert_eq!(
-            node.catalogue.comments(wish).await.unwrap(),
+            node.catalogue.wish_comments(wish).await.unwrap(),
             comments,
             "on {name}"
         );

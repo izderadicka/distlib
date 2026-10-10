@@ -522,7 +522,7 @@ impl Catalogue {
     }
 
     /// Comments on `wish` as this node's member, replacing its earlier comment.
-    pub async fn comment(&self, wish: WishId, comment: &Comment) -> Result<()> {
+    pub async fn wish_comment(&self, wish: WishId, comment: &Comment) -> Result<()> {
         let key = CommunityKey::WishComment {
             wish,
             member: self.inner.me,
@@ -560,7 +560,7 @@ impl Catalogue {
 
     /// Every member's comment on `wish` this node holds, each counted only if
     /// that member wrote it (D9).
-    pub async fn comments(&self, wish: WishId) -> Result<BTreeMap<MemberId, Comment>> {
+    pub async fn wish_comments(&self, wish: WishId) -> Result<BTreeMap<MemberId, Comment>> {
         Ok(by_member(
             self.said(CommunityKey::comments_on(wish), Comment::decode)
                 .await?,

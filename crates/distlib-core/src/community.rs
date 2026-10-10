@@ -19,7 +19,7 @@ use std::{fmt, str::FromStr};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{CoreError, ItemId, MemberId};
+use crate::{CoreError, ItemId, ItemKind, MemberId};
 
 const RATING: &str = "rating";
 const REVIEW: &str = "review";
@@ -394,6 +394,9 @@ impl TryFrom<BookmarkFields> for Bookmark {
 /// title was made earliest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WishFields {
+    /// What kind of item is wished for, as an item says of itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ItemKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
