@@ -6,10 +6,10 @@
 //! instead of by the write that made it. It needs SQLite 3.37, which is why the
 //! dependency is `bundled` rather than the host's.
 //!
-//! **Three tables, no more.** §5.4 also names `ratings`, `reviews`,
-//! `bookmarks`, `wishes` and `custodianships`; those belong to phases 4 and 5
-//! and nothing writes them yet. A table nothing fills is a schema commitment
-//! made before the thing it describes exists.
+//! **Only tables something fills.** §5.4 also names `bookmarks`, `wishes` and
+//! `custodianships`; those belong to later steps of phases 4 and 5, and a
+//! table nothing fills is a schema commitment made before the thing it
+//! describes exists.
 //!
 //! **No `added_by`, `created` or `modified_by` columns**, which §5.2 does name.
 //! There is nothing to fill them from: the catalogue's `fields!` table has no
@@ -29,7 +29,7 @@
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 1;
+pub const READ_MODEL_VERSION: u32 = 2;
 
 /// Run on every connection, before anything else.
 ///
@@ -82,6 +82,23 @@ CREATE TABLE IF NOT EXISTS item_files (
 -- leads with the item. Asked when a blob arrives or goes, to decide whether
 -- its items are now held here (phase 4).
 CREATE INDEX IF NOT EXISTS item_files_by_blob ON item_files (blob);
+
+-- What members said about an item: one rating and one review each, the
+-- latest. Only current members' — an expelled member's are left out when the
+-- item is projected (D9) — so a read needs no join to be true.
+CREATE TABLE IF NOT EXISTS ratings (
+    item   TEXT    NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    member TEXT    NOT NULL,
+    rating INTEGER NOT NULL,
+    PRIMARY KEY (item, member)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS reviews (
+    item   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    member TEXT NOT NULL,
+    review TEXT NOT NULL,
+    PRIMARY KEY (item, member)
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS members (
     id           TEXT    PRIMARY KEY,

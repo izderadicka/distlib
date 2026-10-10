@@ -19,7 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use distlib_core::{ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, Series};
+use distlib_core::{
+    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, Rating, Review, Series,
+};
 use distlib_store::{Store, StoredItem, StoredMember};
 use proptest::prelude::*;
 
@@ -149,11 +151,33 @@ fn item() -> impl Strategy<Value = Item> {
         )
 }
 
+/// One of a handful of members, so that two values about one item are
+/// sometimes by the same member and sometimes not.
+fn member() -> impl Strategy<Value = MemberId> {
+    (1u8..5).prop_map(|seed| MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public()))
+}
+
+fn rating() -> impl Strategy<Value = Rating> {
+    (1u8..=5).prop_map(|value| Rating::try_from(value).expect("one to five is a rating"))
+}
+
+fn review() -> impl Strategy<Value = Review> {
+    text().prop_map(|text| Review::try_from(text).expect("short text is a review"))
+}
+
 fn stored() -> impl Strategy<Value = StoredItem> {
-    (item(), any::<u64>()).prop_map(|(item, last_modified)| StoredItem {
-        item,
-        last_modified: last_modified >> 1,
-    })
+    (
+        item(),
+        proptest::collection::btree_map(member(), rating(), 0..3),
+        proptest::collection::btree_map(member(), review(), 0..3),
+        any::<u64>(),
+    )
+        .prop_map(|(item, ratings, reviews, last_modified)| StoredItem {
+            item,
+            ratings,
+            reviews,
+            last_modified: last_modified >> 1,
+        })
 }
 
 /// Items with distinct ids, so a set of them has a well-defined projection.
@@ -254,6 +278,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
     let store = empty().await;
     let id = ItemId::from_bytes([7; 32]);
     let blob = ContentHash::from_bytes([9; 32]);
+    let member = MemberId::from(iroh::SecretKey::from_bytes(&[1; 32]).public());
 
     let whole = StoredItem {
         item: Item {
@@ -274,6 +299,11 @@ async fn an_item_whose_content_went_away_loses_the_field() {
             )]),
             ..Item::new(id)
         },
+        ratings: BTreeMap::from([(member, Rating::try_from(4).expect("a rating"))]),
+        reviews: BTreeMap::from([(
+            member,
+            Review::try_from("Spice".to_owned()).expect("a review"),
+        )]),
         last_modified: 100,
     };
     store
@@ -282,12 +312,15 @@ async fn an_item_whose_content_went_away_loses_the_field() {
         .expect("the whole item is written");
 
     // The same item as it reads when the title's newest value and the file
-    // record are both entries whose content has not arrived.
+    // record are both entries whose content has not arrived — and when the
+    // member who rated and reviewed it is no longer one.
     let partial = StoredItem {
         item: Item {
             kind: Some(ItemKind::Ebook),
             ..Item::new(id)
         },
+        ratings: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         last_modified: 200,
     };
     store
@@ -296,7 +329,11 @@ async fn an_item_whose_content_went_away_loses_the_field() {
         .expect("the partial item is written");
 
     let read = store.item(id).await.expect("the item is read");
-    assert_eq!(read, Some(partial), "the title and the file row are gone");
+    assert_eq!(
+        read,
+        Some(partial),
+        "the title, the file row, the rating and the review are gone"
+    );
 }
 
 #[tokio::test]
@@ -343,6 +380,8 @@ async fn a_store_reopens_onto_what_it_already_held() {
             title: Some("Neuromancer".to_owned()),
             ..Item::new(id)
         },
+        ratings: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         last_modified: 42,
     };
 
@@ -388,6 +427,8 @@ async fn a_store_of_another_version_is_started_afresh() {
             lang: Some("en".to_owned()),
             ..Item::new(id)
         },
+        ratings: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         last_modified: 42,
     };
     store.upsert_item(stored.clone()).await.expect("written");
@@ -407,7 +448,10 @@ async fn a_store_of_another_version_is_started_afresh() {
         .expect("the tables are listed")
         .collect::<rusqlite::Result<_>>()
         .expect("the tables are listed");
-    assert_eq!(tables, ["item_files", "items", "members"]);
+    assert_eq!(
+        tables,
+        ["item_files", "items", "members", "ratings", "reviews"]
+    );
     let left: i64 = db
         .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
         .expect("the rows are counted");

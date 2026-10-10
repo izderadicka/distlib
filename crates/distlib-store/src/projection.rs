@@ -54,11 +54,18 @@
 //! `admin.reindex`, and a read model being rebuilt from a document it already
 //! held is not news — publishing it would put every watcher into `resync` at
 //! startup.
+//!
+//! **What an expelled member said stops counting here** (D9): an item's
+//! ratings and reviews are projected only from whoever is a member now. So
+//! when the *set* of members changes, everything is replayed — rare, and the
+//! one operation this task already has for "make every row true again". A
+//! membership change that leaves the set alone (a pledge, a proposal, an
+//! approval) replays nothing.
 
 use std::collections::BTreeSet;
 
 use distlib_consensus::MembershipState;
-use distlib_core::{Event, ItemId};
+use distlib_core::{Event, ItemId, MemberId};
 use distlib_sync::{Batch, Catalogue};
 use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
@@ -213,10 +220,11 @@ async fn run(
     // and one upsert per item, and what it buys is that these tables are a
     // function of the document rather than of everything this node has ever
     // seen — which is the difference between a node that restarted and one that
-    // did not holding the same rows.
+    // did not holding the same rows. The members first, since the replay
+    // projects only what they said.
+    let mut members = project_members(&store, &mut membership).await;
     let mut incomplete = BTreeSet::new();
-    replay(&catalogue, &store, &index, &mut incomplete).await;
-    project_members(&store, &mut membership).await;
+    replay(&catalogue, &store, &index, &members, &mut incomplete).await;
 
     loop {
         tokio::select! {
@@ -228,7 +236,8 @@ async fn run(
                 if content_arrived {
                     items.extend(incomplete.iter().copied());
                 }
-                let written = project(&catalogue, &store, &index, items, &mut incomplete).await;
+                let written =
+                    project(&catalogue, &store, &index, items, &members, &mut incomplete).await;
                 for event in written {
                     // Nobody watching is the ordinary case. Never awaited: a
                     // watcher that falls behind is skipped past, and this task
@@ -241,11 +250,16 @@ async fn run(
                     tracing::error!("the membership log is gone; stopping the read model's projection");
                     return;
                 }
-                project_members(&store, &mut membership).await;
+                let current_members = project_members(&store, &mut membership).await;
+                if current_members != members {
+                    members = current_members;
+                    tracing::info!("the group's members changed; replaying the read model");
+                    replay(&catalogue, &store, &index, &members, &mut incomplete).await;
+                }
             }
             Some(done) = reindex_rx.recv() => {
                 tracing::info!("reindexing the read model on request");
-                replay(&catalogue, &store, &index, &mut incomplete).await;
+                replay(&catalogue, &store, &index, &members, &mut incomplete).await;
                 // Dropped if the caller stopped waiting — a reindex that ran
                 // is not undone by nobody being left to tell.
                 let _ = done.send(());
@@ -255,7 +269,7 @@ async fn run(
 }
 
 /// Re-reads each item and writes it over whatever the tables — and the search
-/// index — held.
+/// index — held, with what `members` said about it.
 ///
 /// Failures are logged per item rather than returned: one item that cannot be
 /// read must not stop the rest of a replay, and the next change to it — or the
@@ -274,17 +288,20 @@ async fn project(
     store: &Store,
     index: &SearchIndex,
     items: BTreeSet<ItemId>,
+    members: &BTreeSet<MemberId>,
     incomplete: &mut BTreeSet<ItemId>,
 ) -> Vec<Event> {
     let mut indexed = false;
     let mut written = Vec::new();
     for id in items {
-        let read = match catalogue.read_item(id).await {
+        let mut read = match catalogue.read_item(id).await {
             Ok(Some(read)) => read,
-            // No entry for this item at all. Nothing that reaches here should
-            // produce it — every id came from a key that parsed — so it is
-            // skipped rather than written as an empty row, which is the only
-            // answer that cannot make the tables say something untrue.
+            // No entry of the item's own. A rating or review that arrived
+            // before the item it is about does this — it marks the item
+            // dirty, and the item is not here yet. Skipped rather than written
+            // as an empty row, which is the only answer that cannot make the
+            // tables say something untrue; the item's own entries mark it
+            // again when they land.
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(%id, %error, "could not read a catalogue item to project it");
@@ -312,9 +329,13 @@ async fn project(
             indexed = true;
         }
 
+        read.ratings.retain(|member, _| members.contains(member));
+        read.reviews.retain(|member, _| members.contains(member));
         match store
             .upsert_item(StoredItem {
                 item: read.item,
+                ratings: read.ratings,
+                reviews: read.reviews,
                 last_modified: read.last_modified,
             })
             .await
@@ -336,8 +357,15 @@ async fn project(
     written
 }
 
-/// Writes the group's membership as the log currently has it.
-async fn project_members(store: &Store, membership: &mut watch::Receiver<MembershipState>) {
+/// Writes the group's membership as the log currently has it, and says who
+/// the members are.
+///
+/// One look at the log for both, so the table and what the projection
+/// filters by cannot be two different moments of it.
+async fn project_members(
+    store: &Store,
+    membership: &mut watch::Receiver<MembershipState>,
+) -> BTreeSet<MemberId> {
     // Collected before the await: the borrow guard is not `Send`, and holding
     // it across one would also hold the watch against whoever writes it next.
     let members = {
@@ -351,9 +379,11 @@ async fn project_members(store: &Store, membership: &mut watch::Receiver<Members
             })
             .collect::<Vec<_>>()
     };
+    let ids = members.iter().map(|member| member.member).collect();
     if let Err(error) = store.set_members(members).await {
         tracing::warn!(%error, "could not write the group's members to the read model");
     }
+    ids
 }
 
 /// Re-reads every item in the document into the read model.
@@ -366,6 +396,7 @@ async fn replay(
     catalogue: &Catalogue,
     store: &Store,
     index: &SearchIndex,
+    members: &BTreeSet<MemberId>,
     incomplete: &mut BTreeSet<ItemId>,
 ) {
     let ids = match catalogue.item_ids().await {
@@ -381,5 +412,5 @@ async fn replay(
     );
     // What it wrote is dropped on purpose: a replay is not news — see the
     // module docs.
-    project(catalogue, store, index, ids, incomplete).await;
+    project(catalogue, store, index, ids, members, incomplete).await;
 }

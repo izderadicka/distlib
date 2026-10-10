@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{ContentHash, FileRecord, Item, ItemId, MemberId, Series};
+use distlib_core::{ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review, Series};
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -42,9 +42,17 @@ pub struct Page<T> {
 /// one and reads one back, so a column that stopped matching its field fails
 /// the round-trip property rather than being found by whatever queried it next.
 /// The columns are an encoding of this type, not a second schema.
+///
+/// With what members said about it, written and read back with it the same
+/// way its files are — and left empty by the same reads that leave `files`
+/// empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredItem {
     pub item: Item,
+    /// Each current member's rating.
+    pub ratings: BTreeMap<MemberId, Rating>,
+    /// Each current member's review.
+    pub reviews: BTreeMap<MemberId, Review>,
     /// The newest entry timestamp this item was projected from — §5.2's
     /// `last_modified`, in microseconds since the epoch.
     pub last_modified: u64,
@@ -163,7 +171,7 @@ impl Store {
     /// One item, or `None` if the projection has not written it.
     pub async fn item(&self, id: ItemId) -> Result<Option<StoredItem>> {
         self.read(move |conn| {
-            let mut files = files_of(conn, Some(id))?;
+            let mut details = ItemDetails::read(conn, Some(id))?;
             let mut statement =
                 conn.prepare(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = ?1"))?;
             let mut rows = statement.query(params![id.to_string()])?;
@@ -171,19 +179,20 @@ impl Store {
                 return Ok(None);
             };
             let mut stored = row_to_item(row)?;
-            stored.item.files = files.remove(&stored.item.id).unwrap_or_default();
+            details.attach_to(&mut stored);
             Ok(Some(stored))
         })
         .await
     }
 
-    /// One item's own fields, `files` always empty.
+    /// One item's own fields, `files`, `ratings` and `reviews` always empty.
     ///
-    /// [`Store::item`] minus one query — the one that reads `item_files` — for
-    /// a caller that is not going to look at `files` anyway. `library.search`
-    /// is the reason this exists: a page of hits reads this once per hit, and
-    /// `library.item` is the one place a caller reads the file list, so paying
-    /// for it here would be work every search result throws away.
+    /// [`Store::item`] minus the queries that read an item's details — its
+    /// files, ratings and reviews — for a caller that is not going to look
+    /// at them anyway. `library.search` is the reason this exists: a page of
+    /// hits reads this once per hit, and `library.item` is the one place a
+    /// caller reads the rest, so paying for it here would be work every search
+    /// result throws away.
     pub async fn item_fields(&self, id: ItemId) -> Result<Option<StoredItem>> {
         self.read(move |conn| {
             let mut statement =
@@ -199,19 +208,19 @@ impl Store {
 
     /// Every item the projection has written, by id.
     ///
-    /// Two queries rather than one per item: the file rows are fetched in a
-    /// single pass and grouped here, so this costs O(rows) rather than O(items)
-    /// round trips through SQLite.
+    /// One query per table rather than one per item: each table's rows are
+    /// fetched in a single pass and grouped here, so this costs O(rows)
+    /// rather than O(items) round trips through SQLite.
     pub async fn items(&self) -> Result<Vec<StoredItem>> {
         self.read(|conn| {
-            let mut files = files_of(conn, None)?;
+            let mut details = ItemDetails::read(conn, None)?;
             let mut statement =
                 conn.prepare(&format!("SELECT {ITEM_COLUMNS} FROM items ORDER BY id"))?;
             let mut rows = statement.query([])?;
             let mut items = Vec::new();
             while let Some(row) = rows.next()? {
                 let mut stored = row_to_item(row)?;
-                stored.item.files = files.remove(&stored.item.id).unwrap_or_default();
+                details.attach_to(&mut stored);
                 items.push(stored);
             }
             Ok(items)
@@ -219,9 +228,10 @@ impl Store {
         .await
     }
 
-    /// One page of items, `files` always empty, in browsing order: by title,
-    /// ignoring case, untitled last, and by id among equal titles — so that
-    /// the order is total and pages neither overlap nor leave a gap.
+    /// One page of items, `files`, `ratings` and `reviews` always empty, in
+    /// browsing order: by title, ignoring case, untitled last, and by id among
+    /// equal titles — so that the order is total and pages neither overlap nor
+    /// leave a gap.
     ///
     /// **Case is folded for ASCII only** — SQLite's `NOCASE` — so a title
     /// starting with an accented letter sorts after `Z`. A locale-aware
@@ -402,6 +412,22 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             file.duration,
         ])?;
     }
+
+    // Cleared and written again, as the files are: an expelled member's
+    // rating is one the item no longer has.
+    tx.execute("DELETE FROM ratings WHERE item = ?1", params![id])?;
+    let mut insert =
+        tx.prepare("INSERT INTO ratings (item, member, rating) VALUES (?1, ?2, ?3)")?;
+    for (member, rating) in &stored.ratings {
+        insert.execute(params![id, member.to_string(), rating.get()])?;
+    }
+    tx.execute("DELETE FROM reviews WHERE item = ?1", params![id])?;
+    let mut insert =
+        tx.prepare("INSERT INTO reviews (item, member, review) VALUES (?1, ?2, ?3)")?;
+    for (member, review) in &stored.reviews {
+        insert.execute(params![id, member.to_string(), review.as_str()])?;
+    }
+
     Ok(if existed {
         Upserted::Updated
     } else {
@@ -414,13 +440,7 @@ fn files_of(
     conn: &Connection,
     only: Option<ItemId>,
 ) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>> {
-    let (sql, params) = match &only {
-        Some(id) => (
-            format!("SELECT {FILE_COLUMNS} FROM item_files WHERE item = ?1"),
-            vec![id.to_string()],
-        ),
-        None => (format!("SELECT {FILE_COLUMNS} FROM item_files"), Vec::new()),
-    };
+    let (sql, params) = select_item_rows(&format!("{FILE_COLUMNS} FROM item_files"), only);
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(params))?;
 
@@ -442,6 +462,73 @@ fn files_of(
             .insert(identifier(row, 1, "blob")?, record);
     }
     Ok(grouped)
+}
+
+/// An item's details: the rows in other tables that belong to it — its files,
+/// ratings and reviews. Read for every item, or for just one, in one query
+/// per table, and handed to each item as it is read.
+struct ItemDetails {
+    files: BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>,
+    ratings: BTreeMap<ItemId, BTreeMap<MemberId, Rating>>,
+    reviews: BTreeMap<ItemId, BTreeMap<MemberId, Review>>,
+}
+
+impl ItemDetails {
+    fn read(conn: &Connection, only: Option<ItemId>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            files: files_of(conn, only)?,
+            ratings: member_values_by_item(conn, "ratings", "rating", only, |row| {
+                Rating::try_from(row.get::<_, u8>(2)?).map_err(unreadable(2, "rating"))
+            })?,
+            reviews: member_values_by_item(conn, "reviews", "review", only, |row| {
+                Review::try_from(row.get::<_, String>(2)?).map_err(unreadable(2, "review"))
+            })?,
+        })
+    }
+
+    /// Moves `stored`'s details onto it.
+    fn attach_to(&mut self, stored: &mut StoredItem) {
+        let id = stored.item.id;
+        stored.item.files = self.files.remove(&id).unwrap_or_default();
+        stored.ratings = self.ratings.remove(&id).unwrap_or_default();
+        stored.reviews = self.reviews.remove(&id).unwrap_or_default();
+    }
+}
+
+/// The `column` of every row of `table` — or of just one item's rows —
+/// grouped by item, then by member: for tables holding one value per member
+/// per item, as `ratings` and `reviews` do.
+fn member_values_by_item<T>(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    only: Option<ItemId>,
+    value: impl Fn(&Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<MemberId, T>>> {
+    let (sql, params) = select_item_rows(&format!("item, member, {column} FROM {table}"), only);
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+
+    let mut grouped: BTreeMap<ItemId, BTreeMap<MemberId, T>> = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        grouped
+            .entry(identifier(row, 0, "item")?)
+            .or_default()
+            .insert(identifier(row, 1, "member")?, value(row)?);
+    }
+    Ok(grouped)
+}
+
+/// `SELECT {columns_from}` over every item's rows, or only one item's, with
+/// the parameters it takes.
+fn select_item_rows(columns_from: &str, only: Option<ItemId>) -> (String, Vec<String>) {
+    match only {
+        Some(id) => (
+            format!("SELECT {columns_from} WHERE item = ?1"),
+            vec![id.to_string()],
+        ),
+        None => (format!("SELECT {columns_from}"), Vec::new()),
+    }
 }
 
 /// One `items` row, without its files — the caller attaches those.
@@ -476,6 +563,8 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<StoredItem> {
             replicas: row.get(10)?,
             files: BTreeMap::new(),
         },
+        ratings: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         last_modified: row.get(11)?,
     })
 }
