@@ -23,7 +23,10 @@ pub use availability::{GOSSIP_MAX_MESSAGE, Heartbeat, Holdings, SignedHeartbeat}
 pub use catalogue::{
     Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
 };
-pub use community::{CommunityKey, REVIEW_MAX_BYTES, Rating, Review};
+pub use community::{
+    Bookmark, BookmarkId, CommunityKey, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES,
+    Rating, Review,
+};
 pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
     RelayMode,

@@ -727,8 +727,25 @@ Needs only 4a-1, so it can interleave with 4b.
   - Acceptance, on three founders: carol forges bob's rating and alice's, and every node counts
     only bob's real one; two ratings made at once and a review all reach every node.
 
-  4c-1b is bookmarks and wishes. `Batch.bookmarks` and `Batch.wishes` move to 4c-2, where the
-  projection first reads them.
+  4c-1b is bookmarks, and 4c-1c wishes (Ivan's call: two PRs). `Batch.bookmarks` and `Batch.wishes`
+  move to 4c-2, where the projection first reads them.
+
+  *As built, 4c-1b:*
+  - **The value is `{position, note, created_at}`, with no `updated_at` (Ivan's call).** "Updated" is
+    the entry's own timestamp, as an item's `last_modified` is; a stored field would be a second
+    answer able to disagree. `created_at` is stored, since an edit rewrites the entry. Times are
+    microseconds since the epoch.
+  - **Caps:** the note is 4 KiB, as planned, and the position 256 bytes, since it names a page, a
+    chapter or a time, not prose.
+  - **Ids:** `BookmarkId` is 16 bytes of lowercase hex.
+  - **Catalogue:** `bookmark(item, id, &Bookmark)` writes. `bookmarks(item)` reads with the same
+    author check as ratings, returning `ReadBookmark {member, id, bookmark, last_modified}` sorted
+    by member, then id. Sorted explicitly, because the query's own order is not that.
+  - **The pump does not mark an item dirty for a bookmark**, since a bookmark is not part of the
+    item it points into.
+  - **Acceptance, on three founders:** two of bob's bookmarks on one item both count on every
+    node, and one carol forges in his name counts on none. An edited bookmark keeps its
+    `created_at` and gets a later `last_modified` everywhere.
 
 - **4c-2 — the projection (a version bump).** Tables for ratings, reviews, bookmarks (everyone's),
   wish entries and comments; reviews folded into the item's search document; expelled members

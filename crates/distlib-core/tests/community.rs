@@ -2,7 +2,10 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use distlib_core::{CommunityKey, ItemId, Key, MemberId, REVIEW_MAX_BYTES, Rating, Review};
+use distlib_core::{
+    Bookmark, BookmarkId, CommunityKey, ItemId, Key, MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES,
+    REVIEW_MAX_BYTES, Rating, Review,
+};
 use iroh::SecretKey;
 
 fn member() -> MemberId {
@@ -11,20 +14,29 @@ fn member() -> MemberId {
 
 /// An id whose hex has letters in it, so it has another spelling.
 const ITEM: ItemId = ItemId::from_bytes([0xab; 32]);
+const A: BookmarkId = BookmarkId::from_bytes([0xa1; 16]);
+const B: BookmarkId = BookmarkId::from_bytes([0xb2; 16]);
+
+fn rating(member: MemberId) -> CommunityKey {
+    CommunityKey::Rating { item: ITEM, member }
+}
+
+fn review(member: MemberId) -> CommunityKey {
+    CommunityKey::Review { item: ITEM, member }
+}
+
+fn bookmark(member: MemberId, bookmark: BookmarkId) -> CommunityKey {
+    CommunityKey::Bookmark {
+        item: ITEM,
+        member,
+        bookmark,
+    }
+}
 
 #[test]
 fn a_key_reads_back_as_itself() {
     let bob = member();
-    for key in [
-        CommunityKey::Rating {
-            item: ITEM,
-            member: bob,
-        },
-        CommunityKey::Review {
-            item: ITEM,
-            member: bob,
-        },
-    ] {
+    for key in [rating(bob), review(bob), bookmark(bob, A), bookmark(bob, B)] {
         let encoded = key.encode();
         assert_eq!(
             CommunityKey::parse(encoded.as_bytes()),
@@ -38,21 +50,11 @@ fn a_key_reads_back_as_itself() {
 #[test]
 fn a_key_is_named_by_its_kind_the_item_and_the_member() {
     let bob = member();
+    assert_eq!(rating(bob).encode(), format!("rating/{ITEM}/{bob}"));
+    assert_eq!(review(bob).encode(), format!("review/{ITEM}/{bob}"));
     assert_eq!(
-        CommunityKey::Rating {
-            item: ITEM,
-            member: bob
-        }
-        .encode(),
-        format!("rating/{ITEM}/{bob}")
-    );
-    assert_eq!(
-        CommunityKey::Review {
-            item: ITEM,
-            member: bob
-        }
-        .encode(),
-        format!("review/{ITEM}/{bob}")
+        bookmark(bob, A).encode(),
+        format!("bookmark/{ITEM}/{bob}/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
     );
 }
 
@@ -63,6 +65,7 @@ fn a_key_counts_only_in_the_spelling_it_is_written_in() {
     let bob = member();
     let item = ITEM.to_string().to_uppercase();
     let who = bob.to_string().to_uppercase();
+    let mark = A.to_string().to_uppercase();
     assert_eq!(
         item.parse::<ItemId>().ok(),
         Some(ITEM),
@@ -70,6 +73,10 @@ fn a_key_counts_only_in_the_spelling_it_is_written_in() {
     );
     assert_eq!(
         CommunityKey::parse(format!("rating/{item}/{bob}").as_bytes()),
+        None
+    );
+    assert_eq!(
+        CommunityKey::parse(format!("bookmark/{ITEM}/{bob}/{mark}").as_bytes()),
         None
     );
     if who.parse::<MemberId>().is_ok() {
@@ -88,39 +95,65 @@ fn anything_else_is_somebody_elses_key() {
         format!("rating/{ITEM}"),
         format!("rating/{ITEM}/"),
         format!("bookmark/{ITEM}/{bob}"),
+        format!("bookmark/{ITEM}/{bob}/{A}/extra"),
+        format!("bookmark/{ITEM}/{bob}/a1a1"),
+        format!("wish/{ITEM}/{bob}"),
         format!("item/{ITEM}/title"),
         format!("rating/{bob}/{ITEM}"),
     ] {
         assert_eq!(CommunityKey::parse(key.as_bytes()), None, "{key}");
     }
     // And the other way round: an item's keys never read as a rating's.
-    let rating = CommunityKey::Rating {
-        item: ITEM,
-        member: bob,
-    }
-    .encode();
-    assert_eq!(Key::parse(rating.as_bytes()), None);
+    assert_eq!(Key::parse(rating(bob).encode().as_bytes()), None);
 }
 
 #[test]
 fn a_prefix_covers_one_kind_of_key_about_one_item() {
     let bob = member();
-    let rating = CommunityKey::Rating {
-        item: ITEM,
-        member: bob,
-    }
-    .encode();
-    let review = CommunityKey::Review {
-        item: ITEM,
-        member: bob,
-    }
-    .encode();
     let other = ItemId::from_bytes([8; 32]);
 
-    assert!(rating.starts_with(&CommunityKey::ratings_of(ITEM)));
-    assert!(review.starts_with(&CommunityKey::reviews_of(ITEM)));
-    assert!(!review.starts_with(&CommunityKey::ratings_of(ITEM)));
-    assert!(!rating.starts_with(&CommunityKey::ratings_of(other)));
+    assert!(
+        rating(bob)
+            .encode()
+            .starts_with(&CommunityKey::ratings_of(ITEM))
+    );
+    assert!(
+        review(bob)
+            .encode()
+            .starts_with(&CommunityKey::reviews_of(ITEM))
+    );
+    assert!(
+        bookmark(bob, A)
+            .encode()
+            .starts_with(&CommunityKey::bookmarks_of(ITEM))
+    );
+    assert!(
+        !review(bob)
+            .encode()
+            .starts_with(&CommunityKey::ratings_of(ITEM))
+    );
+    assert!(
+        !rating(bob)
+            .encode()
+            .starts_with(&CommunityKey::ratings_of(other))
+    );
+}
+
+/// Writing a key prunes its author's longer keys beneath it (ground truth
+/// 10): a bare `bookmark/X/bob` would delete every bookmark bob left on X.
+#[test]
+fn no_key_of_a_members_is_a_prefix_of_another_of_theirs() {
+    let bob = member();
+    let keys =
+        [rating(bob), review(bob), bookmark(bob, A), bookmark(bob, B)].map(|key| key.encode());
+    for (n, key) in keys.iter().enumerate() {
+        for (m, other) in keys.iter().enumerate() {
+            assert!(
+                n == m || !other.starts_with(key.as_str()),
+                "{key} prefixes {other}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -174,4 +207,57 @@ fn a_value_that_is_not_a_review_does_not_read_as_one() {
     let review = Review::try_from("Válka s mloky — satire.".to_owned()).unwrap();
     assert_eq!(review.as_str(), "Válka s mloky — satire.");
     assert_eq!(Review::decode(&review.encode()), Some(review));
+}
+
+#[test]
+fn a_bookmark_is_a_position_a_note_and_when_it_was_made() {
+    let mark = Bookmark::new("ch. 12".to_owned(), "the salamanders vote".to_owned(), 17).unwrap();
+    assert_eq!(
+        (mark.position(), mark.note(), mark.created_at()),
+        ("ch. 12", "the salamanders vote", 17)
+    );
+    assert_eq!(Bookmark::decode(&mark.encode()), Some(mark.clone()));
+    // When it last changed is the entry's, not a field of its own.
+    let fields: serde_json::Value = serde_json::from_slice(&mark.encode()).unwrap();
+    assert_eq!(
+        fields,
+        serde_json::json!({"position": "ch. 12", "note": "the salamanders vote", "created_at": 17})
+    );
+}
+
+#[test]
+fn a_bookmarks_note_and_position_are_capped_in_bytes() {
+    let made = |position: String, note: String| Bookmark::new(position, note, 0);
+    assert!(made("p".repeat(POSITION_MAX_BYTES), "n".repeat(NOTE_MAX_BYTES)).is_ok());
+    assert!(made("p".repeat(POSITION_MAX_BYTES + 1), String::new()).is_err());
+    assert!(made(String::new(), "n".repeat(NOTE_MAX_BYTES + 1)).is_err());
+    assert!(made(String::new(), "č".repeat(NOTE_MAX_BYTES / 2 + 1)).is_err());
+}
+
+#[test]
+fn a_value_that_is_not_a_bookmark_does_not_read_as_one() {
+    let long_note = serde_json::json!({
+        "position": "1", "note": "n".repeat(NOTE_MAX_BYTES + 1), "created_at": 0
+    });
+    let no_date = serde_json::json!({"position": "1", "note": ""});
+    for value in [
+        long_note,
+        no_date,
+        serde_json::json!("1"),
+        serde_json::json!(4),
+    ] {
+        assert_eq!(
+            Bookmark::decode(&serde_json::to_vec(&value).unwrap()),
+            None,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn a_bookmark_id_is_sixteen_bytes_of_lowercase_hex() {
+    assert_eq!(A.to_string().parse::<BookmarkId>().ok(), Some(A));
+    for text in ["a1a1", &"a1".repeat(17), &"A1".repeat(16), &"zz".repeat(16)] {
+        assert!(text.parse::<BookmarkId>().is_err(), "{text}");
+    }
 }

@@ -7,20 +7,33 @@
 //! the key names, so a reader counts an entry only when the two agree (D9) —
 //! a check the catalogue makes, since only it sees who wrote an entry.
 //!
+//! **No key is a prefix of another by the same author** (ground truth 10):
+//! writing a key prunes that author's longer keys beneath it. Every key here
+//! ends in a fixed-length id, and nothing writes a bare prefix.
+//!
 //! Apart from [`Key`](crate::Key), which stays item-only: the pump and the
 //! replay read `item/…` as an item's own fields, and these are not.
 
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use data_encoding::HEXLOWER;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{CoreError, ItemId, MemberId};
 
 const RATING: &str = "rating";
 const REVIEW: &str = "review";
+const BOOKMARK: &str = "bookmark";
 
 /// The longest review there may be, in bytes of UTF-8: 16 KiB.
 pub const REVIEW_MAX_BYTES: usize = 16 * 1024;
+
+/// The longest note a bookmark may carry, in bytes of UTF-8: 4 KiB.
+pub const NOTE_MAX_BYTES: usize = 4 * 1024;
+
+/// The longest position a bookmark may name, in bytes of UTF-8: a page, a
+/// chapter or a time, not prose.
+pub const POSITION_MAX_BYTES: usize = 256;
 
 /// A key a member writes about themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +42,12 @@ pub enum CommunityKey {
     Rating { item: ItemId, member: MemberId },
     /// `review/{item_id}/{member_id}`
     Review { item: ItemId, member: MemberId },
+    /// `bookmark/{item_id}/{member_id}/{bookmark_id}`
+    Bookmark {
+        item: ItemId,
+        member: MemberId,
+        bookmark: BookmarkId,
+    },
 }
 
 impl CommunityKey {
@@ -37,6 +56,11 @@ impl CommunityKey {
         match self {
             Self::Rating { item, member } => format!("{RATING}/{item}/{member}"),
             Self::Review { item, member } => format!("{REVIEW}/{item}/{member}"),
+            Self::Bookmark {
+                item,
+                member,
+                bookmark,
+            } => format!("{BOOKMARK}/{item}/{member}/{bookmark}"),
         }
     }
 
@@ -56,6 +80,11 @@ impl CommunityKey {
         let parsed = match kind {
             RATING => Self::Rating { item, member },
             REVIEW => Self::Review { item, member },
+            BOOKMARK => Self::Bookmark {
+                item,
+                member,
+                bookmark: BookmarkId::from_str(parts.next()?).ok()?,
+            },
             _ => return None,
         };
         (parsed.encode().as_bytes() == key).then_some(parsed)
@@ -64,7 +93,9 @@ impl CommunityKey {
     /// The item this key is about.
     pub const fn item(&self) -> ItemId {
         match self {
-            Self::Rating { item, .. } | Self::Review { item, .. } => *item,
+            Self::Rating { item, .. } | Self::Review { item, .. } | Self::Bookmark { item, .. } => {
+                *item
+            }
         }
     }
 
@@ -72,7 +103,9 @@ impl CommunityKey {
     /// key counts (D9).
     pub const fn member(&self) -> MemberId {
         match self {
-            Self::Rating { member, .. } | Self::Review { member, .. } => *member,
+            Self::Rating { member, .. }
+            | Self::Review { member, .. }
+            | Self::Bookmark { member, .. } => *member,
         }
     }
 
@@ -84,6 +117,46 @@ impl CommunityKey {
     /// Every member's review of `item`, as a prefix to read.
     pub fn reviews_of(item: ItemId) -> String {
         format!("{REVIEW}/{item}/")
+    }
+
+    /// Every member's bookmarks on `item`, as a prefix to read.
+    pub fn bookmarks_of(item: ItemId) -> String {
+        format!("{BOOKMARK}/{item}/")
+    }
+}
+
+/// One of a member's bookmarks on an item: 16 random bytes, written in hex.
+///
+/// A member may leave several on one item (D8), so each has an id of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BookmarkId([u8; 16]);
+
+impl BookmarkId {
+    /// Wraps raw bytes without interpreting them.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Display for BookmarkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&HEXLOWER.encode(&self.0))
+    }
+}
+
+impl FromStr for BookmarkId {
+    type Err = CoreError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        HEXLOWER
+            .decode(text.as_bytes())
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(Self)
+            .ok_or_else(|| CoreError::InvalidId {
+                kind: "bookmark id",
+                value: text.to_owned(),
+            })
     }
 }
 
@@ -103,12 +176,12 @@ impl Rating {
 
     /// The value as it is written in the document: a JSON number.
     pub fn encode(self) -> Vec<u8> {
-        serde_json::to_vec(&self).expect("a number always encodes as JSON")
+        to_json(&self)
     }
 
     /// Reads a value back, or `None` if it is not a rating.
     pub fn decode(value: &[u8]) -> Option<Self> {
-        serde_json::from_slice(value).ok()
+        from_json(value)
     }
 }
 
@@ -144,12 +217,12 @@ impl Review {
 
     /// The value as it is written in the document: a JSON string.
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a string always encodes as JSON")
+        to_json(self)
     }
 
     /// Reads a value back, or `None` if it is not a review.
     pub fn decode(value: &[u8]) -> Option<Self> {
-        serde_json::from_slice(value).ok()
+        from_json(value)
     }
 }
 
@@ -157,13 +230,7 @@ impl TryFrom<String> for Review {
     type Error = CoreError;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
-        if text.len() > REVIEW_MAX_BYTES {
-            return Err(CoreError::ReviewTooLong {
-                len: text.len(),
-                max: REVIEW_MAX_BYTES,
-            });
-        }
-        Ok(Self(text))
+        capped("review", text, REVIEW_MAX_BYTES).map(Self)
     }
 }
 
@@ -171,4 +238,96 @@ impl From<Review> for String {
     fn from(review: Review) -> Self {
         review.0
     }
+}
+
+/// A member's bookmark on an item (D8): a shared pointer into it, with a note.
+///
+/// **When it last changed is not here.** The document already records when
+/// each entry was written, and a field would be a second answer able to
+/// disagree — the catalogue reads it off the entry, as it does an item's
+/// `last_modified`. When it was *made* is here, since an edit rewrites the
+/// entry.
+///
+/// Checked when read as well as when made, like [`Rating`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "BookmarkFields")]
+pub struct Bookmark {
+    position: String,
+    note: String,
+    created_at: u64,
+}
+
+impl Bookmark {
+    /// A bookmark at `position` — a page, a chapter, `01:23:45` — made at
+    /// `created_at`, in microseconds since the epoch.
+    pub fn new(position: String, note: String, created_at: u64) -> Result<Self, CoreError> {
+        Ok(Self {
+            position: capped("bookmark position", position, POSITION_MAX_BYTES)?,
+            note: capped("bookmark note", note, NOTE_MAX_BYTES)?,
+            created_at,
+        })
+    }
+
+    /// Where in the item it points: free text.
+    pub fn position(&self) -> &str {
+        &self.position
+    }
+
+    /// What its member said about the place.
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    /// When it was made, in microseconds since the epoch.
+    pub const fn created_at(&self) -> u64 {
+        self.created_at
+    }
+
+    /// The value as it is written in the document: a JSON object.
+    pub fn encode(&self) -> Vec<u8> {
+        to_json(self)
+    }
+
+    /// Reads a value back, or `None` if it is not a bookmark.
+    pub fn decode(value: &[u8]) -> Option<Self> {
+        from_json(value)
+    }
+}
+
+/// A bookmark as it arrives, before [`Bookmark::new`] has checked it.
+#[derive(Deserialize)]
+struct BookmarkFields {
+    position: String,
+    note: String,
+    created_at: u64,
+}
+
+impl TryFrom<BookmarkFields> for Bookmark {
+    type Error = CoreError;
+
+    fn try_from(fields: BookmarkFields) -> Result<Self, Self::Error> {
+        Self::new(fields.position, fields.note, fields.created_at)
+    }
+}
+
+/// `text`, if it is at most `max` bytes of UTF-8.
+fn capped(what: &'static str, text: String, max: usize) -> Result<String, CoreError> {
+    if text.len() > max {
+        return Err(CoreError::TextTooLong {
+            what,
+            len: text.len(),
+            max,
+        });
+    }
+    Ok(text)
+}
+
+/// A community value as the document holds it: JSON, as an item's are.
+fn to_json(value: &impl Serialize) -> Vec<u8> {
+    serde_json::to_vec(value).expect("numbers, strings and their structs always encode as JSON")
+}
+
+/// A community value read back, or `None` if it is not one.
+fn from_json<T: DeserializeOwned>(value: &[u8]) -> Option<T> {
+    serde_json::from_slice(value).ok()
 }
