@@ -144,6 +144,11 @@ impl CommunityKey {
         format!("{BOOKMARK}/{item}/")
     }
 
+    /// Every bookmark on every item, as a prefix to read.
+    pub fn all_bookmarks() -> String {
+        format!("{BOOKMARK}/")
+    }
+
     /// Every member's entry for `wish`, as a prefix to read.
     pub fn wish_entries_of(wish: WishId) -> String {
         format!("{WISH}/{wish}/")

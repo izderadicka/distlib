@@ -20,9 +20,10 @@
 use std::collections::BTreeMap;
 
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, Rating, Review, Series,
+    Bookmark, BookmarkId, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
+    Rating, Review, Series,
 };
-use distlib_store::{Store, StoredItem, StoredMember};
+use distlib_store::{Store, StoredBookmark, StoredItem, StoredMember};
 use proptest::prelude::*;
 
 /// A store with nothing in it, in memory.
@@ -191,6 +192,30 @@ fn distinct_items(count: std::ops::Range<usize>) -> impl Strategy<Value = Vec<St
     })
 }
 
+/// One item's bookmarks, in the order the store reads them back: by member,
+/// then id.
+fn item_bookmarks() -> impl Strategy<Value = Vec<StoredBookmark>> {
+    let bookmark = (text(), text(), any::<u64>()).prop_map(|(position, note, created_at)| {
+        Bookmark::new(position, note, created_at >> 1).expect("short text makes a bookmark")
+    });
+    proptest::collection::btree_map(
+        (member(), any::<[u8; 16]>().prop_map(BookmarkId::from_bytes)),
+        (bookmark, any::<u64>()),
+        0..4,
+    )
+    .prop_map(|bookmarks| {
+        bookmarks
+            .into_iter()
+            .map(|((member, id), (bookmark, last_modified))| StoredBookmark {
+                member,
+                id,
+                bookmark,
+                last_modified: last_modified >> 1,
+            })
+            .collect()
+    })
+}
+
 // --- the properties ---------------------------------------------------------
 
 proptest! {
@@ -220,6 +245,31 @@ proptest! {
                 store.upsert_item(stored.clone()).await.expect("the item is written again");
             }
             prop_assert_eq!(store.items().await.expect("the items are read"), once);
+            Ok(())
+        })?;
+    }
+
+    /// An item's bookmarks read back as written, and writing them again
+    /// replaces them rather than adding to them.
+    #[test]
+    fn an_items_bookmarks_are_replaced_and_read_back(
+        first in item_bookmarks(),
+        second in item_bookmarks(),
+    ) {
+        runtime().block_on(async {
+            let store = empty().await;
+            let item = ItemId::from_bytes([7; 32]);
+            let other = ItemId::from_bytes([8; 32]);
+            store.replace_bookmarks(other, first.clone()).await.expect("written");
+            store.replace_bookmarks(item, first.clone()).await.expect("written");
+            prop_assert_eq!(&store.bookmarks_of(item).await.expect("read"), &first);
+            store.replace_bookmarks(item, second.clone()).await.expect("written again");
+            prop_assert_eq!(store.bookmarks_of(item).await.expect("read"), second);
+            prop_assert_eq!(
+                store.bookmarks_of(other).await.expect("read"),
+                first,
+                "another item's bookmarks are left alone"
+            );
             Ok(())
         })?;
     }
@@ -450,7 +500,14 @@ async fn a_store_of_another_version_is_started_afresh() {
         .expect("the tables are listed");
     assert_eq!(
         tables,
-        ["item_files", "items", "members", "ratings", "reviews"]
+        [
+            "bookmarks",
+            "item_files",
+            "items",
+            "members",
+            "ratings",
+            "reviews"
+        ]
     );
     let left: i64 = db
         .query_row("SELECT count(*) FROM items", [], |row| row.get(0))

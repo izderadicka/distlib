@@ -19,7 +19,7 @@
 //! key beside this one; nothing here has to move.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -121,6 +121,16 @@ pub struct ReadItem {
     ///
     /// The item is still worth projecting: what is here is true, and §5.2's
     /// catalogue is grow-only, so the rest only adds. This says to come back.
+    pub waiting_for_content: bool,
+}
+
+/// An item's bookmarks as this node holds them, for a reader that projects
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemBookmarks {
+    /// Each counted only if its member wrote it (D9), by member, then id.
+    pub bookmarks: Vec<ReadBookmark>,
+    /// Whether a bookmark was left out because its content has not arrived.
     pub waiting_for_content: bool,
 }
 
@@ -609,10 +619,18 @@ impl Catalogue {
     /// Every member's bookmarks on `item` this node holds, each counted only
     /// if that member wrote it (D9) — by member, then id.
     pub async fn bookmarks(&self, item: ItemId) -> Result<Vec<ReadBookmark>> {
-        let entries = self
+        Ok(self.read_bookmarks(item).await?.bookmarks)
+    }
+
+    /// [`Self::bookmarks`], and whether one was left out because its content
+    /// has not arrived.
+    pub async fn read_bookmarks(&self, item: ItemId) -> Result<ItemBookmarks> {
+        let CommunityEntries {
+            entries,
+            waiting_for_content,
+        } = self
             .read_community_entries(CommunityKey::bookmarks_of(item), Bookmark::decode)
-            .await?
-            .entries;
+            .await?;
         let mut bookmarks: Vec<ReadBookmark> = entries
             .into_iter()
             .filter_map(|entry| {
@@ -632,7 +650,31 @@ impl Catalogue {
             })
             .collect();
         bookmarks.sort_unstable_by_key(|read| (read.member, read.id));
-        Ok(bookmarks)
+        Ok(ItemBookmarks {
+            bookmarks,
+            waiting_for_content,
+        })
+    }
+
+    /// Every item somebody has bookmarked, for a reader replaying the
+    /// document.
+    pub async fn bookmarked_item_ids(&self) -> Result<BTreeSet<ItemId>> {
+        let doc = self.document()?;
+        let query = Query::single_latest_per_key().key_prefix(CommunityKey::all_bookmarks());
+        let entries = doc
+            .get_many(query)
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut items = BTreeSet::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            if let Some(CommunityKey::Bookmark { item, .. }) = CommunityKey::parse(entry.key()) {
+                items.insert(item);
+            }
+        }
+        Ok(items)
     }
 
     /// Reads the community entries under `prefix` that count, decoding each
@@ -701,7 +743,7 @@ impl Catalogue {
     /// than usual: the unfiltered query answers with every historical version
     /// of every key, so a replay would walk the document's whole history to
     /// arrive at the same set of ids.
-    pub async fn item_ids(&self) -> Result<std::collections::BTreeSet<ItemId>> {
+    pub async fn item_ids(&self) -> Result<BTreeSet<ItemId>> {
         let doc = self.document()?;
         let query = Query::single_latest_per_key().key_prefix(Key::all_items());
         let entries = doc
