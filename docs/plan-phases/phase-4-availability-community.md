@@ -785,6 +785,16 @@ Needs only 4a-1, so it can interleave with 4b.
     afterwards changes nothing. Mutation-checked, except the content-waiting path for ratings,
     which no harness here can arrange deterministically.
 
+  4c-2b, bookmarks (wishes are 4c-2c; their events wait for the API, Ivan's call):
+  - **`Batch.items_with_changed_bookmarks`** (the plan's `Batch.bookmarks`). `read_bookmarks(item)` adds
+    `waiting_for_content`; `bookmarked_item_ids()` lists them for a replay.
+  - **Table `bookmarks`**, keyed by item, member and id, with no reference to `items`: a bookmark
+    can point at an item not projected yet. Replaced per item, current members' only. Version 3.
+  - **The projection's state is one `ReadModelWriter`**: the members, and a waiting-for-content
+    set for items and one for bookmarks.
+  - **Acceptance:** the 4c-2a test also bookmarks; bob's bookmark goes with his expulsion, carol's
+    stays, and one on an item nobody wrote is kept.
+
 - **4c-3 — ratings, reviews and bookmarks in the API and CLI.** `community.rate`,
   `community.review`, `community.bookmark` (create, edit or delete your own) and
   `community.bookmarks {q?, member?, item_id?}`; the CLI's `rate`, `review`, `bookmark` and

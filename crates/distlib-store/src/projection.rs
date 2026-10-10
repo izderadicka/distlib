@@ -75,7 +75,7 @@ use tokio::{
 use crate::{
     error::{Result, StoreError},
     index::SearchIndex,
-    store::{Store, StoredItem, StoredMember, Upserted},
+    store::{Store, StoredBookmark, StoredItem, StoredMember, Upserted},
 };
 
 /// How many reindex requests can be queued while one is running.
@@ -222,22 +222,31 @@ async fn run(
     // seen — which is the difference between a node that restarted and one that
     // did not holding the same rows. The members first, since the replay
     // projects only what they said.
-    let mut members = project_members(&store, &mut membership).await;
-    let mut incomplete = BTreeSet::new();
-    replay(&catalogue, &store, &index, &members, &mut incomplete).await;
+    let members = project_members(&store, &mut membership).await;
+    let mut writer = ReadModelWriter {
+        catalogue,
+        store,
+        index,
+        members,
+        items_waiting_for_content: BTreeSet::new(),
+        items_with_bookmarks_waiting_for_content: BTreeSet::new(),
+    };
+    writer.replay().await;
 
     loop {
         tokio::select! {
             batch = changes.take() => {
-                let Some(Batch { mut items, content_arrived }) = batch else {
+                let Some(Batch { mut items, mut items_with_changed_bookmarks, content_arrived }) = batch else {
                     tracing::debug!("the catalogue stopped reporting changes; the read model is now cold");
                     return;
                 };
                 if content_arrived {
-                    items.extend(incomplete.iter().copied());
+                    items.extend(writer.items_waiting_for_content.iter().copied());
+                    items_with_changed_bookmarks
+                        .extend(writer.items_with_bookmarks_waiting_for_content.iter().copied());
                 }
-                let written =
-                    project(&catalogue, &store, &index, items, &members, &mut incomplete).await;
+                let written = writer.project_items(items).await;
+                writer.project_bookmarks(items_with_changed_bookmarks).await;
                 for event in written {
                     // Nobody watching is the ordinary case. Never awaited: a
                     // watcher that falls behind is skipped past, and this task
@@ -250,16 +259,16 @@ async fn run(
                     tracing::error!("the membership log is gone; stopping the read model's projection");
                     return;
                 }
-                let current_members = project_members(&store, &mut membership).await;
-                if current_members != members {
-                    members = current_members;
+                let current_members = project_members(&writer.store, &mut membership).await;
+                if current_members != writer.members {
+                    writer.members = current_members;
                     tracing::info!("the group's members changed; replaying the read model");
-                    replay(&catalogue, &store, &index, &members, &mut incomplete).await;
+                    writer.replay().await;
                 }
             }
             Some(done) = reindex_rx.recv() => {
                 tracing::info!("reindexing the read model on request");
-                replay(&catalogue, &store, &index, &members, &mut incomplete).await;
+                writer.replay().await;
                 // Dropped if the caller stopped waiting — a reindex that ran
                 // is not undone by nobody being left to tell.
                 let _ = done.send(());
@@ -268,93 +277,160 @@ async fn run(
     }
 }
 
-/// Re-reads each item and writes it over whatever the tables — and the search
-/// index — held, with what `members` said about it.
-///
-/// Failures are logged per item rather than returned: one item that cannot be
-/// read must not stop the rest of a replay, and the next change to it — or the
-/// next start — reads it again. The index is committed once at the end
-/// regardless of per-item failures, not once per item: a tantivy commit is a
-/// segment flush and an fsync, so committing per item would make a replay of
-/// N items N fsyncs. A commit lost to a crash costs nothing extra — the next
-/// start replays again, per P2-19 — which is what makes batching safe here.
-///
-/// Returns what it wrote, as the events a watcher would be told — and returns
-/// rather than publishes, so that the caller decides whether this batch is
-/// news (see the module docs), and so that nothing is told before the commit
-/// at the end of this function has happened.
-async fn project(
-    catalogue: &Catalogue,
-    store: &Store,
-    index: &SearchIndex,
-    items: BTreeSet<ItemId>,
-    members: &BTreeSet<MemberId>,
-    incomplete: &mut BTreeSet<ItemId>,
-) -> Vec<Event> {
-    let mut indexed = false;
-    let mut written = Vec::new();
-    for id in items {
-        let mut read = match catalogue.read_item(id).await {
-            Ok(Some(read)) => read,
-            // No entry of the item's own. A rating or review that arrived
-            // before the item it is about does this — it marks the item
-            // dirty, and the item is not here yet. Skipped rather than written
-            // as an empty row, which is the only answer that cannot make the
-            // tables say something untrue; the item's own entries mark it
-            // again when they land.
-            Ok(None) => continue,
+/// What the projection writes with, and what it remembers between batches.
+struct ReadModelWriter {
+    catalogue: Catalogue,
+    store: Store,
+    index: SearchIndex,
+    /// Whose ratings, reviews and bookmarks are projected (D9).
+    members: BTreeSet<MemberId>,
+    /// Items last projected with an entry missing its content.
+    items_waiting_for_content: BTreeSet<ItemId>,
+    /// Items whose bookmarks were last projected with one missing its content.
+    items_with_bookmarks_waiting_for_content: BTreeSet<ItemId>,
+}
+
+impl ReadModelWriter {
+    /// Re-reads each item and writes it over whatever the tables — and the
+    /// search index — held, with what current members said about it.
+    ///
+    /// Failures are logged per item rather than returned: one item that cannot
+    /// be read must not stop the rest of a replay, and the next change to it —
+    /// or the next start — reads it again. The index is committed once at the
+    /// end, not once per item: a tantivy commit is a segment flush and an
+    /// fsync, and a commit lost to a crash costs nothing — the next start
+    /// replays again (P2-19).
+    ///
+    /// Returns what it wrote, as the events a watcher would be told — and
+    /// returns rather than publishes, so that the caller decides whether this
+    /// batch is news (see the module docs), and so that nothing is told before
+    /// the commit at the end.
+    async fn project_items(&mut self, items: BTreeSet<ItemId>) -> Vec<Event> {
+        let mut indexed = false;
+        let mut written = Vec::new();
+        for id in items {
+            let mut read = match self.catalogue.read_item(id).await {
+                Ok(Some(read)) => read,
+                // No entry of the item's own: a rating or review that arrived
+                // before its item. Skipped rather than written as an empty row;
+                // the item's own entries mark it again when they land.
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%id, %error, "could not read a catalogue item to project it");
+                    continue;
+                }
+            };
+
+            if read.waiting_for_content {
+                self.items_waiting_for_content.insert(id);
+            } else {
+                self.items_waiting_for_content.remove(&id);
+            }
+
+            // Every pass over an item, since any change to its files can change
+            // whether it is held — including another member adding one this
+            // node lacks. Before the write below, so a row in the read model is
+            // never newer than the holdings behind it.
+            if let Err(error) = self.catalogue.holdings().recheck(&read.item).await {
+                tracing::warn!(%id, %error, "could not work out whether this node holds an item");
+            }
+
+            if let Err(error) = self.index.index_item(read.item.clone()).await {
+                tracing::warn!(%id, %error, "could not write a catalogue item to the search index");
+            } else {
+                indexed = true;
+            }
+
+            read.ratings
+                .retain(|member, _| self.members.contains(member));
+            read.reviews
+                .retain(|member, _| self.members.contains(member));
+            match self
+                .store
+                .upsert_item(StoredItem {
+                    item: read.item,
+                    ratings: read.ratings,
+                    reviews: read.reviews,
+                    last_modified: read.last_modified,
+                })
+                .await
+            {
+                Ok(Upserted::Created) => written.push(Event::ItemAdded { item_id: id }),
+                Ok(Upserted::Updated) => written.push(Event::ItemChanged { item_id: id }),
+                Err(error) => {
+                    tracing::warn!(%id, %error, "could not write a catalogue item to the read model");
+                }
+            }
+        }
+
+        // Skipped when nothing reached the index above: a commit is not free.
+        if indexed && let Err(error) = self.index.commit().await {
+            tracing::error!(%error, "could not commit the search index");
+        }
+        written
+    }
+
+    /// Re-reads each item's bookmarks and writes them over what the table
+    /// held, current members' only. Failures are logged per item, as in
+    /// [`Self::project_items`].
+    async fn project_bookmarks(&mut self, items: BTreeSet<ItemId>) {
+        for item in items {
+            let read = match self.catalogue.read_bookmarks(item).await {
+                Ok(read) => read,
+                Err(error) => {
+                    tracing::warn!(%item, %error, "could not read an item's bookmarks to project them");
+                    continue;
+                }
+            };
+
+            if read.waiting_for_content {
+                self.items_with_bookmarks_waiting_for_content.insert(item);
+            } else {
+                self.items_with_bookmarks_waiting_for_content.remove(&item);
+            }
+
+            let bookmarks = read
+                .bookmarks
+                .into_iter()
+                .filter(|bookmark| self.members.contains(&bookmark.member))
+                .map(|bookmark| StoredBookmark {
+                    member: bookmark.member,
+                    id: bookmark.id,
+                    bookmark: bookmark.bookmark,
+                    last_modified: bookmark.last_modified,
+                })
+                .collect();
+            if let Err(error) = self.store.replace_bookmarks(item, bookmarks).await {
+                tracing::warn!(%item, %error, "could not write an item's bookmarks to the read model");
+            }
+        }
+    }
+
+    /// Re-reads everything in the document into the read model: every item,
+    /// and every item's bookmarks.
+    ///
+    /// What a start does, and what [`Projection::reindex`] drives — one
+    /// function, because they are the same operation. What it writes is not
+    /// published: a replay is not news (see the module docs).
+    async fn replay(&mut self) {
+        let (items, bookmarked_items) = match tokio::try_join!(
+            self.catalogue.item_ids(),
+            self.catalogue.bookmarked_item_ids()
+        ) {
+            Ok(ids) => ids,
             Err(error) => {
-                tracing::warn!(%id, %error, "could not read a catalogue item to project it");
-                continue;
+                tracing::error!(%error, "could not replay the catalogue into the read model");
+                return;
             }
         };
-
-        if read.waiting_for_content {
-            incomplete.insert(id);
-        } else {
-            incomplete.remove(&id);
-        }
-
-        // Every pass over an item, since any change to its files can change
-        // whether it is held — including another member adding one this node
-        // lacks. Before the write below, so a row in the read model is never
-        // newer than the holdings behind it.
-        if let Err(error) = catalogue.holdings().recheck(&read.item).await {
-            tracing::warn!(%id, %error, "could not work out whether this node holds an item");
-        }
-
-        if let Err(error) = index.index_item(read.item.clone()).await {
-            tracing::warn!(%id, %error, "could not write a catalogue item to the search index");
-        } else {
-            indexed = true;
-        }
-
-        read.ratings.retain(|member, _| members.contains(member));
-        read.reviews.retain(|member, _| members.contains(member));
-        match store
-            .upsert_item(StoredItem {
-                item: read.item,
-                ratings: read.ratings,
-                reviews: read.reviews,
-                last_modified: read.last_modified,
-            })
-            .await
-        {
-            Ok(Upserted::Created) => written.push(Event::ItemAdded { item_id: id }),
-            Ok(Upserted::Updated) => written.push(Event::ItemChanged { item_id: id }),
-            Err(error) => {
-                tracing::warn!(%id, %error, "could not write a catalogue item to the read model");
-            }
-        }
+        tracing::info!(
+            items = items.len(),
+            bookmarked_items = bookmarked_items.len(),
+            "replaying the catalogue into the read model"
+        );
+        self.project_items(items).await;
+        self.project_bookmarks(bookmarked_items).await;
     }
-
-    // Skipped when nothing reached the index above — an empty or
-    // entirely-failed batch has nothing new to make visible, and a commit is
-    // not free.
-    if indexed && let Err(error) = index.commit().await {
-        tracing::error!(%error, "could not commit the search index");
-    }
-    written
 }
 
 /// Writes the group's membership as the log currently has it, and says who
@@ -384,33 +460,4 @@ async fn project_members(
         tracing::warn!(%error, "could not write the group's members to the read model");
     }
     ids
-}
-
-/// Re-reads every item in the document into the read model.
-///
-/// What a start does, and what [`Projection::reindex`] drives — one function,
-/// because they are the same operation and two spellings of it would be two
-/// things to keep true. It is the whole of the restart acceptance: a node
-/// that starts is a node that has just reindexed.
-async fn replay(
-    catalogue: &Catalogue,
-    store: &Store,
-    index: &SearchIndex,
-    members: &BTreeSet<MemberId>,
-    incomplete: &mut BTreeSet<ItemId>,
-) {
-    let ids = match catalogue.item_ids().await {
-        Ok(ids) => ids,
-        Err(error) => {
-            tracing::error!(%error, "could not replay the catalogue into the read model");
-            return;
-        }
-    };
-    tracing::info!(
-        items = ids.len(),
-        "replaying the catalogue into the read model"
-    );
-    // What it wrote is dropped on purpose: a replay is not news — see the
-    // module docs.
-    project(catalogue, store, index, ids, members, incomplete).await;
 }
