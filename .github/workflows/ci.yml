@@ -105,10 +105,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       # Every test, slow ones included: `--all-features` turns on `slow-tests`,
-      # which is what the fast local lane leaves out. nextest runs the test
-      # binaries concurrently, which takes this from ~43s to ~17s, and
-      # `.config/nextest.toml` caps how many run at once so a busy runner does
-      # not make the election timers thrash.
+      # which is what the fast local lane leaves out. nextest runs the tests
+      # concurrently, `.config/nextest.toml` says how many, and nothing is
+      # serialised.
       # `--no-fail-fast`: one run should show every test a platform breaks,
       # not the first one and a count of the rest that never ran.
       # `--profile ci` kills a test that hangs, so the log says which one and

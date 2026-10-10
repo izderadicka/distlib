@@ -467,10 +467,10 @@ there are two lanes, both defined in `.cargo/config.toml`:
 
 | | | |
 |---|---|---|
-| `cargo test-fast` | ~7s | everything except the slow tests |
-| `cargo test-all` | ~2min | all of it — what CI runs |
+| `cargo test-fast` | ~10s | everything except the slow tests |
+| `cargo test-all` | ~75s | all of it — what CI runs |
 
-Measured warm on a 12-core machine at the end of phase 2, and they move with it:
+Measured warm on a 12-core machine during phase 4, and they move with it:
 treat them as which lane to reach for rather than as a budget. nextest runs the
 test binaries concurrently rather than one after another, which is most of the
 difference from `cargo test`. The fast lane is for the edit-compile-test loop;
@@ -480,11 +480,11 @@ A test that waits out a real timer belongs in the slow lane whatever else it is,
 and the ones that did not say so have been moved there — CI still runs every
 one of them, and only the edit-compile-test loop skips them.
 
-`.config/nextest.toml` caps it at four tests at a time. Most of these tests are
-clusters of nodes waiting on real timers rather than CPU work, and a dozen at
-once makes the Raft election timeouts thrash — which then reads as a bug in the
-code rather than in the runner. The cap buys a run that fails for real reasons
-at the cost of some wall clock, and that trade holds whatever the machine.
+`.config/nextest.toml` runs eight tests at a time and serialises none. Most of these tests are clusters of nodes waiting on real timers rather
+than CPU work, and each stands up its own nodes, directories and ports. So a
+test that fails only alongside others is a finding — a deadline too tight for a
+busy machine, or code that misbehaves when it is scheduled late — not something
+to serialise away. The full lane is about as long as its slowest test.
 
 The test suite never contacts the public relay or DNS infrastructure — endpoints are
 either given explicit addresses or pointed at an in-process relay, so the suite is
