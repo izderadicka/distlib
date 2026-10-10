@@ -887,6 +887,13 @@ async fn an_expelled_members_ratings_and_reviews_stop_counting() {
         projected,
         "a second replay changes nothing"
     );
+    // Again, now that the projection has certainly taken the change carol's
+    // rating made: the first look above can run ahead of it.
+    assert_eq!(
+        store.item(nothing).await.unwrap(),
+        None,
+        "a rating alone is still not an item"
+    );
 
     group.carol.shutdown().await;
     group.bob.shutdown().await;
