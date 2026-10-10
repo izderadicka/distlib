@@ -17,8 +17,9 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    Bookmark, BookmarkId, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind,
-    MemberId, NodeAddr, Rating, Review, SignedAddress,
+    Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId,
+    ItemKind, MemberId, NodeAddr, Rating, Review, SignedAddress, Wish, WishFields, WishId,
+    WishStatus,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, catalogue_key};
@@ -455,6 +456,81 @@ async fn an_edited_bookmark_keeps_when_it_was_made_and_is_dated_by_its_entry() {
         let [read] = <[_; 1]>::try_from(node.catalogue.bookmarks(item).await.unwrap()).unwrap();
         assert_eq!(read.bookmark.created_at(), 100, "on {name}");
         assert!(read.last_modified > before, "on {name}: the edit dates it");
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
+}
+
+/// A wish's entries and comments reach every node, each counted only from the
+/// member it names: alice wishes, bob comments, carol fulfils it — and forges
+/// a comment in alice's name, which counts on none. Who created the wish and
+/// whether it is fulfilled are resolved from these when read (D10, 4c-4).
+#[tokio::test]
+async fn a_wish_its_comment_and_its_fulfilment_reach_every_node() {
+    let ([alice, bob, carol], nodes, _logs) = three_founders().await;
+    let wish = WishId::from_bytes([5; 32]);
+    let item = ItemId::from_bytes([9; 32]);
+    let made = Wish::new(WishFields {
+        title: Some("Hordubal".to_owned()),
+        authors: Some(vec!["Karel Čapek".to_owned()]),
+        description: None,
+        created_at: Some(1),
+        status: WishStatus::Open,
+    })
+    .unwrap();
+    let fulfilled = Wish::new(WishFields {
+        title: None,
+        authors: None,
+        description: None,
+        created_at: None,
+        status: WishStatus::Fulfilled { item_id: item },
+    })
+    .unwrap();
+    let said = |text: &str| Comment::try_from(text.to_owned()).unwrap();
+
+    nodes[0].catalogue.wish(wish, &made).await.unwrap();
+    nodes[1]
+        .catalogue
+        .comment(wish, &said("I have it on paper"))
+        .await
+        .unwrap();
+    nodes[2].catalogue.wish(wish, &fulfilled).await.unwrap();
+    let forged = CommunityKey::WishComment {
+        wish,
+        member: alice,
+    }
+    .encode();
+    nodes[2]
+        .catalogue
+        .put(forged.clone(), said("never mind").encode())
+        .await
+        .unwrap();
+
+    let entries = BTreeMap::from([(alice, made), (carol, fulfilled)]);
+    let comments = BTreeMap::from([(bob, said("I have it on paper"))]);
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        until(
+            &format!("the wish, its comment and the forgery reach {name}"),
+            || async {
+                node.catalogue.wishes(wish).await.unwrap() == entries
+                    && !node.catalogue.comments(wish).await.unwrap().is_empty()
+                    && node
+                        .catalogue
+                        .get(forged.clone())
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+            },
+        )
+        .await;
+        assert_eq!(
+            node.catalogue.comments(wish).await.unwrap(),
+            comments,
+            "on {name}"
+        );
     }
 
     for node in &nodes {

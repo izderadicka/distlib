@@ -24,6 +24,8 @@ use crate::{CoreError, ItemId, MemberId};
 const RATING: &str = "rating";
 const REVIEW: &str = "review";
 const BOOKMARK: &str = "bookmark";
+const WISH: &str = "wish";
+const WISH_COMMENT: &str = "wish_comment";
 
 /// The longest review there may be, in bytes of UTF-8: 16 KiB.
 pub const REVIEW_MAX_BYTES: usize = 16 * 1024;
@@ -34,6 +36,13 @@ pub const NOTE_MAX_BYTES: usize = 4 * 1024;
 /// The longest position a bookmark may name, in bytes of UTF-8: a page, a
 /// chapter or a time, not prose.
 pub const POSITION_MAX_BYTES: usize = 256;
+
+/// The longest one member's entry for a wish may be — title, authors and
+/// description together — in bytes of its JSON: 16 KiB.
+pub const WISH_MAX_BYTES: usize = 16 * 1024;
+
+/// The longest comment on a wish, in bytes of UTF-8: 4 KiB.
+pub const COMMENT_MAX_BYTES: usize = 4 * 1024;
 
 /// A key a member writes about themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +57,10 @@ pub enum CommunityKey {
         member: MemberId,
         bookmark: BookmarkId,
     },
+    /// `wish/{wish_id}/{member_id}`
+    Wish { wish: WishId, member: MemberId },
+    /// `wish_comment/{wish_id}/{member_id}`
+    WishComment { wish: WishId, member: MemberId },
 }
 
 impl CommunityKey {
@@ -61,6 +74,8 @@ impl CommunityKey {
                 member,
                 bookmark,
             } => format!("{BOOKMARK}/{item}/{member}/{bookmark}"),
+            Self::Wish { wish, member } => format!("{WISH}/{wish}/{member}"),
+            Self::WishComment { wish, member } => format!("{WISH_COMMENT}/{wish}/{member}"),
         }
     }
 
@@ -73,39 +88,44 @@ impl CommunityKey {
     /// the first. So a key counts only if it encodes back to itself.
     pub fn parse(key: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(key).ok()?;
-        let mut parts = text.split('/');
-        let kind = parts.next()?;
-        let item = ItemId::from_str(parts.next()?).ok()?;
-        let member = MemberId::from_str(parts.next()?).ok()?;
-        let parsed = match kind {
-            RATING => Self::Rating { item, member },
-            REVIEW => Self::Review { item, member },
+        let parts = &mut text.split('/');
+        // A struct's fields are read in the order they are written, which is
+        // the order the key names them.
+        let parsed = match parts.next()? {
+            RATING => Self::Rating {
+                item: segment(parts)?,
+                member: segment(parts)?,
+            },
+            REVIEW => Self::Review {
+                item: segment(parts)?,
+                member: segment(parts)?,
+            },
             BOOKMARK => Self::Bookmark {
-                item,
-                member,
-                bookmark: BookmarkId::from_str(parts.next()?).ok()?,
+                item: segment(parts)?,
+                member: segment(parts)?,
+                bookmark: segment(parts)?,
+            },
+            WISH => Self::Wish {
+                wish: segment(parts)?,
+                member: segment(parts)?,
+            },
+            WISH_COMMENT => Self::WishComment {
+                wish: segment(parts)?,
+                member: segment(parts)?,
             },
             _ => return None,
         };
         (parsed.encode().as_bytes() == key).then_some(parsed)
     }
-
-    /// The item this key is about.
-    pub const fn item(&self) -> ItemId {
-        match self {
-            Self::Rating { item, .. } | Self::Review { item, .. } | Self::Bookmark { item, .. } => {
-                *item
-            }
-        }
-    }
-
     /// The member who says it — and so the only author whose entry at this
     /// key counts (D9).
     pub const fn member(&self) -> MemberId {
         match self {
             Self::Rating { member, .. }
             | Self::Review { member, .. }
-            | Self::Bookmark { member, .. } => *member,
+            | Self::Bookmark { member, .. }
+            | Self::Wish { member, .. }
+            | Self::WishComment { member, .. } => *member,
         }
     }
 
@@ -123,42 +143,78 @@ impl CommunityKey {
     pub fn bookmarks_of(item: ItemId) -> String {
         format!("{BOOKMARK}/{item}/")
     }
-}
 
-/// One of a member's bookmarks on an item: 16 random bytes, written in hex.
-///
-/// A member may leave several on one item (D8), so each has an id of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BookmarkId([u8; 16]);
+    /// Every member's entry for `wish`, as a prefix to read.
+    pub fn wish_entries_of(wish: WishId) -> String {
+        format!("{WISH}/{wish}/")
+    }
 
-impl BookmarkId {
-    /// Wraps raw bytes without interpreting them.
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
+    /// Every member's comment on `wish`, as a prefix to read.
+    pub fn comments_on(wish: WishId) -> String {
+        format!("{WISH_COMMENT}/{wish}/")
     }
 }
 
-impl fmt::Display for BookmarkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&HEXLOWER.encode(&self.0))
-    }
+/// The next segment of a key, read as a `T`.
+fn segment<T: FromStr>(parts: &mut std::str::Split<'_, char>) -> Option<T> {
+    parts.next()?.parse().ok()
 }
 
-impl FromStr for BookmarkId {
-    type Err = CoreError;
+/// A random id of a fixed number of bytes, written in lowercase hex.
+macro_rules! random_id {
+    ($(#[$doc:meta])* $name:ident, $len:literal, $kind:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name([u8; $len]);
 
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        HEXLOWER
-            .decode(text.as_bytes())
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(Self)
-            .ok_or_else(|| CoreError::InvalidId {
-                kind: "bookmark id",
-                value: text.to_owned(),
-            })
-    }
+        impl $name {
+            /// Wraps raw bytes without interpreting them.
+            pub const fn from_bytes(bytes: [u8; $len]) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&HEXLOWER.encode(&self.0))
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = CoreError;
+
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                HEXLOWER
+                    .decode(text.as_bytes())
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(Self)
+                    .ok_or_else(|| CoreError::InvalidId {
+                        kind: $kind,
+                        value: text.to_owned(),
+                    })
+            }
+        }
+    };
 }
+
+random_id!(
+    /// One of a member's bookmarks on an item: 16 random bytes.
+    ///
+    /// A member may leave several on one item (D8), so each has an id of its
+    /// own.
+    BookmarkId,
+    16,
+    "bookmark id"
+);
+
+random_id!(
+    /// A wish: 32 random bytes (D10). Every member's entry for it, and every
+    /// comment on it, is keyed by it.
+    WishId,
+    32,
+    "wish id"
+);
 
 /// A member's rating of an item: one to five.
 ///
@@ -202,43 +258,62 @@ impl From<Rating> for u8 {
     }
 }
 
-/// A member's review of an item: text of at most [`REVIEW_MAX_BYTES`].
-///
-/// Checked when read as well as when made, like [`Rating`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Review(String);
+/// Free text a member writes, of at most `$max` bytes of UTF-8 — checked
+/// when read as well as when made, like [`Rating`].
+macro_rules! capped_text {
+    ($(#[$doc:meta])* $name:ident, $what:literal, $max:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(try_from = "String", into = "String")]
+        pub struct $name(String);
 
-impl Review {
-    /// The review's text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+        impl $name {
+            /// The text.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
 
-    /// The value as it is written in the document: a JSON string.
-    pub fn encode(&self) -> Vec<u8> {
-        to_json(self)
-    }
+            /// The value as it is written in the document: a JSON string.
+            pub fn encode(&self) -> Vec<u8> {
+                to_json(self)
+            }
 
-    /// Reads a value back, or `None` if it is not a review.
-    pub fn decode(value: &[u8]) -> Option<Self> {
-        from_json(value)
-    }
+            #[doc = concat!("Reads a value back, or `None` if it is not a ", $what, ".")]
+            pub fn decode(value: &[u8]) -> Option<Self> {
+                from_json(value)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = CoreError;
+
+            fn try_from(text: String) -> Result<Self, Self::Error> {
+                capped($what, text, $max).map(Self)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(text: $name) -> Self {
+                text.0
+            }
+        }
+    };
 }
 
-impl TryFrom<String> for Review {
-    type Error = CoreError;
+capped_text!(
+    /// A member's review of an item: at most [`REVIEW_MAX_BYTES`].
+    Review,
+    "review",
+    REVIEW_MAX_BYTES
+);
 
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        capped("review", text, REVIEW_MAX_BYTES).map(Self)
-    }
-}
-
-impl From<Review> for String {
-    fn from(review: Review) -> Self {
-        review.0
-    }
-}
+capped_text!(
+    /// A member's comment on a wish: at most [`COMMENT_MAX_BYTES`]. One per
+    /// member per wish, editable (D10).
+    Comment,
+    "comment",
+    COMMENT_MAX_BYTES
+);
 
 /// A member's bookmark on an item (D8): a shared pointer into it, with a note.
 ///
@@ -307,6 +382,91 @@ impl TryFrom<BookmarkFields> for Bookmark {
 
     fn try_from(fields: BookmarkFields) -> Result<Self, Self::Error> {
         Self::new(fields.position, fields.note, fields.created_at)
+    }
+}
+
+/// What one member says about a wish (D10): its creator what is wished for,
+/// a fulfiller the item that answers it.
+///
+/// Every field but the status is optional because a member says only their
+/// part — a fulfiller writes a status and an item and nothing else. Who
+/// created the wish is resolved when it is read: whoever's entry carrying a
+/// title was made earliest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WishFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When this member made their entry, in microseconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(flatten)]
+    pub status: WishStatus,
+}
+
+/// Whether a member holds a wish fulfilled, and by what.
+///
+/// One enum rather than a status beside an optional item (Ivan's call), so
+/// "fulfilled by nothing" and "open, by an item" cannot be written. In JSON
+/// it is the entry's `status`, and `item_id` beside it when fulfilled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum WishStatus {
+    Open,
+    Fulfilled { item_id: ItemId },
+}
+
+/// One member's entry for a wish: [`WishFields`] of at most
+/// [`WISH_MAX_BYTES`] as JSON — one cap for the whole entry rather than one
+/// per field. Checked when read as well as when made, like [`Rating`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "WishFields", into = "WishFields")]
+pub struct Wish(WishFields);
+
+impl Wish {
+    /// `fields`, if they encode to at most [`WISH_MAX_BYTES`].
+    pub fn new(fields: WishFields) -> Result<Self, CoreError> {
+        let len = to_json(&fields).len();
+        if len > WISH_MAX_BYTES {
+            return Err(CoreError::TextTooLong {
+                what: "wish",
+                len,
+                max: WISH_MAX_BYTES,
+            });
+        }
+        Ok(Self(fields))
+    }
+
+    /// What this member says.
+    pub fn fields(&self) -> &WishFields {
+        &self.0
+    }
+
+    /// The value as it is written in the document: a JSON object.
+    pub fn encode(&self) -> Vec<u8> {
+        to_json(self)
+    }
+
+    /// Reads a value back, or `None` if it is not a wish entry.
+    pub fn decode(value: &[u8]) -> Option<Self> {
+        from_json(value)
+    }
+}
+
+impl TryFrom<WishFields> for Wish {
+    type Error = CoreError;
+
+    fn try_from(fields: WishFields) -> Result<Self, Self::Error> {
+        Self::new(fields)
+    }
+}
+
+impl From<Wish> for WishFields {
+    fn from(wish: Wish) -> Self {
+        wish.0
     }
 }
 
