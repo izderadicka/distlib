@@ -8,11 +8,14 @@ on:
 jobs:
   stress:
     if: github.head_ref == 'ci/windows-stress'
-    name: consensus x${{ matrix.threads }} threads
+    name: consensus x${{ matrix.threads }} threads, temp ${{ matrix.temp }}
     strategy:
       fail-fast: false
       matrix:
-        threads: [4, 8]
+        include:
+          - { threads: 4, temp: C }
+          - { threads: 8, temp: C }
+          - { threads: 8, temp: D }
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -21,6 +24,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run -p distlib-consensus --all-features --no-run
+      - if: matrix.temp == 'D'
+        run: |
+          echo "TMP=${{ runner.temp }}" >> $env:GITHUB_ENV
+          echo "TEMP=${{ runner.temp }}" >> $env:GITHUB_ENV
       - run: cargo nextest run -p distlib-consensus --all-features --no-fail-fast --test-threads ${{ matrix.threads }} --stress-count 8
         env:
           RUST_LOG: info,distlib=debug,distlib_consensus=debug,distlib_net=debug,distlib_sync=debug,iroh_gossip=debug,noq_proto=warn
