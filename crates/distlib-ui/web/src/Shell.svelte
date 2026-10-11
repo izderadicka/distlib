@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
 
   import AddPage from "./AddPage.svelte";
+  import BookmarksPage from "./BookmarksPage.svelte";
   import ItemPage from "./ItemPage.svelte";
   import LibraryPage from "./LibraryPage.svelte";
   import NodePage from "./NodePage.svelte";
@@ -42,6 +43,7 @@
   <a href="/" aria-current={router.route.page === "library" ? "page" : undefined}>Library</a>
   <a href="/add" aria-current={router.route.page === "add" ? "page" : undefined}>Add</a>
   <a href="/wishes" aria-current={router.route.page === "wishes" ? "page" : undefined}>Wishes</a>
+  <a href="/bookmarks" aria-current={router.route.page === "bookmarks" ? "page" : undefined}>Bookmarks</a>
   <a href="/node" aria-current={router.route.page === "node" ? "page" : undefined}>Node</a>
 </nav>
 
@@ -66,6 +68,8 @@
     <AddPage {onUnauthorised} />
   {:else if router.route.page === "wishes"}
     <WishesPage {listen} {onUnauthorised} />
+  {:else if router.route.page === "bookmarks"}
+    <BookmarksPage route={router.route} {listen} {onUnauthorised} />
   {:else if router.route.page === "node"}
     <NodePage {listen} {onUnauthorised} />
   {:else}

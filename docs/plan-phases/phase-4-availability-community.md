@@ -920,6 +920,21 @@ Needs only 4a-1, so it can interleave with 4b.
 - **4c-7 — the Bookmarks page** — route, nav, search, the "mine" and member filters.
   **Acceptance:** Vitest; one Playwright test.
 
+  **As built:**
+  - **`/bookmarks?q=…&member=…`**, a `Bookmarks` link in the nav. The search and the filter are in
+    the address (Ivan's call), like the library's `?q=`: a reload or a shared link shows the same.
+    A `member` that is not a member id is ignored.
+  - **One member select (Ivan's call):** `Everybody`, `Mine` (this node's member), then every other
+    member by name. Choosing filters at once; the search runs when submitted. A member filtered by
+    whom the group does not know keeps an option, by the start of its id.
+  - **Read-only (Ivan's call):** item (linked), member, position, note, when it was left. Bookmarks
+    are edited on their item's page.
+  - **Kept current:** any `bookmark.changed`, `membership.changed` (names are searched) or
+    `resync` reloads; so does catalogue news of an item listed, for its title.
+  - **Acceptance:** Vitest for the page and the route, mutation-checked (24; the one survivor,
+    `member || null` → `member`, gives the same address); one Playwright test leaves two bookmarks,
+    then lists, searches and filters them, reloads, and follows a link to the item.
+
 **After 4c-7:** the complexity and coverage refactoring in
 [plan-refactor-complexity.md](../plan-refactor-complexity.md), before phase 5.
 
