@@ -6,7 +6,7 @@
 //! instead of by the write that made it. It needs SQLite 3.37, which is why the
 //! dependency is `bundled` rather than the host's.
 //!
-//! **Only tables something fills.** §5.4 also names `bookmarks`, `wishes` and
+//! **Only tables something fills.** §5.4 also names `wishes` and
 //! `custodianships`; those belong to later steps of phases 4 and 5, and a
 //! table nothing fills is a schema commitment made before the thing it
 //! describes exists.
@@ -29,7 +29,7 @@
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 2;
+pub const READ_MODEL_VERSION: u32 = 3;
 
 /// Run on every connection, before anything else.
 ///
@@ -98,6 +98,19 @@ CREATE TABLE IF NOT EXISTS reviews (
     member TEXT NOT NULL,
     review TEXT NOT NULL,
     PRIMARY KEY (item, member)
+) STRICT;
+
+-- Every current member's bookmarks. No reference to `items`: a bookmark can
+-- point at an item whose own entries have not reached this node yet.
+CREATE TABLE IF NOT EXISTS bookmarks (
+    item          TEXT    NOT NULL,
+    member        TEXT    NOT NULL,
+    id            TEXT    NOT NULL,
+    position      TEXT    NOT NULL,
+    note          TEXT    NOT NULL,
+    created_at    INTEGER NOT NULL,
+    last_modified INTEGER NOT NULL,
+    PRIMARY KEY (item, member, id)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS members (

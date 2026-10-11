@@ -6,7 +6,9 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review, Series};
+use distlib_core::{
+    Bookmark, BookmarkId, ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review, Series,
+};
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -55,6 +57,16 @@ pub struct StoredItem {
     pub reviews: BTreeMap<MemberId, Review>,
     /// The newest entry timestamp this item was projected from — §5.2's
     /// `last_modified`, in microseconds since the epoch.
+    pub last_modified: u64,
+}
+
+/// One row of `bookmarks`: a member's bookmark on an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBookmark {
+    pub member: MemberId,
+    pub id: BookmarkId,
+    pub bookmark: Bookmark,
+    /// When its entry was last written, in microseconds since the epoch.
     pub last_modified: u64,
 }
 
@@ -141,6 +153,58 @@ impl Store {
     pub async fn upsert_item(&self, stored: StoredItem) -> Result<Upserted> {
         self.write("written to", move |tx| upsert_item(tx, &stored))
             .await
+    }
+
+    /// Replaces `item`'s bookmarks with `bookmarks`.
+    pub async fn replace_bookmarks(
+        &self,
+        item: ItemId,
+        bookmarks: Vec<StoredBookmark>,
+    ) -> Result<()> {
+        self.write("given an item's bookmarks", move |tx| {
+            let item = item.to_string();
+            tx.execute("DELETE FROM bookmarks WHERE item = ?1", params![item])?;
+            let mut insert = tx.prepare(
+                "INSERT INTO bookmarks \
+                 (item, member, id, position, note, created_at, last_modified) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for stored in &bookmarks {
+                insert.execute(params![
+                    item,
+                    stored.member.to_string(),
+                    stored.id.to_string(),
+                    stored.bookmark.position(),
+                    stored.bookmark.note(),
+                    stored.bookmark.created_at(),
+                    stored.last_modified,
+                ])?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// `item`'s bookmarks, by member, then id.
+    pub async fn bookmarks_of(&self, item: ItemId) -> Result<Vec<StoredBookmark>> {
+        self.read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT member, id, position, note, created_at, last_modified \
+                 FROM bookmarks WHERE item = ?1 ORDER BY member, id",
+            )?;
+            statement
+                .query_map(params![item.to_string()], |row| {
+                    Ok(StoredBookmark {
+                        member: identifier(row, 0, "member")?,
+                        id: identifier(row, 1, "id")?,
+                        bookmark: Bookmark::new(row.get(2)?, row.get(3)?, row.get(4)?)
+                            .map_err(unreadable(2, "bookmark"))?,
+                        last_modified: row.get(5)?,
+                    })
+                })?
+                .collect()
+        })
+        .await
     }
 
     /// Replaces the `members` table with `members`.

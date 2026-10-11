@@ -21,8 +21,10 @@ use std::{
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating, Review};
-use distlib_store::{Store, StoredItem};
+use distlib_core::{
+    Bookmark, BookmarkId, Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating, Review,
+};
+use distlib_store::{Store, StoredBookmark, StoredItem};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
@@ -779,21 +781,22 @@ async fn an_expelled_member_stops_receiving_entries() {
     group.alice.shutdown().await;
 }
 
-/// **4c-2's acceptance: an expelled member's ratings and reviews stop counting
-/// in the read model** — and only theirs.
+/// **4c-2's acceptance: an expelled member's ratings, reviews and bookmarks
+/// stop counting in the read model** — and only theirs.
 ///
-/// Before and after, as the test above is: bob's rating and review are in
-/// alice's read model before he is expelled, so their going proves something,
-/// and carol's stay, so it is bob's that went rather than everyone's. On the
-/// way, a rating of an item nobody has written does not make one. And a
-/// reindex afterwards changes nothing.
+/// Before and after: bob's are in alice's read model before he is expelled,
+/// and carol's stay after. A rating of an item nobody has written makes no
+/// item, while a bookmark on one is kept. A reindex afterwards changes
+/// nothing.
 #[tokio::test]
-async fn an_expelled_members_ratings_and_reviews_stop_counting() {
+async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
     let carol_id = group.carol_id;
     let rating = |value| Rating::try_from(value).unwrap();
     let review = |text: &str| Review::try_from(text.to_owned()).unwrap();
+    let bookmark = |note: &str| Bookmark::new("p. 12".to_owned(), note.to_owned(), 1).unwrap();
+    let bookmark_id = BookmarkId::from_bytes([1; 16]);
 
     let id = ItemId::from_bytes([4; 32]);
     group
@@ -812,12 +815,23 @@ async fn an_expelled_members_ratings_and_reviews_stop_counting() {
             .review(id, &review(words))
             .await
             .unwrap();
+        runtime
+            .catalogue()
+            .bookmark(id, bookmark_id, &bookmark(words))
+            .await
+            .unwrap();
     }
     let nothing = ItemId::from_bytes([5; 32]);
     group
         .carol
         .catalogue()
         .rate(nothing, rating(3))
+        .await
+        .unwrap();
+    group
+        .carol
+        .catalogue()
+        .bookmark(nothing, bookmark_id, &bookmark("Where is it?"))
         .await
         .unwrap();
 
@@ -856,6 +870,24 @@ async fn an_expelled_members_ratings_and_reviews_stop_counting() {
         None,
         "a rating alone is not an item"
     );
+    let members_of = |bookmarks: Vec<StoredBookmark>| {
+        bookmarks
+            .into_iter()
+            .map(|stored| stored.member)
+            .collect::<Vec<_>>()
+    };
+    let mut both = vec![bob_id, carol_id];
+    both.sort();
+    assert_eq!(
+        members_of(bookmarks_when(store, id, 2).await),
+        both,
+        "both members' bookmarks"
+    );
+    assert_eq!(
+        members_of(bookmarks_when(store, nothing, 1).await),
+        [carol_id],
+        "a bookmark on an item nobody wrote is kept"
+    );
 
     group
         .alice
@@ -879,13 +911,30 @@ async fn an_expelled_members_ratings_and_reviews_stop_counting() {
         after.reviews,
         BTreeMap::from([(carol_id, review("Too short"))])
     );
+    assert_eq!(
+        members_of(bookmarks_when(store, id, 1).await),
+        [carol_id],
+        "only carol's bookmark"
+    );
 
-    let projected = store.items().await.unwrap();
+    let items = store.items().await.unwrap();
+    let bookmarks = (
+        store.bookmarks_of(id).await.unwrap(),
+        store.bookmarks_of(nothing).await.unwrap(),
+    );
     group.alice.projection().reindex().await.unwrap();
     assert_eq!(
         store.items().await.unwrap(),
-        projected,
-        "a second replay changes nothing"
+        items,
+        "a second replay changes no item"
+    );
+    assert_eq!(
+        (
+            store.bookmarks_of(id).await.unwrap(),
+            store.bookmarks_of(nothing).await.unwrap()
+        ),
+        bookmarks,
+        "a second replay changes no bookmark"
     );
     // Again, now that the projection has certainly taken the change carol's
     // rating made: the first look above can run ahead of it.
@@ -898,6 +947,23 @@ async fn an_expelled_members_ratings_and_reviews_stop_counting() {
     group.carol.shutdown().await;
     group.bob.shutdown().await;
     group.alice.shutdown().await;
+}
+
+/// Waits for `store` to hold `count` bookmarks on `item`, and returns them.
+async fn bookmarks_when(store: &Store, item: ItemId, count: usize) -> Vec<StoredBookmark> {
+    tokio::time::timeout(SOON, async {
+        loop {
+            let bookmarks = store.bookmarks_of(item).await.unwrap();
+            if bookmarks.len() == count {
+                return bookmarks;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the read model never held {count} bookmarks on {item} within {SOON:?}")
+    })
 }
 
 /// Waits for `store` to hold item `id` as `ready` says it should, and

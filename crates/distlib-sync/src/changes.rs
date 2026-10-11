@@ -46,6 +46,8 @@ use tokio::sync::{mpsc, watch};
 pub struct Batch {
     /// Items with at least one entry written locally or arrived from a peer.
     pub items: BTreeSet<ItemId>,
+    /// Items with at least one bookmark written or arrived.
+    pub items_with_changed_bookmarks: BTreeSet<ItemId>,
     /// Content landed for some entry — which item's is not said.
     ///
     /// **Deliberately not resolved to an item here.** `LiveEvent::ContentReady`
@@ -62,7 +64,9 @@ pub struct Batch {
 impl Batch {
     /// Whether there is nothing here to do.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && !self.content_arrived
+        self.items.is_empty()
+            && self.items_with_changed_bookmarks.is_empty()
+            && !self.content_arrived
     }
 }
 
@@ -347,26 +351,26 @@ impl Pump {
     }
 }
 
-/// Records the item an entry is about, answering whether it is news.
+/// Records what an entry asks the read model to re-read, answering whether it
+/// is news.
 ///
-/// One of the item's own keys, or a member's rating or review of it (D8): the
-/// read model re-reads an item whole, so either is a reason to read it again.
-/// A bookmark is not part of the item it points into, and a wish and its
-/// comments are about no item at all, so none of those is here.
-/// A key this build does not recognise is left alone, for the reason
-/// [`Key::parse`] gives: the catalogue is one document for the whole group and
-/// grows keys over time.
+/// An item for one of its own keys, or a rating or review of it (D8). The
+/// item a bookmark points into, for a bookmark: it is not part of that item.
+/// Wishes and their comments are not routed yet (4c-2c). A key this build does
+/// not recognise is left alone, for the reason [`Key::parse`] gives.
 fn note(batch: &mut Batch, key: &[u8]) -> bool {
-    let item =
-        Key::parse(key)
-            .map(|parsed| parsed.item())
-            .or_else(|| match CommunityKey::parse(key)? {
-                CommunityKey::Rating { item, .. } | CommunityKey::Review { item, .. } => Some(item),
-                CommunityKey::Bookmark { .. }
-                | CommunityKey::Wish { .. }
-                | CommunityKey::WishComment { .. } => None,
-            });
-    item.is_some_and(|item| batch.items.insert(item))
+    if let Some(parsed) = Key::parse(key) {
+        return batch.items.insert(parsed.item());
+    }
+    match CommunityKey::parse(key) {
+        Some(CommunityKey::Rating { item, .. } | CommunityKey::Review { item, .. }) => {
+            batch.items.insert(item)
+        }
+        Some(CommunityKey::Bookmark { item, .. }) => {
+            batch.items_with_changed_bookmarks.insert(item)
+        }
+        Some(CommunityKey::Wish { .. } | CommunityKey::WishComment { .. }) | None => false,
+    }
 }
 
 /// The item ids a set of keys is about, for a reader replaying a document.
@@ -415,10 +419,11 @@ mod tests {
         peers
     }
 
-    /// A member's rating or review is news of the item it is about; a key
-    /// this build does not read is news of nothing.
+    /// A member's rating or review is news of the item it is about, and a
+    /// bookmark news of that item's bookmarks; a key this build does not read
+    /// is news of nothing.
     #[test]
-    fn a_rating_or_a_review_is_news_of_its_item() {
+    fn each_community_entry_is_news_of_what_it_is_about() {
         let item = ItemId::from_bytes([3; 32]);
         let member = MemberId::from(SecretKey::generate().public());
         for key in [
@@ -435,9 +440,15 @@ mod tests {
             member,
             bookmark: BookmarkId::from_bytes([1; 16]),
         };
-        assert!(
-            !note(&mut Batch::default(), bookmark.encode().as_bytes()),
-            "a bookmark is not part of its item"
+        let mut batch = Batch::default();
+        assert!(note(&mut batch, bookmark.encode().as_bytes()));
+        assert_eq!(
+            batch,
+            Batch {
+                items_with_changed_bookmarks: BTreeSet::from([item]),
+                ..Batch::default()
+            },
+            "a bookmark is news of its item's bookmarks, not of the item"
         );
         let wish = CommunityKey::Wish {
             wish: WishId::from_bytes([3; 32]),
