@@ -20,7 +20,7 @@ use distlib_api::{
     uploads::Uploads,
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
-use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Ticket};
+use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Rating, Review, Ticket};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
 use distlib_sync::{Availability, Catalogue, Sources};
@@ -1526,6 +1526,122 @@ async fn library_item_reads_the_stored_record() {
     assert_eq!(answer["item_id"], json!(id));
     assert_eq!(answer["title"], json!("Dune"));
     assert_eq!(answer["authors"], json!(["Frank Herbert"]));
+    assert_eq!(
+        answer["ratings"],
+        json!({ "average": null, "count": 0, "mine": null })
+    );
+    assert_eq!(answer["reviews"], json!([]));
+
+    harness.shutdown().await;
+}
+
+/// `library.item` sums up the ratings the read model holds, picks out this
+/// node's member's own, and lists the reviews.
+#[tokio::test]
+async fn library_item_summarises_ratings_and_lists_reviews() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let other = MemberId::from(SecretKey::generate().public());
+    let id = ItemId::from_bytes([7; 32]);
+    let review = Review::try_from("A desert planet.".to_owned()).unwrap();
+    harness
+        .store
+        .upsert_item(StoredItem {
+            item: Item::new(id),
+            ratings: BTreeMap::from([
+                (me, Rating::try_from(4).unwrap()),
+                (other, Rating::try_from(5).unwrap()),
+            ]),
+            reviews: BTreeMap::from([(other, review)]),
+            last_modified: 1,
+        })
+        .await
+        .unwrap();
+
+    let answer = harness.call("library.item", json!({ "item_id": id })).await;
+    assert_eq!(
+        answer["ratings"],
+        json!({ "average": 4.5, "count": 2, "mine": 4 })
+    );
+    assert_eq!(
+        answer["reviews"],
+        json!([{ "member": other, "review": "A desert planet." }])
+    );
+
+    harness.shutdown().await;
+}
+
+/// `community.rate` and `community.review` write this node's member's entry,
+/// and `null` clears it.
+#[tokio::test]
+async fn community_rate_and_review_write_and_clear_this_members_entries() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let id = ItemId::from_bytes([7; 32]);
+    harness.catalogue.ready().await;
+    let dune = Item {
+        title: Some("Dune".to_owned()),
+        ..Item::new(id)
+    };
+    harness.catalogue.write(&dune).await.unwrap();
+
+    harness
+        .call("community.rate", json!({ "item_id": id, "rating": 4 }))
+        .await;
+    harness
+        .call(
+            "community.review",
+            json!({ "item_id": id, "review": "A desert planet." }),
+        )
+        .await;
+    assert_eq!(
+        harness.catalogue.ratings(id).await.unwrap(),
+        BTreeMap::from([(me, Rating::try_from(4).unwrap())])
+    );
+    assert_eq!(
+        harness.catalogue.reviews(id).await.unwrap(),
+        BTreeMap::from([(me, Review::try_from("A desert planet.".to_owned()).unwrap())])
+    );
+
+    harness
+        .call("community.rate", json!({ "item_id": id, "rating": null }))
+        .await;
+    harness
+        .call("community.review", json!({ "item_id": id, "review": null }))
+        .await;
+    assert!(harness.catalogue.ratings(id).await.unwrap().is_empty());
+    assert!(harness.catalogue.reviews(id).await.unwrap().is_empty());
+
+    harness.shutdown().await;
+}
+
+/// A rating out of range, or none given, is the caller's mistake; an item
+/// nobody added is refused. None of them writes anything.
+#[tokio::test]
+async fn community_rate_refuses_a_bad_rating_and_an_unknown_item() {
+    let harness = Harness::start().await;
+    let id = ItemId::from_bytes([7; 32]);
+    harness.catalogue.ready().await;
+    let dune = Item {
+        title: Some("Dune".to_owned()),
+        ..Item::new(id)
+    };
+    harness.catalogue.write(&dune).await.unwrap();
+
+    for params in [
+        json!({ "item_id": id, "rating": 6 }),
+        json!({ "item_id": id }),
+    ] {
+        let refused = harness.refuse("community.rate", params).await;
+        assert_eq!(code(&refused), -32602, "{refused}");
+    }
+    let unknown = ItemId::from_bytes([9; 32]);
+    let refused = harness
+        .refuse("community.rate", json!({ "item_id": unknown, "rating": 4 }))
+        .await;
+    assert_eq!(code(&refused), -32000, "{refused}");
+    assert!(harness.catalogue.ratings(id).await.unwrap().is_empty());
+    assert!(harness.catalogue.ratings(unknown).await.unwrap().is_empty());
 
     harness.shutdown().await;
 }

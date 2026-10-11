@@ -246,6 +246,37 @@ pub enum Command {
         item_id: ItemId,
     },
 
+    /// Rate an item one to five as this node's member, or clear the rating.
+    Rate {
+        /// The item to rate, as `distlib search` prints it.
+        item_id: ItemId,
+
+        /// One to five.
+        #[arg(
+            value_parser = clap::value_parser!(u8).range(1..=5),
+            required_unless_present = "clear"
+        )]
+        rating: Option<u8>,
+
+        /// Clear this member's rating instead.
+        #[arg(long, conflicts_with = "rating")]
+        clear: bool,
+    },
+
+    /// Review an item as this node's member, or clear the review.
+    Review {
+        /// The item to review, as `distlib search` prints it.
+        item_id: ItemId,
+
+        /// The review.
+        #[arg(required_unless_present = "clear")]
+        text: Option<String>,
+
+        /// Clear this member's review instead.
+        #[arg(long, conflicts_with = "text")]
+        clear: bool,
+    },
+
     /// Add a file set to the catalogue as one item (2b-2, §6.1).
     ///
     /// Every file given is `role: content` — the set §5.2's `item_id`

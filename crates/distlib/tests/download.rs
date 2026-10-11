@@ -22,14 +22,14 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
-    ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig,
-    Progress, TaskId,
+    ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, Progress,
+    TaskId,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -37,29 +37,11 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 mod common;
-use common::{bound, config, following, record, until_projected};
+use common::{api, bound, config, following, record, until_projected};
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
 /// project.
 const SOON: Duration = Duration::from_secs(60);
-
-/// An `Api` wired to `runtime`'s own pieces, as `library.rs` does it.
-fn api(runtime: &Runtime, key: &SecretKey) -> Api {
-    Api {
-        node: Arc::clone(runtime.node()),
-        secret: key.clone(),
-        net: NetConfig::default(),
-        reindex_handle: runtime.projection().reindex_handle(),
-        catalogue: runtime.catalogue().clone(),
-        blobs: runtime.blobs().clone(),
-        store: runtime.store().clone(),
-        search: runtime.search().clone(),
-        availability: runtime.availability().clone(),
-        tasks: runtime.tasks().clone(),
-        downloads: runtime.downloads().to_path_buf(),
-        uploads: runtime.uploads().clone(),
-    }
-}
 
 /// Downloads as a caller of the API does since 3a-5: starts the task, then
 /// asks after it until it ends. Answers with the finished task — whose

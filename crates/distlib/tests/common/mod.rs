@@ -14,12 +14,15 @@ pub mod process;
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
 use distlib::Runtime;
+use distlib_api::Api;
 use distlib_consensus::MemberRecord;
-use distlib_core::{Config, CoreMember, ItemId, MemberId, NodeAddr};
+use distlib_core::{Config, CoreMember, ItemId, MemberId, NetConfig, NodeAddr};
+use iroh::SecretKey;
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
 ///
@@ -113,4 +116,23 @@ pub async fn until_projected(runtime: &Runtime, item: ItemId, files: usize, who:
     })
     .await
     .unwrap_or_else(|_| panic!("{who} never projected the item with its {files} file(s)"));
+}
+
+/// An `Api` wired to `runtime`'s own pieces: what `distlib::commands::run`
+/// assembles, minus the HTTP listener, for tests that call `Api::call`.
+pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
+    Api {
+        node: Arc::clone(runtime.node()),
+        secret: key.clone(),
+        net: NetConfig::default(),
+        reindex_handle: runtime.projection().reindex_handle(),
+        catalogue: runtime.catalogue().clone(),
+        blobs: runtime.blobs().clone(),
+        store: runtime.store().clone(),
+        search: runtime.search().clone(),
+        availability: runtime.availability().clone(),
+        tasks: runtime.tasks().clone(),
+        downloads: runtime.downloads().to_path_buf(),
+        uploads: runtime.uploads().clone(),
+    }
 }

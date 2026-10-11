@@ -13,7 +13,7 @@ use std::{
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
     ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind, MemberId, NetConfig,
-    NodeAddr, Series, TaskId, Ticket,
+    NodeAddr, Rating, Review, Series, TaskId, Ticket,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
@@ -105,6 +105,8 @@ impl Api {
             "library.download" => self.download(parse(params)?).await,
             "library.task" => self.task(parse(params)?),
             "library.edit_metadata" => self.edit_metadata(parse(params)?).await,
+            "community.rate" => self.rate(parse(params)?).await,
+            "community.review" => self.review(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -456,15 +458,10 @@ impl Api {
         Ok(json!({ "results": results, "total": page.total }))
     }
 
-    /// `library.item` — the full record the read model holds for one item,
-    /// and its `availability`: `held`, `providers`, and the online `holders`
-    /// and `unknown` members behind them.
-    ///
-    /// **No ratings**, though the plan's sketch promises them in this answer:
-    /// nothing populates them yet. `schema.rs` gives the same reason for
-    /// leaving the `reviews` table out of `distlib-store` altogether — a field
-    /// nothing fills is a commitment made before the thing it describes
-    /// exists.
+    /// `library.item` — the full record the read model holds for one item;
+    /// its `availability`: `held`, `providers`, and the online `holders` and
+    /// `unknown` members behind them; and current members' `ratings` and
+    /// `reviews`.
     async fn item(&self, params: ItemParams) -> Result<Value, Error> {
         let stored = self
             .store
@@ -480,6 +477,12 @@ impl Api {
         record["files"] = json!(stored.item.files);
         record["last_modified"] = json!(stored.last_modified);
         record["availability"] = self.seen().of(&params.item_id);
+        record["ratings"] = ratings_summary(&stored.ratings, self.node.id());
+        record["reviews"] = stored
+            .reviews
+            .iter()
+            .map(|(member, review)| json!({ "member": member, "review": review }))
+            .collect();
         Ok(record)
     }
 
@@ -518,17 +521,44 @@ impl Api {
                 "library.edit_metadata needs at least one field to write",
             ));
         }
-        if self
-            .catalogue
-            .item(item_id)
-            .await
-            .map_err(sync_error)?
-            .is_none()
-        {
-            return Err(Error::failed(format!("no such item: {item_id}")));
-        }
+        self.refuse_unknown_item(item_id).await?;
         self.catalogue.write(&edit).await.map_err(sync_error)?;
         Ok(json!({ "item_id": item_id }))
+    }
+
+    /// `community.rate` — rates an item as this node's member, or clears that
+    /// rating with `rating: null`. `library.item` shows it once projected.
+    async fn rate(&self, params: Rate) -> Result<Value, Error> {
+        let Rate { item_id, rating } = params;
+        self.refuse_unknown_item(item_id).await?;
+        match rating {
+            Some(rating) => self.catalogue.rate(item_id, rating).await,
+            None => self.catalogue.clear_rating(item_id).await,
+        }
+        .map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id }))
+    }
+
+    /// `community.review` — reviews an item as this node's member, or clears
+    /// that review with `review: null`.
+    async fn review(&self, params: ReviewParams) -> Result<Value, Error> {
+        let ReviewParams { item_id, review } = params;
+        self.refuse_unknown_item(item_id).await?;
+        match review {
+            Some(review) => self.catalogue.review(item_id, &review).await,
+            None => self.catalogue.clear_review(item_id).await,
+        }
+        .map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id }))
+    }
+
+    /// Refuses an item this node's document has no entry of: writing about it
+    /// would describe an item nobody added.
+    async fn refuse_unknown_item(&self, item_id: ItemId) -> Result<(), Error> {
+        match self.catalogue.item(item_id).await.map_err(sync_error)? {
+            Some(_) => Ok(()),
+            None => Err(Error::failed(format!("no such item: {item_id}"))),
+        }
     }
 
     /// `library.add` — hash a file set, store it as blobs, and write a
@@ -1284,6 +1314,18 @@ fn summary(stored: &StoredItem) -> Value {
     })
 }
 
+/// `library.item`'s `ratings`: the average of current members' ratings, how
+/// many there are, and this node's member's own.
+fn ratings_summary(ratings: &BTreeMap<MemberId, Rating>, me: MemberId) -> Value {
+    let (total, count) = ratings
+        .values()
+        .fold((0_u32, 0_u32), |(total, count), rating| {
+            (total + u32::from(rating.get()), count + 1)
+        });
+    let average = (count > 0).then(|| f64::from(total) / f64::from(count));
+    json!({ "average": average, "count": count, "mine": ratings.get(&me) })
+}
+
 /// A malformed query is the caller's mistake; anything else out of
 /// `distlib-store` is this method failing for its own reasons.
 fn query_error(error: StoreError) -> Error {
@@ -1611,6 +1653,27 @@ struct Add {
 struct EditMetadata {
     item_id: ItemId,
     fields: ItemFields,
+}
+
+/// `community.rate`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Rate {
+    item_id: ItemId,
+    /// Required: `null` clears. Serde would otherwise read a missing field
+    /// as `null`, and a call that left it out would clear the rating.
+    #[serde(deserialize_with = "Option::deserialize")]
+    rating: Option<Rating>,
+}
+
+/// `community.review`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewParams {
+    item_id: ItemId,
+    /// Required: `null` clears, as [`Rate::rating`].
+    #[serde(deserialize_with = "Option::deserialize")]
+    review: Option<Review>,
 }
 
 /// `library.download`'s params.

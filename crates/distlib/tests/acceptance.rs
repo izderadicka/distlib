@@ -29,13 +29,10 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::path::Path;
 
 mod common;
-use common::process::{CONVERGE_TIMEOUT, Friend, distlib, wait_for_all};
+use common::process::{Friend, distlib, run_command, until_output, wait_for_all};
 
 /// The three ebooks node A adds, as §9 asks for. One author across all three,
 /// because the criterion's next clause is searching by it.
@@ -44,40 +41,6 @@ const LIBRARY: [(&str, &str); 3] = [
     ("dune-messiah.epub", "Dune Messiah"),
     ("children-of-dune.epub", "Children of Dune"),
 ];
-
-/// Runs a command that is expected to succeed, and answers with its stdout.
-fn run(at: &Path, args: &[&str]) -> String {
-    let output = distlib(at).args(args).output().unwrap();
-    assert!(
-        output.status.success(),
-        "`distlib {}` failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
-/// Polls a command until its output satisfies `settled`.
-///
-/// The catalogue is eventually consistent and every read here is of a
-/// *projection* of it, so a single call is asserting the absence of a
-/// replication delay rather than the thing the test is about — the same
-/// reasoning `Friend::wait_for_status` gives for polling a promotion.
-fn until(at: &Path, args: &[&str], what: &str, settled: impl Fn(&str) -> bool) -> String {
-    let deadline = Instant::now() + CONVERGE_TIMEOUT;
-    loop {
-        let out = run(at, args);
-        if settled(&out) {
-            return out;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {what}; `distlib {}` last said:\n{out}",
-            args.join(" ")
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
 
 /// The `(item id, title)` of every hit `distlib search` printed.
 ///
@@ -121,7 +84,7 @@ fn id_of(listing: &str, title: &str) -> String {
 /// the gap between "the item is there" and "its files are there" reopens every
 /// time it starts — even for an item it has already downloaded.
 fn until_files_are_projected(at: &Path, id: &str) {
-    until(
+    until_output(
         at,
         &["item", id],
         "the file behind the item to be projected, not only its title",
@@ -183,7 +146,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
         // inlined in its database — which is the shape `download.rs` found
         // matters, and the shape a real book has.
         std::fs::write(&path, format!("{title}, in full\n").repeat(20_000)).unwrap();
-        let added = run(
+        let added = run_command(
             alice.dir.path(),
             &[
                 "add",
@@ -204,7 +167,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // By author, as the criterion says, and not by title — a title match
     // would be satisfied by the one field the projection writes first, which
     // is exactly the confusion that made `read_model.rs`'s own test flaky.
-    let found = until(
+    let found = until_output(
         bob.dir.path(),
         &["search", "authors:herbert"],
         "bob to sync all three books and find them by author",
@@ -221,7 +184,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // *Downloads a file.*
     let bobs_books = bob.dir.path().join("downloads");
     std::fs::create_dir_all(&bobs_books).unwrap();
-    let downloaded = run(
+    let downloaded = run_command(
         bob.dir.path(),
         &["download", &dune, "--dest", bobs_books.to_str().unwrap()],
     );
@@ -271,7 +234,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     bob_node.wait_for("members=3");
     until_files_are_projected(bob.dir.path(), &dune);
 
-    let again = run(
+    let again = run_command(
         bob.dir.path(),
         &["download", &dune, "--dest", bobs_books.to_str().unwrap()],
     );
@@ -288,7 +251,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     // Carol has been a member throughout, syncing the same catalogue: what is
     // asserted of her is that a fresh join sees the whole library, which is
     // the other thing §9's first clauses are about.
-    let carols_view = until(
+    let carols_view = until_output(
         carol.dir.path(),
         &["search", "authors:herbert"],
         "carol to sync the catalogue",
@@ -320,7 +283,7 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
 
     let book = alice.dir.path().join("dune.epub");
     std::fs::write(&book, b"Dune, in full").unwrap();
-    run(
+    run_command(
         alice.dir.path(),
         &[
             "add",
@@ -331,7 +294,7 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
             "Dune",
         ],
     );
-    let found = until(
+    let found = until_output(
         alice.dir.path(),
         &["search", "Dune"],
         "the book alice just added to be searchable",
@@ -343,7 +306,7 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
 
     let dest = alice.dir.path().join("downloads");
     std::fs::create_dir_all(&dest).unwrap();
-    let first = run(
+    let first = run_command(
         alice.dir.path(),
         &["download", &dune, "--dest", dest.to_str().unwrap()],
     );

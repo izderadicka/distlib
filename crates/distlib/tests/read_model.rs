@@ -18,10 +18,9 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use distlib::Runtime;
-use distlib_api::Api;
 use distlib_core::{
     Config, ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
-    NetConfig, Series,
+    Series,
 };
 use distlib_store::StoredItem;
 use iroh::SecretKey;
@@ -29,7 +28,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, init_logging, record};
+use common::{api, bound, config, init_logging, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// then for the projection behind that to catch up.
@@ -581,20 +580,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     .await
     .expect("the item becomes searchable by author, with its record fully projected");
 
-    let api = Api {
-        node: std::sync::Arc::clone(runtime.node()),
-        secret: key,
-        net: NetConfig::default(),
-        reindex_handle: runtime.projection().reindex_handle(),
-        catalogue: runtime.catalogue().clone(),
-        blobs: runtime.blobs().clone(),
-        store: runtime.store().clone(),
-        search: runtime.search().clone(),
-        availability: runtime.availability().clone(),
-        tasks: runtime.tasks().clone(),
-        downloads: runtime.downloads().to_path_buf(),
-        uploads: runtime.uploads().clone(),
-    };
+    let api = api(&runtime, &key);
 
     let found = api
         .call("library.search", Some(json!({ "query": "Herbert" })))

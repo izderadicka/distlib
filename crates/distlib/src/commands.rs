@@ -677,6 +677,27 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
         println!("description {description}");
     }
 
+    let ratings = &answer["ratings"];
+    match ratings["average"].as_f64() {
+        Some(average) => println!(
+            "rating      {average:.1} from {}{}",
+            ratings["count"],
+            ratings["mine"]
+                .as_u64()
+                .map_or_else(String::new, |mine| format!(" (yours {mine})"))
+        ),
+        None => println!("rating      none yet"),
+    }
+    let reviews = answer["reviews"].as_array().map_or(&[][..], |v| v);
+    println!("reviews     {}", reviews.len());
+    for review in reviews {
+        println!(
+            "  {}  {}",
+            review["member"].as_str().unwrap_or("?"),
+            review["review"].as_str().unwrap_or("?")
+        );
+    }
+
     let found = &answer["availability"];
     println!(
         "available   {}",
@@ -701,6 +722,36 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
                 file["size"].as_u64().unwrap_or(0)
             );
         }
+    }
+    Ok(())
+}
+
+/// `distlib rate`. `None` clears this member's rating.
+pub async fn rate(paths: &Paths, item_id: ItemId, rating: Option<u8>) -> Result<()> {
+    ask(
+        paths,
+        "community.rate",
+        json!({ "item_id": item_id, "rating": rating }),
+    )
+    .await?;
+    match rating {
+        Some(rating) => println!("rated {item_id} {rating}"),
+        None => println!("cleared your rating of {item_id}"),
+    }
+    Ok(())
+}
+
+/// `distlib review`. `None` clears this member's review.
+pub async fn review(paths: &Paths, item_id: ItemId, text: Option<String>) -> Result<()> {
+    ask(
+        paths,
+        "community.review",
+        json!({ "item_id": item_id, "review": &text }),
+    )
+    .await?;
+    match text {
+        Some(_) => println!("reviewed {item_id}"),
+        None => println!("cleared your review of {item_id}"),
     }
     Ok(())
 }

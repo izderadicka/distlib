@@ -20,6 +20,7 @@ use std::{
 };
 
 use distlib::Runtime;
+use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
     Bookmark, BookmarkId, Comment, Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating,
@@ -27,10 +28,11 @@ use distlib_core::{
 };
 use distlib_store::{Store, StoredBookmark, StoredItem, StoredWish};
 use iroh::SecretKey;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, following, init_logging, record};
+use common::{api, bound, config, following, init_logging, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -148,7 +150,9 @@ struct Group {
     alice: Runtime,
     alice_key: SecretKey,
     bob: Runtime,
+    bob_key: SecretKey,
     carol: Runtime,
+    carol_key: SecretKey,
     carol_id: MemberId,
 }
 
@@ -246,7 +250,9 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
         alice,
         alice_key,
         bob,
+        bob_key,
         carol,
+        carol_key,
         carol_id,
     }
 }
@@ -948,6 +954,106 @@ async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
     group.carol.shutdown().await;
     group.bob.shutdown().await;
     group.alice.shutdown().await;
+}
+
+/// **4c-3a's acceptance, §9's second half:** bob and carol rate one item at
+/// once, and both ratings show in `library.item` on all three nodes, each
+/// node's own as `mine`. Carol's review reaches everyone, and so does her
+/// clearing it.
+#[tokio::test]
+async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
+    let group = a_group_with_two_followers().await;
+    let alices_api = api(&group.alice, &group.alice_key);
+    let bobs_api = api(&group.bob, &group.bob_key);
+    let carols_api = api(&group.carol, &group.carol_key);
+    let apis = [
+        ("alice", &alices_api, json!(null)),
+        ("bob", &bobs_api, json!(4)),
+        ("carol", &carols_api, json!(5)),
+    ];
+    let item = ItemId::from_bytes([5; 32]);
+    group
+        .alice
+        .catalogue()
+        .write(&Item {
+            title: Some("Hordubal".to_owned()),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
+    for (who, runtime) in [
+        ("alice", &group.alice),
+        ("bob", &group.bob),
+        ("carol", &group.carol),
+    ] {
+        until_projected(runtime, item, 0, who).await;
+    }
+
+    let rate = |rating: u8| Some(json!({ "item_id": item, "rating": rating }));
+    let (bobs, carols) = tokio::join!(
+        bobs_api.call("community.rate", rate(4)),
+        carols_api.call("community.rate", rate(5)),
+    );
+    bobs.unwrap();
+    carols.unwrap();
+    let review = |review: Value| Some(json!({ "item_id": item, "review": review }));
+    carols_api
+        .call("community.review", review(json!("Čapek at his quietest.")))
+        .await
+        .unwrap();
+
+    for (who, api, mine) in &apis {
+        let answer = library_item_when(api, item, who, |answer| {
+            answer["ratings"]["count"] == 2 && answer["reviews"] != json!([])
+        })
+        .await;
+        assert_eq!(
+            answer["ratings"],
+            json!({ "average": 4.5, "count": 2, "mine": mine }),
+            "{who}"
+        );
+        assert_eq!(
+            answer["reviews"],
+            json!([{ "member": group.carol_id, "review": "Čapek at his quietest." }]),
+            "{who}"
+        );
+    }
+
+    carols_api
+        .call("community.review", review(Value::Null))
+        .await
+        .unwrap();
+    for (who, api, _) in &apis {
+        library_item_when(api, item, who, |answer| answer["reviews"] == json!([])).await;
+    }
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// Asks `api` for `item` until `ready` accepts the answer, and returns it —
+/// or fails naming `who` was asked.
+async fn library_item_when(
+    api: &Api,
+    item: ItemId,
+    who: &str,
+    ready: impl Fn(&Value) -> bool,
+) -> Value {
+    tokio::time::timeout(SOON, async {
+        loop {
+            let answer = api
+                .call("library.item", Some(json!({ "item_id": item })))
+                .await
+                .unwrap();
+            if ready(&answer) {
+                return answer;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{who}'s library.item never gave the answer waited for"))
 }
 
 /// **4c-2c: a wish's entries and comments reach the read model, current

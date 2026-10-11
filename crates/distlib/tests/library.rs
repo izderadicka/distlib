@@ -13,40 +13,20 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_core::{DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId, NetConfig};
+use distlib_core::{DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId};
 use iroh::SecretKey;
 use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{bound, config, record};
+use common::{api, bound, config, record};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
-
-/// An `Api` wired to `runtime`'s own pieces — the same assembly
-/// `distlib::commands::run` does, minus the HTTP listener: these tests call
-/// `Api::call` directly, the way `read_model.rs`'s own `library.*` test does.
-fn api(runtime: &Runtime, key: &SecretKey) -> Api {
-    Api {
-        node: Arc::clone(runtime.node()),
-        secret: key.clone(),
-        net: NetConfig::default(),
-        reindex_handle: runtime.projection().reindex_handle(),
-        catalogue: runtime.catalogue().clone(),
-        blobs: runtime.blobs().clone(),
-        store: runtime.store().clone(),
-        search: runtime.search().clone(),
-        availability: runtime.availability().clone(),
-        tasks: runtime.tasks().clone(),
-        downloads: runtime.downloads().to_path_buf(),
-        uploads: runtime.uploads().clone(),
-    }
-}
 
 /// 2b-2's acceptance: two nodes each `library.add` the identical file set,
 /// at the same time, and end up looking at one item rather than two.
