@@ -22,9 +22,10 @@ use std::{
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
-    Bookmark, BookmarkId, Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating, Review,
+    Bookmark, BookmarkId, Comment, Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating,
+    Review, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_store::{Store, StoredBookmark, StoredItem};
+use distlib_store::{Store, StoredBookmark, StoredItem, StoredWish};
 use iroh::SecretKey;
 use tempfile::TempDir;
 
@@ -947,6 +948,199 @@ async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
     group.carol.shutdown().await;
     group.bob.shutdown().await;
     group.alice.shutdown().await;
+}
+
+/// **4c-2c: a wish's entries and comments reach the read model, current
+/// members' only.** Alice wishes, carol fulfils and both comment, and so does
+/// bob; once bob is expelled his comment goes and the rest stay, and a wish
+/// only bob made goes with carol's comment on it. Comments on a wish nobody
+/// made make no wish. A reindex afterwards changes nothing.
+#[tokio::test]
+async fn a_wish_reaches_the_read_model_without_an_expelled_members_comment() {
+    let group = a_group_with_two_followers().await;
+    let alice_id = MemberId::from(group.alice.endpoint().id());
+    let bob_id = MemberId::from(group.bob.endpoint().id());
+    let carol_id = group.carol_id;
+    let comment = |text: &str| Comment::try_from(text.to_owned()).unwrap();
+    let wish = WishId::from_bytes([6; 32]);
+    let alices_entry = Wish::new(WishFields {
+        kind: None,
+        title: Some("Hordubal".to_owned()),
+        authors: None,
+        description: None,
+        created_at: Some(1),
+        status: WishStatus::Open,
+    })
+    .unwrap();
+    let carols_fulfilment = Wish::new(WishFields {
+        kind: None,
+        title: None,
+        authors: None,
+        description: None,
+        created_at: None,
+        status: WishStatus::Fulfilled {
+            item_id: ItemId::from_bytes([4; 32]),
+        },
+    })
+    .unwrap();
+
+    group
+        .alice
+        .catalogue()
+        .wish(wish, &alices_entry)
+        .await
+        .unwrap();
+    group
+        .carol
+        .catalogue()
+        .wish(wish, &carols_fulfilment)
+        .await
+        .unwrap();
+    for (runtime, words) in [
+        (&group.alice, "On paper, please"),
+        (&group.bob, "I have it"),
+        (&group.carol, "Added it"),
+    ] {
+        runtime
+            .catalogue()
+            .wish_comment(wish, &comment(words))
+            .await
+            .unwrap();
+    }
+
+    let wish_only_bob_made = WishId::from_bytes([8; 32]);
+    let bobs_entry = Wish::new(WishFields {
+        kind: None,
+        title: Some("Krakatit".to_owned()),
+        authors: None,
+        description: None,
+        created_at: Some(2),
+        status: WishStatus::Open,
+    })
+    .unwrap();
+    group
+        .bob
+        .catalogue()
+        .wish(wish_only_bob_made, &bobs_entry)
+        .await
+        .unwrap();
+    group
+        .carol
+        .catalogue()
+        .wish_comment(wish_only_bob_made, &comment("Me too"))
+        .await
+        .unwrap();
+
+    let wish_nobody_made = WishId::from_bytes([7; 32]);
+    group
+        .carol
+        .catalogue()
+        .wish_comment(wish_nobody_made, &comment("Which one?"))
+        .await
+        .unwrap();
+
+    let store = group.alice.store();
+    let entries = BTreeMap::from([(alice_id, alices_entry), (carol_id, carols_fulfilment)]);
+    let before = wish_when(store, wish, "two entries and three comments", |stored| {
+        stored.entries.len() == 2 && stored.comments.len() == 3
+    })
+    .await;
+    assert_eq!(before.entries, entries);
+    wish_when(
+        store,
+        wish_only_bob_made,
+        "bob's entry and carol's comment",
+        |stored| stored.entries.len() == 1 && stored.comments.len() == 1,
+    )
+    .await;
+    tokio::time::timeout(SOON, async {
+        while !group
+            .alice
+            .catalogue()
+            .wish_comments(wish_nobody_made)
+            .await
+            .unwrap()
+            .contains_key(&carol_id)
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("carol's comment on a wish nobody made reaches alice");
+
+    group
+        .alice
+        .node()
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: bob_id,
+                reason: "4c-2c's acceptance says so".to_owned(),
+            },
+            &group.alice_key,
+        )
+        .await
+        .unwrap();
+
+    let after = wish_when(store, wish, "bob's comment gone", |stored| {
+        stored.comments.len() == 2
+    })
+    .await;
+    assert_eq!(
+        after,
+        StoredWish {
+            entries,
+            comments: BTreeMap::from([
+                (alice_id, comment("On paper, please")),
+                (carol_id, comment("Added it")),
+            ]),
+        }
+    );
+    wish_when(store, wish_only_bob_made, "bob's wish gone", |stored| {
+        *stored == StoredWish::default()
+    })
+    .await;
+
+    group.alice.projection().reindex().await.unwrap();
+    assert_eq!(
+        store.wish(wish).await.unwrap(),
+        after,
+        "a second replay changes nothing"
+    );
+    assert_eq!(
+        store.wish(wish_nobody_made).await.unwrap(),
+        StoredWish::default(),
+        "comments alone are not a wish"
+    );
+    assert_eq!(
+        store.wish(wish_only_bob_made).await.unwrap(),
+        StoredWish::default(),
+        "nor are comments on an expelled member's wish"
+    );
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// Waits for `store` to hold `wish` as `ready` says it should, and returns
+/// it — or fails saying `what` it was waiting for.
+async fn wish_when(
+    store: &Store,
+    wish: WishId,
+    what: &str,
+    ready: impl Fn(&StoredWish) -> bool,
+) -> StoredWish {
+    tokio::time::timeout(SOON, async {
+        loop {
+            let stored = store.wish(wish).await.unwrap();
+            if ready(&stored) {
+                return stored;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the read model never held the wish with {what} within {SOON:?}"))
 }
 
 /// Waits for `store` to hold `count` bookmarks on `item`, and returns them.

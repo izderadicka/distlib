@@ -795,6 +795,19 @@ Needs only 4a-1, so it can interleave with 4b.
   - **Acceptance:** the 4c-2a test also bookmarks; bob's bookmark goes with his expulsion, carol's
     stays, and one on an item nobody wrote is kept.
 
+  4c-2c, wishes and their comments:
+  - **`Batch.changed_wishes`**: wish entries and comments route to their wish. `read_wish(id)`
+    gives both with `waiting_for_content`; `wish_ids()` lists the wishes with an entry.
+  - **Tables `wish_entries` and `wish_comments`**, keyed by wish and member. An entry is stored as
+    the JSON the document holds: it is one member's partial statement, resolved by 4c-4 (D10).
+    Version 4.
+  - **A wish with no current member's entry is stored empty**: comments that arrive before the
+    wish wait for it, as a rating waits for its item, and a wish only an expelled member made goes
+    with the comments on it.
+  - **Acceptance, on three nodes:** alice wishes, carol fulfils, and all three comment; bob's
+    comment goes with his expulsion, and so does a wish only bob made, with carol's comment on it;
+    comments on a wish nobody made make none; a reindex changes nothing.
+
 - **4c-3 — ratings, reviews and bookmarks in the API and CLI.** `community.rate`,
   `community.review`, `community.bookmark` (create, edit or delete your own) and
   `community.bookmarks {q?, member?, item_id?}`; the CLI's `rate`, `review`, `bookmark` and
