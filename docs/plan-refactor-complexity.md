@@ -49,6 +49,10 @@ comments are cut to a sentence or two. One PR per group.
     (recheck holdings).
   - `Api::add` (130) → take uploads / build the item from its files (filename collision) / add
     missing files to an existing item / write a new one.
+  - **Done.** In code lines, `add` went from 90 to 10 and `download` from 124 to 35. The steps:
+    `take_uploads`, `files_or_uploads`, `item_from_files`, `add_missing_files`, `write_new_item`;
+    and `download_destination`, `files_to_download`, `targets_in`, `providers_of`,
+    `finish_download_in_background`, `recheck_holdings`. The longest is `targets_in`, at 39.
 - **R2, `distlib-store` and the CLI**
   - `upsert_item` (77): one helper for "delete the rows of X, insert them again". Files, ratings,
     reviews, bookmarks and wishes all repeat it now.
