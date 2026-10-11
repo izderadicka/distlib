@@ -49,22 +49,24 @@ export function emptyDraft(): Draft {
   };
 }
 
+/** The lines of a field typed one to a line, or nothing if all are blank. */
+export function nonEmptyLines(value: string): string[] | undefined {
+  const each = value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return each.length > 0 ? each : undefined;
+}
+
 /** Everything filled in, and nothing that was left empty. */
 export function fields(draft: Draft): Fields {
   const text = (value: string) => value.trim() || undefined;
-  const lines = (value: string) => {
-    const each = value
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    return each.length > 0 ? each : undefined;
-  };
   const series = text(draft.series);
   return {
     kind: draft.kind,
     title: text(draft.title),
-    authors: lines(draft.authors),
-    genres: lines(draft.genres),
+    authors: nonEmptyLines(draft.authors),
+    genres: nonEmptyLines(draft.genres),
     series:
       series === undefined
         ? undefined

@@ -32,7 +32,8 @@ sequencing plan of the phase currently being built.
 >   them, and a node that has fetched a file then serves it too.
 > - **Web UI:** served by the node itself (`distlib ui` prints a signed-in link). You can
 >   browse and search the library, read and edit an item, download it with live progress,
->   and add an item from files chosen in the browser. Release builds and a Dockerfile exist.
+>   rate, review and bookmark it, add an item from files chosen in the browser, and make,
+>   comment on and fulfil wishes. Release builds and a Dockerfile exist.
 >
 > Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
 > see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and
@@ -377,7 +378,7 @@ curl -s http://127.0.0.1:11280/rpc \
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
 | `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |
 | `community.bookmark` / `community.bookmark_delete` | `{item_id, bookmark_id?, position, note?}` / `{item_id, bookmark_id}` — leave a bookmark, edit one of yours (it keeps when it was made), or delete one. |
-| `community.wish_create` / `community.wish_list` | `{title, kind?, authors?, description?}` / `{status?}` — wish for something; list every wish, newest first, with its `creator`, `status`, `fulfilled_by` and `comments`. |
+| `community.wish_create` / `community.wish_list` | `{title, kind?, authors?, description?}` / `{status?}` — wish for something; list every wish, newest first, with its `creator`, `status`, `fulfilled_by` (each member's `item_id`, and its `title` once this node has the item) and `comments`. |
 | `community.wish_comment` / `community.wish_fulfill` | `{wish_id, comment}` / `{wish_id, item_id}` — comment on a wish (`null` clears yours); say an item answers it. |
 | `community.bookmarks` | `{q?, member?, item_id?}` — every member's bookmarks, newest first, with the item's `title` and the `member_name`; `q` searches the note, the title and the name. |
 | `admin.reindex` | Rebuild the read model. |

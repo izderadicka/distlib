@@ -39,6 +39,7 @@ describe("reading the address", () => {
   it("reads the node page, and the page for adding an item", () => {
     expect(at("/node")).toEqual({ page: "node" });
     expect(at("/add")).toEqual({ page: "add" });
+    expect(at("/wishes")).toEqual({ page: "wishes" });
   });
 
   it("takes anything else for a page that does not exist", () => {
@@ -53,6 +54,7 @@ describe("writing the address", () => {
     expect(href({ page: "library", query: "", number: 1 })).toBe("/");
     expect(href({ page: "node" })).toBe("/node");
     expect(href({ page: "add" })).toBe("/add");
+    expect(href({ page: "wishes" })).toBe("/wishes");
     expect(href({ page: "item", id: "a".repeat(64) })).toBe(`/items/${"a".repeat(64)}`);
   });
 

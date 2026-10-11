@@ -1242,10 +1242,11 @@ async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
     assert_eq!(listed["wish_id"], wish);
     assert_eq!(listed["creator"], json!(alice_id));
     assert_eq!(listed["title"], json!("Hordubal"));
-    assert_eq!(
-        listed["fulfilled_by"],
-        json!([{ "member": group.carol_id, "item_id": item }])
-    );
+    // The title may or may not have been projected on alice's node yet.
+    let fulfilment = &listed["fulfilled_by"];
+    assert_eq!(fulfilment.as_array().map(Vec::len), Some(1), "{fulfilment}");
+    assert_eq!(fulfilment[0]["member"], json!(group.carol_id));
+    assert_eq!(fulfilment[0]["item_id"], json!(item));
     assert_eq!(
         listed["comments"],
         json!([{ "member": bob_id, "comment": "I have it on paper" }])

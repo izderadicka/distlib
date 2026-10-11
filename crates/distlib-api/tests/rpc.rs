@@ -764,14 +764,10 @@ async fn the_ui_is_served_to_anybody() {
         );
         assert!(body.contains("<html"), "{path}: {body}");
         // The token lives in the page's storage; script from anywhere else
-        // is how it would be stolen.
-        assert!(
-            headers["content-security-policy"]
-                .to_str()
-                .unwrap()
-                .contains("default-src 'self'"),
-            "{path}"
-        );
+        // is how it would be stolen. Styles are the stylesheet's only (C20).
+        let policy = headers["content-security-policy"].to_str().unwrap();
+        assert!(policy.contains("default-src 'self'"), "{path}");
+        assert!(!policy.contains("'unsafe-inline'"), "{path}");
         assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
     }
 
@@ -1907,6 +1903,19 @@ async fn community_wish_list_resolves_filters_and_orders_wishes() {
     let alice = harness.node.id();
     let bob = MemberId::from(SecretKey::generate().public());
     let item = ItemId::from_bytes([4; 32]);
+    harness
+        .store
+        .upsert_item(StoredItem {
+            item: Item {
+                title: Some("Hordubal".to_owned()),
+                ..Item::new(item)
+            },
+            ratings: BTreeMap::new(),
+            reviews: BTreeMap::new(),
+            last_modified: 1,
+        })
+        .await
+        .unwrap();
     let entry = |title: Option<&str>, created_at, status| {
         Wish::new(WishFields {
             kind: None,
@@ -1969,7 +1978,7 @@ async fn community_wish_list_resolves_filters_and_orders_wishes() {
             "description": null,
             "created_at": 1,
             "status": "fulfilled",
-            "fulfilled_by": [{ "member": bob, "item_id": item }],
+            "fulfilled_by": [{ "member": bob, "item_id": item, "title": "Hordubal" }],
             "comments": [{ "member": bob, "comment": "Added" }],
         }] })
     );

@@ -139,6 +139,15 @@ describe("the shell", () => {
     expect(current()?.textContent).toBe("Add");
   });
 
+  it("opens the wishes from their link", async () => {
+    open();
+
+    await fireEvent.click(screen.getByRole("link", { name: "Wishes" }));
+
+    await screen.findByRole("heading", { name: "Make a wish" });
+    expect(current()?.textContent).toBe("Wishes");
+  });
+
   it("says when the address names no page", async () => {
     navigate("/shelves");
     open();

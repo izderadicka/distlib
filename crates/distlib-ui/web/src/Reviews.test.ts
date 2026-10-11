@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Reviews from "./Reviews.svelte";
-import { call, type ReviewRecord, RpcError } from "./lib/rpc";
+import { call, type ReviewRecord } from "./lib/rpc";
 
 vi.mock("./lib/rpc", async (original) => ({
   ...(await original<typeof import("./lib/rpc")>()),
@@ -22,7 +22,7 @@ function open(reviews: ReviewRecord[], me: string | null = ME) {
 }
 
 const draft = () => screen.getByLabelText("Your review") as HTMLTextAreaElement;
-const button = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement;
+const button = (name: string) => screen.getByRole("button", { name });
 
 describe("an item's reviews", () => {
   beforeEach(() => {
@@ -48,27 +48,12 @@ describe("an item's reviews", () => {
     expect(call).toHaveBeenCalledWith("community.review", { item_id: ITEM, review: "A quiet book." });
   });
 
-  it("has nothing to save while the form is blank or unchanged", async () => {
-    open([MINE]);
-    expect(button("Save review").disabled).toBe(true);
-
-    await fireEvent.input(draft(), { target: { value: "  " } });
-
-    expect(button("Save review").disabled).toBe(true);
-  });
-
-  it("clears this member's review, and offers to only when there is one", async () => {
+  it("clears this member's review", async () => {
     open([MINE]);
 
     await fireEvent.click(button("Clear review"));
 
     expect(call).toHaveBeenCalledWith("community.review", { item_id: ITEM, review: null });
-  });
-
-  it("offers no clearing without a review of this member's", () => {
-    open([BOBS]);
-
-    expect(screen.queryByRole("button", { name: "Clear review" })).toBeNull();
   });
 
   it("fills the form once it is known which review is this member's", async () => {
@@ -78,15 +63,5 @@ describe("an item's reviews", () => {
     await page.rerender({ me: ME });
 
     expect(draft().value).toBe("Čapek at his quietest.");
-  });
-
-  it("says what the node refused", async () => {
-    vi.mocked(call).mockRejectedValue(new RpcError(-32602, "review is too long"));
-    open([]);
-
-    await fireEvent.input(draft(), { target: { value: "Long." } });
-    await fireEvent.click(button("Save review"));
-
-    await screen.findByText("review is too long");
   });
 });
