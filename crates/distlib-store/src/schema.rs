@@ -6,10 +6,9 @@
 //! instead of by the write that made it. It needs SQLite 3.37, which is why the
 //! dependency is `bundled` rather than the host's.
 //!
-//! **Only tables something fills.** §5.4 also names `wishes` and
-//! `custodianships`; those belong to later steps of phases 4 and 5, and a
-//! table nothing fills is a schema commitment made before the thing it
-//! describes exists.
+//! **Only tables something fills.** §5.4 also names `custodianships`; that
+//! belongs to phase 5, and a table nothing fills is a schema commitment made
+//! before the thing it describes exists.
 //!
 //! **No `added_by`, `created` or `modified_by` columns**, which §5.2 does name.
 //! There is nothing to fill them from: the catalogue's `fields!` table has no
@@ -29,7 +28,7 @@
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 3;
+pub const READ_MODEL_VERSION: u32 = 4;
 
 /// Run on every connection, before anything else.
 ///
@@ -111,6 +110,22 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     created_at    INTEGER NOT NULL,
     last_modified INTEGER NOT NULL,
     PRIMARY KEY (item, member, id)
+) STRICT;
+
+-- Every current member's entry for each wish, as the JSON the document holds:
+-- what one member says about a wish, which the reader resolves (D10).
+CREATE TABLE IF NOT EXISTS wish_entries (
+    wish   TEXT NOT NULL,
+    member TEXT NOT NULL,
+    entry  TEXT NOT NULL,
+    PRIMARY KEY (wish, member)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS wish_comments (
+    wish    TEXT NOT NULL,
+    member  TEXT NOT NULL,
+    comment TEXT NOT NULL,
+    PRIMARY KEY (wish, member)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS members (

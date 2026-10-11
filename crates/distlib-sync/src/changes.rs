@@ -31,7 +31,7 @@ use std::{
     time::SystemTime,
 };
 
-use distlib_core::{CommunityKey, ItemId, Key, MemberId};
+use distlib_core::{CommunityKey, ItemId, Key, MemberId, WishId};
 use futures_lite::stream::{Stream, StreamExt as _};
 use iroh::EndpointId;
 use iroh_docs::engine::{LiveEvent, SyncEvent};
@@ -48,6 +48,8 @@ pub struct Batch {
     pub items: BTreeSet<ItemId>,
     /// Items with at least one bookmark written or arrived.
     pub items_with_changed_bookmarks: BTreeSet<ItemId>,
+    /// Wishes with at least one entry or comment written or arrived.
+    pub changed_wishes: BTreeSet<WishId>,
     /// Content landed for some entry — which item's is not said.
     ///
     /// **Deliberately not resolved to an item here.** `LiveEvent::ContentReady`
@@ -66,6 +68,7 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
             && self.items_with_changed_bookmarks.is_empty()
+            && self.changed_wishes.is_empty()
             && !self.content_arrived
     }
 }
@@ -356,8 +359,8 @@ impl Pump {
 ///
 /// An item for one of its own keys, or a rating or review of it (D8). The
 /// item a bookmark points into, for a bookmark: it is not part of that item.
-/// Wishes and their comments are not routed yet (4c-2c). A key this build does
-/// not recognise is left alone, for the reason [`Key::parse`] gives.
+/// The wish, for a wish entry or a comment on one. A key this build does not
+/// recognise is left alone, for the reason [`Key::parse`] gives.
 fn note(batch: &mut Batch, key: &[u8]) -> bool {
     if let Some(parsed) = Key::parse(key) {
         return batch.items.insert(parsed.item());
@@ -369,7 +372,10 @@ fn note(batch: &mut Batch, key: &[u8]) -> bool {
         Some(CommunityKey::Bookmark { item, .. }) => {
             batch.items_with_changed_bookmarks.insert(item)
         }
-        Some(CommunityKey::Wish { .. } | CommunityKey::WishComment { .. }) | None => false,
+        Some(CommunityKey::Wish { wish, .. } | CommunityKey::WishComment { wish, .. }) => {
+            batch.changed_wishes.insert(wish)
+        }
+        None => false,
     }
 }
 
@@ -389,7 +395,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use distlib_core::{BookmarkId, WishId};
+    use distlib_core::BookmarkId;
     use iroh::SecretKey;
     use iroh_docs::engine::{Origin, SyncReason};
 
@@ -419,9 +425,9 @@ mod tests {
         peers
     }
 
-    /// A member's rating or review is news of the item it is about, and a
-    /// bookmark news of that item's bookmarks; a key this build does not read
-    /// is news of nothing.
+    /// A member's rating or review is news of the item it is about, a
+    /// bookmark news of that item's bookmarks, and a wish entry or comment
+    /// news of its wish; a key this build does not read is news of nothing.
     #[test]
     fn each_community_entry_is_news_of_what_it_is_about() {
         let item = ItemId::from_bytes([3; 32]);
@@ -450,14 +456,22 @@ mod tests {
             },
             "a bookmark is news of its item's bookmarks, not of the item"
         );
-        let wish = CommunityKey::Wish {
-            wish: WishId::from_bytes([3; 32]),
-            member,
-        };
-        assert!(
-            !note(&mut Batch::default(), wish.encode().as_bytes()),
-            "a wish is about no item, whatever its id looks like"
-        );
+        let wish = WishId::from_bytes([3; 32]);
+        for key in [
+            CommunityKey::Wish { wish, member },
+            CommunityKey::WishComment { wish, member },
+        ] {
+            let mut batch = Batch::default();
+            assert!(note(&mut batch, key.encode().as_bytes()));
+            assert_eq!(
+                batch,
+                Batch {
+                    changed_wishes: BTreeSet::from([wish]),
+                    ..Batch::default()
+                },
+                "a wish entry or comment is news of its wish, whatever its id looks like"
+            );
+        }
     }
 
     /// The content sweep's nudge: one wake however often it is told, until

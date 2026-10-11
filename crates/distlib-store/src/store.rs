@@ -7,7 +7,8 @@ use std::{
 };
 
 use distlib_core::{
-    Bookmark, BookmarkId, ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review, Series,
+    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review,
+    Series, Wish, WishId,
 };
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
@@ -68,6 +69,14 @@ pub struct StoredBookmark {
     pub bookmark: Bookmark,
     /// When its entry was last written, in microseconds since the epoch.
     pub last_modified: u64,
+}
+
+/// One wish's rows: each current member's entry and comment. Empty for a
+/// wish the read model holds nothing of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredWish {
+    pub entries: BTreeMap<MemberId, Wish>,
+    pub comments: BTreeMap<MemberId, Comment>,
 }
 
 /// One row of `members`, projected from the membership log.
@@ -203,6 +212,50 @@ impl Store {
                     })
                 })?
                 .collect()
+        })
+        .await
+    }
+
+    /// Replaces `wish`'s entries and comments with `stored`'s.
+    pub async fn replace_wish(&self, wish: WishId, stored: StoredWish) -> Result<()> {
+        self.write("given a wish", move |tx| {
+            let wish = wish.to_string();
+            tx.execute("DELETE FROM wish_entries WHERE wish = ?1", params![wish])?;
+            let mut insert =
+                tx.prepare("INSERT INTO wish_entries (wish, member, entry) VALUES (?1, ?2, ?3)")?;
+            for (member, entry) in &stored.entries {
+                insert.execute(params![wish, member.to_string(), json(entry)?])?;
+            }
+            tx.execute("DELETE FROM wish_comments WHERE wish = ?1", params![wish])?;
+            let mut insert = tx
+                .prepare("INSERT INTO wish_comments (wish, member, comment) VALUES (?1, ?2, ?3)")?;
+            for (member, comment) in &stored.comments {
+                insert.execute(params![wish, member.to_string(), comment.as_str()])?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// `wish`'s entries and comments.
+    pub async fn wish(&self, wish: WishId) -> Result<StoredWish> {
+        self.read(move |conn| {
+            let wish = wish.to_string();
+            let entries = conn
+                .prepare("SELECT member, entry FROM wish_entries WHERE wish = ?1")?
+                .query_map(params![wish], |row| {
+                    Ok((identifier(row, 0, "member")?, unjson(row, 1, "entry")?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let comments = conn
+                .prepare("SELECT member, comment FROM wish_comments WHERE wish = ?1")?
+                .query_map(params![wish], |row| {
+                    let comment = Comment::try_from(row.get::<_, String>(1)?)
+                        .map_err(unreadable(1, "comment"))?;
+                    Ok((identifier(row, 0, "member")?, comment))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(StoredWish { entries, comments })
         })
         .await
     }

@@ -20,10 +20,10 @@
 use std::collections::BTreeMap;
 
 use distlib_core::{
-    Bookmark, BookmarkId, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
-    Rating, Review, Series,
+    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind,
+    MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_store::{Store, StoredBookmark, StoredItem, StoredMember};
+use distlib_store::{Store, StoredBookmark, StoredItem, StoredMember, StoredWish};
 use proptest::prelude::*;
 
 /// A store with nothing in it, in memory.
@@ -192,6 +192,46 @@ fn distinct_items(count: std::ops::Range<usize>) -> impl Strategy<Value = Vec<St
     })
 }
 
+/// One member's entry for a wish: any of its optional fields, open or
+/// fulfilled.
+fn wish_entry() -> impl Strategy<Value = Wish> {
+    let status = prop_oneof![
+        Just(WishStatus::Open),
+        item_id().prop_map(|item_id| WishStatus::Fulfilled { item_id }),
+    ];
+    (
+        proptest::option::of(kind()),
+        proptest::option::of(text()),
+        proptest::option::of(proptest::collection::vec(text(), 0..3)),
+        proptest::option::of(text()),
+        proptest::option::of(any::<u64>().prop_map(|at| at >> 1)),
+        status,
+    )
+        .prop_map(|(kind, title, authors, description, created_at, status)| {
+            Wish::new(WishFields {
+                kind,
+                title,
+                authors,
+                description,
+                created_at,
+                status,
+            })
+            .expect("short fields make a wish")
+        })
+}
+
+fn stored_wish() -> impl Strategy<Value = StoredWish> {
+    (
+        proptest::collection::btree_map(member(), wish_entry(), 0..3),
+        proptest::collection::btree_map(
+            member(),
+            text().prop_map(|text| Comment::try_from(text).expect("short text is a comment")),
+            0..3,
+        ),
+    )
+        .prop_map(|(entries, comments)| StoredWish { entries, comments })
+}
+
 /// One item's bookmarks, in the order the store reads them back: by member,
 /// then id.
 fn item_bookmarks() -> impl Strategy<Value = Vec<StoredBookmark>> {
@@ -245,6 +285,28 @@ proptest! {
                 store.upsert_item(stored.clone()).await.expect("the item is written again");
             }
             prop_assert_eq!(store.items().await.expect("the items are read"), once);
+            Ok(())
+        })?;
+    }
+
+    /// A wish's entries and comments read back as written, and writing them
+    /// again replaces them rather than adding to them.
+    #[test]
+    fn a_wish_is_replaced_and_read_back(first in stored_wish(), second in stored_wish()) {
+        runtime().block_on(async {
+            let store = empty().await;
+            let wish = WishId::from_bytes([7; 32]);
+            let other = WishId::from_bytes([8; 32]);
+            store.replace_wish(other, first.clone()).await.expect("written");
+            store.replace_wish(wish, first.clone()).await.expect("written");
+            prop_assert_eq!(&store.wish(wish).await.expect("read"), &first);
+            store.replace_wish(wish, second.clone()).await.expect("written again");
+            prop_assert_eq!(store.wish(wish).await.expect("read"), second);
+            prop_assert_eq!(
+                store.wish(other).await.expect("read"),
+                first,
+                "another wish is left alone"
+            );
             Ok(())
         })?;
     }
@@ -506,7 +568,9 @@ async fn a_store_of_another_version_is_started_afresh() {
             "items",
             "members",
             "ratings",
-            "reviews"
+            "reviews",
+            "wish_comments",
+            "wish_entries"
         ]
     );
     let left: i64 = db

@@ -65,7 +65,7 @@
 use std::collections::BTreeSet;
 
 use distlib_consensus::MembershipState;
-use distlib_core::{Event, ItemId, MemberId};
+use distlib_core::{Event, ItemId, MemberId, WishId};
 use distlib_sync::{Batch, Catalogue};
 use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
@@ -75,7 +75,7 @@ use tokio::{
 use crate::{
     error::{Result, StoreError},
     index::SearchIndex,
-    store::{Store, StoredBookmark, StoredItem, StoredMember, Upserted},
+    store::{Store, StoredBookmark, StoredItem, StoredMember, StoredWish, Upserted},
 };
 
 /// How many reindex requests can be queued while one is running.
@@ -230,13 +230,19 @@ async fn run(
         members,
         items_waiting_for_content: BTreeSet::new(),
         items_with_bookmarks_waiting_for_content: BTreeSet::new(),
+        wishes_waiting_for_content: BTreeSet::new(),
     };
     writer.replay().await;
 
     loop {
         tokio::select! {
             batch = changes.take() => {
-                let Some(Batch { mut items, mut items_with_changed_bookmarks, content_arrived }) = batch else {
+                let Some(Batch {
+                    mut items,
+                    mut items_with_changed_bookmarks,
+                    mut changed_wishes,
+                    content_arrived,
+                }) = batch else {
                     tracing::debug!("the catalogue stopped reporting changes; the read model is now cold");
                     return;
                 };
@@ -244,9 +250,11 @@ async fn run(
                     items.extend(writer.items_waiting_for_content.iter().copied());
                     items_with_changed_bookmarks
                         .extend(writer.items_with_bookmarks_waiting_for_content.iter().copied());
+                    changed_wishes.extend(writer.wishes_waiting_for_content.iter().copied());
                 }
                 let written = writer.project_items(items).await;
                 writer.project_bookmarks(items_with_changed_bookmarks).await;
+                writer.project_wishes(changed_wishes).await;
                 for event in written {
                     // Nobody watching is the ordinary case. Never awaited: a
                     // watcher that falls behind is skipped past, and this task
@@ -288,6 +296,8 @@ struct ReadModelWriter {
     items_waiting_for_content: BTreeSet<ItemId>,
     /// Items whose bookmarks were last projected with one missing its content.
     items_with_bookmarks_waiting_for_content: BTreeSet<ItemId>,
+    /// Wishes last projected with an entry or comment missing its content.
+    wishes_waiting_for_content: BTreeSet<WishId>,
 }
 
 impl ReadModelWriter {
@@ -406,16 +416,54 @@ impl ReadModelWriter {
         }
     }
 
+    /// Re-reads each wish and writes its entries and comments over what the
+    /// tables held, current members' only; a wish with no entry is empty.
+    /// Failures are logged per wish, as in [`Self::project_items`].
+    async fn project_wishes(&mut self, wishes: BTreeSet<WishId>) {
+        for wish in wishes {
+            let mut read = match self.catalogue.read_wish(wish).await {
+                Ok(read) => read,
+                Err(error) => {
+                    tracing::warn!(%wish, %error, "could not read a wish to project it");
+                    continue;
+                }
+            };
+
+            if read.waiting_for_content {
+                self.wishes_waiting_for_content.insert(wish);
+            } else {
+                self.wishes_waiting_for_content.remove(&wish);
+            }
+            read.entries
+                .retain(|member, _| self.members.contains(member));
+            read.comments
+                .retain(|member, _| self.members.contains(member));
+            // Comments alone are not a wish: they wait for a current
+            // member's entry, which marks the wish again when it lands.
+            if read.entries.is_empty() {
+                read.comments.clear();
+            }
+            let stored = StoredWish {
+                entries: read.entries,
+                comments: read.comments,
+            };
+            if let Err(error) = self.store.replace_wish(wish, stored).await {
+                tracing::warn!(%wish, %error, "could not write a wish to the read model");
+            }
+        }
+    }
+
     /// Re-reads everything in the document into the read model: every item,
-    /// and every item's bookmarks.
+    /// every item's bookmarks and every wish.
     ///
     /// What a start does, and what [`Projection::reindex`] drives — one
     /// function, because they are the same operation. What it writes is not
     /// published: a replay is not news (see the module docs).
     async fn replay(&mut self) {
-        let (items, bookmarked_items) = match tokio::try_join!(
+        let (items, bookmarked_items, wishes) = match tokio::try_join!(
             self.catalogue.item_ids(),
-            self.catalogue.bookmarked_item_ids()
+            self.catalogue.bookmarked_item_ids(),
+            self.catalogue.wish_ids()
         ) {
             Ok(ids) => ids,
             Err(error) => {
@@ -426,10 +474,12 @@ impl ReadModelWriter {
         tracing::info!(
             items = items.len(),
             bookmarked_items = bookmarked_items.len(),
+            wishes = wishes.len(),
             "replaying the catalogue into the read model"
         );
         self.project_items(items).await;
         self.project_bookmarks(bookmarked_items).await;
+        self.project_wishes(wishes).await;
     }
 }
 

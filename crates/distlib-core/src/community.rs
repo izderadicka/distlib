@@ -158,6 +158,11 @@ impl CommunityKey {
     pub fn comments_on(wish: WishId) -> String {
         format!("{WISH_COMMENT}/{wish}/")
     }
+
+    /// Every entry of every wish, as a prefix to read.
+    pub fn all_wish_entries() -> String {
+        format!("{WISH}/")
+    }
 }
 
 /// The next segment of a key, read as a `T`.

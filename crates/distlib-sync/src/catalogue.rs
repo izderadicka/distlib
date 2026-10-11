@@ -134,6 +134,17 @@ pub struct ItemBookmarks {
     pub waiting_for_content: bool,
 }
 
+/// A wish as this node holds it, for a reader that projects it: every
+/// member's entry and comment, each counted only if its member wrote it (D9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadWish {
+    pub entries: BTreeMap<MemberId, Wish>,
+    pub comments: BTreeMap<MemberId, Comment>,
+    /// Whether an entry or comment was left out because its content has not
+    /// arrived.
+    pub waiting_for_content: bool,
+}
+
 /// One member's bookmark on an item, as this node holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadBookmark {
@@ -654,6 +665,43 @@ impl Catalogue {
             bookmarks,
             waiting_for_content,
         })
+    }
+
+    /// [`Self::wishes`] and [`Self::wish_comments`] together, and whether one
+    /// was left out because its content has not arrived.
+    pub async fn read_wish(&self, wish: WishId) -> Result<ReadWish> {
+        let entries = self
+            .read_community_entries(CommunityKey::wish_entries_of(wish), Wish::decode)
+            .await?;
+        let comments = self
+            .read_community_entries(CommunityKey::comments_on(wish), Comment::decode)
+            .await?;
+        Ok(ReadWish {
+            waiting_for_content: entries.waiting_for_content || comments.waiting_for_content,
+            entries: values_by_member(entries.entries),
+            comments: values_by_member(comments.entries),
+        })
+    }
+
+    /// Every wish somebody has an entry for, for a reader replaying the
+    /// document. A wish with comments and no entry is not one yet.
+    pub async fn wish_ids(&self) -> Result<BTreeSet<WishId>> {
+        let doc = self.document()?;
+        let query = Query::single_latest_per_key().key_prefix(CommunityKey::all_wish_entries());
+        let entries = doc
+            .get_many(query)
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut wishes = BTreeSet::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            if let Some(CommunityKey::Wish { wish, .. }) = CommunityKey::parse(entry.key()) {
+                wishes.insert(wish);
+            }
+        }
+        Ok(wishes)
     }
 
     /// Every item somebody has bookmarked, for a reader replaying the
