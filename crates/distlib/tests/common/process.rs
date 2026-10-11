@@ -521,6 +521,45 @@ impl Drop for Running {
     }
 }
 
+/// Runs a command that is expected to succeed, and answers with its stdout.
+pub fn run_command(at: &Path, args: &[&str]) -> String {
+    let output = distlib(at).args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "`distlib {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Polls a command until its output satisfies `settled`.
+///
+/// The catalogue is eventually consistent and every read here is of a
+/// *projection* of it, so a single call is asserting the absence of a
+/// replication delay rather than the thing the test is about — the same
+/// reasoning `Friend::wait_for_status` gives for polling a promotion.
+pub fn until_output(
+    at: &Path,
+    args: &[&str],
+    what: &str,
+    settled: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + CONVERGE_TIMEOUT;
+    loop {
+        let out = run_command(at, args);
+        if settled(&out) {
+            return out;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; `distlib {}` last said:\n{out}",
+            args.join(" ")
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn distlib(data_dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_distlib"));
     command.arg("--data-dir").arg(data_dir);

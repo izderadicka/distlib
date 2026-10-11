@@ -330,7 +330,9 @@ them hold for every protocol added later.
 | `distlib ui [--base-url]` | Print the link that opens this node's web UI, signed in. |
 | `distlib add <files>... --kind [--title] [--author]...` | Add a file set to the catalogue as one item. |
 | `distlib search <query> [--limit]` | Search the catalogue. |
-| `distlib item <item_id>` | Print one item's record. |
+| `distlib item <item_id>` | Print one item's record, with its ratings and reviews. |
+| `distlib rate <item_id> <1-5>` / `rate <item_id> --clear` | Rate an item as this node's member, or clear the rating. |
+| `distlib review <item_id> <text>` / `review <item_id> --clear` | Review an item, or clear the review. |
 | `distlib download <item_id> [--dest] [--file]` | Fetch an item's files from the group and write them out. |
 | `distlib admin reindex` | Rebuild the read model and search index from the catalogue. |
 | `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
@@ -363,10 +365,11 @@ curl -s http://127.0.0.1:11280/rpc \
 | `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. |
 | `group.ticket` | A join ticket for this group. |
 | `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |
-| `library.item` | `{item_id}` — one item's full record, and its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them. |
+| `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`) and `reviews`. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
+| `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |
 | `admin.reindex` | Rebuild the read model. |
 
 Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, a

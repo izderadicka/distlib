@@ -816,6 +816,19 @@ Needs only 4a-1, so it can interleave with 4b.
   three nodes. And: two bookmarks by one member on one item both survive, and another member finds
   one by a word from its note.
 
+  *As built, in two PRs (Ivan's call): ratings and reviews first.* 4c-3a:
+  - **`community.rate {item_id, rating}` and `community.review {item_id, review}`**, where `null`
+    clears this member's entry (Ivan's call) with `Doc::del` on its own key. The field is required,
+    so a call that leaves it out is refused rather than read as a clear. An item this node's
+    document has no entry of is refused, as `library.edit_metadata` refuses one.
+  - **`library.item` gains `ratings {average, count, mine}` and `reviews [{member, review}]`**,
+    current members' only, from the read model.
+  - **CLI:** `rate <item> <1-5>` / `--clear`, `review <item> <text>` / `--clear`; `item` prints
+    the rating and the reviews.
+  - **Acceptance, on three nodes:** bob and carol rate one item at once, and `library.item` on all
+    three shows both, each node's own as `mine`; carol's review reaches everyone, and so does her
+    clearing it. A one-node CLI test rates, reviews and clears through the binary.
+
 - **4c-4 — wishes in the API and CLI (D10).** `community.wish_create`, `wish_list`, `wish_comment`,
   `wish_fulfill`, as §7.1 names them.
   **Acceptance:** A creates a wish, B comments, C fulfils it with an item; A sees it fulfilled and

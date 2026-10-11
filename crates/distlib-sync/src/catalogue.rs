@@ -345,6 +345,18 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Deletes what this node wrote at `key`. Reads leave a deleted entry out.
+    ///
+    /// iroh-docs deletes by prefix (ground truth 10), so `key` must be a whole
+    /// community key: one that is no other key's prefix.
+    async fn delete(&self, key: String) -> Result<()> {
+        let doc = self.document()?;
+        doc.del(self.inner.author, key.into_bytes())
+            .await
+            .map_err(SyncError::docs("deleted from"))?;
+        Ok(())
+    }
+
     /// Reads one entry: the latest value any member wrote at `key`.
     ///
     /// `Ok(None)` means nobody has written that key.
@@ -555,6 +567,24 @@ impl Catalogue {
             member: self.inner.me,
         };
         self.put(key.encode(), review.encode()).await
+    }
+
+    /// Clears this node's member's rating of `item`, if it has one.
+    pub async fn clear_rating(&self, item: ItemId) -> Result<()> {
+        let key = CommunityKey::Rating {
+            item,
+            member: self.inner.me,
+        };
+        self.delete(key.encode()).await
+    }
+
+    /// Clears this node's member's review of `item`, if it has one.
+    pub async fn clear_review(&self, item: ItemId) -> Result<()> {
+        let key = CommunityKey::Review {
+            item,
+            member: self.inner.me,
+        };
+        self.delete(key.encode()).await
     }
 
     /// Leaves bookmark `id` on `item` as this node's member, or replaces it.

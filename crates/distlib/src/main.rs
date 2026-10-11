@@ -44,6 +44,10 @@ async fn main() -> Result<()> {
         },
         Command::Search { query, limit } => commands::search(&paths, &query, limit).await,
         Command::Item { item_id } => commands::item(&paths, item_id).await,
+        Command::Rate {
+            item_id, rating, ..
+        } => commands::rate(&paths, item_id, rating).await,
+        Command::Review { item_id, text, .. } => commands::review(&paths, item_id, text).await,
         Command::Add {
             files,
             kind,

@@ -5,42 +5,24 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{num::NonZeroU32, path::Path, sync::Arc, time::Duration};
+use std::{num::NonZeroU32, path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_core::{DataDir, Event, ItemId, MemberId, NetConfig, TaskId};
+use distlib_core::{DataDir, Event, ItemId, MemberId, TaskId};
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::Instant;
 
 mod common;
-use common::{bound, config, init_logging, record, until_projected};
+use common::{api, bound, config, init_logging, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
 
 /// How long a beat every second is believed for: three of them.
 const TTL: Duration = Duration::from_secs(3);
-
-/// An `Api` wired to `runtime`'s own pieces, as `library.rs` has it.
-fn api(runtime: &Runtime, key: &SecretKey) -> Api {
-    Api {
-        node: Arc::clone(runtime.node()),
-        secret: key.clone(),
-        net: NetConfig::default(),
-        reindex_handle: runtime.projection().reindex_handle(),
-        catalogue: runtime.catalogue().clone(),
-        blobs: runtime.blobs().clone(),
-        store: runtime.store().clone(),
-        search: runtime.search().clone(),
-        availability: runtime.availability().clone(),
-        tasks: runtime.tasks().clone(),
-        downloads: runtime.downloads().to_path_buf(),
-        uploads: runtime.uploads().clone(),
-    }
-}
 
 /// A group founded by `keys`, each a whole runtime beating every second.
 async fn a_group<const N: usize>(dir: &Path, keys: [&SecretKey; N]) -> [Runtime; N] {
