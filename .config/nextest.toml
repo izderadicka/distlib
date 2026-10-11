@@ -18,3 +18,10 @@ test-threads = 8
 # hour later — cancelled, with nothing to say which step it was stuck on.
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# `scripts/mutate.py` (`--profile mutants`): a mutation only needs one failing
+# test, so the run stops at the first; and one that makes a test hang counts
+# as caught once the test has run for two minutes.
+[profile.mutants]
+fail-fast = true
+slow-timeout = { period = "30s", terminate-after = 4 }
