@@ -23,6 +23,9 @@ const MLOCI: ItemRecord = {
   files: {},
   last_modified: 1790521054348270,
   availability: { held: false, providers: 1 },
+  ratings: { average: null, count: 0, mine: null },
+  reviews: [],
+  bookmarks: [],
 };
 
 function open(item = MLOCI) {

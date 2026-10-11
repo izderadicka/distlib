@@ -1,6 +1,6 @@
 // How the pages write numbers a person reads.
 
-import type { Availability } from "./rpc";
+import type { Availability, Ratings } from "./rpc";
 
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
@@ -32,4 +32,24 @@ export function availability({ held, providers }: Availability): string {
     : providers === 0 ? "none online"
     : `${providers} online`;
   return held ? `held here, ${online}` : online;
+}
+
+/** Current members' ratings in a phrase: `4.5 from 2 ratings`, `not rated yet`. */
+export function ratingSummary({ average, count }: Ratings): string {
+  if (average === null) {
+    return "not rated yet";
+  }
+  return `${average.toFixed(1)} from ${count} ${count === 1 ? "rating" : "ratings"}`;
+}
+
+/**
+ * Who a member is, to a person: `you` for this node's own, the name the
+ * group knows them by, or the start of their id while their name is not
+ * known here.
+ */
+export function memberName(member: string, names: ReadonlyMap<string, string>, me: string | null): string {
+  if (member === me) {
+    return "you";
+  }
+  return names.get(member) || `${member.slice(0, 8)}…`;
 }

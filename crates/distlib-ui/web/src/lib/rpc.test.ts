@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { call, RpcError, Unauthorised } from "./rpc";
+import { call, failureOf, RpcError, Unauthorised } from "./rpc";
 import { token } from "./token";
 
 /** A `fetch` that answers every request with `status` and `body`. */
@@ -67,5 +67,29 @@ describe("the RPC client", () => {
 
     await expect(call("node.status", null)).rejects.toBeInstanceOf(Unauthorised);
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("what went wrong with a write", () => {
+  it("is nothing when it succeeded", async () => {
+    const onUnauthorised = vi.fn();
+    expect(await failureOf(async () => "done", onUnauthorised)).toBeNull();
+    expect(onUnauthorised).not.toHaveBeenCalled();
+  });
+
+  it("is the node's own words when it refused", async () => {
+    const refused = failureOf(async () => {
+      throw new RpcError(-32000, "no such item");
+    }, vi.fn());
+    expect(await refused).toBe("no such item");
+  });
+
+  it("is handed up, not shown, when the token was refused", async () => {
+    const onUnauthorised = vi.fn();
+    const refused = failureOf(async () => {
+      throw new Unauthorised();
+    }, onUnauthorised);
+    expect(await refused).toBeNull();
+    expect(onUnauthorised).toHaveBeenCalled();
   });
 });

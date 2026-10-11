@@ -97,6 +97,32 @@ export interface FileRecord {
   duration?: number;
 }
 
+/** Current members' ratings of one item. */
+export interface Ratings {
+  /** `null` while nobody has rated it. */
+  average: number | null;
+  count: number;
+  /** This node's member's own, one to five. */
+  mine: number | null;
+}
+
+/** One member's review of an item. */
+export interface ReviewRecord {
+  member: string;
+  review: string;
+}
+
+/** One member's bookmark on an item. */
+export interface BookmarkRecord {
+  member: string;
+  bookmark_id: string;
+  position: string;
+  note: string;
+  /** Microseconds since the epoch, both. */
+  created_at: number;
+  last_modified: number;
+}
+
 /** `library.item`: everything the read model holds for one item. */
 export interface ItemRecord extends ItemSummary {
   lang: string | null;
@@ -107,6 +133,9 @@ export interface ItemRecord extends ItemSummary {
   /** Microseconds since the epoch. */
   last_modified: number;
   availability: Availability;
+  ratings: Ratings;
+  reviews: ReviewRecord[];
+  bookmarks: BookmarkRecord[];
 }
 
 /** How far a download has got, in bytes and in files written. */
@@ -161,6 +190,19 @@ interface Methods {
   /** Without `dest`: into the node's own `[library] download_dir`. */
   "library.download": { params: { item_id: string }; result: { task_id: number } };
   "library.task": { params: { task_id: number }; result: TaskState };
+  /** `rating: null` clears this member's rating. */
+  "community.rate": { params: { item_id: string; rating: number | null }; result: { item_id: string } };
+  /** `review: null` clears this member's review. */
+  "community.review": { params: { item_id: string; review: string | null }; result: { item_id: string } };
+  /** With `bookmark_id`: edits that bookmark of this member's; without, leaves a new one. */
+  "community.bookmark": {
+    params: { item_id: string; bookmark_id?: string; position: string; note: string };
+    result: { item_id: string; bookmark_id: string };
+  };
+  "community.bookmark_delete": {
+    params: { item_id: string; bookmark_id: string };
+    result: { item_id: string; bookmark_id: string };
+  };
 }
 
 /** The node answered, and the answer was an error. */
@@ -207,4 +249,22 @@ export async function call<M extends keyof Methods>(
     throw new RpcError(answer.error.code, answer.error.message);
   }
   return answer.result;
+}
+
+/**
+ * Runs `action` and answers what went wrong, in words, or `null` if nothing
+ * did. A refused token is handed to `onUnauthorised` rather than shown: the
+ * tab has to be signed in again, which is not this page's to say.
+ */
+export async function failureOf(action: () => Promise<unknown>, onUnauthorised: () => void): Promise<string | null> {
+  try {
+    await action();
+    return null;
+  } catch (error) {
+    if (error instanceof Unauthorised) {
+      onUnauthorised();
+      return null;
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
 }

@@ -194,3 +194,26 @@ test("an item's details are edited from its page", async ({ page, node }) => {
   await expect(page.getByText("1920")).toBeVisible();
   await expect(page.getByText("Karel Čapek")).toBeVisible();
 });
+
+test("an item is rated, reviewed and bookmarked from its page", async ({ page, node }) => {
+  node.add("hordubal.epub", "a novel", "--kind", "ebook", "--title", "Hordubal");
+  await page.goto(node.link);
+  await page.getByRole("link", { name: "Hordubal" }).click();
+
+  // Each is read back from the node once it has been projected, the way
+  // another member would see it.
+  await page.getByRole("button", { name: "4 stars" }).click();
+  await expect(page.getByText("4.0 from 1 rating")).toBeVisible();
+  await expect(page.getByRole("button", { name: "4 stars" })).toHaveAttribute("aria-pressed", "true");
+
+  await page.getByLabel("Your review").fill("Čapek at his quietest.");
+  await page.getByRole("button", { name: "Save review" }).click();
+  await expect(page.getByRole("button", { name: "Clear review" })).toBeVisible();
+
+  await page.getByLabel("Position").fill("p. 12");
+  await page.getByLabel("Note").fill("the farm");
+  await page.getByRole("button", { name: "Add bookmark" }).click();
+  const bookmark = rows(page).filter({ hasText: "p. 12" });
+  await expect(bookmark).toContainText("you");
+  await expect(bookmark).toContainText("the farm");
+});
