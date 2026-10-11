@@ -23,8 +23,8 @@ use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, Config, DataDir, Item, ItemId, MemberId, NodeAddr, Rating,
-    Review, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, Comment, Config, DataDir, Event, Item, ItemId, MemberId, NodeAddr,
+    Rating, Review, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_store::{Store, StoredBookmark, StoredItem, StoredWish};
 use iroh::SecretKey;
@@ -1026,6 +1026,100 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
     for (who, api, _) in &apis {
         library_item_when(api, item, who, |answer| answer["reviews"] == json!([])).await;
     }
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
+}
+
+/// **4c-3b's acceptance:** two bookmarks bob leaves on one item both reach
+/// every node, and carol finds one by a word from its note, but cannot delete
+/// it. Alice is told `bookmark.changed`, and bob's deleting one reaches her.
+#[tokio::test]
+async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
+    let group = a_group_with_two_followers().await;
+    let alices_api = api(&group.alice, &group.alice_key);
+    let bobs_api = api(&group.bob, &group.bob_key);
+    let carols_api = api(&group.carol, &group.carol_key);
+    let bob_id = MemberId::from(group.bob_key.public());
+    let item = ItemId::from_bytes([5; 32]);
+    group
+        .alice
+        .catalogue()
+        .write(&Item {
+            title: Some("Dune".to_owned()),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
+    for (who, runtime) in [
+        ("alice", &group.alice),
+        ("bob", &group.bob),
+        ("carol", &group.carol),
+    ] {
+        until_projected(runtime, item, 0, who).await;
+    }
+    let mut alice_hears = group.alice.events().subscribe();
+
+    let mut made = Vec::new();
+    for (position, note) in [
+        ("p. 12", "the spice must flow"),
+        ("p. 40", "Arrakis at night"),
+    ] {
+        let answer = bobs_api
+            .call(
+                "community.bookmark",
+                Some(json!({ "item_id": item, "position": position, "note": note })),
+            )
+            .await
+            .unwrap();
+        made.push(answer["bookmark_id"].clone());
+    }
+    for (who, api) in [("alice", &alices_api), ("carol", &carols_api)] {
+        library_item_when(api, item, who, |answer| {
+            answer["bookmarks"]
+                .as_array()
+                .is_some_and(|all| all.len() == 2)
+        })
+        .await;
+    }
+    let found = carols_api
+        .call("community.bookmarks", Some(json!({ "q": "arrakis" })))
+        .await
+        .unwrap();
+    let found = found["bookmarks"].as_array().unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["bookmark_id"], made[1]);
+    assert_eq!(found[0]["member"], json!(bob_id));
+    assert_eq!(found[0]["member_name"], json!("bob"));
+    assert_eq!(found[0]["title"], json!("Dune"));
+    carols_api
+        .call(
+            "community.bookmark_delete",
+            Some(json!({ "item_id": item, "bookmark_id": made[1] })),
+        )
+        .await
+        .expect_err("a bookmark is deleted only by its member");
+    tokio::time::timeout(SOON, async {
+        while alice_hears.recv().await.unwrap() != (Event::BookmarkChanged { item_id: item }) {}
+    })
+    .await
+    .expect("alice is told the item's bookmarks changed");
+
+    bobs_api
+        .call(
+            "community.bookmark_delete",
+            Some(json!({ "item_id": item, "bookmark_id": made[0] })),
+        )
+        .await
+        .unwrap();
+    let answer = library_item_when(&alices_api, item, "alice", |answer| {
+        answer["bookmarks"]
+            .as_array()
+            .is_some_and(|all| all.len() == 1)
+    })
+    .await;
+    assert_eq!(answer["bookmarks"][0]["bookmark_id"], made[1]);
 
     group.carol.shutdown().await;
     group.bob.shutdown().await;

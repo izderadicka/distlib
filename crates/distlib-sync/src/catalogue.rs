@@ -597,6 +597,16 @@ impl Catalogue {
         self.put(key.encode(), bookmark.encode()).await
     }
 
+    /// Deletes this node's member's bookmark `id` on `item`, if there is one.
+    pub async fn delete_bookmark(&self, item: ItemId, id: BookmarkId) -> Result<()> {
+        let key = CommunityKey::Bookmark {
+            item,
+            member: self.inner.me,
+            bookmark: id,
+        };
+        self.delete(key.encode()).await
+    }
+
     /// Writes this node's member's entry for `wish`: creating it, or
     /// fulfilling it, or both (D10). Replaces this member's earlier entry.
     pub async fn wish(&self, wish: WishId, entry: &Wish) -> Result<()> {

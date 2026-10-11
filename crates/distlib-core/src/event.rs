@@ -63,6 +63,12 @@ pub enum Event {
     #[serde(rename = "availability.changed")]
     AvailabilityChanged { member_id: MemberId },
 
+    /// An item's bookmarks were re-read and written again: one was made,
+    /// edited or deleted. `library.item` and `community.bookmarks` say what
+    /// they are now.
+    #[serde(rename = "bookmark.changed")]
+    BookmarkChanged { item_id: ItemId },
+
     /// How far a download has got, in bytes and in files, across all of the
     /// files it is fetching.
     ///
@@ -126,6 +132,7 @@ impl Event {
             Self::ItemAdded { .. } => "catalogue.item_added",
             Self::ItemChanged { .. } => "catalogue.item_changed",
             Self::AvailabilityChanged { .. } => "availability.changed",
+            Self::BookmarkChanged { .. } => "bookmark.changed",
             Self::DownloadProgress { .. } => "download.progress",
             Self::DownloadFinished { .. } => "download.finished",
             Self::DownloadFailed { .. } => "download.failed",

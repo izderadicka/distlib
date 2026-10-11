@@ -8,15 +8,18 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
-    ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind, MemberId, NetConfig,
-    NodeAddr, Rating, Review, Series, TaskId, Ticket,
+    Bookmark, BookmarkId, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind,
+    MemberId, NetConfig, NodeAddr, Rating, Review, Series, TaskId, Ticket,
 };
 use distlib_net::{Blobs, NetError};
-use distlib_store::{ReindexHandle, SearchIndex, Store, StoreError, StoredItem};
+use distlib_store::{
+    BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
+};
 use distlib_sync::{Availability, Catalogue, SyncError, SyncState};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
@@ -107,6 +110,9 @@ impl Api {
             "library.edit_metadata" => self.edit_metadata(parse(params)?).await,
             "community.rate" => self.rate(parse(params)?).await,
             "community.review" => self.review(parse(params)?).await,
+            "community.bookmark" => self.bookmark(parse(params)?).await,
+            "community.bookmark_delete" => self.bookmark_delete(parse(params)?).await,
+            "community.bookmarks" => self.bookmarks(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -460,8 +466,8 @@ impl Api {
 
     /// `library.item` — the full record the read model holds for one item;
     /// its `availability`: `held`, `providers`, and the online `holders` and
-    /// `unknown` members behind them; and current members' `ratings` and
-    /// `reviews`.
+    /// `unknown` members behind them; and current members' `ratings`,
+    /// `reviews` and `bookmarks`.
     async fn item(&self, params: ItemParams) -> Result<Value, Error> {
         let stored = self
             .store
@@ -482,6 +488,14 @@ impl Api {
             .reviews
             .iter()
             .map(|(member, review)| json!({ "member": member, "review": review }))
+            .collect();
+        record["bookmarks"] = self
+            .store
+            .bookmarks_of(params.item_id)
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .iter()
+            .map(bookmark_json)
             .collect();
         Ok(record)
     }
@@ -550,6 +564,90 @@ impl Api {
         }
         .map_err(sync_error)?;
         Ok(json!({ "item_id": item_id }))
+    }
+
+    /// `community.bookmark` — leaves a bookmark on an item as this node's
+    /// member, or edits one of its own when `bookmark_id` names it. An edit
+    /// keeps when the bookmark was made.
+    async fn bookmark(&self, params: BookmarkParams) -> Result<Value, Error> {
+        let BookmarkParams {
+            item_id,
+            bookmark_id,
+            position,
+            note,
+        } = params;
+        self.refuse_unknown_item(item_id).await?;
+        let (bookmark_id, created_at) = match bookmark_id {
+            Some(id) => (id, self.own_bookmark(item_id, id).await?.created_at()),
+            None => (
+                BookmarkId::random().map_err(|error| Error::failed(error.to_string()))?,
+                micros_since_epoch(SystemTime::now()),
+            ),
+        };
+        let bookmark = Bookmark::new(position, note, created_at)
+            .map_err(|error| Error::invalid_params(error.to_string()))?;
+        self.catalogue
+            .bookmark(item_id, bookmark_id, &bookmark)
+            .await
+            .map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id, "bookmark_id": bookmark_id }))
+    }
+
+    /// `community.bookmark_delete` — deletes one of this node's member's
+    /// bookmarks.
+    async fn bookmark_delete(&self, params: BookmarkDelete) -> Result<Value, Error> {
+        let BookmarkDelete {
+            item_id,
+            bookmark_id,
+        } = params;
+        self.own_bookmark(item_id, bookmark_id).await?;
+        self.catalogue
+            .delete_bookmark(item_id, bookmark_id)
+            .await
+            .map_err(sync_error)?;
+        Ok(json!({ "item_id": item_id, "bookmark_id": bookmark_id }))
+    }
+
+    /// `community.bookmarks` — current members' bookmarks, newest first,
+    /// narrowed by `q` (text in the note, the item's title or the member's
+    /// name), `member` and `item_id`. "Mine" is `member` set to this node's
+    /// own (D13).
+    async fn bookmarks(&self, params: Bookmarks) -> Result<Value, Error> {
+        let Bookmarks { q, member, item_id } = params;
+        let found = self
+            .store
+            .find_bookmarks(BookmarkFilter {
+                text: q,
+                member,
+                item: item_id,
+            })
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?;
+        let bookmarks: Vec<Value> = found
+            .iter()
+            .map(|listed| {
+                let mut value = bookmark_json(&listed.stored);
+                value["item_id"] = json!(listed.item);
+                value["title"] = json!(listed.item_title);
+                value["member_name"] = json!(listed.member_name);
+                value
+            })
+            .collect();
+        Ok(json!({ "bookmarks": bookmarks }))
+    }
+
+    /// This node's member's bookmark `id` on `item_id`, as the document holds
+    /// it, or a refusal saying there is none.
+    async fn own_bookmark(&self, item_id: ItemId, id: BookmarkId) -> Result<Bookmark, Error> {
+        let me = self.node.id();
+        self.catalogue
+            .bookmarks(item_id)
+            .await
+            .map_err(sync_error)?
+            .into_iter()
+            .find(|read| read.member == me && read.id == id)
+            .map(|read| read.bookmark)
+            .ok_or_else(|| Error::failed(format!("you have no bookmark {id} on {item_id}")))
     }
 
     /// Refuses an item this node's document has no entry of: writing about it
@@ -1277,16 +1375,31 @@ fn sync_block(sync: &SyncState) -> Value {
         .last_sync
         .iter()
         .map(|(member, last)| {
-            let finished = last
-                .finished
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| {
-                    u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
-                });
+            let finished = micros_since_epoch(last.finished);
             json!({ "member": member, "finished": finished, "ok": last.ok })
         })
         .collect();
     json!({ "neighbours": sync.neighbours, "last_sync": last_sync })
+}
+
+/// `time` in microseconds since the epoch, as every time in this API is. A
+/// clock before 1970 gives 0 rather than an error.
+fn micros_since_epoch(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+    })
+}
+
+/// One bookmark as `library.item` and `community.bookmarks` give it.
+fn bookmark_json(stored: &StoredBookmark) -> Value {
+    json!({
+        "member": stored.member,
+        "bookmark_id": stored.id,
+        "position": stored.bookmark.position(),
+        "note": stored.bookmark.note(),
+        "created_at": stored.bookmark.created_at(),
+        "last_modified": stored.last_modified,
+    })
 }
 
 /// A search or list hit: the summary, `held` and `providers`.
@@ -1674,6 +1787,39 @@ struct ReviewParams {
     /// Required: `null` clears, as [`Rate::rating`].
     #[serde(deserialize_with = "Option::deserialize")]
     review: Option<Review>,
+}
+
+/// `community.bookmark`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BookmarkParams {
+    item_id: ItemId,
+    /// One of this member's bookmarks to edit; a new one when left out.
+    #[serde(default)]
+    bookmark_id: Option<BookmarkId>,
+    position: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// `community.bookmark_delete`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BookmarkDelete {
+    item_id: ItemId,
+    bookmark_id: BookmarkId,
+}
+
+/// `community.bookmarks`' params: each one given narrows the list.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Bookmarks {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    member: Option<MemberId>,
+    #[serde(default)]
+    item_id: Option<ItemId>,
 }
 
 /// `library.download`'s params.

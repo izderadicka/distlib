@@ -23,7 +23,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind,
     MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_store::{Store, StoredBookmark, StoredItem, StoredMember, StoredWish};
+use distlib_store::{BookmarkFilter, Store, StoredBookmark, StoredItem, StoredMember, StoredWish};
 use proptest::prelude::*;
 
 /// A store with nothing in it, in memory.
@@ -480,6 +480,148 @@ async fn members_are_replaced_rather_than_merged() {
         store.members().await.expect("read"),
         vec![member(alice, "alice", true)],
     );
+}
+
+/// `find_bookmarks` narrows by text in the note, the item's title or the
+/// member's name — case aside, and with `%` and `_` meaning themselves — and
+/// by member and item; newest first.
+#[tokio::test]
+async fn bookmarks_are_found_by_text_member_and_item() {
+    let store = empty().await;
+    let alice = MemberId::from(iroh::SecretKey::from_bytes(&[1; 32]).public());
+    let bob = MemberId::from(iroh::SecretKey::from_bytes(&[2; 32]).public());
+    store
+        .set_members(
+            [(alice, "alice"), (bob, "bob")]
+                .map(|(member, name)| StoredMember {
+                    member,
+                    display_name: name.to_owned(),
+                    pledge_bytes: 0,
+                    is_core: false,
+                })
+                .to_vec(),
+        )
+        .await
+        .expect("written");
+    let dune = ItemId::from_bytes([1; 32]);
+    let hordubal = ItemId::from_bytes([2; 32]);
+    let not_projected = ItemId::from_bytes([9; 32]);
+    for (id, title) in [(dune, "Dune"), (hordubal, "Hordubal")] {
+        store
+            .upsert_item(StoredItem {
+                item: Item {
+                    title: Some(title.to_owned()),
+                    ..Item::new(id)
+                },
+                ratings: BTreeMap::new(),
+                reviews: BTreeMap::new(),
+                last_modified: 1,
+            })
+            .await
+            .expect("written");
+    }
+    let bookmark = |member, id: u8, note: &str, created_at| StoredBookmark {
+        member,
+        id: BookmarkId::from_bytes([id; 16]),
+        bookmark: Bookmark::new("p. 1".to_owned(), note.to_owned(), created_at)
+            .expect("a short bookmark"),
+        last_modified: created_at,
+    };
+    let alices_on_dune = bookmark(alice, 1, "the spice must flow, axb", 4);
+    let bobs_on_dune = bookmark(bob, 2, "100% sure: a_b", 3);
+    let bobs_on_hordubal = bookmark(bob, 3, "the ending", 2);
+    let alices_elsewhere = bookmark(alice, 4, "", 1);
+    store
+        .replace_bookmarks(dune, vec![alices_on_dune.clone(), bobs_on_dune.clone()])
+        .await
+        .expect("written");
+    store
+        .replace_bookmarks(hordubal, vec![bobs_on_hordubal.clone()])
+        .await
+        .expect("written");
+    store
+        .replace_bookmarks(not_projected, vec![alices_elsewhere.clone()])
+        .await
+        .expect("written");
+
+    let found = |filter: BookmarkFilter| {
+        let store = store.clone();
+        async move {
+            store
+                .find_bookmarks(filter)
+                .await
+                .expect("read")
+                .into_iter()
+                .map(|listed| listed.stored)
+                .collect::<Vec<_>>()
+        }
+    };
+    let text = |text: &str| BookmarkFilter {
+        text: Some(text.to_owned()),
+        ..BookmarkFilter::default()
+    };
+
+    assert_eq!(
+        found(BookmarkFilter::default()).await,
+        [
+            &alices_on_dune,
+            &bobs_on_dune,
+            &bobs_on_hordubal,
+            &alices_elsewhere
+        ]
+        .map(Clone::clone),
+        "everything, newest first"
+    );
+    assert_eq!(
+        found(text("SPICE")).await,
+        std::slice::from_ref(&alices_on_dune),
+        "the note"
+    );
+    assert_eq!(
+        found(text("dune")).await,
+        [alices_on_dune.clone(), bobs_on_dune.clone()],
+        "the item's title"
+    );
+    assert_eq!(
+        found(text("Bob")).await,
+        [bobs_on_dune.clone(), bobs_on_hordubal.clone()],
+        "the member's name"
+    );
+    assert_eq!(
+        found(text("%")).await,
+        std::slice::from_ref(&bobs_on_dune),
+        "`%` is itself"
+    );
+    assert_eq!(
+        found(text("a_b")).await,
+        std::slice::from_ref(&bobs_on_dune),
+        "`_` is itself"
+    );
+    assert_eq!(
+        found(BookmarkFilter {
+            member: Some(bob),
+            item: Some(dune),
+            ..BookmarkFilter::default()
+        })
+        .await,
+        std::slice::from_ref(&bobs_on_dune),
+        "one member's, on one item"
+    );
+
+    let listed = store
+        .find_bookmarks(BookmarkFilter {
+            item: Some(not_projected),
+            ..BookmarkFilter::default()
+        })
+        .await
+        .expect("read");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].item, not_projected);
+    assert_eq!(
+        listed[0].item_title, None,
+        "an item not projected has no title"
+    );
+    assert_eq!(listed[0].member_name.as_deref(), Some("alice"));
 }
 
 /// The schema is created by opening, and opening again finds it already there.

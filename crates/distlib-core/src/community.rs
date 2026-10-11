@@ -182,11 +182,35 @@ macro_rules! random_id {
             pub const fn from_bytes(bytes: [u8; $len]) -> Self {
                 Self(bytes)
             }
+
+            /// A new id, from the operating system's random source.
+            pub fn random() -> Result<Self, CoreError> {
+                let mut bytes = [0; $len];
+                getrandom::fill(&mut bytes).map_err(|error| CoreError::Random {
+                    message: error.to_string(),
+                })?;
+                Ok(Self(bytes))
+            }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(&HEXLOWER.encode(&self.0))
+            }
+        }
+
+        // A readable string in JSON, as `MemberId` is.
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_str(self)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                String::deserialize(deserializer)?
+                    .parse()
+                    .map_err(serde::de::Error::custom)
             }
         }
 

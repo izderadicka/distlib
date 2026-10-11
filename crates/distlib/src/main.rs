@@ -48,6 +48,25 @@ async fn main() -> Result<()> {
             item_id, rating, ..
         } => commands::rate(&paths, item_id, rating).await,
         Command::Review { item_id, text, .. } => commands::review(&paths, item_id, text).await,
+        Command::Bookmark {
+            item_id,
+            position,
+            note,
+            edit,
+            delete,
+        } => match delete {
+            Some(bookmark_id) => commands::delete_bookmark(&paths, item_id, bookmark_id).await,
+            // Clap requires a position whenever `--delete` is not given.
+            None => {
+                commands::bookmark(&paths, item_id, edit, position.unwrap_or_default(), note).await
+            }
+        },
+        Command::Bookmarks {
+            query,
+            mine,
+            member,
+            item,
+        } => commands::bookmarks(&paths, query, mine, member, item).await,
         Command::Add {
             files,
             kind,

@@ -39,4 +39,7 @@ pub mod store;
 pub use error::{Result, StoreError};
 pub use index::SearchIndex;
 pub use projection::{Projection, ReindexHandle};
-pub use store::{Page, Store, StoredBookmark, StoredItem, StoredMember, StoredWish, Upserted};
+pub use store::{
+    BookmarkFilter, ListedBookmark, Page, Store, StoredBookmark, StoredItem, StoredMember,
+    StoredWish, Upserted,
+};
