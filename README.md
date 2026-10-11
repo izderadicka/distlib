@@ -511,7 +511,7 @@ Mutation checks come in two layers:
   - A mutation those tests miss is run against the whole suite before it is
     called a survivor.
   - Its docstring gives the file format.
-- **`cargo mutants --in-diff <diff>`** ([cargo-mutants](https://mutants.rs))
+- **`cargo mutants --test-workspace=true --minimum-test-timeout=300 --in-diff <diff>`** ([cargo-mutants](https://mutants.rs))
   makes mechanical mutations of every changed Rust function and runs the whole
   workspace's tests on each, set up in `.cargo/mutants.toml`.
   - It builds a copy of the tree, so it can run in the background.

@@ -1,8 +1,12 @@
-# cargo-mutants (`cargo mutants --in-diff <diff>`): mechanical mutations of the
-# Rust a branch changed, beside the hand-written ones `scripts/mutate.py` runs.
-# Every test in the workspace, with every feature, since most of a crate's
+# cargo-mutants: mechanical mutations of the Rust a branch changed, beside the
+# hand-written ones `scripts/mutate.py` runs.
+#
+#   cargo mutants --test-workspace=true --minimum-test-timeout=300 --in-diff <diff>
+#
+# Every test in the workspace runs on each mutation, since most of a crate's
 # behaviour is tested from the crates above it — `distlib-api`'s downloads
-# from `distlib`'s tests, for one.
+# from `distlib`'s tests, for one. The unmutated baseline still runs only the
+# mutated crate's tests, so the timeout it would set is too short for the
+# cluster tests; hence the minimum.
 test_tool = "nextest"
-test_workspace = true
 additional_cargo_args = ["--all-features"]
