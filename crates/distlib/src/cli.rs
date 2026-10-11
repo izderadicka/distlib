@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
-use distlib_core::{BookmarkId, ContentHash, ItemId, MemberId};
+use distlib_core::{BookmarkId, ContentHash, ItemId, MemberId, WishId};
 
 /// Distributed community media library for closed, trusted groups.
 #[derive(Debug, Parser)]
@@ -318,6 +318,12 @@ pub enum Command {
         item: Option<ItemId>,
     },
 
+    /// Wishes: what members would like the library to have.
+    Wish {
+        #[command(subcommand)]
+        command: WishCommand,
+    },
+
     /// Add a file set to the catalogue as one item (2b-2, §6.1).
     ///
     /// Every file given is `role: content` — the set §5.2's `item_id`
@@ -422,6 +428,62 @@ pub enum Kind {
 }
 
 /// `distlib admin <...>`
+/// `distlib wish ...`
+#[derive(Debug, Subcommand)]
+pub enum WishCommand {
+    /// Wish for something, as this node's member.
+    Create {
+        /// What is wished for.
+        title: String,
+
+        /// What kind of item it would be.
+        #[arg(long, value_enum)]
+        kind: Option<Kind>,
+
+        /// An author. May be repeated.
+        #[arg(long = "author")]
+        authors: Vec<String>,
+
+        /// More about it.
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List the group's wishes, newest first, with their comments.
+    List {
+        /// Only the ones nobody has fulfilled.
+        #[arg(long, conflicts_with = "fulfilled")]
+        open: bool,
+
+        /// Only the fulfilled ones.
+        #[arg(long)]
+        fulfilled: bool,
+    },
+
+    /// Comment on a wish as this node's member, or clear the comment.
+    Comment {
+        /// The wish, as `distlib wish list` prints it.
+        wish_id: WishId,
+
+        /// The comment. One per member per wish: a second replaces the first.
+        #[arg(required_unless_present = "clear")]
+        text: Option<String>,
+
+        /// Clear this member's comment instead.
+        #[arg(long, conflicts_with = "text")]
+        clear: bool,
+    },
+
+    /// Say that an item in the catalogue answers a wish.
+    Fulfill {
+        /// The wish, as `distlib wish list` prints it.
+        wish_id: WishId,
+
+        /// The item that answers it, as `distlib search` prints it.
+        item_id: ItemId,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
     /// Rebuild the read model and search index from the document.

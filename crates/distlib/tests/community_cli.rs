@@ -1,6 +1,6 @@
-//! The community commands through the binary: `rate`, `review`, `bookmark`
-//! and `bookmarks`, and what `item` shows of them. One node; `catalogue.rs`
-//! covers a group.
+//! The community commands through the binary: `rate`, `review`, `bookmark`,
+//! `bookmarks` and `wish`, and what `item` shows of them. One node;
+//! `catalogue.rs` covers a group.
 
 // Builds the binary and runs a node of it.
 #![cfg(feature = "slow-tests")]
@@ -86,6 +86,36 @@ fn a_member_bookmarks_an_item_twice_finds_one_edits_it_and_deletes_the_other() {
     until_output(at, &["bookmarks"], "one bookmark, edited", |out| {
         out.contains("at p. 13") && !out.contains("at p. 12") && !out.contains(&second)
     });
+
+    node.stop();
+}
+
+#[test]
+fn a_member_wishes_comments_and_fulfils_the_wish_with_an_item() {
+    let alice = Friend::introduce();
+    let (node, item) = a_node_with_a_book(&alice);
+    let at = alice.dir.path();
+
+    // `wished      {wish}  {title}`
+    let made = run_command(
+        at,
+        &["wish", "create", "Hordubal", "--author", "Karel Capek"],
+    );
+    let wish = made.split_whitespace().nth(1).unwrap().to_owned();
+    until_output(at, &["wish", "list", "--open"], "the wish, open", |out| {
+        out.contains(&format!("{wish}  Hordubal  [open]"))
+    });
+
+    run_command(at, &["wish", "comment", &wish, "On paper, please"]);
+    run_command(at, &["wish", "fulfill", &wish, &item]);
+    let fulfilled = until_output(
+        at,
+        &["wish", "list", "--fulfilled"],
+        "the wish, fulfilled",
+        |out| out.contains(&format!("with {item}")) && out.contains("On paper, please"),
+    );
+    assert!(fulfilled.contains("[fulfilled]"), "{fulfilled}");
+    assert!(fulfilled.contains("Karel Capek"), "{fulfilled}");
 
     node.stop();
 }

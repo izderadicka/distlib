@@ -2,10 +2,12 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
+use std::collections::BTreeMap;
+
 use distlib_core::{
     Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ItemId, ItemKind, Key,
-    MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, Review, WISH_MAX_BYTES,
-    Wish, WishFields, WishId, WishStatus,
+    MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, ResolvedWish, Review,
+    WISH_MAX_BYTES, Wish, WishFields, WishId, WishStatus,
 };
 use iroh::SecretKey;
 use serde_json::json;
@@ -412,4 +414,71 @@ fn a_wish_id_is_thirty_two_bytes_of_lowercase_hex() {
     for text in [&"cd".repeat(16), &"CD".repeat(32), &"cd".repeat(33)] {
         assert!(text.parse::<WishId>().is_err(), "{text}");
     }
+}
+
+/// A wish entry saying only what is given.
+fn wish_entry(title: Option<&str>, created_at: Option<u64>, status: WishStatus) -> Wish {
+    Wish::new(WishFields {
+        kind: None,
+        title: title.map(str::to_owned),
+        authors: None,
+        description: None,
+        created_at,
+        status,
+    })
+    .unwrap()
+}
+
+/// D10: the creator is whoever's entry carrying a title was made earliest,
+/// and every member's fulfilment is kept.
+#[test]
+fn a_wish_resolves_to_its_earliest_titled_entry_and_every_fulfilment() {
+    let [alice, bob, carol] = [member(), member(), member()];
+    let hordubal = ItemId::from_bytes([4; 32]);
+    let krakatit = ItemId::from_bytes([5; 32]);
+    let entries = BTreeMap::from([
+        (
+            alice,
+            wish_entry(Some("Hordubal"), Some(2), WishStatus::Open),
+        ),
+        // Earlier, but no title: a fulfiller says nothing of what is wished.
+        (
+            bob,
+            wish_entry(None, Some(1), WishStatus::Fulfilled { item_id: hordubal }),
+        ),
+        // A title too, but later than alice's.
+        (
+            carol,
+            wish_entry(
+                Some("Hordubal, again"),
+                Some(3),
+                WishStatus::Fulfilled { item_id: krakatit },
+            ),
+        ),
+    ]);
+
+    let resolved = ResolvedWish::resolve(&entries).unwrap();
+    assert_eq!(resolved.creator, alice);
+    assert_eq!(resolved.wished.title.as_deref(), Some("Hordubal"));
+    assert_eq!(
+        resolved.fulfilled_by,
+        BTreeMap::from([(bob, hordubal), (carol, krakatit)])
+    );
+    assert!(resolved.is_fulfilled());
+}
+
+/// Fulfilments alone are no wish: what was wished for is not known.
+#[test]
+fn a_wish_without_a_titled_entry_does_not_resolve() {
+    let entries = BTreeMap::from([(
+        member(),
+        wish_entry(
+            None,
+            Some(1),
+            WishStatus::Fulfilled {
+                item_id: ItemId::from_bytes([4; 32]),
+            },
+        ),
+    )]);
+    assert_eq!(ResolvedWish::resolve(&entries), None);
 }

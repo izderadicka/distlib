@@ -254,7 +254,7 @@ async fn run(
                 }
                 let mut written = writer.project_items(items).await;
                 written.extend(writer.project_bookmarks(items_with_changed_bookmarks).await);
-                writer.project_wishes(changed_wishes).await;
+                written.extend(writer.project_wishes(changed_wishes).await);
                 for event in written {
                     // Nobody watching is the ordinary case. Never awaited: a
                     // watcher that falls behind is skipped past, and this task
@@ -423,8 +423,10 @@ impl ReadModelWriter {
 
     /// Re-reads each wish and writes its entries and comments over what the
     /// tables held, current members' only; a wish with no entry is empty.
-    /// Failures are logged per wish, as in [`Self::project_items`].
-    async fn project_wishes(&mut self, wishes: BTreeSet<WishId>) {
+    /// Failures are logged per wish, as in [`Self::project_items`], and what
+    /// it wrote is returned as events.
+    async fn project_wishes(&mut self, wishes: BTreeSet<WishId>) -> Vec<Event> {
+        let mut written = Vec::new();
         for wish in wishes {
             let mut read = match self.catalogue.read_wish(wish).await {
                 Ok(read) => read,
@@ -452,10 +454,14 @@ impl ReadModelWriter {
                 entries: read.entries,
                 comments: read.comments,
             };
-            if let Err(error) = self.store.replace_wish(wish, stored).await {
-                tracing::warn!(%wish, %error, "could not write a wish to the read model");
+            match self.store.replace_wish(wish, stored).await {
+                Ok(()) => written.push(Event::WishChanged { wish_id: wish }),
+                Err(error) => {
+                    tracing::warn!(%wish, %error, "could not write a wish to the read model");
+                }
             }
         }
+        written
     }
 
     /// Re-reads everything in the document into the read model: every item,

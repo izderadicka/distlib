@@ -853,6 +853,25 @@ Needs only 4a-1, so it can interleave with 4b.
   **Acceptance:** A creates a wish, B comments, C fulfils it with an item; A sees it fulfilled and
   linked to the item.
 
+  *As built, one PR (Ivan's call):*
+  - **Resolution (D10) is `ResolvedWish::resolve`** in `distlib-core`, from current members'
+    entries: the creator is whoever's entry carrying a title has the earliest `created_at` (the
+    lower member id on a tie), and what is wished for is that entry. **Every fulfilment is kept**
+    (Ivan's call): `fulfilled_by` lists each member whose entry says fulfilled, with its item, and
+    the wish is `fulfilled` if any does. No titled entry, no wish.
+  - **`community.wish_create {title, kind?, authors?, description?}`** writes a new wish with a
+    random id. **`wish_comment {wish_id, comment}`** sets this member's one comment, `null`
+    clearing it. **`wish_fulfill {wish_id, item_id}`** writes `fulfilled` into this member's own
+    entry, keeping its other fields, so a creator can fulfil their own wish. A wish nobody made, an
+    item nobody added and an empty title are refused.
+  - **`community.wish_list {status?}`** returns whole wishes, newest first, with their comments
+    (Ivan's call), from the read model's new `Store::all_wishes`.
+  - **`wish.changed {wish_id}`** is published when a wish is projected from a change.
+  - **CLI:** `wish create | list | comment | fulfill`.
+  - **Acceptance, on three nodes:** alice wishes, bob comments, carol fulfils with an item she
+    adds; alice's `wish_list` shows it fulfilled by carol with that item, bob's comment, alice as
+    the creator, and alice hears `wish.changed`. A one-node CLI test does the same by hand.
+
 - **4c-5 — community on the item page** — ratings, reviews, bookmarks.
   **Acceptance:** Vitest; one Playwright test that rates, reviews and bookmarks.
 
