@@ -71,6 +71,25 @@ pub struct StoredBookmark {
     pub last_modified: u64,
 }
 
+/// A search over every bookmark: each condition given narrows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BookmarkFilter {
+    /// Text anywhere in the note, the item's title or the member's name.
+    pub text: Option<String>,
+    pub member: Option<MemberId>,
+    pub item: Option<ItemId>,
+}
+
+/// A bookmark as a listing shows it: with its item's title and its member's
+/// name, either of which the read model may not hold yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedBookmark {
+    pub item: ItemId,
+    pub item_title: Option<String>,
+    pub member_name: Option<String>,
+    pub stored: StoredBookmark,
+}
+
 /// One wish's rows: each current member's entry and comment. Empty for a
 /// wish the read model holds nothing of.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,15 +221,47 @@ impl Store {
                  FROM bookmarks WHERE item = ?1 ORDER BY member, id",
             )?;
             statement
-                .query_map(params![item.to_string()], |row| {
-                    Ok(StoredBookmark {
-                        member: identifier(row, 0, "member")?,
-                        id: identifier(row, 1, "id")?,
-                        bookmark: Bookmark::new(row.get(2)?, row.get(3)?, row.get(4)?)
-                            .map_err(unreadable(2, "bookmark"))?,
-                        last_modified: row.get(5)?,
-                    })
-                })?
+                .query_map(params![item.to_string()], |row| stored_bookmark(row, 0))?
+                .collect()
+        })
+        .await
+    }
+
+    /// The bookmarks `filter` lets through, newest first. A `LIKE` search,
+    /// not the search index: a group's bookmarks are few next to its items
+    /// (D13).
+    pub async fn find_bookmarks(&self, filter: BookmarkFilter) -> Result<Vec<ListedBookmark>> {
+        self.read(move |conn| {
+            let mut statement = conn.prepare(
+                r"SELECT b.item, i.title, m.display_name,
+                         b.member, b.id, b.position, b.note, b.created_at, b.last_modified
+                  FROM bookmarks b
+                  LEFT JOIN items i ON i.id = b.item
+                  LEFT JOIN members m ON m.id = b.member
+                  WHERE (?1 IS NULL
+                         OR b.note LIKE ?1 ESCAPE '\'
+                         OR i.title LIKE ?1 ESCAPE '\'
+                         OR m.display_name LIKE ?1 ESCAPE '\')
+                    AND (?2 IS NULL OR b.member = ?2)
+                    AND (?3 IS NULL OR b.item = ?3)
+                  ORDER BY b.created_at DESC, b.item, b.member, b.id",
+            )?;
+            statement
+                .query_map(
+                    params![
+                        filter.text.as_deref().map(like_anywhere),
+                        filter.member.map(|member| member.to_string()),
+                        filter.item.map(|item| item.to_string()),
+                    ],
+                    |row| {
+                        Ok(ListedBookmark {
+                            item: identifier(row, 0, "item")?,
+                            item_title: row.get(1)?,
+                            member_name: row.get(2)?,
+                            stored: stored_bookmark(row, 3)?,
+                        })
+                    },
+                )?
                 .collect()
         })
         .await
@@ -684,6 +735,32 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<StoredItem> {
         reviews: BTreeMap::new(),
         last_modified: row.get(11)?,
     })
+}
+
+/// A bookmark read from six columns starting at `first`: member, id,
+/// position, note, created_at and last_modified.
+fn stored_bookmark(row: &Row<'_>, first: usize) -> rusqlite::Result<StoredBookmark> {
+    Ok(StoredBookmark {
+        member: identifier(row, first, "member")?,
+        id: identifier(row, first + 1, "id")?,
+        bookmark: Bookmark::new(
+            row.get(first + 2)?,
+            row.get(first + 3)?,
+            row.get(first + 4)?,
+        )
+        .map_err(unreadable(first + 2, "bookmark"))?,
+        last_modified: row.get(first + 5)?,
+    })
+}
+
+/// `text` as a `LIKE` pattern matching it anywhere, with its own `%`, `_`
+/// and `\` taken literally.
+fn like_anywhere(text: &str) -> String {
+    let escaped = text
+        .replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_");
+    format!("%{escaped}%")
 }
 
 /// Reads one of the catalogue's identifiers back out of a text column.

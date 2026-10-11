@@ -330,9 +330,11 @@ them hold for every protocol added later.
 | `distlib ui [--base-url]` | Print the link that opens this node's web UI, signed in. |
 | `distlib add <files>... --kind [--title] [--author]...` | Add a file set to the catalogue as one item. |
 | `distlib search <query> [--limit]` | Search the catalogue. |
-| `distlib item <item_id>` | Print one item's record, with its ratings and reviews. |
+| `distlib item <item_id>` | Print one item's record, with its ratings, reviews and bookmarks. |
 | `distlib rate <item_id> <1-5>` / `rate <item_id> --clear` | Rate an item as this node's member, or clear the rating. |
 | `distlib review <item_id> <text>` / `review <item_id> --clear` | Review an item, or clear the review. |
+| `distlib bookmark <item_id> <position> [--note] [--edit <id>]` / `bookmark <item_id> --delete <id>` | Leave a bookmark on an item, edit one of yours, or delete one. |
+| `distlib bookmarks [query] [--mine \| --member] [--item]` | List the group's bookmarks, newest first: the query searches notes, titles and members' names. |
 | `distlib download <item_id> [--dest] [--file]` | Fetch an item's files from the group and write them out. |
 | `distlib admin reindex` | Rebuild the read model and search index from the catalogue. |
 | `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
@@ -365,15 +367,17 @@ curl -s http://127.0.0.1:11280/rpc \
 | `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. |
 | `group.ticket` | A join ticket for this group. |
 | `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |
-| `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`) and `reviews`. |
+| `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`), `reviews` and `bookmarks`. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
 | `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |
+| `community.bookmark` / `community.bookmark_delete` | `{item_id, bookmark_id?, position, note?}` / `{item_id, bookmark_id}` — leave a bookmark, edit one of yours (it keeps when it was made), or delete one. |
+| `community.bookmarks` | `{q?, member?, item_id?}` — every member's bookmarks, newest first, with the item's `title` and the `member_name`; `q` searches the note, the title and the name. |
 | `admin.reindex` | Rebuild the read model. |
 
-Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, a
-member's availability, download progress) as server-sent events, and `POST /upload?filename=…` takes one
+Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, an item's
+bookmarks, a member's availability, download progress) as server-sent events, and `POST /upload?filename=…` takes one
 file for `library.add`. Both need the same token.
 
 **Loopback and a token, deliberately.** Whoever can call this can make the node

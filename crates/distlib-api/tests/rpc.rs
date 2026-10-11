@@ -20,9 +20,12 @@ use distlib_api::{
     uploads::Uploads,
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
-use distlib_core::{ContentHash, Item, ItemId, MemberId, NodeAddr, Rating, Review, Ticket};
+use distlib_core::{
+    Bookmark, BookmarkId, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr, Rating,
+    Review, Ticket,
+};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
-use distlib_store::{ReindexHandle, SearchIndex, Store, StoredItem};
+use distlib_store::{ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember};
 use distlib_sync::{Availability, Catalogue, Sources};
 use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::{
@@ -1611,6 +1614,184 @@ async fn community_rate_and_review_write_and_clear_this_members_entries() {
         .await;
     assert!(harness.catalogue.ratings(id).await.unwrap().is_empty());
     assert!(harness.catalogue.reviews(id).await.unwrap().is_empty());
+
+    harness.shutdown().await;
+}
+
+/// `community.bookmark` leaves bookmarks, two on one item if asked twice,
+/// and edits one of this member's own, keeping when it was made;
+/// `community.bookmark_delete` deletes one.
+#[tokio::test]
+async fn community_bookmark_leaves_edits_and_deletes_this_members_bookmarks() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let item = ItemId::from_bytes([7; 32]);
+    harness.catalogue.ready().await;
+    let dune = Item {
+        title: Some("Dune".to_owned()),
+        ..Item::new(item)
+    };
+    harness.catalogue.write(&dune).await.unwrap();
+
+    let mut made = Vec::new();
+    for position in ["p. 12", "p. 40"] {
+        let answer = harness
+            .call(
+                "community.bookmark",
+                json!({ "item_id": item, "position": position, "note": "spice" }),
+            )
+            .await;
+        let id: BookmarkId = serde_json::from_value(answer["bookmark_id"].clone()).unwrap();
+        made.push(id);
+    }
+    let read = harness.catalogue.bookmarks(item).await.unwrap();
+    assert_eq!(read.len(), 2, "two bookmarks by one member on one item");
+    assert!(read.iter().all(|read| read.member == me));
+    let created_at = read
+        .iter()
+        .find(|read| read.id == made[0])
+        .unwrap()
+        .bookmark
+        .created_at();
+
+    harness
+        .call(
+            "community.bookmark",
+            json!({ "item_id": item, "bookmark_id": made[0], "position": "p. 13" }),
+        )
+        .await;
+    harness
+        .call(
+            "community.bookmark_delete",
+            json!({ "item_id": item, "bookmark_id": made[1] }),
+        )
+        .await;
+    let read = harness.catalogue.bookmarks(item).await.unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(read[0].id, made[0]);
+    assert_eq!(
+        read[0].bookmark,
+        Bookmark::new("p. 13".to_owned(), String::new(), created_at).unwrap(),
+        "an edit replaces the position and note and keeps when it was made"
+    );
+
+    harness.shutdown().await;
+}
+
+/// Nobody edits or deletes a bookmark that is not theirs, or bookmarks an
+/// item nobody added; a note over its cap is the caller's mistake.
+#[tokio::test]
+async fn community_bookmark_refuses_what_is_not_this_members_to_write() {
+    let harness = Harness::start().await;
+    let item = ItemId::from_bytes([7; 32]);
+    harness.catalogue.ready().await;
+    let dune = Item {
+        title: Some("Dune".to_owned()),
+        ..Item::new(item)
+    };
+    harness.catalogue.write(&dune).await.unwrap();
+    let nobodys = BookmarkId::from_bytes([3; 16]);
+
+    for (method, params) in [
+        (
+            "community.bookmark",
+            json!({ "item_id": item, "bookmark_id": nobodys, "position": "p. 1" }),
+        ),
+        (
+            "community.bookmark_delete",
+            json!({ "item_id": item, "bookmark_id": nobodys }),
+        ),
+        (
+            "community.bookmark",
+            json!({ "item_id": ItemId::from_bytes([9; 32]), "position": "p. 1" }),
+        ),
+    ] {
+        let refused = harness.refuse(method, params).await;
+        assert_eq!(code(&refused), -32000, "{method}: {refused}");
+    }
+    let refused = harness
+        .refuse(
+            "community.bookmark",
+            json!({ "item_id": item, "position": "p. 1", "note": "x".repeat(NOTE_MAX_BYTES + 1) }),
+        )
+        .await;
+    assert_eq!(code(&refused), -32602, "{refused}");
+    assert!(harness.catalogue.bookmarks(item).await.unwrap().is_empty());
+
+    harness.shutdown().await;
+}
+
+/// `library.item` lists an item's bookmarks, and `community.bookmarks` every
+/// one the read model holds, with the item's title and the member's name —
+/// narrowed by what it is given.
+#[tokio::test]
+async fn bookmarks_are_listed_on_the_item_and_found_across_the_group() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let item = ItemId::from_bytes([7; 32]);
+    harness
+        .store
+        .upsert_item(StoredItem {
+            item: Item {
+                title: Some("Dune".to_owned()),
+                ..Item::new(item)
+            },
+            ratings: BTreeMap::new(),
+            reviews: BTreeMap::new(),
+            last_modified: 1,
+        })
+        .await
+        .unwrap();
+    harness
+        .store
+        .set_members(vec![StoredMember {
+            member: me,
+            display_name: "founder".to_owned(),
+            pledge_bytes: 0,
+            is_core: true,
+        }])
+        .await
+        .unwrap();
+    let id = BookmarkId::from_bytes([3; 16]);
+    harness
+        .store
+        .replace_bookmarks(
+            item,
+            vec![StoredBookmark {
+                member: me,
+                id,
+                bookmark: Bookmark::new("p. 12".to_owned(), "the spice".to_owned(), 5).unwrap(),
+                last_modified: 6,
+            }],
+        )
+        .await
+        .unwrap();
+    let bookmark = json!({
+        "member": me,
+        "bookmark_id": id,
+        "position": "p. 12",
+        "note": "the spice",
+        "created_at": 5,
+        "last_modified": 6,
+    });
+
+    let answer = harness
+        .call("library.item", json!({ "item_id": item }))
+        .await;
+    assert_eq!(answer["bookmarks"], json!([bookmark]));
+
+    let mut listed = bookmark;
+    listed["item_id"] = json!(item);
+    listed["title"] = json!("Dune");
+    listed["member_name"] = json!("founder");
+    let found = harness
+        .call("community.bookmarks", json!({ "q": "spice", "member": me }))
+        .await;
+    assert_eq!(found, json!({ "bookmarks": [listed] }));
+    let found = harness
+        .call("community.bookmarks", json!({ "q": "nowhere" }))
+        .await;
+    assert_eq!(found, json!({ "bookmarks": [] }));
 
     harness.shutdown().await;
 }

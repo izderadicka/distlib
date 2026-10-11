@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
-use distlib_core::{ContentHash, ItemId, MemberId};
+use distlib_core::{BookmarkId, ContentHash, ItemId, MemberId};
 
 /// Distributed community media library for closed, trusted groups.
 #[derive(Debug, Parser)]
@@ -275,6 +275,47 @@ pub enum Command {
         /// Clear this member's review instead.
         #[arg(long, conflicts_with = "text")]
         clear: bool,
+    },
+
+    /// Leave a bookmark on an item as this node's member, edit one of yours,
+    /// or delete one.
+    Bookmark {
+        /// The item to bookmark, as `distlib search` prints it.
+        item_id: ItemId,
+
+        /// Where in the item: a page, a chapter, `01:23:45`.
+        #[arg(required_unless_present = "delete")]
+        position: Option<String>,
+
+        /// What to say about the place.
+        #[arg(long, default_value = "", conflicts_with = "delete")]
+        note: String,
+
+        /// Edit this bookmark of yours instead of leaving a new one.
+        #[arg(long, conflicts_with = "delete")]
+        edit: Option<BookmarkId>,
+
+        /// Delete this bookmark of yours.
+        #[arg(long, conflicts_with = "position")]
+        delete: Option<BookmarkId>,
+    },
+
+    /// List the group's bookmarks, newest first.
+    Bookmarks {
+        /// Text in the note, the item's title or the member's name.
+        query: Option<String>,
+
+        /// Only this node's member's.
+        #[arg(long, conflicts_with = "member")]
+        mine: bool,
+
+        /// Only this member's.
+        #[arg(long)]
+        member: Option<MemberId>,
+
+        /// Only the bookmarks on this item.
+        #[arg(long)]
+        item: Option<ItemId>,
     },
 
     /// Add a file set to the catalogue as one item (2b-2, §6.1).

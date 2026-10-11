@@ -252,8 +252,8 @@ async fn run(
                         .extend(writer.items_with_bookmarks_waiting_for_content.iter().copied());
                     changed_wishes.extend(writer.wishes_waiting_for_content.iter().copied());
                 }
-                let written = writer.project_items(items).await;
-                writer.project_bookmarks(items_with_changed_bookmarks).await;
+                let mut written = writer.project_items(items).await;
+                written.extend(writer.project_bookmarks(items_with_changed_bookmarks).await);
                 writer.project_wishes(changed_wishes).await;
                 for event in written {
                     // Nobody watching is the ordinary case. Never awaited: a
@@ -382,8 +382,9 @@ impl ReadModelWriter {
 
     /// Re-reads each item's bookmarks and writes them over what the table
     /// held, current members' only. Failures are logged per item, as in
-    /// [`Self::project_items`].
-    async fn project_bookmarks(&mut self, items: BTreeSet<ItemId>) {
+    /// [`Self::project_items`], and what it wrote is returned as events.
+    async fn project_bookmarks(&mut self, items: BTreeSet<ItemId>) -> Vec<Event> {
+        let mut written = Vec::new();
         for item in items {
             let read = match self.catalogue.read_bookmarks(item).await {
                 Ok(read) => read,
@@ -410,10 +411,14 @@ impl ReadModelWriter {
                     last_modified: bookmark.last_modified,
                 })
                 .collect();
-            if let Err(error) = self.store.replace_bookmarks(item, bookmarks).await {
-                tracing::warn!(%item, %error, "could not write an item's bookmarks to the read model");
+            match self.store.replace_bookmarks(item, bookmarks).await {
+                Ok(()) => written.push(Event::BookmarkChanged { item_id: item }),
+                Err(error) => {
+                    tracing::warn!(%item, %error, "could not write an item's bookmarks to the read model");
+                }
             }
         }
+        written
     }
 
     /// Re-reads each wish and writes its entries and comments over what the

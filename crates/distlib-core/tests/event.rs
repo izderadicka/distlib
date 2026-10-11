@@ -20,6 +20,7 @@ fn every_event() -> Vec<Event> {
         Event::AvailabilityChanged {
             member_id: MemberId::from(iroh::SecretKey::generate().public()),
         },
+        Event::BookmarkChanged { item_id },
         Event::DownloadProgress {
             task_id,
             item_id,
@@ -40,6 +41,7 @@ fn every_event() -> Vec<Event> {
             | Event::ItemAdded { .. }
             | Event::ItemChanged { .. }
             | Event::AvailabilityChanged { .. }
+            | Event::BookmarkChanged { .. }
             | Event::DownloadProgress { .. }
             | Event::DownloadFinished { .. }
             | Event::DownloadFailed { .. } => {}

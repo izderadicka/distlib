@@ -829,6 +829,25 @@ Needs only 4a-1, so it can interleave with 4b.
     three shows both, each node's own as `mine`; carol's review reaches everyone, and so does her
     clearing it. A one-node CLI test rates, reviews and clears through the binary.
 
+  4c-3b, bookmarks:
+  - **`community.bookmark {item_id, bookmark_id?, position, note?}`** leaves a new bookmark, with
+    a random id and `created_at` now, or edits one of this member's own when `bookmark_id` names
+    it, keeping its `created_at`. **`community.bookmark_delete {item_id, bookmark_id}`** deletes one
+    (Ivan's call: a method of its own, since bookmarks have ids). Editing or deleting a bookmark
+    that is not this member's is refused.
+  - **`community.bookmarks {q?, member?, item_id?}`**: current members' bookmarks, newest by
+    `created_at` first, with the item's `title` and the `member_name` (either can be `null`). `q`
+    is a `LIKE` over the note, the title and the name (D13), with `%` and `_` taken literally; SQLite
+    ignores case for ASCII only. No paging yet. "Mine" is `member` set to one's own.
+  - **`library.item` gains `bookmarks`**, and **`bookmark.changed {item_id}`** is published when an
+    item's bookmarks are projected from a change (not on a replay).
+  - `BookmarkId` and `WishId` get `random()` and serialise as their hex strings.
+  - **CLI:** `bookmark <item> <position> [--note] [--edit <id>]`, `bookmark <item> --delete <id>`,
+    `bookmarks [query] [--mine | --member] [--item]`; `item` lists the bookmarks.
+  - **Acceptance, on three nodes:** bob leaves two bookmarks on one item and both reach alice and
+    carol; carol finds one by a word from its note; alice hears `bookmark.changed`; bob's deleting
+    one reaches alice. A one-node CLI test bookmarks twice, finds, edits and deletes.
+
 - **4c-4 — wishes in the API and CLI (D10).** `community.wish_create`, `wish_list`, `wish_comment`,
   `wish_fulfill`, as §7.1 names them.
   **Acceptance:** A creates a wish, B comments, C fulfils it with an item; A sees it fulfilled and

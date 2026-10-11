@@ -14,7 +14,8 @@ use distlib_api::{
 };
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
-    Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId, Ticket,
+    BookmarkId, Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId,
+    Ticket,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -698,6 +699,18 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
         );
     }
 
+    let bookmarks = answer["bookmarks"].as_array().map_or(&[][..], |v| v);
+    println!("bookmarks   {}", bookmarks.len());
+    for bookmark in bookmarks {
+        println!(
+            "  {}  at {}  {}  ({})",
+            bookmark["member"].as_str().unwrap_or("?"),
+            bookmark["position"].as_str().unwrap_or("?"),
+            bookmark["note"].as_str().unwrap_or(""),
+            bookmark["bookmark_id"].as_str().unwrap_or("?")
+        );
+    }
+
     let found = &answer["availability"];
     println!(
         "available   {}",
@@ -752,6 +765,90 @@ pub async fn review(paths: &Paths, item_id: ItemId, text: Option<String>) -> Res
     match text {
         Some(_) => println!("reviewed {item_id}"),
         None => println!("cleared your review of {item_id}"),
+    }
+    Ok(())
+}
+
+/// `distlib bookmark`: leaves a bookmark on `item_id`, or edits `edit`, one of
+/// this member's.
+pub async fn bookmark(
+    paths: &Paths,
+    item_id: ItemId,
+    edit: Option<BookmarkId>,
+    position: String,
+    note: String,
+) -> Result<()> {
+    let answer = ask(
+        paths,
+        "community.bookmark",
+        json!({ "item_id": item_id, "bookmark_id": edit, "position": position, "note": note }),
+    )
+    .await?;
+    let bookmark_id = answer["bookmark_id"].as_str().unwrap_or("?");
+    match edit {
+        Some(_) => println!("edited bookmark {bookmark_id} on {item_id}"),
+        None => println!("bookmarked {item_id} as {bookmark_id}"),
+    }
+    Ok(())
+}
+
+/// `distlib bookmark --delete`
+pub async fn delete_bookmark(
+    paths: &Paths,
+    item_id: ItemId,
+    bookmark_id: BookmarkId,
+) -> Result<()> {
+    ask(
+        paths,
+        "community.bookmark_delete",
+        json!({ "item_id": item_id, "bookmark_id": bookmark_id }),
+    )
+    .await?;
+    println!("deleted bookmark {bookmark_id} on {item_id}");
+    Ok(())
+}
+
+/// `distlib bookmarks`. `mine` is `member` set to this node's own.
+pub async fn bookmarks(
+    paths: &Paths,
+    query: Option<String>,
+    mine: bool,
+    member: Option<MemberId>,
+    item: Option<ItemId>,
+) -> Result<()> {
+    let member = if mine {
+        Some(member_id(&load_secret_key(&paths.secret_key_file())?))
+    } else {
+        member
+    };
+    let answer = ask(
+        paths,
+        "community.bookmarks",
+        json!({ "q": query, "member": member, "item_id": item }),
+    )
+    .await?;
+    let bookmarks = answer["bookmarks"].as_array().map_or(&[][..], |v| v);
+    if bookmarks.is_empty() {
+        println!("no bookmarks");
+    }
+    for bookmark in bookmarks {
+        println!(
+            "{}  {}",
+            bookmark["item_id"].as_str().unwrap_or("?"),
+            bookmark["title"].as_str().unwrap_or("(no title)")
+        );
+        println!(
+            "  at {}  by {}  ({})",
+            bookmark["position"].as_str().unwrap_or("?"),
+            named(
+                bookmark["member"].as_str().unwrap_or("?"),
+                bookmark["member_name"].as_str().unwrap_or_default()
+            ),
+            bookmark["bookmark_id"].as_str().unwrap_or("?")
+        );
+        if let Some(note) = bookmark["note"].as_str().filter(|note| !note.is_empty()) {
+            println!("  {note}");
+        }
     }
     Ok(())
 }
