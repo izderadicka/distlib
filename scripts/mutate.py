@@ -37,6 +37,9 @@ mutation worth making is listed, with why, instead:
 
 Any block left without either is printed, and nothing runs.
 
+An entry without one of its keys, or naming a file that is not there, is
+reported before anything else, and nothing runs.
+
 Exits non-zero if a block is left out, or if a mutation survives, does not
 build, or is written wrongly.
 """
@@ -195,11 +198,29 @@ def untracked() -> set[str]:
     return set(git("ls-files", "--others", "--exclude-standard").splitlines())
 
 
+REQUIRED = {"mutation": ("name", "file", "find", "replace", "tests"), "unmutated": ("file", "find", "reason")}
+
+
+def problems(plan: dict) -> list[str]:
+    """What is missing from the plan's entries: a key, or the file named."""
+    found = []
+    for table, keys in REQUIRED.items():
+        for number, entry in enumerate(plan.get(table, []), start=1):
+            where = f"[[{table}]] {number} ({entry.get('name') or entry.get('file', '?')})"
+            found += [f"{where}: no `{key}`" for key in keys if key not in entry]
+            if "file" in entry and not (ROOT / entry["file"]).is_file():
+                found.append(f"{where}: no file {entry['file']}")
+    return found
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3):
         print(__doc__, file=sys.stderr)
         return 2
     plan = tomllib.loads(Path(sys.argv[1]).read_text())
+    if found := problems(plan):
+        print("\n".join(found), file=sys.stderr)
+        return 2
     mutations = plan.get("mutation", [])
     for entry in plan.get("unmutated", []):
         print(f"{'UNMUTATED':>12}  {entry['file']}: {entry['reason']}")
