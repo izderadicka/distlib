@@ -38,6 +38,9 @@ const MLOCI: ItemRecord = {
   title: "Válka s mloky",
   year: 1936,
   availability: { held: false, providers: 1 },
+  ratings: { average: null, count: 0, mine: null },
+  reviews: [],
+  bookmarks: [],
 };
 
 /** Everything nobody has said left unsaid, as a node answers it. */
@@ -52,9 +55,25 @@ const BARE: ItemRecord = {
 };
 
 const OTHER = "f".repeat(64);
+const ME = "a".repeat(64);
 
-/** What the node answers with, while the test lets it. */
+/** What the node answers `library.item` with, while the test lets it. */
 let answer: ItemRecord;
+
+/** The node, as the page asks it: the item, who this node is, and the group. */
+async function node(method: string) {
+  switch (method) {
+    case "node.status":
+      return { member: ME };
+    case "group.members":
+      return { group: "g", changed_at: 1, members: [{ member: OTHER, name: "bob", pledge_bytes: 0, core: false }] };
+    default:
+      return answer;
+  }
+}
+
+/** How many times the page has asked the node for `method`. */
+const asked = (method: string) => vi.mocked(call).mock.calls.filter(([called]) => called === method).length;
 
 function open(id = MLOCI.item_id) {
   const events = fakeListen();
@@ -80,7 +99,7 @@ describe("the item page", () => {
   beforeEach(() => {
     answer = MLOCI;
     vi.mocked(call).mockReset();
-    vi.mocked(call).mockImplementation((async () => answer) as typeof call);
+    vi.mocked(call).mockImplementation(node as typeof call);
   });
 
   it("shows what the node holds for the item", async () => {
@@ -95,6 +114,7 @@ describe("the item page", () => {
       Type: "audiobook",
       Genres: "satire",
       Availability: "1 online",
+      Rating: "not rated yet",
       Item: MLOCI.item_id,
     });
     expect(document.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-27T14:57:34.348Z");
@@ -110,7 +130,7 @@ describe("the item page", () => {
     open();
 
     await screen.findByText("no title");
-    expect(Object.keys(details())).toEqual(["Availability", "Changed", "Item"]);
+    expect(Object.keys(details())).toEqual(["Availability", "Rating", "Changed", "Item"]);
     expect(document.querySelector(".description")).toBeNull();
   });
 
@@ -163,19 +183,39 @@ describe("the item page", () => {
     ]);
   });
 
-  it("loads again on news of this item, or a resync", async () => {
+  it("loads again on news of this item or its bookmarks, or a resync", async () => {
     const { events } = open();
     await screen.findByText("Válka s mloky");
 
     for (const event of [
       { type: "catalogue.item_changed", item_id: MLOCI.item_id },
       { type: "catalogue.item_added", item_id: MLOCI.item_id },
+      { type: "bookmark.changed", item_id: MLOCI.item_id },
       { type: "resync" },
     ]) {
-      const asked = vi.mocked(call).mock.calls.length;
+      const before = asked("library.item");
       events.tell(event);
-      await waitFor(() => expect(call).toHaveBeenCalledTimes(asked + 1));
+      await waitFor(() => expect(asked("library.item")).toBe(before + 1));
     }
+  });
+
+  it("names members, and finds their names again when the membership changes", async () => {
+    answer = {
+      ...MLOCI,
+      ratings: { average: 4.5, count: 2, mine: 4 },
+      reviews: [{ member: OTHER, review: "Too sad." }],
+    };
+    const { events } = open();
+    await screen.findByRole("heading", { name: "bob" });
+    expect(details().Rating).toBe("4.5 from 2 ratings");
+
+    vi.mocked(call).mockImplementation((async (method: string) =>
+      method === "group.members" ?
+        { group: "g", changed_at: 2, members: [{ member: OTHER, name: "robert", pledge_bytes: 0, core: false }] }
+      : node(method)) as typeof call);
+    events.tell({ type: "membership.changed" });
+
+    await screen.findByRole("heading", { name: "robert" });
   });
 
   it("shows a change in who has it when any member's availability changes", async () => {
@@ -195,7 +235,7 @@ describe("the item page", () => {
     events.tell({ type: "catalogue.item_changed", item_id: OTHER });
     events.tell({ type: "membership.changed" });
 
-    expect(call).toHaveBeenCalledOnce();
+    expect(asked("library.item")).toBe(1);
   });
 
   it("answers a burst of news of it with one load more, not one each", async () => {
@@ -211,11 +251,11 @@ describe("the item page", () => {
       events.tell({ type: "catalogue.item_changed", item_id: MLOCI.item_id });
     }
     finish();
-    await waitFor(() => expect(call).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(asked("library.item")).toBe(3));
     finish();
     await new Promise((done) => setTimeout(done, 0));
 
-    expect(call).toHaveBeenCalledTimes(3);
+    expect(asked("library.item")).toBe(3);
   });
 
   it("says when the node has no such item, and shows it when it arrives", async () => {

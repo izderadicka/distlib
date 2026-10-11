@@ -3,13 +3,18 @@
   // current by the event stream — news of this item reloads it, including
   // its arrival, so a page opened before sync brought the item in shows it
   // when it comes. So does news of any member's availability, which is named
-  // by member rather than by item.
+  // by member rather than by item, and of its bookmarks. Who is who — this
+  // node's own member, and everybody's names — is loaded beside it, and again
+  // when the membership changes.
   import { onMount } from "svelte";
 
+  import Bookmarks from "./Bookmarks.svelte";
   import Download from "./Download.svelte";
   import EditItem from "./EditItem.svelte";
+  import Reviews from "./Reviews.svelte";
+  import StarRating from "./StarRating.svelte";
   import type { Listen } from "./lib/events";
-  import { availability, bytes, instant } from "./lib/format";
+  import { availability, bytes, instant, ratingSummary } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { call, type FileRecord, type ItemRecord, Unauthorised } from "./lib/rpc";
 
@@ -19,6 +24,8 @@
   let item = $state<ItemRecord | null>(null);
   let failure = $state<string | null>(null);
   let editing = $state(false);
+  let me = $state<string | null>(null);
+  let names = $state<ReadonlyMap<string, string>>(new Map());
 
   async function load() {
     try {
@@ -33,7 +40,22 @@
     }
   }
 
+  /** Who this node's member is, and every member's name. */
+  async function loadMembers() {
+    try {
+      const [status, group] = await Promise.all([call("node.status", null), call("group.members", null)]);
+      me = status.member;
+      names = new Map(group.members.map((member) => [member.member, member.name]));
+    } catch (error) {
+      // Anything else leaves members shown by id, and the next change tries again.
+      if (error instanceof Unauthorised) {
+        onUnauthorised();
+      }
+    }
+  }
+
   const reload = reloader(load);
+  const reloadMembers = reloader(loadMembers);
 
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {
@@ -45,8 +67,12 @@
       ) {
         reload();
       }
+      if (event.type === "resync" || event.type === "membership.changed") {
+        reloadMembers();
+      }
     });
     reload();
+    reloadMembers();
     return stop;
   });
 
@@ -93,6 +119,8 @@
       {#if item.replicas !== null}<dt>Copies kept</dt><dd>{item.replicas}</dd>{/if}
       <dt>Availability</dt>
       <dd>{availability(item.availability)}</dd>
+      <dt>Rating</dt>
+      <dd>{ratingSummary(item.ratings)}</dd>
       <dt>Changed</dt>
       <dd><time datetime={last?.toISOString()}>{last?.toLocaleString()}</time></dd>
       <dt>Item</dt>
@@ -122,4 +150,8 @@
       </tbody>
     </table>
   </section>
+
+  <StarRating itemId={id} ratings={item.ratings} {onUnauthorised} />
+  <Reviews itemId={id} reviews={item.reviews} {me} {names} {onUnauthorised} />
+  <Bookmarks itemId={id} bookmarks={item.bookmarks} {me} {names} {onUnauthorised} />
 {/if}

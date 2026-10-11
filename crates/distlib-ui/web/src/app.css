@@ -186,3 +186,16 @@ form.add button {
   display: flex;
   gap: 0.5rem;
 }
+
+button.star {
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 0 0.1rem;
+}
+
+.review h3 {
+  font-size: 1rem;
+  margin: 0.75rem 0 0.25rem;
+}

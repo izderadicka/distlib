@@ -96,21 +96,30 @@ describe("the shell", () => {
   });
 
   it("opens an item's page, and another item's as a page of its own", async () => {
-    vi.mocked(call).mockImplementation((async (_: string, params: { item_id: string }) => ({
-      item_id: params.item_id,
-      title: `Item ${params.item_id.slice(0, 1)}`,
-      kind: null,
-      authors: null,
-      genres: null,
-      series: null,
-      year: null,
-      lang: null,
-      description: null,
-      replicas: null,
-      files: {},
-      last_modified: 0,
-      availability: { held: false, providers: 0 },
-    })) as typeof call);
+    const members = vi.mocked(call).getMockImplementation();
+    vi.mocked(call).mockImplementation((async (method: string, params: { item_id: string }) => {
+      if (method !== "library.item") {
+        return members?.(method as "node.status", null);
+      }
+      return {
+        item_id: params.item_id,
+        title: `Item ${params.item_id.slice(0, 1)}`,
+        kind: null,
+        authors: null,
+        genres: null,
+        series: null,
+        year: null,
+        lang: null,
+        description: null,
+        replicas: null,
+        files: {},
+        last_modified: 0,
+        availability: { held: false, providers: 0 },
+        ratings: { average: null, count: 0, mine: null },
+        reviews: [],
+        bookmarks: [],
+      };
+    }) as typeof call);
     navigate(`/items/${"a".repeat(64)}`);
     open();
     await screen.findByText("Item a");
@@ -118,7 +127,7 @@ describe("the shell", () => {
     navigate(`/items/${"b".repeat(64)}`);
 
     await screen.findByText("Item b");
-    expect(call).toHaveBeenLastCalledWith("library.item", { item_id: "b".repeat(64) });
+    expect(call).toHaveBeenCalledWith("library.item", { item_id: "b".repeat(64) });
   });
 
   it("opens the page for adding an item from its link", async () => {

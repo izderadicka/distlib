@@ -874,6 +874,24 @@ Needs only 4a-1, so it can interleave with 4b.
 
 - **4c-5 — community on the item page** — ratings, reviews, bookmarks.
   **Acceptance:** Vitest; one Playwright test that rates, reviews and bookmarks.
+  *As built, one PR (Ivan's call):*
+  - **Placement (Ivan's call):** the details list gains `Rating` (`4.5 from 2 ratings`, or `not
+    rated yet`); below Files come three sections, each its own component.
+  - **`StarRating`:** five star buttons (Ivan's call), filled up to this member's rating, which is
+    also `aria-pressed`; a click saves at once, `Clear rating` takes it back.
+  - **`Reviews`:** this member's own review as a form (`Save review`, `Clear review`), everybody
+    else's below it by name.
+  - **`Bookmarks`:** every member's, newest first, by name; this member's own can be edited (in the
+    one form, by its id) or deleted.
+  - **Who is who:** the page also loads `node.status` (this member) and `group.members` (names),
+    again on `membership.changed`; this member is `you`, a member whose name is not known the start
+    of their id. `bookmark.changed` reloads the item like any news of it.
+  - **What is shown is what the node said:** a write is not shown until it is projected and its
+    event reloads the page, which on one node takes a moment.
+  - Saving goes through one `failureOf` in `rpc.ts`: the node's refusal shown, a refused token
+    handed up.
+  - **Acceptance:** Vitest for each component and the page, mutation-checked (fourteen, all
+    caught); one Playwright test rates, reviews and bookmarks an item on a real node.
 
 - **4c-6 — the Wishes page** — route, nav, create, a picker to fulfil with, comments.
   **Acceptance:** Vitest; one Playwright test.
