@@ -831,6 +831,9 @@ Needs only 4a-1, so it can interleave with 4b.
 - **4c-7 — the Bookmarks page** — route, nav, search, the "mine" and member filters.
   **Acceptance:** Vitest; one Playwright test.
 
+**After 4c-7:** the complexity and coverage refactoring in
+[plan-refactor-complexity.md](../plan-refactor-complexity.md), before phase 5.
+
 **Order:** 4.0 first; 4a-1 before any schema change; 4a-2 before 4a-3 and 4b-6; 4b-1 and 4b-2
 before 4b-3, then 4b-4; 4b-3 before 4b-6. 4c needs only 4a-1.
 
