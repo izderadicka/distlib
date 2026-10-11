@@ -104,6 +104,14 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      # Windows keeps %TEMP% on C:, the runner's slow disk, and every test node
+      # keeps its stores in a temporary directory. Measured: the suite took
+      # 146-154s per run there and 85-94s on D:, and Raft's fsyncs queued up
+      # on C: long enough to time out elections now and then.
+      - if: runner.os == 'Windows'
+        run: |
+          echo "TMP=${{ runner.temp }}" >> $env:GITHUB_ENV
+          echo "TEMP=${{ runner.temp }}" >> $env:GITHUB_ENV
       # Every test, slow ones included: `--all-features` turns on `slow-tests`,
       # which is what the fast local lane leaves out. nextest runs the tests
       # concurrently, `.config/nextest.toml` says how many, and nothing is
