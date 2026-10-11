@@ -32,8 +32,8 @@ sequencing plan of the phase currently being built.
 >   them, and a node that has fetched a file then serves it too.
 > - **Web UI:** served by the node itself (`distlib ui` prints a signed-in link). You can
 >   browse and search the library, read and edit an item, download it with live progress,
->   rate, review and bookmark it, add an item from files chosen in the browser, and make,
->   comment on and fulfil wishes. Release builds and a Dockerfile exist.
+>   rate, review and bookmark it, add an item from files chosen in the browser, search
+>   everybody's bookmarks, and make, comment on and fulfil wishes. Release builds and a Dockerfile exist.
 >
 > Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
 > see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and

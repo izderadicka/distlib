@@ -123,6 +123,15 @@ export interface BookmarkRecord {
   last_modified: number;
 }
 
+/** `community.bookmarks`: a bookmark with what it points into, and who left it. */
+export interface ListedBookmark extends BookmarkRecord {
+  item_id: string;
+  /** The item's title, `null` while it has none. */
+  title: string | null;
+  /** The member's name, `null` while the group does not know one. */
+  member_name: string | null;
+}
+
 /** `library.item`: everything the read model holds for one item. */
 export interface ItemRecord extends ItemSummary {
   lang: string | null;
@@ -220,6 +229,11 @@ interface Methods {
   "community.bookmark_delete": {
     params: { item_id: string; bookmark_id: string };
     result: { item_id: string; bookmark_id: string };
+  };
+  /** Every member's bookmarks, newest first; `q` searches the note, the item's title and the member's name. */
+  "community.bookmarks": {
+    params: { q?: string; member?: string; item_id?: string };
+    result: { bookmarks: ListedBookmark[] };
   };
   /** Every wish, newest first. */
   "community.wish_list": { params: Record<string, never>; result: { wishes: WishRecord[] } };

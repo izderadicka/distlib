@@ -42,6 +42,18 @@ describe("reading the address", () => {
     expect(at("/wishes")).toEqual({ page: "wishes" });
   });
 
+  it("reads the bookmarks, searched and filtered by a member", () => {
+    const bob = "b".repeat(64);
+    expect(at("/bookmarks")).toEqual({ page: "bookmarks", query: "", member: null });
+    expect(at(`/bookmarks?q=+the+farm+&member=${bob}`)).toEqual({ page: "bookmarks", query: "the farm", member: bob });
+  });
+
+  it("takes anything but a member id as the node writes one for no member", () => {
+    for (const member of ["B".repeat(64), "b".repeat(63), "g".repeat(64), ""]) {
+      expect(at(`/bookmarks?member=${member}`)).toEqual({ page: "bookmarks", query: "", member: null });
+    }
+  });
+
   it("takes anything else for a page that does not exist", () => {
     for (const address of ["/nodes", "/node/", "/items"]) {
       expect(at(address)).toEqual({ page: "missing" });
@@ -55,6 +67,7 @@ describe("writing the address", () => {
     expect(href({ page: "node" })).toBe("/node");
     expect(href({ page: "add" })).toBe("/add");
     expect(href({ page: "wishes" })).toBe("/wishes");
+    expect(href({ page: "bookmarks", query: "", member: null })).toBe("/bookmarks");
     expect(href({ page: "item", id: "a".repeat(64) })).toBe(`/items/${"a".repeat(64)}`);
   });
 
@@ -63,6 +76,9 @@ describe("writing the address", () => {
       { page: "library", query: "Čapek & syn?", number: 1 },
       { page: "library", query: "", number: 4 },
       { page: "library", query: 'title:"R.U.R." #2', number: 12 },
+      { page: "bookmarks", query: "50% & more?", member: null },
+      { page: "bookmarks", query: "", member: "b".repeat(64) },
+      { page: "bookmarks", query: "p. 12", member: "b".repeat(64) },
     ];
     for (const route of routes) {
       expect(at(href(route))).toEqual(route);

@@ -28,6 +28,7 @@ export type NodeEvent =
   | { type: "catalogue.item_added"; item_id: string }
   | { type: "catalogue.item_changed"; item_id: string }
   | { type: "availability.changed"; member_id: string }
+  | { type: "bookmark.changed"; item_id: string }
   | { type: "wish.changed"; wish_id: string }
   | { type: "sync.status" }
   | ({ type: "download.progress"; task_id: number; item_id: string } & Progress)

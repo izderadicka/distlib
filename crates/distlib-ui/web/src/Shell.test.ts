@@ -148,6 +148,15 @@ describe("the shell", () => {
     expect(current()?.textContent).toBe("Wishes");
   });
 
+  it("opens the bookmarks from their link", async () => {
+    open();
+
+    await fireEvent.click(screen.getByRole("link", { name: "Bookmarks" }));
+
+    await screen.findByRole("searchbox", { name: "Search the bookmarks" });
+    expect(current()?.textContent).toBe("Bookmarks");
+  });
+
   it("says when the address names no page", async () => {
     navigate("/shelves");
     open();

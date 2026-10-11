@@ -248,3 +248,43 @@ test("a wish is made, commented on and fulfilled from the wishes page", async ({
   // Nothing refused by the CSP — no inline styles left to allow — nothing thrown.
   expect(errors).toEqual([]);
 });
+
+test("bookmarks are listed, searched and filtered on the bookmarks page", async ({ page, node }) => {
+  const errors = errorsOn(page);
+  // Different bytes: the same file twice would be one item.
+  node.add("hordubal.epub", "a novel of a farm", "--kind", "ebook", "--title", "Hordubal");
+  node.add("krakatit.epub", "a novel of an explosive", "--kind", "ebook", "--title", "Krakatit");
+  await page.goto(node.link);
+  for (const [title, note] of [
+    ["Hordubal", "the farm"],
+    ["Krakatit", "the explosion"],
+  ]) {
+    await page.getByRole("link", { name: "Library" }).click();
+    await page.getByRole("link", { name: title }).click();
+    await page.getByLabel("Position").fill("p. 12");
+    await page.getByLabel("Note").fill(note);
+    await page.getByRole("button", { name: "Add bookmark" }).click();
+    await expect(rows(page).filter({ hasText: note })).toBeVisible();
+  }
+
+  await page.getByRole("link", { name: "Bookmarks" }).click();
+  await expect(rows(page)).toHaveCount(2);
+  await expect(rows(page).first()).toContainText("Krakatit");
+  await expect(rows(page).first()).toContainText("you");
+
+  await page.getByRole("searchbox").fill("farm");
+  await page.getByRole("button", { name: "Search" }).click();
+  await expect(rows(page)).toHaveCount(1);
+  await expect(rows(page).first()).toContainText("Hordubal");
+
+  await page.getByLabel("Member").selectOption({ label: "Mine" });
+  expect(new URL(page.url()).searchParams.get("member")).toBe(node.id);
+  // The search and the filter are in the address, so a reload asks for both again.
+  await page.reload();
+  await expect(rows(page)).toHaveCount(1);
+  await expect(page.getByLabel("Member")).toHaveValue(node.id);
+
+  await page.getByRole("link", { name: "Hordubal" }).click();
+  await expect(page.getByRole("heading", { name: "Hordubal" })).toBeVisible();
+  expect(errors).toEqual([]);
+});

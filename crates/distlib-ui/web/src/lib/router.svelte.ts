@@ -14,11 +14,16 @@ export type Route =
   | { page: "item"; id: string }
   | { page: "add" }
   | { page: "wishes" }
+  /** Every member's bookmarks, or with `query` and `member`, those matching. */
+  | { page: "bookmarks"; query: string; member: string | null }
   | { page: "node" }
   | { page: "missing" };
 
 /** An item id as the node writes one: 32 bytes of lower-case hex. */
 const ITEM = /^\/items\/([0-9a-f]{64})$/;
+
+/** A member id, written the same way. */
+const MEMBER = /^[0-9a-f]{64}$/;
 
 /** Reads the route from an address. Anything unrecognised is `missing`. */
 export function parse(url: URL): Route {
@@ -36,6 +41,15 @@ export function parse(url: URL): Route {
       return { page: "add" };
     case "/wishes":
       return { page: "wishes" };
+    case "/bookmarks": {
+      const member = url.searchParams.get("member");
+      return {
+        page: "bookmarks",
+        query: url.searchParams.get("q")?.trim() ?? "",
+        // Anything that is not a member id filters by nobody.
+        member: member !== null && MEMBER.test(member) ? member : null,
+      };
+    }
     case "/node":
       return { page: "node" };
     default: {
@@ -65,6 +79,17 @@ export function href(route: Route): string {
       return "/add";
     case "wishes":
       return "/wishes";
+    case "bookmarks": {
+      const search = new URLSearchParams();
+      if (route.query) {
+        search.set("q", route.query);
+      }
+      if (route.member) {
+        search.set("member", route.member);
+      }
+      const query = search.toString();
+      return query ? `/bookmarks?${query}` : "/bookmarks";
+    }
     case "node":
       return "/node";
     case "missing":
