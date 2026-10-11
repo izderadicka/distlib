@@ -26,3 +26,6 @@
 *.swp
 .vscode/
 lcov.info
+
+# cargo-mutants results
+mutants.out*/
