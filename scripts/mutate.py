@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks that the tests catch hand-written mutations of the code.
 
-    scripts/mutate.py <mutations.toml>
+    scripts/mutate.py <mutations.toml> [base]
 
 Each mutation replaces one piece of text in one file:
 
@@ -24,7 +24,21 @@ whole suite before it is called a survivor, so naming too few tests only costs
 time. A test that hangs is stopped and counts as a failure. The file is put
 back after each mutation, whatever happens.
 
-Exits non-zero if a mutation survives, does not build, or is written wrongly.
+Before any mutation runs, every block of code this branch changed since it
+left `base` (master if not given) has to be touched by one: a block is a run of changed lines
+without a blank or an unchanged line in it, in a .rs, .ts or .svelte file that
+is not a test. Comments and imports do not count. A block that has no
+mutation worth making is listed, with why, instead:
+
+    [[unmutated]]
+    file = "crates/distlib-api/src/methods.rs"
+    find = "struct Download {"
+    reason = "a params struct: serde's own tests cover it"
+
+Any block left without either is printed, and nothing runs.
+
+Exits non-zero if a block is left out, or if a mutation survives, does not
+build, or is written wrongly.
 """
 
 import os
@@ -99,18 +113,104 @@ def check(mutation: dict) -> tuple[str, str]:
         os.utime(path)
 
 
+TEST_PATHS = re.compile(r"/tests/|/e2e/|\.test\.ts$|/testing\.ts$|/test-setup\.ts$")
+
+
+def changed_blocks(base: str) -> list[tuple[str, int, int]]:
+    """Every block of code changed since `base`, as (file, first line, last line)."""
+    base = git("merge-base", base, "HEAD").strip()
+    changed: dict[str, set[int]] = {}
+    file = None
+    for line in git("diff", "-U0", "-w", "--diff-algorithm=histogram", base).splitlines():
+        if line.startswith("+++ "):
+            file = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("@@") and file:
+            start, _, count = re.search(r"\+(\d+)(,(\d+))?", line).groups()
+            first, length = int(start), int(count) if count is not None else 1
+            changed.setdefault(file, set()).update(range(first, first + length))
+    for file in untracked():
+        if (ROOT / file).is_file():
+            changed[file] = set(range(1, len((ROOT / file).read_text().splitlines()) + 1))
+    blocks = []
+    for file, numbers in sorted(changed.items()):
+        if not file.endswith((".rs", ".ts", ".svelte")) or TEST_PATHS.search("/" + file):
+            continue
+        kinds = line_kinds(file, (ROOT / file).read_text().splitlines())
+        block: list[int] = []
+        for number, kind in enumerate(kinds, start=1):
+            if kind == "code" and number in numbers:
+                block.append(number)
+            elif kind != "neutral" and block:
+                blocks.append((file, block[0], block[-1]))
+                block = []
+        if block:
+            blocks.append((file, block[0], block[-1]))
+    return blocks
+
+
+def line_kinds(file: str, lines: list[str]) -> list[str]:
+    """Each line as "code", "blank" (ends a block), or "neutral": a comment, an import,
+    brackets alone, a test."""
+    kinds = []
+    in_import = in_tests = False
+    for line in lines:
+        text = line.strip()
+        if file.endswith(".rs") and text == "#[cfg(test)]":
+            in_tests = True
+        starts_import = re.match(r"(pub(\(crate\))? )?use |import ", text) is not None
+        closing = text and not text.strip("{}()[];,")
+        if in_tests or in_import or starts_import or closing or text.startswith(("//", "/*", "*", "<!--")):
+            kinds.append("neutral")
+        else:
+            kinds.append("code" if text else "blank")
+        if starts_import or in_import:
+            in_import = not (text.endswith(";") or " from " in text or text.startswith("} from"))
+    return kinds
+
+
+def lines_of(entry: dict) -> tuple[int, int] | None:
+    """The lines an entry's `find` spans in its file, if it occurs once."""
+    text = (ROOT / entry["file"]).read_text()
+    if text.count(entry["find"]) != 1:
+        return None
+    first = text[: text.index(entry["find"])].count("\n") + 1
+    return first, first + entry["find"].count("\n")
+
+
+def unmutated(blocks: list[tuple[str, int, int]], entries: list[dict]) -> list[tuple[str, int, int]]:
+    """The blocks no entry's `find` touches."""
+    spans = [(entry["file"], lines_of(entry)) for entry in entries]
+    return [
+        (file, first, last)
+        for file, first, last in blocks
+        if not any(at == file and span and span[0] <= last and first <= span[1] for at, span in spans)
+    ]
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+
+
 def untracked() -> set[str]:
-    listed = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"], cwd=ROOT, capture_output=True, text=True, check=True
-    )
-    return set(listed.stdout.splitlines())
+    return set(git("ls-files", "--others", "--exclude-standard").splitlines())
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         print(__doc__, file=sys.stderr)
         return 2
-    mutations = tomllib.loads(Path(sys.argv[1]).read_text())["mutation"]
+    plan = tomllib.loads(Path(sys.argv[1]).read_text())
+    mutations = plan.get("mutation", [])
+    for entry in plan.get("unmutated", []):
+        print(f"{'UNMUTATED':>12}  {entry['file']}: {entry['reason']}")
+    base = sys.argv[2] if len(sys.argv) == 3 else "master"
+    left_out = unmutated(changed_blocks(base), mutations + plan.get("unmutated", []))
+    for file, first, last in left_out:
+        code = (ROOT / file).read_text().splitlines()[first - 1].strip()
+        print(f"{'NO MUTATION':>12}  {file}:{first}-{last}  {code[:70]}")
+    if left_out:
+        print(f"\n{len(left_out)} changed blocks have no mutation; add one, or list them as [[unmutated]]")
+        return 1
     before = untracked()
     results = []
     for mutation in mutations:

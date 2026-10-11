@@ -500,11 +500,21 @@ test that fails only alongside others is a finding — a deadline too tight for 
 busy machine, or code that misbehaves when it is scheduled late — not something
 to serialise away. The full lane is about as long as its slowest test.
 
-`scripts/mutate.py <mutations.toml>` checks that the tests catch hand-written
-mutations of the code, Rust or UI. Each mutation names the tests that should
-catch it, and only those are built and run, stopping at the first failure. A
-mutation they miss is run against the whole suite before it is called a
-survivor. Its docstring has the file's format.
+Mutation checks come in two layers:
+
+- **`scripts/mutate.py <mutations.toml>`** runs hand-written mutations of the
+  code, Rust or UI.
+  - First it refuses to run while a block of code the branch changed has no
+    mutation, or no stated reason for having none.
+  - Each mutation names the tests that should catch it. Only those are built
+    and run, stopping at the first failure.
+  - A mutation those tests miss is run against the whole suite before it is
+    called a survivor.
+  - Its docstring gives the file format.
+- **`cargo mutants --in-diff <diff>`** ([cargo-mutants](https://mutants.rs))
+  makes mechanical mutations of every changed Rust function and runs the whole
+  workspace's tests on each, set up in `.cargo/mutants.toml`.
+  - It builds a copy of the tree, so it can run in the background.
 
 The test suite never contacts the public relay or DNS infrastructure — endpoints are
 either given explicit addresses or pointed at an in-process relay, so the suite is

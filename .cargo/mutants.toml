@@ -1,0 +1,8 @@
+# cargo-mutants (`cargo mutants --in-diff <diff>`): mechanical mutations of the
+# Rust a branch changed, beside the hand-written ones `scripts/mutate.py` runs.
+# Every test in the workspace, with every feature, since most of a crate's
+# behaviour is tested from the crates above it — `distlib-api`'s downloads
+# from `distlib`'s tests, for one.
+test_tool = "nextest"
+test_workspace = true
+additional_cargo_args = ["--all-features"]
