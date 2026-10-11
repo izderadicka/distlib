@@ -31,7 +31,7 @@ use crate::{
     availability::Seen,
     rpc::Error,
     tasks::{self, Downloaded, Source, Tasks},
-    uploads::{UploadId, Uploads},
+    uploads::{Staged, UploadId, Uploads},
 };
 
 /// A ceiling on a page's `limit` — `library.search`'s and `library.list`'s —
@@ -793,90 +793,51 @@ impl Api {
     /// `library.add` — hash a file set, store it as blobs, and write a
     /// catalogue entry for it (2b-2; §6.1's "v1 — exact" dedup).
     ///
-    /// **`files` are all `role: content`.** They are what §5.2's `item_id`
-    /// fingerprints (D4), and it is the only role this surface writes —
-    /// covers, subtitles and the rest of [`distlib_core::FileRole`] are left
-    /// for whoever needs the first caller that wants one, the way `filters`
-    /// and paging were left out of `library.search` (P2-21).
-    ///
-    /// **The dedup guard runs before anything is written.** The fingerprint
-    /// is known before the catalogue is asked anything (§6.1's "add-time
-    /// assist"). A hit means somebody's copy of this exact file set is
-    /// already an item: **metadata already there is left alone** — this call
-    /// never overwrites a `title` or `kind` a hit already holds, so a second
-    /// caller with a worse guess at the title cannot clobber a better one —
-    /// and only the files this call brought that the item did not already
-    /// have are written, which is the "offering to contribute any files it
-    /// is missing" half of the same rule. A miss creates the item with every
-    /// field this call was given.
-    ///
-    /// **This is also what makes the phase's own acceptance hold without any
-    /// coordination.** `item_id` is a pure function of the content hashes
-    /// (§5.2), so two nodes adding the identical file set independently
-    /// compute the same id and converge on one item by construction — the
-    /// guard here only decides what a *second* write to that id is allowed
-    /// to change, not whether the two nodes end up looking at the same
-    /// item.
-    ///
-    /// **The id is `item.fingerprint()`, not a hash list of its own.**
-    /// `files` is keyed by content hash, so two paths given that hash the
-    /// same — literal duplicates, or two different files with identical
-    /// bytes — collapse to one entry before the id is ever computed;
-    /// [`Item::fingerprint`] reads exactly that map. Hashing `params.files`
-    /// into a separate `Vec` alongside it, the way an earlier version of
-    /// this did, can disagree with `files`' own key set the moment a caller
-    /// repeats a path — the id it stored under would then differ from the
-    /// item's own fingerprint of what it actually holds, which
-    /// `converge.rs`'s `it is what it contains` pins as an invariant nothing
-    /// upstream of the domain type should be able to break twice.
+    /// Every file is `role: content`: the files `item_id` fingerprints (§5.2,
+    /// D4). An item already at that id keeps its metadata, so a worse guess at
+    /// a title cannot replace a better one, and gains only the files it lacks.
+    /// Two nodes adding the same files compute the same id, so they converge
+    /// on one item without coordinating.
     async fn add(&self, params: Add) -> Result<Value, Error> {
-        // Uploads are taken — and so removed when this returns, whatever it
-        // returns — before anything else can refuse the call, so a refused
-        // `add` does not leave its uploads behind for the next start.
-        let mut staged = Vec::with_capacity(params.uploads.len());
-        let mut uploaded = Vec::with_capacity(params.uploads.len());
-        for upload in &params.uploads {
+        // Taken first, so a refused call still deletes its uploads, when
+        // `_staged` is dropped.
+        let (uploaded, _staged) = self.take_uploads(&params.uploads).await?;
+        let item = self
+            .item_from_files(files_or_uploads(&params.files, &uploaded)?)
+            .await?;
+        match self.catalogue.item(item.id).await.map_err(sync_error)? {
+            Some(existing) => self.add_missing_files(item, &existing).await,
+            None => self.write_new_item(item, params).await,
+        }
+    }
+
+    /// Takes the uploads named: their paths, and the guards that delete them
+    /// when dropped.
+    async fn take_uploads(
+        &self,
+        uploads: &[UploadId],
+    ) -> Result<(Vec<PathBuf>, Vec<Staged>), Error> {
+        let mut paths = Vec::with_capacity(uploads.len());
+        let mut staged = Vec::with_capacity(uploads.len());
+        for upload in uploads {
             let (path, guard) = self
                 .uploads
                 .take(*upload)
                 .await
                 .map_err(|error| Error::invalid_params(error.to_string()))?;
+            paths.push(path);
             staged.push(guard);
-            uploaded.push(path);
         }
-        let paths = match (params.files.is_empty(), uploaded.is_empty()) {
-            (false, true) => &params.files,
-            (true, false) => &uploaded,
-            (true, true) => {
-                return Err(Error::invalid_params("library.add needs at least one file"));
-            }
-            (false, false) => {
-                return Err(Error::invalid_params(
-                    "library.add takes files or uploads, not both",
-                ));
-            }
-        };
+        Ok((paths, staged))
+    }
 
-        // A placeholder: `fingerprint` reads only `files`, so the real id
-        // is not known until every path is hashed into the same
-        // deduplicated map the item is actually built from.
-        // **Two different blobs cannot share a filename within one item**,
-        // and this is the place to say so: an item's file names are decided
-        // here, while the person who chose them is still in the room and can
-        // rename one. `library.download` refuses the same collision, because
-        // the catalogue is a shared document and another member's build can
-        // write what this one refuses — but catching it only there means
-        // telling somebody else, later, that an item they did not create
-        // cannot be written into one directory. That is a worse conversation
-        // at a worse moment, and this is the "check it on creation in the
-        // first place" half of it.
-        //
-        // Keyed on the blob, so the *same* file named twice — one path
-        // repeated, or two paths with identical bytes — is one entry and not
-        // a collision. That case is legal and
-        // `adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step`
-        // says so.
-        let mut named: BTreeMap<String, PathBuf> = BTreeMap::new();
+    /// An item of the files at `paths`, its id the fingerprint of what it
+    /// holds. Two different files under one name are refused here, while
+    /// whoever named them can still rename one.
+    async fn item_from_files(&self, paths: &[PathBuf]) -> Result<Item, Error> {
+        // Keyed on the blob, so the same file named twice is not a collision.
+        let mut named: BTreeMap<String, &PathBuf> = BTreeMap::new();
+        // A placeholder id until every file is hashed.
         let mut item = Item::new(ItemId::from_bytes([0; 32]));
         for path in paths {
             let (hash, record) = self.hash_file(path).await?;
@@ -891,59 +852,47 @@ impl Api {
                     record.filename,
                 )));
             }
-            named.insert(record.filename.clone(), path.clone());
+            named.insert(record.filename.clone(), path);
             item.files.insert(hash, record);
         }
         item.id = item
             .fingerprint()
             .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
+        Ok(item)
+    }
+
+    /// Writes the files of `item` that `existing`, at the same id, lacks, and
+    /// leaves its metadata alone. Usually there are none: only an earlier
+    /// write interrupted partway leaves an item without all of its files.
+    async fn add_missing_files(&self, item: Item, existing: &Item) -> Result<Value, Error> {
         let id = item.id;
-
-        if let Some(existing) = self.catalogue.item(id).await.map_err(sync_error)? {
-            // In today's code, `contributed` is rarely non-empty. `id` is
-            // the fingerprint of exactly `item.files`' key set, so a hit
-            // here means some earlier write already produced an item at
-            // this same id from what must have been (barring a hash
-            // collision) that identical set — `existing.files` should
-            // already hold every hash `item.files` does. The exception,
-            // and the reason this stays rather than becoming an assert, is
-            // the case the guard exists for: an earlier `Catalogue::write`
-            // interrupted partway through its per-key loop, leaving
-            // `existing` with fewer file entries than its own id implies.
-            // Every file `library.add` writes is `role: content` today, so
-            // there is no *other* way for this to end up non-empty — that
-            // changes the moment a role that does not take part in the
-            // fingerprint (a cover, say) is wired in here too.
-            let contributed: Vec<ContentHash> = item
-                .files
-                .keys()
-                .filter(|hash| !existing.files.contains_key(hash))
-                .copied()
-                .collect();
-            if !contributed.is_empty() {
-                let files = item
-                    .files
-                    .into_iter()
-                    .filter(|(hash, _)| contributed.contains(hash))
-                    .collect();
-                self.catalogue
-                    .write(&Item {
-                        files,
-                        ..Item::new(id)
-                    })
-                    .await
-                    .map_err(sync_error)?;
-            }
-            return Ok(json!({
-                "item_id": id,
-                "created": false,
-                "title": existing.title,
-                "contributed_files": contributed,
-            }));
+        let missing: BTreeMap<ContentHash, FileRecord> = item
+            .files
+            .into_iter()
+            .filter(|(hash, _)| !existing.files.contains_key(hash))
+            .collect();
+        let contributed: Vec<ContentHash> = missing.keys().copied().collect();
+        if !missing.is_empty() {
+            self.catalogue
+                .write(&Item {
+                    files: missing,
+                    ..Item::new(id)
+                })
+                .await
+                .map_err(sync_error)?;
         }
+        Ok(json!({
+            "item_id": id,
+            "created": false,
+            "title": existing.title,
+            "contributed_files": contributed,
+        }))
+    }
 
+    /// Writes `item` as a new item, with every field `params` gives.
+    async fn write_new_item(&self, mut item: Item, params: Add) -> Result<Value, Error> {
         item.kind = Some(params.kind);
-        item.title = params.title.clone();
+        item.title = params.title;
         item.authors = (!params.authors.is_empty()).then_some(params.authors);
         item.genres = (!params.genres.is_empty()).then_some(params.genres);
         item.series = params.series;
@@ -951,11 +900,10 @@ impl Api {
         item.lang = params.lang;
         item.description = params.description;
         self.catalogue.write(&item).await.map_err(sync_error)?;
-
         Ok(json!({
-            "item_id": id,
+            "item_id": item.id,
             "created": true,
-            "title": params.title,
+            "title": item.title,
             "contributed_files": Vec::<ContentHash>::new(),
         }))
     }
@@ -963,65 +911,58 @@ impl Api {
     /// `library.download` — fetch an item's files from whoever has them, and
     /// write them out to a directory (2b-3).
     ///
-    /// **Answers with a `task_id` as soon as the download is checked, and
-    /// fetches in the background** (phase 3's D4). This was synchronous in
-    /// phase 2, and its doc comment then predicted that becoming a task would
-    /// be "an addition rather than a change". It is a change: the files are
-    /// no longer on disk when the answer arrives, and the answer no longer
-    /// says whether each was fetched — `library.task` does, once it has
-    /// finished. The reason is the browser: axum drops a handler whose client
-    /// went away, so a synchronous download would die with a page reload.
+    /// Everything that can be the caller's mistake is refused before the
+    /// answer. The fetching then runs as a task that `library.task` reports
+    /// on, so a page reload does not end it (phase 3's D4). `file` names a
+    /// content hash, the key of an item's files. No deadline: a provider that
+    /// cannot be reached fails rather than hangs.
     ///
-    /// **Every refusal is still synchronous.** Everything below that can be
-    /// the caller's mistake — a destination that is not a directory, an item
-    /// or file this node does not have, a name that cannot be written or is
-    /// already taken — is checked before the task exists, so it is refused as
-    /// a JSON-RPC error exactly as before. What the task can fail with is the
-    /// network.
-    ///
-    /// **`file` names a content hash, where the sketch says `file_index`.**
-    /// An item's files are a map keyed by content hash (§5.2), so the only
-    /// index there is to give is a position in hash order — which is stable,
-    /// meaningless to a human, and silently renumbers the moment a second
-    /// member contributes a missing file. The hash is what `library.item`
-    /// already reports and what the record itself is keyed by.
-    ///
-    /// **Every member is offered as a provider**, minus this node. §5.6's
-    /// availability index is phase 4, so there is nothing to ask *who* holds
-    /// a hash; what makes the naive list workable is that a member who does
-    /// not have it is a provider skipped rather than a download failed, which
-    /// `distlib-net`'s own tests pin. It is O(members) dials in the worst
-    /// case and wrong at the thousands §2 allows — the same shape as the
-    /// peer-offer sweep already carried out of this phase, and it should be
-    /// answered by the availability index rather than guessed at here.
-    ///
-    /// **No deadline.** A media file is as slow as it is big, and a number
-    /// picked here would be a guess about file sizes and links this method
-    /// knows nothing about. The failure this would otherwise guard against
-    /// does not need it: a provider that cannot be reached fails rather than
-    /// hangs (`fetching_from_an_unreachable_provider_fails_rather_than_hangs`).
-    ///
-    /// **A failure partway through a multi-file download leaves the files
-    /// already written where they are**, and the error names only what
-    /// failed. That is deliberate rather than overlooked: those files are
-    /// complete and verified, and deleting them would be this method
-    /// destroying something on its way out. **Asking again takes only what
-    /// is missing**: a file already at its destination with exactly the
-    /// content the item names counts as done, and nothing is fetched or
-    /// written for it. A file is only ever at its destination whole, since
-    /// [`Blobs::export`] renames it into place once complete — so what a
-    /// failed download leaves there is always something a retry can keep.
-    ///
-    /// **Nothing is "registered".** The fetch lands the bytes in the store
-    /// `Catalogue::protocols`' `BlobsProtocol` serves from, so this node is a
-    /// holder from the moment it finishes and stays one across a restart,
-    /// because that store is on disk. §5.6's heartbeat is what would announce
-    /// it, and it does not exist yet.
+    /// Nothing is overwritten, and a failed download leaves the files it
+    /// finished: asking again fetches only what is missing.
     async fn download(&self, params: Download) -> Result<Value, Error> {
-        // A destination named is the caller's, and has to be there already:
-        // creating one would turn a mistyped path into a new directory. The
-        // node's own is created, since nobody else is going to.
-        let dest = match params.dest {
+        let dest = self.download_destination(params.dest)?;
+        // An item the read model does not have yet is one this node has not
+        // synced, so "no such item" is the truth about this node.
+        let item = self
+            .store
+            .item(params.item_id)
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .ok_or_else(|| Error::failed(format!("no such item: {}", params.item_id)))?
+            .item;
+        let wanted = files_to_download(params.item_id, item.files, params.file)?;
+        let targets = targets_in(&dest, wanted).await?;
+
+        let bytes = targets.iter().map(|target| target.record.size).sum();
+        let task = self.tasks.start_download(
+            params.item_id,
+            item.title.clone(),
+            targets.len() as u64,
+            bytes,
+        );
+        let answer = json!({
+            "task_id": task.id(),
+            "item_id": params.item_id,
+            "title": item.title,
+            "files": targets
+                .iter()
+                .map(|target| json!({
+                    "file": target.hash,
+                    "filename": target.record.filename,
+                    "path": target.path,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let providers = self.providers_of(&params.item_id);
+        self.finish_download_in_background(params.item_id, targets, providers, task);
+        Ok(answer)
+    }
+
+    /// Where a download writes: the directory named, which has to exist
+    /// already, since creating it would turn a mistyped path into a new
+    /// directory; or the node's own, created if need be.
+    fn download_destination(&self, dest: Option<PathBuf>) -> Result<PathBuf, Error> {
+        let dest = match dest {
             Some(dest) => dest,
             None => {
                 std::fs::create_dir_all(&self.downloads).map_err(|error| {
@@ -1036,175 +977,59 @@ impl Api {
                 dest.display()
             )));
         }
+        Ok(dest)
+    }
 
-        // The read model, like every other `library.*` read. It is derived
-        // from the document rather than a second copy of it, so an item it
-        // does not have yet is one this node has not synced — and answering
-        // "no such item" is then the truth about this node, which is what a
-        // caller about to wait and retry needs to hear.
-        let stored = self
-            .store
-            .item(params.item_id)
-            .await
-            .map_err(|error| Error::failed(error.to_string()))?
-            .ok_or_else(|| Error::failed(format!("no such item: {}", params.item_id)))?;
-
-        let wanted: Vec<(ContentHash, FileRecord)> = match params.file {
-            Some(hash) => {
-                let record = stored.item.files.get(&hash).cloned().ok_or_else(|| {
-                    Error::invalid_params(format!("{} has no file {hash}", params.item_id))
-                })?;
-                vec![(hash, record)]
-            }
-            None => stored.item.files.into_iter().collect(),
-        };
-        if wanted.is_empty() {
-            return Err(Error::failed(format!(
-                "{}: this item has no files yet",
-                params.item_id
-            )));
-        }
-
-        // Every target is worked out and checked before anything is fetched,
-        // so a caller who mistyped a destination or asked for something that
-        // cannot be written is not made to wait for a transfer first.
-        //
-        // **Nothing here overwrites anything.** Three ways that could happen
-        // and all three are refused. A file already at the target is the
-        // operator's — they may have edited or replaced it — and a download
-        // is not a reason to assume otherwise; deleting it is an instruction,
-        // overwriting it would be a guess. The exception is a file that *is*
-        // this one, byte for byte: nothing would be lost by keeping it, and
-        // it is what an earlier download that failed partway leaves behind.
-        // Checked by size first, which costs nothing, and only then by hash,
-        // which reads the whole file — here rather than in the task, so that
-        // "something of yours is in the way" is still refused before anything
-        // starts. Only a retry pays for it, and BLAKE3 reads faster than most
-        // disks can be read. Two of this item's own files
-        // landing on one path is the same loss by a different route. And a
-        // `filename` is a string some other member's build wrote into the
-        // document, so it is reduced to its last component before it is
-        // joined — §2 says members do not attack the protocol, but
-        // `dest.join("/etc/passwd")` is `/etc/passwd`, and that is a foot-gun
-        // whether or not anybody means it.
-        //
-        // **The name collision is refused at `library.add` as well, and that
-        // is where it is meant to be caught** — by whoever chose the names,
-        // while they can still rename one. This is the second line, and it
-        // is not redundant: the catalogue is one document for the whole
-        // group, so an item's files can be written by a member running an
-        // older build, or by a future one filling the roles `library.add`
-        // does not write yet. What arrives here is data, and a method about
-        // to write files to a disk checks it rather than trusting that
-        // whoever wrote it ran this build.
-        //
-        // The refusal names `file`, which is the way through: a hash says
-        // which of two identically-named files is wanted where their names
-        // cannot. Writing them both under disambiguated names would be the
-        // more useful answer and wants `FileRecord`'s own `disc` and `seq`
-        // to do it with — they are the right disambiguator and nothing fills
-        // them yet (P2-23).
-        let mut taken: BTreeMap<PathBuf, ContentHash> = BTreeMap::new();
-        let mut targets: Vec<Target> = Vec::with_capacity(wanted.len());
-        for (hash, record) in wanted {
-            let name = std::path::Path::new(&record.filename)
-                .file_name()
-                .ok_or_else(|| {
-                    Error::failed(format!(
-                        "{hash}: {:?} is not a filename this can write",
-                        record.filename
-                    ))
-                })?;
-            let target = dest.join(name);
-            if let Some(other) = taken.get(&target) {
-                return Err(Error::failed(format!(
-                    "{} and {other} are both called {}; download them one at a time with `file`",
-                    hash,
-                    target.display()
-                )));
-            }
-            let in_place = target.exists();
-            if in_place && !already_there(&target, hash, record.size).await? {
-                return Err(Error::failed(format!(
-                    "{} already exists and is not this file; move or delete it to download \
-                     this file again",
-                    target.display()
-                )));
-            }
-            taken.insert(target.clone(), hash);
-            targets.push(Target {
-                hash,
-                record,
-                path: target,
-                in_place,
-            });
-        }
-
+    /// Every other member, in the order to ask them for `item_id`.
+    fn providers_of(&self, item_id: &ItemId) -> Vec<MemberId> {
         let me = self.node.id();
-        let providers = self.seen().ask_order(
-            &params.item_id,
+        self.seen().ask_order(
+            item_id,
             self.node
                 .membership()
                 .members()
                 .map(|record| record.member_id)
                 .filter(|member| *member != me),
-        );
+        )
+    }
 
-        let bytes = targets.iter().map(|target| target.record.size).sum();
-        let task = self.tasks.start_download(
-            params.item_id,
-            stored.item.title.clone(),
-            targets.len() as u64,
-            bytes,
-        );
-        let task_id = task.id();
-        let answer = json!({
-            "task_id": task_id,
-            "item_id": params.item_id,
-            "title": stored.item.title,
-            "files": targets
-                .iter()
-                .map(|target| json!({
-                    "file": target.hash,
-                    "filename": target.record.filename,
-                    "path": target.path,
-                }))
-                .collect::<Vec<_>>(),
-        });
-
+    /// Fetches and writes `targets` for `task` in the background, then
+    /// rechecks whether this node holds the item before the task says it has
+    /// finished, so whoever waits on it finds the item held.
+    fn finish_download_in_background(
+        &self,
+        item_id: ItemId,
+        targets: Vec<Target>,
+        providers: Vec<MemberId>,
+        mut task: tasks::Download,
+    ) {
         // A clone, because the task outlives this call; every field is a
-        // handle onto something shared, so it is the same node either way.
+        // handle onto something shared.
         let api = self.clone();
-        let item_id = params.item_id;
         tokio::spawn(async move {
-            let mut task = task;
             match api.fetch_all(targets, &providers, &mut task).await {
                 Ok(files) => {
-                    // Before the task says it is finished, so whoever was
-                    // waiting on that finds the item held. A download is the
-                    // one way content arrives that the document never hears
-                    // of, so nothing else would recheck it.
-                    //
-                    // **The item as it is now**, read back rather than kept
-                    // from when the download was asked for: an item's id is
-                    // frozen at creation, so a chapter can be added under it
-                    // mid-transfer, and rechecking the old file list would
-                    // call held an item that is missing it.
-                    let rechecked = async {
-                        let Some(item) = api.catalogue.item(item_id).await? else {
-                            return Ok(false);
-                        };
-                        api.catalogue.holdings().recheck(&item).await
-                    };
-                    if let Err(error) = rechecked.await {
-                        tracing::warn!(item = %item_id, %error, "could not work out whether this node now holds an item");
-                    }
-                    task.finish(files)
+                    api.recheck_holdings(item_id).await;
+                    task.finish(files);
                 }
                 Err(error) => task.fail(error.message),
             }
         });
-        Ok(answer)
+    }
+
+    /// Rechecks whether this node holds `item_id`. A download is the one way
+    /// content arrives that the document never hears of. The item is read
+    /// again, since a file may have been added to it during the download.
+    async fn recheck_holdings(&self, item_id: ItemId) {
+        let rechecked = async {
+            let Some(item) = self.catalogue.item(item_id).await? else {
+                return Ok(false);
+            };
+            self.catalogue.holdings().recheck(&item).await
+        };
+        if let Err(error) = rechecked.await {
+            tracing::warn!(item = %item_id, %error, "could not work out whether this node now holds an item");
+        }
     }
 
     /// `library.download`'s background half: fetches what is not here yet and
@@ -1610,6 +1435,94 @@ fn query_error(error: StoreError) -> Error {
         StoreError::Query { .. } => Error::invalid_params(error.to_string()),
         other => Error::failed(other.to_string()),
     }
+}
+
+/// The files `library.add` was given: paths on this node, or uploads, not
+/// both.
+fn files_or_uploads<'a>(
+    files: &'a [PathBuf],
+    uploaded: &'a [PathBuf],
+) -> Result<&'a [PathBuf], Error> {
+    match (files.is_empty(), uploaded.is_empty()) {
+        (false, true) => Ok(files),
+        (true, false) => Ok(uploaded),
+        (true, true) => Err(Error::invalid_params("library.add needs at least one file")),
+        (false, false) => Err(Error::invalid_params(
+            "library.add takes files or uploads, not both",
+        )),
+    }
+}
+
+/// The files of `item_id` a download asks for: the one `file` names, or all.
+fn files_to_download(
+    item_id: ItemId,
+    files: BTreeMap<ContentHash, FileRecord>,
+    file: Option<ContentHash>,
+) -> Result<Vec<(ContentHash, FileRecord)>, Error> {
+    let wanted: Vec<(ContentHash, FileRecord)> = match file {
+        Some(hash) => {
+            let record = files
+                .get(&hash)
+                .cloned()
+                .ok_or_else(|| Error::invalid_params(format!("{item_id} has no file {hash}")))?;
+            vec![(hash, record)]
+        }
+        None => files.into_iter().collect(),
+    };
+    if wanted.is_empty() {
+        return Err(Error::failed(format!(
+            "{item_id}: this item has no files yet"
+        )));
+    }
+    Ok(wanted)
+}
+
+/// Where in `dest` each file goes, checked before anything is fetched.
+///
+/// Nothing is overwritten. A file already at its target is refused unless it
+/// is this file byte for byte, which is what a failed earlier download leaves.
+/// Two files on one path are refused too: `library.add` refuses them, but
+/// another member's build may have written them, and `file` picks one. A
+/// filename comes from the shared document, so only its last component is
+/// used.
+async fn targets_in(
+    dest: &Path,
+    wanted: Vec<(ContentHash, FileRecord)>,
+) -> Result<Vec<Target>, Error> {
+    let mut taken: BTreeMap<PathBuf, ContentHash> = BTreeMap::new();
+    let mut targets: Vec<Target> = Vec::with_capacity(wanted.len());
+    for (hash, record) in wanted {
+        let name = Path::new(&record.filename).file_name().ok_or_else(|| {
+            Error::failed(format!(
+                "{hash}: {:?} is not a filename this can write",
+                record.filename
+            ))
+        })?;
+        let target = dest.join(name);
+        if let Some(other) = taken.get(&target) {
+            return Err(Error::failed(format!(
+                "{} and {other} are both called {}; download them one at a time with `file`",
+                hash,
+                target.display()
+            )));
+        }
+        let in_place = target.exists();
+        if in_place && !already_there(&target, hash, record.size).await? {
+            return Err(Error::failed(format!(
+                "{} already exists and is not this file; move or delete it to download \
+                 this file again",
+                target.display()
+            )));
+        }
+        taken.insert(target.clone(), hash);
+        targets.push(Target {
+            hash,
+            record,
+            path: target,
+            in_place,
+        });
+    }
+    Ok(targets)
 }
 
 /// One file `library.download` is to write, worked out and checked before the
