@@ -15,8 +15,9 @@
   import StarRating from "./StarRating.svelte";
   import type { Listen } from "./lib/events";
   import { availability, bytes, instant, ratingSummary } from "./lib/format";
+  import { whoIsWho } from "./lib/members";
   import { reloader } from "./lib/reloader";
-  import { call, type FileRecord, type ItemRecord, Unauthorised } from "./lib/rpc";
+  import { call, failureOf, type FileRecord, type ItemRecord, Unauthorised } from "./lib/rpc";
 
   let { id, listen, onUnauthorised }: { id: string; listen: Listen; onUnauthorised: () => void } =
     $props();
@@ -40,22 +41,11 @@
     }
   }
 
-  /** Who this node's member is, and every member's name. */
-  async function loadMembers() {
-    try {
-      const [status, group] = await Promise.all([call("node.status", null), call("group.members", null)]);
-      me = status.member;
-      names = new Map(group.members.map((member) => [member.member, member.name]));
-    } catch (error) {
-      // Anything else leaves members shown by id, and the next change tries again.
-      if (error instanceof Unauthorised) {
-        onUnauthorised();
-      }
-    }
-  }
-
   const reload = reloader(load);
-  const reloadMembers = reloader(loadMembers);
+  // A failure leaves members shown by id, and the next change tries again.
+  const reloadMembers = reloader(async () => {
+    await failureOf(async () => ({ me, names } = await whoIsWho()), onUnauthorised);
+  });
 
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {

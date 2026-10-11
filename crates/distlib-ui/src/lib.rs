@@ -55,10 +55,10 @@ const PLACEHOLDER: &str = include_str!("../placeholder.html");
 ///
 /// The token sits in the page's session storage, so script injected into the
 /// page is the way to steal it; this confines script, and everything the page
-/// fetches, to this origin. Styles may be inline because Svelte sets them so,
-/// and a style cannot read storage. `frame-ancestors 'none'` keeps another
-/// site from framing the page to click through it.
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; \
+/// fetches, to this origin, and styles too: every rule the pages need is in
+/// the stylesheet (C20, closed in 4c-6). `frame-ancestors 'none'` keeps
+/// another site from framing the page to click through it.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; style-src 'self'; \
      img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// The UI's answer to a request for `path`: a file of the UI, or the page for

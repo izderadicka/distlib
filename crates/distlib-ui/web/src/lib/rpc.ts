@@ -138,6 +138,24 @@ export interface ItemRecord extends ItemSummary {
   bookmarks: BookmarkRecord[];
 }
 
+/** One wish, as its members' entries resolve it (D10). */
+export interface WishRecord {
+  wish_id: string;
+  /** Whoever wished for it first. */
+  creator: string;
+  kind: ItemSummary["kind"];
+  title: string;
+  authors: string[] | null;
+  description: string | null;
+  /** Microseconds since the epoch. */
+  created_at: number | null;
+  /** `fulfilled` once any member says an item answers it. */
+  status: "open" | "fulfilled";
+  /** Every member's answer: the item, and its title once this node has it. */
+  fulfilled_by: { member: string; item_id: string; title: string | null }[];
+  comments: { member: string; comment: string }[];
+}
+
 /** How far a download has got, in bytes and in files written. */
 export interface Progress {
   bytes_done: number;
@@ -202,6 +220,18 @@ interface Methods {
   "community.bookmark_delete": {
     params: { item_id: string; bookmark_id: string };
     result: { item_id: string; bookmark_id: string };
+  };
+  /** Every wish, newest first. */
+  "community.wish_list": { params: Record<string, never>; result: { wishes: WishRecord[] } };
+  "community.wish_create": {
+    params: { title: string; kind?: NonNullable<ItemSummary["kind"]>; authors?: string[]; description?: string };
+    result: { wish_id: string };
+  };
+  /** `comment: null` clears this member's comment. */
+  "community.wish_comment": { params: { wish_id: string; comment: string | null }; result: { wish_id: string } };
+  "community.wish_fulfill": {
+    params: { wish_id: string; item_id: string };
+    result: { wish_id: string; item_id: string };
   };
 }
 

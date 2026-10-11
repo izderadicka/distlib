@@ -217,3 +217,34 @@ test("an item is rated, reviewed and bookmarked from its page", async ({ page, n
   await expect(bookmark).toContainText("you");
   await expect(bookmark).toContainText("the farm");
 });
+
+test("a wish is made, commented on and fulfilled from the wishes page", async ({ page, node }) => {
+  const errors = errorsOn(page);
+  node.add("krakatit.epub", "a novel", "--kind", "ebook", "--title", "Krakatit", "--author", "Karel Čapek");
+  await page.goto(node.link);
+  await page.getByRole("link", { name: "Wishes" }).click();
+  await expect(page.getByText("Nobody has wished for anything yet.")).toBeVisible();
+
+  await page.getByLabel("Title").fill("Krakatit");
+  await page.getByLabel(/^Authors/).fill("Karel Čapek");
+  await page.getByRole("button", { name: "Wish for it" }).click();
+
+  // Each is read back from the node once it has been projected.
+  const wish = page.locator("section").filter({ has: page.getByRole("heading", { name: "Krakatit" }) });
+  await expect(wish).toContainText("open");
+  await expect(wish).toContainText("you");
+
+  await wish.getByLabel("Your comment").fill("The one with the explosive.");
+  await wish.getByRole("button", { name: "Save comment" }).click();
+  await expect(wish.getByRole("button", { name: "Clear comment" })).toBeVisible();
+
+  await wish.getByRole("button", { name: "Fulfil…" }).click();
+  await wish.getByRole("row", { name: /Krakatit/ }).getByRole("button", { name: "Fulfil with this" }).click();
+  await expect(wish).toContainText("fulfilled");
+  await wish.getByRole("link", { name: "Krakatit" }).click();
+  await expect(page.getByRole("heading", { name: "Krakatit" })).toBeVisible();
+  expect(new URL(page.url()).pathname).toMatch(/^\/items\/[0-9a-f]{64}$/);
+
+  // Nothing refused by the CSP — no inline styles left to allow — nothing thrown.
+  expect(errors).toEqual([]);
+});

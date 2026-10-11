@@ -13,6 +13,7 @@ export type Route =
   | { page: "library"; query: string; number: number }
   | { page: "item"; id: string }
   | { page: "add" }
+  | { page: "wishes" }
   | { page: "node" }
   | { page: "missing" };
 
@@ -33,6 +34,8 @@ export function parse(url: URL): Route {
     }
     case "/add":
       return { page: "add" };
+    case "/wishes":
+      return { page: "wishes" };
     case "/node":
       return { page: "node" };
     default: {
@@ -60,6 +63,8 @@ export function href(route: Route): string {
       return `/items/${route.id}`;
     case "add":
       return "/add";
+    case "wishes":
+      return "/wishes";
     case "node":
       return "/node";
     case "missing":

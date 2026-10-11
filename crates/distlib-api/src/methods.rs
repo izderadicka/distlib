@@ -691,9 +691,25 @@ impl Api {
             })
             .collect();
         wishes.sort_by_key(|(_, wish, _)| Reverse(wish.wished.created_at));
+
+        // Each fulfilling item's title, read once however many wishes it
+        // answers; `None` for one the read model has not projected yet.
+        let mut titles: BTreeMap<ItemId, Option<String>> = BTreeMap::new();
+        for (_, wish, _) in &wishes {
+            for item_id in wish.fulfilled_by.values() {
+                if !titles.contains_key(item_id) {
+                    let stored = self
+                        .store
+                        .item_fields(*item_id)
+                        .await
+                        .map_err(|error| Error::failed(error.to_string()))?;
+                    titles.insert(*item_id, stored.and_then(|stored| stored.item.title));
+                }
+            }
+        }
         let wishes: Vec<Value> = wishes
             .iter()
-            .map(|(id, wish, comments)| wish_json(*id, wish, comments))
+            .map(|(id, wish, comments)| wish_json(*id, wish, comments, &titles))
             .collect();
         Ok(json!({ "wishes": wishes }))
     }
@@ -1517,8 +1533,14 @@ fn bookmark_json(stored: &StoredBookmark) -> Value {
     })
 }
 
-/// One wish as `community.wish_list` gives it.
-fn wish_json(id: WishId, wish: &ResolvedWish, comments: &BTreeMap<MemberId, Comment>) -> Value {
+/// One wish as `community.wish_list` gives it, each fulfilling item with its
+/// title from `titles`.
+fn wish_json(
+    id: WishId,
+    wish: &ResolvedWish,
+    comments: &BTreeMap<MemberId, Comment>,
+    titles: &BTreeMap<ItemId, Option<String>>,
+) -> Value {
     let wished = &wish.wished;
     json!({
         "wish_id": id,
@@ -1532,7 +1554,10 @@ fn wish_json(id: WishId, wish: &ResolvedWish, comments: &BTreeMap<MemberId, Comm
         "fulfilled_by": wish
             .fulfilled_by
             .iter()
-            .map(|(member, item_id)| json!({ "member": member, "item_id": item_id }))
+            .map(|(member, item_id)| {
+                let title = titles.get(item_id).cloned().flatten();
+                json!({ "member": member, "item_id": item_id, "title": title })
+            })
             .collect::<Vec<_>>(),
         "comments": comments
             .iter()

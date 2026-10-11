@@ -897,6 +897,26 @@ Needs only 4a-1, so it can interleave with 4b.
   **Acceptance:** Vitest; one Playwright test.
   **Watch for:** C20 — a new page is when the CSP's inline styles are revisited.
 
+  **As built:**
+  - **`/wishes`**, a `Wishes` link in the nav. The page lists every wish as the node gives them,
+    newest first, under a `Make a wish` form: title (needed), type, authors one to a line,
+    description.
+  - **Each wish:** its status, who wished for it, when, type, authors, description; who fulfilled
+    it with which item, linked by the item's title.
+  - **Titles from the API (Ivan's call):** each `fulfilled_by` entry of `community.wish_list`
+    carries the item's `title`, `null` until this node has the item. The page reloads on news of
+    an item a wish is fulfilled with, so the title appears when the item does.
+  - **The picker (Ivan's call):** `Fulfil…` opens a search under the wish, filled with its title and
+    run at once; each item found has `Fulfil with this`.
+  - **Comments:** this member's own as a form, everybody else's below by name. The form is
+    `OwnText`, shared with `Reviews`. Who is who is `whoIsWho` in `lib/members.ts`, shared with the
+    item page.
+  - **C20 closed (Ivan's call):** the CSP is `style-src 'self'`. Every rule is in the stylesheet;
+    the e2e tests fail on anything the CSP refuses, and the header test checks there is no
+    `'unsafe-inline'`.
+  - **Acceptance:** Vitest for each component and the page; one Playwright test makes a wish,
+    comments on it, fulfils it with an item and follows the link.
+
 - **4c-7 — the Bookmarks page** — route, nav, search, the "mine" and member filters.
   **Acceptance:** Vitest; one Playwright test.
 
@@ -924,7 +944,7 @@ Every open C-number appears here once.
 | **C13** | Gossip does not change sides when a node is promoted | **Deferred.** |
 | **C14** | `sync.status` does not exist | **Closed by 4a-2.** |
 | **C15**–**C19** | Read-only admin; Windows file privacy and service; clearing a field; downloads as in-memory tasks | **Unchanged.** |
-| **C20** | The CSP allows `style-src 'unsafe-inline'` | **Revisited in 4c-6**, the first new page. |
+| **C20** | The CSP allows `style-src 'unsafe-inline'` | **Closed by 4c-6**: `style-src 'self'`. |
 | **C21**–**C24** | Title sort; consensus test peers that cannot restart; release publishing; the expelled leader's lost answer | **Unchanged.** |
 | **C25** | On Windows, two followers meet only through the timed re-offer | **Closed by 4a-3.** Not Windows-specific: a dial on the membership topic to a member with no address strands that peer in iroh-gossip for every topic (ground truth 18). |
 

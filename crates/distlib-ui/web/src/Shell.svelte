@@ -8,6 +8,7 @@
   import ItemPage from "./ItemPage.svelte";
   import LibraryPage from "./LibraryPage.svelte";
   import NodePage from "./NodePage.svelte";
+  import WishesPage from "./WishesPage.svelte";
   import { type Connection, type Listen, type NodeEvent, watch } from "./lib/events";
   import { href, onLinkClick, onPopState, router } from "./lib/router.svelte";
 
@@ -40,6 +41,7 @@
 <nav>
   <a href="/" aria-current={router.route.page === "library" ? "page" : undefined}>Library</a>
   <a href="/add" aria-current={router.route.page === "add" ? "page" : undefined}>Add</a>
+  <a href="/wishes" aria-current={router.route.page === "wishes" ? "page" : undefined}>Wishes</a>
   <a href="/node" aria-current={router.route.page === "node" ? "page" : undefined}>Node</a>
 </nav>
 
@@ -62,6 +64,8 @@
     <ItemPage id={router.route.id} {listen} {onUnauthorised} />
   {:else if router.route.page === "add"}
     <AddPage {onUnauthorised} />
+  {:else if router.route.page === "wishes"}
+    <WishesPage {listen} {onUnauthorised} />
   {:else if router.route.page === "node"}
     <NodePage {listen} {onUnauthorised} />
   {:else}
