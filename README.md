@@ -500,6 +500,12 @@ test that fails only alongside others is a finding — a deadline too tight for 
 busy machine, or code that misbehaves when it is scheduled late — not something
 to serialise away. The full lane is about as long as its slowest test.
 
+`scripts/mutate.py <mutations.toml>` checks that the tests catch hand-written
+mutations of the code, Rust or UI. Each mutation names the tests that should
+catch it, and only those are built and run, stopping at the first failure. A
+mutation they miss is run against the whole suite before it is called a
+survivor. Its docstring has the file's format.
+
 The test suite never contacts the public relay or DNS infrastructure — endpoints are
 either given explicit addresses or pointed at an in-process relay, so the suite is
 deterministic and works offline. Engineering standards are in
