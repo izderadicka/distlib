@@ -311,6 +311,35 @@ impl Store {
         .await
     }
 
+    /// Every wish the read model holds something of, by id.
+    pub async fn all_wishes(&self) -> Result<BTreeMap<WishId, StoredWish>> {
+        self.read(|conn| {
+            let mut wishes: BTreeMap<WishId, StoredWish> = BTreeMap::new();
+            let mut entries = conn.prepare("SELECT wish, member, entry FROM wish_entries")?;
+            let mut rows = entries.query([])?;
+            while let Some(row) = rows.next()? {
+                wishes
+                    .entry(identifier(row, 0, "wish")?)
+                    .or_default()
+                    .entries
+                    .insert(identifier(row, 1, "member")?, unjson(row, 2, "entry")?);
+            }
+            let mut comments = conn.prepare("SELECT wish, member, comment FROM wish_comments")?;
+            let mut rows = comments.query([])?;
+            while let Some(row) = rows.next()? {
+                let comment = Comment::try_from(row.get::<_, String>(2)?)
+                    .map_err(unreadable(2, "comment"))?;
+                wishes
+                    .entry(identifier(row, 0, "wish")?)
+                    .or_default()
+                    .comments
+                    .insert(identifier(row, 1, "member")?, comment);
+            }
+            Ok(wishes)
+        })
+        .await
+    }
+
     /// Replaces the `members` table with `members`.
     ///
     /// Replaced rather than merged, for the same reason the projection is a

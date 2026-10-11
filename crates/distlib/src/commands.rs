@@ -15,7 +15,7 @@ use distlib_api::{
 use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
 use distlib_core::{
     BookmarkId, Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId,
-    Ticket,
+    Ticket, WishId,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -850,6 +850,103 @@ pub async fn bookmarks(
             println!("  {note}");
         }
     }
+    Ok(())
+}
+
+/// `distlib wish create`
+pub async fn wish_create(
+    paths: &Paths,
+    title: String,
+    kind: Option<Kind>,
+    authors: Vec<String>,
+    description: Option<String>,
+) -> Result<()> {
+    let answer = ask(
+        paths,
+        "community.wish_create",
+        json!({
+            "title": title,
+            "kind": kind.map(kind_str),
+            "authors": authors,
+            "description": description,
+        }),
+    )
+    .await?;
+    println!(
+        "wished      {}  {title}",
+        answer["wish_id"].as_str().unwrap_or("?")
+    );
+    Ok(())
+}
+
+/// `distlib wish list`
+pub async fn wish_list(paths: &Paths, open: bool, fulfilled: bool) -> Result<()> {
+    let status = match (open, fulfilled) {
+        (true, _) => Some("open"),
+        (_, true) => Some("fulfilled"),
+        _ => None,
+    };
+    let answer = ask(paths, "community.wish_list", json!({ "status": status })).await?;
+    let wishes = answer["wishes"].as_array().map_or(&[][..], |v| v);
+    if wishes.is_empty() {
+        println!("no wishes");
+    }
+    for wish in wishes {
+        println!(
+            "{}  {}  [{}]",
+            wish["wish_id"].as_str().unwrap_or("?"),
+            wish["title"].as_str().unwrap_or("?"),
+            wish["status"].as_str().unwrap_or("?")
+        );
+        println!("  by {}", wish["creator"].as_str().unwrap_or("?"));
+        if let Some(authors) = wish["authors"].as_array().filter(|list| !list.is_empty()) {
+            println!("  {}", join_strings(authors));
+        }
+        if let Some(description) = wish["description"].as_str() {
+            println!("  {description}");
+        }
+        for fulfilment in wish["fulfilled_by"].as_array().map_or(&[][..], |v| v) {
+            println!(
+                "  fulfilled by {} with {}",
+                fulfilment["member"].as_str().unwrap_or("?"),
+                fulfilment["item_id"].as_str().unwrap_or("?")
+            );
+        }
+        for comment in wish["comments"].as_array().map_or(&[][..], |v| v) {
+            println!(
+                "  {}: {}",
+                comment["member"].as_str().unwrap_or("?"),
+                comment["comment"].as_str().unwrap_or("?")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `distlib wish comment`. `None` clears this member's comment.
+pub async fn wish_comment(paths: &Paths, wish_id: WishId, text: Option<String>) -> Result<()> {
+    ask(
+        paths,
+        "community.wish_comment",
+        json!({ "wish_id": wish_id, "comment": &text }),
+    )
+    .await?;
+    match text {
+        Some(_) => println!("commented on {wish_id}"),
+        None => println!("cleared your comment on {wish_id}"),
+    }
+    Ok(())
+}
+
+/// `distlib wish fulfill`
+pub async fn wish_fulfill(paths: &Paths, wish_id: WishId, item_id: ItemId) -> Result<()> {
+    ask(
+        paths,
+        "community.wish_fulfill",
+        json!({ "wish_id": wish_id, "item_id": item_id }),
+    )
+    .await?;
+    println!("fulfilled   {wish_id} with {item_id}");
     Ok(())
 }
 

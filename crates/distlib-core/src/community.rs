@@ -14,7 +14,7 @@
 //! Apart from [`Key`](crate::Key), which stays item-only: the pump and the
 //! replay read `item/…` as an item's own fields, and these are not.
 
-use std::{fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -490,6 +490,49 @@ impl Wish {
     /// Reads a value back, or `None` if it is not a wish entry.
     pub fn decode(value: &[u8]) -> Option<Self> {
         from_json(value)
+    }
+}
+
+/// A wish as its current members' entries resolve it (D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWish {
+    /// Whoever's entry carrying a title was made earliest; the lower member
+    /// id on a tie.
+    pub creator: MemberId,
+    /// What the creator wished for: their own entry.
+    pub wished: WishFields,
+    /// Each member whose entry says fulfilled, and by which item. Two members
+    /// may each answer it with an item of their own (Ivan's call: all shown).
+    pub fulfilled_by: BTreeMap<MemberId, ItemId>,
+}
+
+impl ResolvedWish {
+    /// `None` while no entry carries a title, as when only a fulfiller's has
+    /// reached this node.
+    pub fn resolve(entries: &BTreeMap<MemberId, Wish>) -> Option<Self> {
+        let (creator, wished) = entries
+            .iter()
+            .filter(|(_, wish)| wish.fields().title.is_some())
+            .min_by_key(|(member, wish)| {
+                (wish.fields().created_at.unwrap_or(u64::MAX), **member)
+            })?;
+        let fulfilled_by = entries
+            .iter()
+            .filter_map(|(member, wish)| match wish.fields().status {
+                WishStatus::Fulfilled { item_id } => Some((*member, item_id)),
+                WishStatus::Open => None,
+            })
+            .collect();
+        Some(Self {
+            creator: *creator,
+            wished: wished.fields().clone(),
+            fulfilled_by,
+        })
+    }
+
+    /// Whether any member has fulfilled it.
+    pub fn is_fulfilled(&self) -> bool {
+        !self.fulfilled_by.is_empty()
     }
 }
 

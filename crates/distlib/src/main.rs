@@ -5,7 +5,7 @@ use std::{io::IsTerminal as _, time::Duration};
 use anyhow::Result;
 use clap::Parser;
 use distlib::{
-    cli::{AdminCommand, Cli, Command, CoreCommand},
+    cli::{AdminCommand, Cli, Command, CoreCommand, WishCommand},
     commands::{self, AddArgs, Paths},
 };
 use distlib_core::DataDir;
@@ -59,6 +59,23 @@ async fn main() -> Result<()> {
             // Clap requires a position whenever `--delete` is not given.
             None => {
                 commands::bookmark(&paths, item_id, edit, position.unwrap_or_default(), note).await
+            }
+        },
+        Command::Wish { command } => match command {
+            WishCommand::Create {
+                title,
+                kind,
+                authors,
+                description,
+            } => commands::wish_create(&paths, title, kind, authors, description).await,
+            WishCommand::List { open, fulfilled } => {
+                commands::wish_list(&paths, open, fulfilled).await
+            }
+            WishCommand::Comment { wish_id, text, .. } => {
+                commands::wish_comment(&paths, wish_id, text).await
+            }
+            WishCommand::Fulfill { wish_id, item_id } => {
+                commands::wish_fulfill(&paths, wish_id, item_id).await
             }
         },
         Command::Bookmarks {

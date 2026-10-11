@@ -21,11 +21,13 @@ use distlib_api::{
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{
-    Bookmark, BookmarkId, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr, Rating,
-    Review, Ticket,
+    Bookmark, BookmarkId, Comment, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr,
+    Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
-use distlib_store::{ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember};
+use distlib_store::{
+    ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
+};
 use distlib_sync::{Availability, Catalogue, Sources};
 use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::{
@@ -1792,6 +1794,190 @@ async fn bookmarks_are_listed_on_the_item_and_found_across_the_group() {
         .call("community.bookmarks", json!({ "q": "nowhere" }))
         .await;
     assert_eq!(found, json!({ "bookmarks": [] }));
+
+    harness.shutdown().await;
+}
+
+/// `community.wish_create` writes this member's entry as the wish's creator,
+/// `wish_comment` its comment (and `null` clears it), and `wish_fulfill`
+/// marks it fulfilled in the same entry, keeping what was wished for.
+#[tokio::test]
+async fn community_wishes_are_created_commented_on_and_fulfilled() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let item = ItemId::from_bytes([7; 32]);
+    harness.catalogue.ready().await;
+    let hordubal = Item {
+        title: Some("Hordubal".to_owned()),
+        ..Item::new(item)
+    };
+    harness.catalogue.write(&hordubal).await.unwrap();
+
+    let made = harness
+        .call(
+            "community.wish_create",
+            json!({ "title": "Hordubal", "kind": "ebook", "authors": ["Karel Čapek"] }),
+        )
+        .await;
+    let wish: WishId = serde_json::from_value(made["wish_id"].clone()).unwrap();
+    harness
+        .call(
+            "community.wish_comment",
+            json!({ "wish_id": wish, "comment": "On paper, please" }),
+        )
+        .await;
+    assert_eq!(
+        harness.catalogue.wish_comments(wish).await.unwrap(),
+        BTreeMap::from([(
+            me,
+            Comment::try_from("On paper, please".to_owned()).unwrap()
+        )])
+    );
+    harness
+        .call(
+            "community.wish_comment",
+            json!({ "wish_id": wish, "comment": null }),
+        )
+        .await;
+    assert!(
+        harness
+            .catalogue
+            .wish_comments(wish)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    harness
+        .call(
+            "community.wish_fulfill",
+            json!({ "wish_id": wish, "item_id": item }),
+        )
+        .await;
+    let entries = harness.catalogue.wishes(wish).await.unwrap();
+    let mine = entries[&me].fields();
+    assert_eq!(mine.title.as_deref(), Some("Hordubal"), "still the creator");
+    assert_eq!(mine.authors, Some(vec!["Karel Čapek".to_owned()]));
+    assert_eq!(mine.status, WishStatus::Fulfilled { item_id: item });
+
+    harness.shutdown().await;
+}
+
+/// A wish needs a title and a comment field; a wish or an item nobody made
+/// is refused.
+#[tokio::test]
+async fn community_wishes_refuse_what_cannot_be_written() {
+    let harness = Harness::start().await;
+    harness.catalogue.ready().await;
+    let made = harness
+        .call("community.wish_create", json!({ "title": "Krakatit" }))
+        .await;
+    let wish = made["wish_id"].clone();
+    let nobodys = WishId::from_bytes([9; 32]);
+
+    for (method, params) in [
+        ("community.wish_create", json!({ "title": " " })),
+        ("community.wish_comment", json!({ "wish_id": wish })),
+    ] {
+        let refused = harness.refuse(method, params).await;
+        assert_eq!(code(&refused), -32602, "{method}: {refused}");
+    }
+    for (method, params) in [
+        (
+            "community.wish_comment",
+            json!({ "wish_id": nobodys, "comment": "Me too" }),
+        ),
+        (
+            "community.wish_fulfill",
+            json!({ "wish_id": wish, "item_id": ItemId::from_bytes([9; 32]) }),
+        ),
+    ] {
+        let refused = harness.refuse(method, params).await;
+        assert_eq!(code(&refused), -32000, "{method}: {refused}");
+    }
+
+    harness.shutdown().await;
+}
+
+/// `community.wish_list` resolves each wish the read model holds (D10),
+/// newest first, every fulfilment and comment shown; `status` filters.
+#[tokio::test]
+async fn community_wish_list_resolves_filters_and_orders_wishes() {
+    let harness = Harness::start().await;
+    let alice = harness.node.id();
+    let bob = MemberId::from(SecretKey::generate().public());
+    let item = ItemId::from_bytes([4; 32]);
+    let entry = |title: Option<&str>, created_at, status| {
+        Wish::new(WishFields {
+            kind: None,
+            title: title.map(str::to_owned),
+            authors: None,
+            description: None,
+            created_at: Some(created_at),
+            status,
+        })
+        .unwrap()
+    };
+    let older = WishId::from_bytes([1; 32]);
+    let newer = WishId::from_bytes([2; 32]);
+    harness
+        .store
+        .replace_wish(
+            older,
+            StoredWish {
+                entries: BTreeMap::from([
+                    (alice, entry(Some("Hordubal"), 1, WishStatus::Open)),
+                    (bob, entry(None, 5, WishStatus::Fulfilled { item_id: item })),
+                ]),
+                comments: BTreeMap::from([(bob, Comment::try_from("Added".to_owned()).unwrap())]),
+            },
+        )
+        .await
+        .unwrap();
+    harness
+        .store
+        .replace_wish(
+            newer,
+            StoredWish {
+                entries: BTreeMap::from([(bob, entry(Some("Krakatit"), 2, WishStatus::Open))]),
+                comments: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let all = harness.call("community.wish_list", json!({})).await;
+    let ids: Vec<&Value> = all["wishes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|wish| &wish["wish_id"])
+        .collect();
+    assert_eq!(ids, [&json!(newer), &json!(older)], "newest first");
+
+    let fulfilled = harness
+        .call("community.wish_list", json!({ "status": "fulfilled" }))
+        .await;
+    assert_eq!(
+        fulfilled,
+        json!({ "wishes": [{
+            "wish_id": older,
+            "creator": alice,
+            "kind": null,
+            "title": "Hordubal",
+            "authors": null,
+            "description": null,
+            "created_at": 1,
+            "status": "fulfilled",
+            "fulfilled_by": [{ "member": bob, "item_id": item }],
+            "comments": [{ "member": bob, "comment": "Added" }],
+        }] })
+    );
+    let open = harness
+        .call("community.wish_list", json!({ "status": "open" }))
+        .await;
+    assert_eq!(open["wishes"][0]["wish_id"], json!(newer));
+    assert_eq!(open["wishes"].as_array().unwrap().len(), 1);
 
     harness.shutdown().await;
 }

@@ -301,11 +301,20 @@ proptest! {
             store.replace_wish(wish, first.clone()).await.expect("written");
             prop_assert_eq!(&store.wish(wish).await.expect("read"), &first);
             store.replace_wish(wish, second.clone()).await.expect("written again");
-            prop_assert_eq!(store.wish(wish).await.expect("read"), second);
+            prop_assert_eq!(&store.wish(wish).await.expect("read"), &second);
             prop_assert_eq!(
                 store.wish(other).await.expect("read"),
-                first,
+                first.clone(),
                 "another wish is left alone"
+            );
+            let expected: BTreeMap<WishId, StoredWish> = [(other, first), (wish, second)]
+                .into_iter()
+                .filter(|(_, stored)| *stored != StoredWish::default())
+                .collect();
+            prop_assert_eq!(
+                store.all_wishes().await.expect("read"),
+                expected,
+                "every wish with a row, and none without"
             );
             Ok(())
         })?;

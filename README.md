@@ -335,6 +335,10 @@ them hold for every protocol added later.
 | `distlib review <item_id> <text>` / `review <item_id> --clear` | Review an item, or clear the review. |
 | `distlib bookmark <item_id> <position> [--note] [--edit <id>]` / `bookmark <item_id> --delete <id>` | Leave a bookmark on an item, edit one of yours, or delete one. |
 | `distlib bookmarks [query] [--mine \| --member] [--item]` | List the group's bookmarks, newest first: the query searches notes, titles and members' names. |
+| `distlib wish create <title> [--kind] [--author]... [--description]` | Wish for something the library does not have. |
+| `distlib wish list [--open \| --fulfilled]` | List the group's wishes, newest first, with who fulfilled them and the comments. |
+| `distlib wish comment <wish_id> <text>` / `wish comment <wish_id> --clear` | Comment on a wish (one comment per member), or clear yours. |
+| `distlib wish fulfill <wish_id> <item_id>` | Say that an item in the catalogue answers a wish. |
 | `distlib download <item_id> [--dest] [--file]` | Fetch an item's files from the group and write them out. |
 | `distlib admin reindex` | Rebuild the read model and search index from the catalogue. |
 | `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
@@ -373,11 +377,13 @@ curl -s http://127.0.0.1:11280/rpc \
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
 | `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |
 | `community.bookmark` / `community.bookmark_delete` | `{item_id, bookmark_id?, position, note?}` / `{item_id, bookmark_id}` — leave a bookmark, edit one of yours (it keeps when it was made), or delete one. |
+| `community.wish_create` / `community.wish_list` | `{title, kind?, authors?, description?}` / `{status?}` — wish for something; list every wish, newest first, with its `creator`, `status`, `fulfilled_by` and `comments`. |
+| `community.wish_comment` / `community.wish_fulfill` | `{wish_id, comment}` / `{wish_id, item_id}` — comment on a wish (`null` clears yours); say an item answers it. |
 | `community.bookmarks` | `{q?, member?, item_id?}` — every member's bookmarks, newest first, with the item's `title` and the `member_name`; `q` searches the note, the title and the name. |
 | `admin.reindex` | Rebuild the read model. |
 
 Beside `/rpc`, `GET /events` streams what changes (membership, catalogue items, an item's
-bookmarks, a member's availability, download progress) as server-sent events, and `POST /upload?filename=…` takes one
+bookmarks, wishes, a member's availability, download progress) as server-sent events, and `POST /upload?filename=…` takes one
 file for `library.add`. Both need the same token.
 
 **Loopback and a token, deliberately.** Whoever can call this can make the node

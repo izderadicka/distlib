@@ -5,6 +5,7 @@
 //! caller written against `group.members` today keeps working.
 
 use std::{
+    cmp::Reverse,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,8 +14,9 @@ use std::{
 
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
-    Bookmark, BookmarkId, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId, ItemKind,
-    MemberId, NetConfig, NodeAddr, Rating, Review, Series, TaskId, Ticket,
+    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
+    ItemKind, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series, TaskId, Ticket,
+    Wish, WishFields, WishId, WishStatus,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
@@ -113,6 +115,10 @@ impl Api {
             "community.bookmark" => self.bookmark(parse(params)?).await,
             "community.bookmark_delete" => self.bookmark_delete(parse(params)?).await,
             "community.bookmarks" => self.bookmarks(parse(params)?).await,
+            "community.wish_create" => self.wish_create(parse(params)?).await,
+            "community.wish_list" => self.wish_list(parse(params)?).await,
+            "community.wish_comment" => self.wish_comment(parse(params)?).await,
+            "community.wish_fulfill" => self.wish_fulfill(parse(params)?).await,
             other => Err(Error::method_not_found(other)),
         }
     }
@@ -634,6 +640,115 @@ impl Api {
             })
             .collect();
         Ok(json!({ "bookmarks": bookmarks }))
+    }
+
+    /// `community.wish_create` — wishes for something as this node's member: a
+    /// new wish, with this member as its creator (D10).
+    async fn wish_create(&self, params: WishCreate) -> Result<Value, Error> {
+        let WishCreate {
+            kind,
+            title,
+            authors,
+            description,
+        } = params;
+        if title.trim().is_empty() {
+            return Err(Error::invalid_params("a wish needs a title"));
+        }
+        let wish_id = WishId::random().map_err(|error| Error::failed(error.to_string()))?;
+        let entry = Wish::new(WishFields {
+            kind,
+            title: Some(title),
+            authors: (!authors.is_empty()).then_some(authors),
+            description,
+            created_at: Some(micros_since_epoch(SystemTime::now())),
+            status: WishStatus::Open,
+        })
+        .map_err(|error| Error::invalid_params(error.to_string()))?;
+        self.catalogue
+            .wish(wish_id, &entry)
+            .await
+            .map_err(sync_error)?;
+        Ok(json!({ "wish_id": wish_id }))
+    }
+
+    /// `community.wish_list` — every wish the read model holds, resolved
+    /// (D10), newest first, with its comments; `status` keeps only the open
+    /// or the fulfilled ones.
+    async fn wish_list(&self, params: WishList) -> Result<Value, Error> {
+        let mut wishes: Vec<(WishId, ResolvedWish, BTreeMap<MemberId, Comment>)> = self
+            .store
+            .all_wishes()
+            .await
+            .map_err(|error| Error::failed(error.to_string()))?
+            .into_iter()
+            .filter_map(|(id, stored)| {
+                Some((id, ResolvedWish::resolve(&stored.entries)?, stored.comments))
+            })
+            .filter(|(_, wish, _)| match params.status {
+                None => true,
+                Some(WishListStatus::Open) => !wish.is_fulfilled(),
+                Some(WishListStatus::Fulfilled) => wish.is_fulfilled(),
+            })
+            .collect();
+        wishes.sort_by_key(|(_, wish, _)| Reverse(wish.wished.created_at));
+        let wishes: Vec<Value> = wishes
+            .iter()
+            .map(|(id, wish, comments)| wish_json(*id, wish, comments))
+            .collect();
+        Ok(json!({ "wishes": wishes }))
+    }
+
+    /// `community.wish_comment` — comments on a wish as this node's member,
+    /// replacing its earlier comment, or clears it with `comment: null`.
+    async fn wish_comment(&self, params: WishCommentParams) -> Result<Value, Error> {
+        let WishCommentParams { wish_id, comment } = params;
+        self.known_wish_entries(wish_id).await?;
+        match comment {
+            Some(comment) => self.catalogue.wish_comment(wish_id, &comment).await,
+            None => self.catalogue.clear_wish_comment(wish_id).await,
+        }
+        .map_err(sync_error)?;
+        Ok(json!({ "wish_id": wish_id }))
+    }
+
+    /// `community.wish_fulfill` — says, as this node's member, that `item_id`
+    /// answers the wish. Written into this member's own entry, so a creator
+    /// fulfilling their own wish keeps what they wished for.
+    async fn wish_fulfill(&self, params: WishFulfill) -> Result<Value, Error> {
+        let WishFulfill { wish_id, item_id } = params;
+        let entries = self.known_wish_entries(wish_id).await?;
+        self.refuse_unknown_item(item_id).await?;
+        let mine = entries.get(&self.node.id()).map_or_else(
+            || WishFields {
+                kind: None,
+                title: None,
+                authors: None,
+                description: None,
+                created_at: Some(micros_since_epoch(SystemTime::now())),
+                status: WishStatus::Open,
+            },
+            |entry| entry.fields().clone(),
+        );
+        let entry = Wish::new(WishFields {
+            status: WishStatus::Fulfilled { item_id },
+            ..mine
+        })
+        .map_err(|error| Error::invalid_params(error.to_string()))?;
+        self.catalogue
+            .wish(wish_id, &entry)
+            .await
+            .map_err(sync_error)?;
+        Ok(json!({ "wish_id": wish_id, "item_id": item_id }))
+    }
+
+    /// Every member's entry for `wish_id` in this node's document, or a
+    /// refusal if none of them says what is wished for.
+    async fn known_wish_entries(&self, wish_id: WishId) -> Result<BTreeMap<MemberId, Wish>, Error> {
+        let entries = self.catalogue.wishes(wish_id).await.map_err(sync_error)?;
+        match ResolvedWish::resolve(&entries) {
+            Some(_) => Ok(entries),
+            None => Err(Error::failed(format!("no such wish: {wish_id}"))),
+        }
     }
 
     /// This node's member's bookmark `id` on `item_id`, as the document holds
@@ -1402,6 +1517,30 @@ fn bookmark_json(stored: &StoredBookmark) -> Value {
     })
 }
 
+/// One wish as `community.wish_list` gives it.
+fn wish_json(id: WishId, wish: &ResolvedWish, comments: &BTreeMap<MemberId, Comment>) -> Value {
+    let wished = &wish.wished;
+    json!({
+        "wish_id": id,
+        "creator": wish.creator,
+        "kind": wished.kind,
+        "title": wished.title,
+        "authors": wished.authors,
+        "description": wished.description,
+        "created_at": wished.created_at,
+        "status": if wish.is_fulfilled() { "fulfilled" } else { "open" },
+        "fulfilled_by": wish
+            .fulfilled_by
+            .iter()
+            .map(|(member, item_id)| json!({ "member": member, "item_id": item_id }))
+            .collect::<Vec<_>>(),
+        "comments": comments
+            .iter()
+            .map(|(member, comment)| json!({ "member": member, "comment": comment }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// A search or list hit: the summary, `held` and `providers`.
 fn hit(stored: &StoredItem, seen: &Seen<'_>) -> Value {
     let mut hit = summary(stored);
@@ -1820,6 +1959,53 @@ struct Bookmarks {
     member: Option<MemberId>,
     #[serde(default)]
     item_id: Option<ItemId>,
+}
+
+/// `community.wish_create`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WishCreate {
+    #[serde(default)]
+    kind: Option<ItemKind>,
+    title: String,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// `community.wish_list`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WishList {
+    #[serde(default)]
+    status: Option<WishListStatus>,
+}
+
+/// Which wishes `community.wish_list` keeps.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum WishListStatus {
+    Open,
+    Fulfilled,
+}
+
+/// `community.wish_comment`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WishCommentParams {
+    wish_id: WishId,
+    /// Required: `null` clears, as [`Rate::rating`].
+    #[serde(deserialize_with = "Option::deserialize")]
+    comment: Option<Comment>,
+}
+
+/// `community.wish_fulfill`'s params.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WishFulfill {
+    wish_id: WishId,
+    item_id: ItemId,
 }
 
 /// `library.download`'s params.

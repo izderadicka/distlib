@@ -626,6 +626,15 @@ impl Catalogue {
         self.put(key.encode(), comment.encode()).await
     }
 
+    /// Clears this node's member's comment on `wish`, if it has one.
+    pub async fn clear_wish_comment(&self, wish: WishId) -> Result<()> {
+        let key = CommunityKey::WishComment {
+            wish,
+            member: self.inner.me,
+        };
+        self.delete(key.encode()).await
+    }
+
     /// Every member's rating of `item` this node holds, each counted only if
     /// that member wrote it (D9).
     pub async fn ratings(&self, item: ItemId) -> Result<BTreeMap<MemberId, Rating>> {

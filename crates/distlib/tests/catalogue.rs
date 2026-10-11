@@ -1003,9 +1003,13 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
         .unwrap();
 
     for (who, api, mine) in &apis {
-        let answer = library_item_when(api, item, who, |answer| {
-            answer["ratings"]["count"] == 2 && answer["reviews"] != json!([])
-        })
+        let answer = call_until(
+            api,
+            "library.item",
+            json!({ "item_id": item }),
+            who,
+            |answer| answer["ratings"]["count"] == 2 && answer["reviews"] != json!([]),
+        )
         .await;
         assert_eq!(
             answer["ratings"],
@@ -1024,7 +1028,14 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
         .await
         .unwrap();
     for (who, api, _) in &apis {
-        library_item_when(api, item, who, |answer| answer["reviews"] == json!([])).await;
+        call_until(
+            api,
+            "library.item",
+            json!({ "item_id": item }),
+            who,
+            |answer| answer["reviews"] == json!([]),
+        )
+        .await;
     }
 
     group.carol.shutdown().await;
@@ -1076,11 +1087,17 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
         made.push(answer["bookmark_id"].clone());
     }
     for (who, api) in [("alice", &alices_api), ("carol", &carols_api)] {
-        library_item_when(api, item, who, |answer| {
-            answer["bookmarks"]
-                .as_array()
-                .is_some_and(|all| all.len() == 2)
-        })
+        call_until(
+            api,
+            "library.item",
+            json!({ "item_id": item }),
+            who,
+            |answer| {
+                answer["bookmarks"]
+                    .as_array()
+                    .is_some_and(|all| all.len() == 2)
+            },
+        )
         .await;
     }
     let found = carols_api
@@ -1113,11 +1130,17 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
         )
         .await
         .unwrap();
-    let answer = library_item_when(&alices_api, item, "alice", |answer| {
-        answer["bookmarks"]
-            .as_array()
-            .is_some_and(|all| all.len() == 1)
-    })
+    let answer = call_until(
+        &alices_api,
+        "library.item",
+        json!({ "item_id": item }),
+        "alice",
+        |answer| {
+            answer["bookmarks"]
+                .as_array()
+                .is_some_and(|all| all.len() == 1)
+        },
+    )
     .await;
     assert_eq!(answer["bookmarks"][0]["bookmark_id"], made[1]);
 
@@ -1126,20 +1149,18 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
     group.alice.shutdown().await;
 }
 
-/// Asks `api` for `item` until `ready` accepts the answer, and returns it —
+/// Calls `method` on `api` until `ready` accepts the answer, and returns it —
 /// or fails naming `who` was asked.
-async fn library_item_when(
+async fn call_until(
     api: &Api,
-    item: ItemId,
+    method: &str,
+    params: Value,
     who: &str,
     ready: impl Fn(&Value) -> bool,
 ) -> Value {
     tokio::time::timeout(SOON, async {
         loop {
-            let answer = api
-                .call("library.item", Some(json!({ "item_id": item })))
-                .await
-                .unwrap();
+            let answer = api.call(method, Some(params.clone())).await.unwrap();
             if ready(&answer) {
                 return answer;
             }
@@ -1147,7 +1168,98 @@ async fn library_item_when(
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{who}'s library.item never gave the answer waited for"))
+    .unwrap_or_else(|_| panic!("{who}'s {method} never gave the answer waited for"))
+}
+
+/// **4c-4's acceptance:** alice wishes for a book, bob comments, and carol
+/// fulfils it with an item she adds; alice sees it fulfilled and linked to
+/// that item, and is told `wish.changed`.
+#[tokio::test]
+async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
+    let group = a_group_with_two_followers().await;
+    let alices_api = api(&group.alice, &group.alice_key);
+    let bobs_api = api(&group.bob, &group.bob_key);
+    let carols_api = api(&group.carol, &group.carol_key);
+    let alice_id = MemberId::from(group.alice_key.public());
+    let bob_id = MemberId::from(group.bob_key.public());
+    let mut alice_hears = group.alice.events().subscribe();
+
+    let made = alices_api
+        .call(
+            "community.wish_create",
+            Some(json!({ "title": "Hordubal", "authors": ["Karel Čapek"] })),
+        )
+        .await
+        .unwrap();
+    let wish = made["wish_id"].clone();
+    let lists_the_wish = |answer: &Value| {
+        answer["wishes"]
+            .as_array()
+            .is_some_and(|wishes| wishes.iter().any(|listed| listed["wish_id"] == wish))
+    };
+    for (who, api) in [("bob", &bobs_api), ("carol", &carols_api)] {
+        call_until(api, "community.wish_list", json!({}), who, lists_the_wish).await;
+    }
+
+    bobs_api
+        .call(
+            "community.wish_comment",
+            Some(json!({ "wish_id": wish, "comment": "I have it on paper" })),
+        )
+        .await
+        .unwrap();
+    let item = ItemId::from_bytes([4; 32]);
+    group
+        .carol
+        .catalogue()
+        .write(&Item {
+            title: Some("Hordubal".to_owned()),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
+    carols_api
+        .call(
+            "community.wish_fulfill",
+            Some(json!({ "wish_id": wish, "item_id": item })),
+        )
+        .await
+        .unwrap();
+
+    let fulfilled = call_until(
+        &alices_api,
+        "community.wish_list",
+        json!({ "status": "fulfilled" }),
+        "alice",
+        |answer| {
+            answer["wishes"][0]["comments"]
+                .as_array()
+                .is_some_and(|comments| !comments.is_empty())
+        },
+    )
+    .await;
+    let listed = &fulfilled["wishes"][0];
+    assert_eq!(listed["wish_id"], wish);
+    assert_eq!(listed["creator"], json!(alice_id));
+    assert_eq!(listed["title"], json!("Hordubal"));
+    assert_eq!(
+        listed["fulfilled_by"],
+        json!([{ "member": group.carol_id, "item_id": item }])
+    );
+    assert_eq!(
+        listed["comments"],
+        json!([{ "member": bob_id, "comment": "I have it on paper" }])
+    );
+    let wish_id: WishId = serde_json::from_value(wish).unwrap();
+    tokio::time::timeout(SOON, async {
+        while alice_hears.recv().await.unwrap() != (Event::WishChanged { wish_id }) {}
+    })
+    .await
+    .expect("alice is told the wish changed");
+
+    group.carol.shutdown().await;
+    group.bob.shutdown().await;
+    group.alice.shutdown().await;
 }
 
 /// **4c-2c: a wish's entries and comments reach the read model, current

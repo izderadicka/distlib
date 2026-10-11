@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ItemId, MemberId};
+use crate::{ItemId, MemberId, WishId};
 
 /// One thing a watcher may want to refetch.
 ///
@@ -68,6 +68,11 @@ pub enum Event {
     /// they are now.
     #[serde(rename = "bookmark.changed")]
     BookmarkChanged { item_id: ItemId },
+
+    /// A wish was re-read and written again: made, commented on or
+    /// fulfilled. `community.wish_list` says what it is now.
+    #[serde(rename = "wish.changed")]
+    WishChanged { wish_id: WishId },
 
     /// How far a download has got, in bytes and in files, across all of the
     /// files it is fetching.
@@ -133,6 +138,7 @@ impl Event {
             Self::ItemChanged { .. } => "catalogue.item_changed",
             Self::AvailabilityChanged { .. } => "availability.changed",
             Self::BookmarkChanged { .. } => "bookmark.changed",
+            Self::WishChanged { .. } => "wish.changed",
             Self::DownloadProgress { .. } => "download.progress",
             Self::DownloadFinished { .. } => "download.finished",
             Self::DownloadFailed { .. } => "download.failed",
