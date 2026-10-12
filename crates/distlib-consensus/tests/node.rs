@@ -5,6 +5,7 @@
 //! anybody editing a config file.
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+#![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 #![allow(clippy::result_large_err)] // openraft's error types, in its own signatures
 
 use std::time::Duration;

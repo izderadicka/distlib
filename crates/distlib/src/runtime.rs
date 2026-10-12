@@ -74,6 +74,10 @@ impl Runtime {
     /// which. Only the ALPNs the endpoint advertises are declared out of
     /// order — they have to be, since the endpoint exists before any handler
     /// does. That is the gap [`MembershipNode::protocols`] is tested against.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wiring of every subsystem, in the order they depend on each other; a refactor candidate"
+    )]
     pub async fn start(secret: &SecretKey, config: &Config, data_dir: &DataDir) -> Result<Self> {
         let me = member_id(secret);
         // `init` has usually done this, and `run` refuses a directory with no

@@ -255,6 +255,10 @@ impl Config {
     ///
     /// Written out by hand rather than through a serialiser so the file carries
     /// the comments that explain each field — the point of a starter file.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the starter file as a template: its length is the file's"
+    )]
     pub fn to_starter_toml(&self) -> String {
         let quoted = |values: &[String]| {
             values

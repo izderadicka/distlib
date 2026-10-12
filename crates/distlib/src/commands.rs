@@ -658,6 +658,10 @@ pub async fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
 }
 
 /// `distlib item`
+#[expect(
+    clippy::too_many_lines,
+    reason = "prints every section of an item in turn; a refactor candidate"
+)]
 pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     let answer = ask(paths, "library.item", json!({ "item_id": item_id })).await?;
 

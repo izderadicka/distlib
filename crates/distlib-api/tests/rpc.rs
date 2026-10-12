@@ -6,6 +6,7 @@
 //! caller without one cannot.
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+#![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
 use std::{
     collections::BTreeMap,
