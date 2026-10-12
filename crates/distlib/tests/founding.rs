@@ -500,6 +500,10 @@ fn stops_cleanly_when_asked(name: &str, stop: impl FnOnce(&mut common::process::
         log.contains("shutting down"),
         "the node should reach its own shutdown; got:\n{log}"
     );
+    assert!(
+        !log.contains("Endpoint dropped without calling"),
+        "the node should shut its runtime down, not drop it; got:\n{log}"
+    );
 }
 
 #[test]
