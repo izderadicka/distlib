@@ -86,122 +86,132 @@ pub fn init(paths: &Paths, force: bool) -> Result<()> {
 
 /// `distlib run`
 pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
-    // Said before anything is read: every line below it is only meaningful once
-    // you know which directory and which config file produced it. Refusing an
-    // empty directory closes the worst case, but pointing at *another node's*
-    // directory still starts a perfectly healthy node — just not the one meant.
+    // First, so every line after it is read knowing which directory and
+    // config file produced it.
     tracing::info!(
         data_dir = %paths.data_dir.root().display(),
         config = %display_path(&paths.config_file),
         "starting"
     );
-
-    // Installed before anything is started, and that is the point rather than
-    // tidiness: until a handler exists the default disposition for `SIGTERM` is
-    // to die on the spot, so a supervisor that stops this node while it is
-    // still coming up would get exactly the abrupt exit this type exists to
-    // avoid. Installed here, the signal is remembered and acted on as soon as
-    // there is something to shut down.
+    // Before anything starts: until a handler exists, `SIGTERM` kills the
+    // process on the spot, and a node stopped while still starting would not
+    // shut down cleanly.
     let mut stop = StopSignals::install()?;
 
     let config = load_config(&paths.config_file)?;
-    // Refuses an empty data directory rather than minting an identity in it —
-    // see `load_secret_key`. `init` and `whoami` are how a node comes to have
-    // one; `run` only ever uses it.
+    // Refuses an empty data directory rather than minting an identity in it:
+    // `init` and `whoami` make one, `run` only uses it.
     let secret = load_secret_key(&paths.secret_key_file())?;
-    let me = member_id(&secret);
-
     let runtime = Runtime::start(&secret, &config, &paths.data_dir).await?;
-    let node = Arc::clone(runtime.node());
+    if let Err(error) =
+        found_or_say_there_is_no_group(&runtime, &config, &secret, found_group).await
+    {
+        // Shut down before returning: a live node dropped leaves iroh
+        // complaining about its endpoint, after the error that matters.
+        runtime.shutdown().await;
+        return Err(error);
+    }
+    let api = start_local_api(paths, &config, &secret, &runtime).await?;
+    let reporters = spawn_reporters(&runtime);
 
+    let expelled = wait_for_stop_or_expulsion(&mut stop, runtime.node()).await;
+
+    tracing::info!("shutting down");
+    for reporter in reporters {
+        reporter.abort();
+    }
+    if let Some(api) = api {
+        api.shutdown();
+    }
+    runtime.shutdown().await;
+    if expelled {
+        bail!(
+            "this node has been expelled from its group and is no longer a member; its data \
+             directory can be deleted, or kept and rejoined with a new ticket after somebody \
+             admits it again"
+        );
+    }
+    Ok(())
+}
+
+/// Founds a group if asked to; otherwise warns when this node is in none.
+async fn found_or_say_there_is_no_group(
+    runtime: &Runtime,
+    config: &Config,
+    secret: &SecretKey,
+    found_group: bool,
+) -> Result<()> {
+    let node = runtime.node();
     if found_group {
-        if let Err(error) = found(&node, &config, &secret, me).await {
-            // Shut down rather than propagating straight out. Dropping a live
-            // node leaves iroh complaining that the endpoint was never closed,
-            // and that complaint lands after the error it should not bury.
-            runtime.shutdown().await;
-            return Err(error);
-        }
-    } else if node.membership().group_id().is_none() {
+        return found(node, config, secret, member_id(secret)).await;
+    }
+    if node.membership().group_id().is_none() {
         tracing::warn!(
             "this node is in no group; found one with `distlib run --found-group`, or wait \
              for a founder to admit it"
         );
     }
+    Ok(())
+}
 
-    // The local API. Started after founding, so a caller that reaches it finds
-    // a node that has finished deciding what it is.
-    let api = if config.api.enabled {
-        Some(
-            serve_api(
-                paths,
-                &config,
-                Api {
-                    node: Arc::clone(&node),
-                    secret: secret.clone(),
-                    net: config.net.clone(),
-                    reindex_handle: runtime.projection().reindex_handle(),
-                    catalogue: runtime.catalogue().clone(),
-                    blobs: runtime.blobs().clone(),
-                    store: runtime.store().clone(),
-                    search: runtime.search().clone(),
-                    availability: runtime.availability().clone(),
-                    tasks: runtime.tasks().clone(),
-                    downloads: runtime.downloads().to_path_buf(),
-                    uploads: runtime.uploads().clone(),
-                },
-            )
-            .await?,
-        )
-    } else {
+/// The local API, if the config enables it. Started after founding, so a
+/// caller that reaches it finds a node that has decided what it is.
+async fn start_local_api(
+    paths: &Paths,
+    config: &Config,
+    secret: &SecretKey,
+    runtime: &Runtime,
+) -> Result<Option<Server>> {
+    if !config.api.enabled {
         tracing::info!("the local api is disabled");
-        None
+        return Ok(None);
+    }
+    let api = Api {
+        node: Arc::clone(runtime.node()),
+        secret: secret.clone(),
+        net: config.net.clone(),
+        reindex_handle: runtime.projection().reindex_handle(),
+        catalogue: runtime.catalogue().clone(),
+        blobs: runtime.blobs().clone(),
+        store: runtime.store().clone(),
+        search: runtime.search().clone(),
+        availability: runtime.availability().clone(),
+        tasks: runtime.tasks().clone(),
+        downloads: runtime.downloads().to_path_buf(),
+        uploads: runtime.uploads().clone(),
     };
+    Ok(Some(serve_api(paths, config, api).await?))
+}
 
-    // A running node holds the database exclusively, so nothing else can read
-    // the membership while it is up. Logging every change is how the group is
-    // observed.
-    let memberships = tokio::spawn(report_membership(node.subscribe()));
+/// Tasks that log what happens while the node runs: every membership change,
+/// since nothing else can read the database while the node holds it, and the
+/// home relay once one is reached, which may take a while or, offline, never
+/// happen.
+fn spawn_reporters(runtime: &Runtime) -> [tokio::task::JoinHandle<()>; 2] {
+    let endpoint = runtime.endpoint().clone();
+    [
+        tokio::spawn(report_membership(runtime.node().subscribe())),
+        tokio::spawn(async move {
+            endpoint.online().await;
+            for relay in endpoint.home_relay_status().get() {
+                tracing::info!(url = %relay.url(), "home relay established");
+            }
+        }),
+    ]
+}
 
-    // Reaching a relay takes a moment and may never happen offline, so report
-    // it when it arrives instead of blocking startup on it.
-    let watcher = runtime.endpoint().clone();
-    let relay_task = tokio::spawn(async move {
-        watcher.online().await;
-        for relay in watcher.home_relay_status().get() {
-            tracing::info!(url = %relay.url(), "home relay established");
-        }
-    });
-
-    // Two ways to stop: the operator, or the group. A node that has been
-    // expelled cannot fetch the log and is refused by every core node, so
-    // there is nothing left for it to do but say so and go — carrying on would
-    // mean asking nodes that will not answer, roughly once a second, forever.
-    let expelled = tokio::select! {
+/// Waits for the operator to stop the node, or for the group to expel it;
+/// says whether it was expelled. An expelled node is refused by every core
+/// node, so there is nothing left for it to do.
+async fn wait_for_stop_or_expulsion(stop: &mut StopSignals, node: &MembershipNode) -> bool {
+    tokio::select! {
         signal = stop.requested() => {
-            // Which one, because "why did the node stop" is the first question
-            // asked of a log that ends, and the two answers mean different
-            // things: a person was at the keyboard, or a supervisor was not.
+            // Which one: a person at the keyboard, or a supervisor.
             tracing::info!(signal, "stop requested");
             false
         }
         () = node.expelled() => true,
-    };
-
-    tracing::info!("shutting down");
-    relay_task.abort();
-    memberships.abort();
-    if let Some(api) = api {
-        api.shutdown();
     }
-    runtime.shutdown().await;
-
-    if expelled {
-        bail!(
-            "this node has been expelled from its group and is no longer a member; its data              directory can be deleted, or kept and rejoined with a new ticket after somebody              admits it again"
-        );
-    }
-    Ok(())
 }
 
 /// The ways an operator asks this node to stop.

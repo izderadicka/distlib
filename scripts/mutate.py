@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks that the tests catch hand-written mutations of the code.
 
-    scripts/mutate.py <mutations.toml> [base]
+    scripts/mutate.py <mutations.toml> [--every-block [base]]
 
 Each mutation replaces one piece of text in one file:
 
@@ -24,8 +24,9 @@ whole suite before it is called a survivor, so naming too few tests only costs
 time. A test that hangs is stopped and counts as a failure. The file is put
 back after each mutation, whatever happens.
 
-Before any mutation runs, every block of code this branch changed since it
-left `base` (master if not given) has to be touched by one: a block is a run of changed lines
+With `--every-block`, for an occasional thorough pass rather than every PR:
+before any mutation runs, every block of code changed since `base` (master if
+not given) has to be touched by one. A block is a run of changed lines
 without a blank or an unchanged line in it, in a .rs, .ts or .svelte file that
 is not a test. Comments and imports do not count. A block that has no
 mutation worth making is listed, with why, instead:
@@ -44,6 +45,7 @@ Exits non-zero if a block is left out, or if a mutation survives, does not
 build, or is written wrongly.
 """
 
+import argparse
 import os
 import re
 import subprocess
@@ -214,18 +216,19 @@ def problems(plan: dict) -> list[str]:
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3):
-        print(__doc__, file=sys.stderr)
-        return 2
-    plan = tomllib.loads(Path(sys.argv[1]).read_text())
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("plan", type=Path)
+    parser.add_argument("--every-block", nargs="?", const="master", metavar="base")
+    arguments = parser.parse_args()
+    plan = tomllib.loads(arguments.plan.read_text())
     if found := problems(plan):
         print("\n".join(found), file=sys.stderr)
         return 2
     mutations = plan.get("mutation", [])
     for entry in plan.get("unmutated", []):
         print(f"{'UNMUTATED':>12}  {entry['file']}: {entry['reason']}")
-    base = sys.argv[2] if len(sys.argv) == 3 else "master"
-    left_out = unmutated(changed_blocks(base), mutations + plan.get("unmutated", []))
+    blocks = changed_blocks(arguments.every_block) if arguments.every_block else []
+    left_out = unmutated(blocks, mutations + plan.get("unmutated", []))
     for file, first, last in left_out:
         code = (ROOT / file).read_text().splitlines()[first - 1].strip()
         print(f"{'NO MUTATION':>12}  {file}:{first}-{last}  {code[:70]}")

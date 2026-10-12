@@ -10,7 +10,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review,
     Series, Wish, WishId,
 };
-use rusqlite::{Connection, Row, Transaction, params, types::Type};
+use rusqlite::{Connection, Row, Statement, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -191,13 +191,7 @@ impl Store {
     ) -> Result<()> {
         self.write("given an item's bookmarks", move |tx| {
             let item = item.to_string();
-            tx.execute("DELETE FROM bookmarks WHERE item = ?1", params![item])?;
-            let mut insert = tx.prepare(
-                "INSERT INTO bookmarks \
-                 (item, member, id, position, note, created_at, last_modified) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?;
-            for stored in &bookmarks {
+            BOOKMARKS.replace(tx, &item, &bookmarks, |insert, stored| {
                 insert.execute(params![
                     item,
                     stored.member.to_string(),
@@ -206,9 +200,8 @@ impl Store {
                     stored.bookmark.note(),
                     stored.bookmark.created_at(),
                     stored.last_modified,
-                ])?;
-            }
-            Ok(())
+                ])
+            })
         })
         .await
     }
@@ -271,19 +264,12 @@ impl Store {
     pub async fn replace_wish(&self, wish: WishId, stored: StoredWish) -> Result<()> {
         self.write("given a wish", move |tx| {
             let wish = wish.to_string();
-            tx.execute("DELETE FROM wish_entries WHERE wish = ?1", params![wish])?;
-            let mut insert =
-                tx.prepare("INSERT INTO wish_entries (wish, member, entry) VALUES (?1, ?2, ?3)")?;
-            for (member, entry) in &stored.entries {
-                insert.execute(params![wish, member.to_string(), json(entry)?])?;
-            }
-            tx.execute("DELETE FROM wish_comments WHERE wish = ?1", params![wish])?;
-            let mut insert = tx
-                .prepare("INSERT INTO wish_comments (wish, member, comment) VALUES (?1, ?2, ?3)")?;
-            for (member, comment) in &stored.comments {
-                insert.execute(params![wish, member.to_string(), comment.as_str()])?;
-            }
-            Ok(())
+            WISH_ENTRIES.replace(tx, &wish, &stored.entries, |insert, (member, entry)| {
+                insert.execute(params![wish, member.to_string(), json(entry)?])
+            })?;
+            WISH_COMMENTS.replace(tx, &wish, &stored.comments, |insert, (member, comment)| {
+                insert.execute(params![wish, member.to_string(), comment.as_str()])
+            })
         })
         .await
     }
@@ -528,7 +514,87 @@ const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_ind
                             year, lang, description, replicas, last_modified";
 
 /// The `item_files` columns, in the order [`files_of`] reads them.
-const FILE_COLUMNS: &str = "item, blob, role, format, size, filename, seq, disc, title, duration";
+const FILE_COLUMNS: &[&str] = &[
+    "item", "blob", "role", "format", "size", "filename", "seq", "disc", "title", "duration",
+];
+
+/// A table whose rows belong to one key, in its first column: an item's
+/// files, ratings, reviews and bookmarks, a wish's entries and comments.
+///
+/// They are replaced together, never merged. A row the projection no longer
+/// gives, such as an expelled member's rating or a file no longer readable,
+/// goes, so the table never depends on what was projected into it before.
+struct OwnedRows {
+    table: &'static str,
+    /// The key first.
+    columns: &'static [&'static str],
+}
+
+const FILES: OwnedRows = OwnedRows {
+    table: "item_files",
+    columns: FILE_COLUMNS,
+};
+const RATINGS: OwnedRows = OwnedRows {
+    table: "ratings",
+    columns: &["item", "member", "rating"],
+};
+const REVIEWS: OwnedRows = OwnedRows {
+    table: "reviews",
+    columns: &["item", "member", "review"],
+};
+const BOOKMARKS: OwnedRows = OwnedRows {
+    table: "bookmarks",
+    columns: &[
+        "item",
+        "member",
+        "id",
+        "position",
+        "note",
+        "created_at",
+        "last_modified",
+    ],
+};
+const WISH_ENTRIES: OwnedRows = OwnedRows {
+    table: "wish_entries",
+    columns: &["wish", "member", "entry"],
+};
+const WISH_COMMENTS: OwnedRows = OwnedRows {
+    table: "wish_comments",
+    columns: &["wish", "member", "comment"],
+};
+
+impl OwnedRows {
+    /// Deletes `key`'s rows, then inserts one for each of `rows` through
+    /// `insert`, given the statement and the row.
+    fn replace<T>(
+        &self,
+        tx: &Transaction<'_>,
+        key: &str,
+        rows: impl IntoIterator<Item = T>,
+        mut insert: impl FnMut(&mut Statement<'_>, T) -> rusqlite::Result<usize>,
+    ) -> rusqlite::Result<()> {
+        let Self { table, columns } = self;
+        let key_column = columns
+            .first()
+            .expect("an OwnedRows names its columns, the key first");
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {key_column} = ?1"),
+            params![key],
+        )?;
+        let placeholders: Vec<String> = (1..=columns.len())
+            .map(|number| format!("?{number}"))
+            .collect();
+        let mut statement = tx.prepare(&format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            columns.join(", "),
+            placeholders.join(", ")
+        ))?;
+        for row in rows {
+            insert(&mut statement, row)?;
+        }
+        Ok(())
+    }
+}
 
 /// Drops every table a read model of another version left behind.
 ///
@@ -588,14 +654,7 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
         ],
     )?;
 
-    // Cleared rather than merged: a file whose record is no longer readable is
-    // a file this node can no longer offer, and leaving the row behind would
-    // make the tables depend on what was projected into them before.
-    tx.execute("DELETE FROM item_files WHERE item = ?1", params![id])?;
-    let mut insert = tx.prepare(&format!(
-        "INSERT INTO item_files ({FILE_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
-    ))?;
-    for (blob, file) in &item.files {
+    FILES.replace(tx, &id, &item.files, |insert, (blob, file)| {
         insert.execute(params![
             id,
             blob.to_string(),
@@ -607,23 +666,14 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             file.disc,
             file.title,
             file.duration,
-        ])?;
-    }
-
-    // Cleared and written again, as the files are: an expelled member's
-    // rating is one the item no longer has.
-    tx.execute("DELETE FROM ratings WHERE item = ?1", params![id])?;
-    let mut insert =
-        tx.prepare("INSERT INTO ratings (item, member, rating) VALUES (?1, ?2, ?3)")?;
-    for (member, rating) in &stored.ratings {
-        insert.execute(params![id, member.to_string(), rating.get()])?;
-    }
-    tx.execute("DELETE FROM reviews WHERE item = ?1", params![id])?;
-    let mut insert =
-        tx.prepare("INSERT INTO reviews (item, member, review) VALUES (?1, ?2, ?3)")?;
-    for (member, review) in &stored.reviews {
-        insert.execute(params![id, member.to_string(), review.as_str()])?;
-    }
+        ])
+    })?;
+    RATINGS.replace(tx, &id, &stored.ratings, |insert, (member, rating)| {
+        insert.execute(params![id, member.to_string(), rating.get()])
+    })?;
+    REVIEWS.replace(tx, &id, &stored.reviews, |insert, (member, review)| {
+        insert.execute(params![id, member.to_string(), review.as_str()])
+    })?;
 
     Ok(if existed {
         Upserted::Updated
@@ -637,7 +687,10 @@ fn files_of(
     conn: &Connection,
     only: Option<ItemId>,
 ) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>> {
-    let (sql, params) = select_item_rows(&format!("{FILE_COLUMNS} FROM item_files"), only);
+    let (sql, params) = select_item_rows(
+        &format!("{} FROM item_files", FILE_COLUMNS.join(", ")),
+        only,
+    );
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(params))?;
 
