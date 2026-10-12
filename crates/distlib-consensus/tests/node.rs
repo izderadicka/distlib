@@ -2503,6 +2503,30 @@ async fn a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot() {
         "caught up from the snapshot, the entries being gone; got {installed:?}"
     );
 
+    // Ignoring older memberships must not keep it seated: a demotion is newer
+    // than the promotion, so it still stands down.
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(founder.id, founder.addr.clone())],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&founder, "the demotion to be pending").await;
+    joiner
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &joiner.secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        joiner.node.raft().is_none()
+    })
+    .await;
+    assert!(!joiner.node.is_core());
+
     joiner.shutdown().await;
     founder.shutdown().await;
 }
