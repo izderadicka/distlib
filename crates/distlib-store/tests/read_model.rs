@@ -17,6 +17,8 @@
 //! and unlike the other two it cannot be satisfied by an implementation that
 //! quietly accumulates.
 
+#![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
+
 use std::collections::BTreeMap;
 
 use distlib_core::{

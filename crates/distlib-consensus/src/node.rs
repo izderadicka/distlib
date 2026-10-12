@@ -383,6 +383,10 @@ impl MembershipNode {
     /// Once a `GroupFounded` has been applied the log wins, here as everywhere:
     /// a node the group was founded without is a follower whatever its config
     /// says.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wiring of the membership node, one subsystem after another; a refactor candidate"
+    )]
     pub async fn start(
         transport: Transport,
         hooks: AllowlistHooks,

@@ -1,0 +1,5 @@
+# Function length, for `clippy::too_many_lines` (on in the workspace lints).
+# Counts code lines, not comments or blank ones. Set after the R1-R3
+# refactors (docs/plan-refactor-complexity.md); the few functions over it say
+# why with `#[expect]`, and tests are exempt.
+too-many-lines-threshold = 80

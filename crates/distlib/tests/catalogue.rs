@@ -12,6 +12,7 @@
 // `--no-default-features`, like every other multi-node test here.
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+#![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -12,6 +12,10 @@ use distlib_core::DataDir;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat arm per subcommand, a table best read in one place"
+)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);

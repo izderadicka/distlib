@@ -109,6 +109,15 @@ comments are cut to a sentence or two. One PR per group.
   clippy step CI already has.
 - Not `cognitive_complexity`: it is in the nursery, and it would flag the flat matches above.
 - cargo-crap stays a pointer that someone runs by hand now and then, not a CI gate.
+- **Done.** `too_many_lines = "warn"` is in the workspace lints, and `too-many-lines-threshold =
+  80` in `clippy.toml`; CI's `-D warnings` makes it an error.
+  - The five functions over 80 say why with `#[expect(clippy::too_many_lines, reason = ...)]`, so
+    clippy fails once one is shortened and the exemption is no longer needed:
+    - `main` (a flat match) and `Config::to_starter_toml` (a template) stay as they are;
+    - `consensus::node::start` (137), `Runtime::start` (91) and `commands::item` (89) are refactor
+      candidates.
+  - Test files with scenario tests over 80 lines allow the lint at the file level, as they already
+    allow `unwrap_used`.
 
 ## Order
 
