@@ -74,56 +74,13 @@ impl Runtime {
     /// which. Only the ALPNs the endpoint advertises are declared out of
     /// order — they have to be, since the endpoint exists before any handler
     /// does. That is the gap [`MembershipNode::protocols`] is tested against.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "wiring of every subsystem, in the order they depend on each other; a refactor candidate"
-    )]
     pub async fn start(secret: &SecretKey, config: &Config, data_dir: &DataDir) -> Result<Self> {
-        let me = member_id(secret);
         // `init` has usually done this, and `run` refuses a directory with no
         // identity in it — but a caller that starts a node from a key it holds
         // (a test, an embedder) has no reason to have created it first.
         data_dir.create()?;
-
-        // The bootstrap seed, and the last time configuration has anything to
-        // say about who this node talks to. Once `GroupFounded` is applied the
-        // node replaces it with the log's membership and never reads it again.
-        let (writer, allowed) = allowlist(me, config.consensus.core.iter().map(|core| core.member));
-        let hooks = AllowlistHooks::new(allowed);
-
-        // What this node serves is the same on every node since 2.3-2:
-        // whether it *answers* consensus is decided per connection by whether
-        // it has a Raft, because a router's protocols are fixed when it spawns
-        // and a follower that may be promoted has to be listening first.
-        let endpoint = build_endpoint(secret.clone(), &config.net, hooks.clone(), alpns()).await?;
-
-        tracing::info!(member = %me, "node started");
-        for addr in endpoint.bound_sockets() {
-            tracing::info!(%addr, "listening");
-        }
-
-        // One gossip for the process. The memberlog announces on it today and
-        // iroh-docs will be handed this same instance in 2a-2; two would mean
-        // two swarms over one endpoint, and a topic joined on one is invisible
-        // to the other.
-        let swarm = distlib_net::spawn_gossip(&endpoint);
-
-        // `Transport::new` installs the directory on the endpoint, so the
-        // thing consensus fills and the thing iroh resolves against cannot be
-        // two different objects.
-        let transport = Transport::new(endpoint.clone(), swarm)
-            .context("could not install the address directory")?;
-        let node = Arc::new(
-            MembershipNode::start(
-                transport.clone(),
-                hooks,
-                writer,
-                data_dir.root(),
-                core_group(config),
-            )
-            .await
-            .context("could not start consensus")?,
-        );
+        let (transport, node) = start_consensus(secret, config, data_dir).await?;
+        let endpoint = transport.endpoint.clone();
 
         // Content, and the catalogue that refers to it. The store comes first
         // because iroh-docs cannot be built without one: an entry's value is a
@@ -176,16 +133,7 @@ impl Runtime {
         let search = SearchIndex::open(Some(data_dir.index_dir()))
             .await
             .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
-        // Clears what a previous run was sent and never added — which can be
-        // a large file's worth of removal, so off the async threads.
-        let uploads = {
-            let dir = data_dir.root().join("uploads");
-            let max = config.api.max_upload_bytes;
-            tokio::task::spawn_blocking(move || Uploads::open(dir, max))
-                .await
-                .context("the upload directory's clean-up did not finish")?
-                .context("could not clear the web UI's upload directory")?
-        };
+        let uploads = open_uploads(config, data_dir).await?;
         let projection = Projection::start(
             catalogue.clone(),
             store.clone(),
@@ -345,6 +293,65 @@ pub fn alpns() -> Vec<Vec<u8>> {
         .into_iter()
         .chain(distlib_sync::alpns())
         .collect()
+}
+
+/// Binds the endpoint and starts consensus on it, with the gossip both share.
+async fn start_consensus(
+    secret: &SecretKey,
+    config: &Config,
+    data_dir: &DataDir,
+) -> Result<(Transport, Arc<MembershipNode>)> {
+    let me = member_id(secret);
+    // The bootstrap seed, and the last time configuration has anything to say
+    // about who this node talks to. Once `GroupFounded` is applied the node
+    // replaces it with the log's membership and never reads it again.
+    let (writer, allowed) = allowlist(me, config.consensus.core.iter().map(|core| core.member));
+    let hooks = AllowlistHooks::new(allowed);
+
+    // What this node serves is the same on every node since 2.3-2: whether it
+    // *answers* consensus is decided per connection by whether it has a Raft,
+    // because a router's protocols are fixed when it spawns and a follower that
+    // may be promoted has to be listening first.
+    let endpoint = build_endpoint(secret.clone(), &config.net, hooks.clone(), alpns()).await?;
+
+    tracing::info!(member = %me, "node started");
+    for addr in endpoint.bound_sockets() {
+        tracing::info!(%addr, "listening");
+    }
+
+    // One gossip for the process, shared by the memberlog and iroh-docs: two
+    // would mean two swarms over one endpoint, and a topic joined on one is
+    // invisible to the other.
+    let swarm = distlib_net::spawn_gossip(&endpoint);
+
+    // `Transport::new` installs the directory on the endpoint, so the thing
+    // consensus fills and the thing iroh resolves against cannot be two
+    // different objects.
+    let transport =
+        Transport::new(endpoint, swarm).context("could not install the address directory")?;
+    let node = MembershipNode::start(
+        transport.clone(),
+        hooks,
+        writer,
+        data_dir.root(),
+        core_group(config),
+    )
+    .await
+    .context("could not start consensus")?;
+    Ok((transport, Arc::new(node)))
+}
+
+/// Where the web UI's uploads wait for `library.add`.
+///
+/// Opening clears what a previous run was sent and never added — which can be
+/// a large file's worth of removal, so off the async threads.
+async fn open_uploads(config: &Config, data_dir: &DataDir) -> Result<Uploads> {
+    let dir = data_dir.root().join("uploads");
+    let max = config.api.max_upload_bytes;
+    tokio::task::spawn_blocking(move || Uploads::open(dir, max))
+        .await
+        .context("the upload directory's clean-up did not finish")?
+        .context("could not clear the web UI's upload directory")
 }
 
 /// The configured core group, with an address for each.

@@ -135,6 +135,10 @@ comments are cut to a sentence or two. One PR per group.
       one are both built by `new_raft`. Not covered by any test, found by mutation: on restart,
       the log rather than the configuration deciding whether the node votes; and the address
       book being seeded with the configured core group.
+    - `Runtime::start`: **done**, under 80 and without the exemption. Its steps:
+      `start_consensus` (allowlist, endpoint, gossip, node) and `open_uploads`. A new test,
+      `uploads_follow_the_configuration_and_start_empty`, covers the uploads directory and its
+      configured limit, which no test saw before.
   - Test files with scenario tests over 80 lines allow the lint at the file level, as they already
     allow `unwrap_used`.
 
