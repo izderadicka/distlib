@@ -165,7 +165,7 @@ pub async fn follow(following: Following, mut hints: Hints) {
     let mut addresses_asked_for = false;
 
     loop {
-        let progress = ask_around(me, &state_machine, &client, &sources).await;
+        let progress = fetch_log_from_core_nodes(me, &state_machine, &client, &sources).await;
 
         // Not before the first answer: until then `sources` holds what
         // configuration named, and a node that has not been admitted yet is
@@ -346,7 +346,7 @@ pub(crate) async fn ask_for_the_directory(
 }
 
 /// Tries each known source until one answers.
-async fn ask_around(
+async fn fetch_log_from_core_nodes(
     me: MemberId,
     state_machine: &StateMachineStore,
     client: &MemberlogClient,

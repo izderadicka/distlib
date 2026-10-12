@@ -68,6 +68,10 @@ comments are cut to a sentence or two. One PR per group.
     / pick providers / fetch one hash.
   - Rename `ask_around` (`distlib-consensus/src/raft/follower.rs`) to say what it does, e.g.
     `fetch_log_from_core_nodes`. Also rename `heard` in `distlib-net/src/directory.rs`.
+  - **Done.** `fetch_content_nobody_offered` now has a generation type, `AskedThisGeneration`, and
+    two steps, `wait_for_the_next_round` and `fetch_one`. Its 43-line doc comment is down to two
+    short paragraphs. `ask_around` is now `fetch_log_from_core_nodes`, and the `heard` field is
+    `signed_addresses`.
 
 ## Coverage gaps
 
@@ -77,7 +81,8 @@ comments are cut to a sentence or two. One PR per group.
   - `ping`: against a running node, if it is cheap.
   - `run`. These are the paths R2's mutations showed no test reaches: an expelled node exits with
     its error; a node with the API disabled serves none; a node in no group says so; a founding
-    that fails is reported, and the node shut down; the API server is shut down with the node; and
+    that fails is reported, and the node shut down (the same path as an API that cannot start,
+    which `a_node_whose_api_cannot_start_shuts_down_cleanly_and_says_why` covers since R3); the API server is shut down with the node; and
     the runtime's shutdown keeps what a clean stop should keep (the blob store's records).
 - **T2, `commit_as_follower` (50%)**: its fallbacks — first candidate unreachable, all
   unreachable, rejected. It also carries the question raised in #110: the doc comment says a core

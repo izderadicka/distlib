@@ -1290,48 +1290,15 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(20);
 
 /// Asks for the content of entries this node holds and was never sent.
 ///
-/// **This repairs a one-shot in iroh-docs, and the gap is structural.** An
-/// entry and its content travel separately, and when an entry arrives over
-/// gossip the sender's content is assumed present *only if the message came
-/// straight from its publisher*: `engine/gossip.rs` reads
-/// `msg.scope.is_direct()` and records `ContentStatus::Missing` for anything
-/// relayed. A relayed entry therefore starts no download and remembers no
-/// provider — the hash goes into the engine's `missing_hashes` and stays there.
+/// iroh-docs remembers no provider for an entry relayed by gossip, and the
+/// `ContentReady` that should rescue it reaches direct neighbours once; without
+/// this, such content never arrives. It works only because members announce
+/// where they are (P2-15): the downloader is given bare ids.
 ///
-/// What is supposed to rescue it is `Op::ContentReady`, which a node broadcasts
-/// when its own download finishes. That message is sent **once**, to **direct
-/// neighbours only**, and never by the author — a local write emits `Op::Put`
-/// and nothing else. So a node that is not a neighbour of whoever completes
-/// first, at the moment they complete, holds the key for ever and never the
-/// value. Nothing retries: a failed download is put back in `missing_hashes`
-/// with no timer, and the engine's provider list is a snapshot taken when the
-/// download started, so a peer learned afterwards is not tried either.
-///
-/// Measured, both before this existed and on the branch before this PR: the
-/// group converges, then `catalogue.get` answers `MissingContent` until the
-/// test gives up — *the entry is here, its content has not arrived*.
-///
-/// **It can only work because of P2-15.** The downloader is given bare
-/// [`EndpointId`]s and has to resolve them, and a follower's address is in no
-/// log. Before members announced where they are, this retry would have failed
-/// exactly the way the download it repairs did.
-///
-/// **A hash is asked about once per generation, and that is the whole of the
-/// pacing.** Without it the loop asked for everything it was missing on every
-/// round, for as long as the node ran — see [`FETCH_AGAIN`] for what that
-/// measured, which was not what its comment claimed. A generation ends when the
-/// membership changes, because that is the event most likely to have produced
-/// somebody holding the bytes, and otherwise after [`ASK_AGAIN`].
-///
-/// The gain worth naming is not the dialing saved. It is that a hash stranded
-/// *now* is asked about on the very next round instead of queueing behind every
-/// hash that has already failed — at twenty stranded hashes that queue was
-/// already twenty seconds long, and it grows with the document.
-///
-/// **What it fetches, it tells the read model about.** The bytes reach the
-/// store behind iroh-docs' back, so no `ContentReady` follows, and the item
-/// they complete would otherwise stay half-projected until something else
-/// touched it (ground truth 12).
+/// Each hash is asked about once per generation. A generation ends when the
+/// membership changes, the likeliest moment for somebody to have the bytes, or
+/// after [`ASK_AGAIN`]. What it fetches it tells the read model about, since no
+/// `ContentReady` follows (ground truth 12).
 async fn fetch_content_nobody_offered(
     doc: Doc,
     fetching: Fetching,
@@ -1344,43 +1311,17 @@ async fn fetch_content_nobody_offered(
         downloader,
         news,
     } = fetching;
-    // What has been asked about this generation and did not arrive. Pruned to
-    // the want set on every round, so it cannot outlive what it is about:
-    // content that landed and entries that were deleted drop out by themselves.
-    let mut already_asked: HashSet<Hash> = HashSet::new();
-    let mut generation = Instant::now();
-
+    let mut asked = AskedThisGeneration::default();
     loop {
-        // A deadline rather than a fresh sleep, so a group whose membership
-        // keeps changing cannot hold the scan off for ever — the same rule
-        // `offer_peers_as_they_are_learned` follows, and for the same reason.
-        let next_round = Instant::now() + FETCH_AGAIN;
-        loop {
-            tokio::select! {
-                () = tokio::time::sleep_until(next_round) => break,
-                // **The reason the generation rule is safe.** A member who has
-                // just joined is the likeliest holder of bytes nobody here had,
-                // and a sweep that slept through that would be one that backed
-                // off from its own answer.
-                changed = membership.changed() => {
-                    if changed.is_err() {
-                        tracing::error!("the membership log is gone; stopping the catalogue's repair task");
-                        return;
-                    }
-                    tracing::debug!("the group changed; asking again for content that is missing");
-                    already_asked.clear();
-                    generation = Instant::now();
-                }
-            }
+        if !wait_for_the_next_round(&mut membership, &mut asked).await {
+            tracing::error!("the membership log is gone; stopping the catalogue's repair task");
+            return;
         }
-
-        if generation.elapsed() >= ASK_AGAIN {
-            already_asked.clear();
-            generation = Instant::now();
+        if asked.started.elapsed() >= ASK_AGAIN {
+            asked.start_again();
         }
-
-        // The same set the document is offered as peers, which is the right
-        // one: a member this node cannot reach cannot serve it content either.
+        // The peers the document is offered to: a member this node cannot
+        // reach cannot serve it content either.
         let providers: Vec<EndpointId> =
             sync_with(&membership.borrow_and_update().clone(), me, &directory)
                 .into_iter()
@@ -1389,7 +1330,6 @@ async fn fetch_content_nobody_offered(
         if providers.is_empty() {
             continue;
         }
-
         let wanted = match content_not_here(&doc, &blobs).await {
             Ok(wanted) => wanted,
             Err(error) => {
@@ -1397,36 +1337,80 @@ async fn fetch_content_nobody_offered(
                 continue;
             }
         };
-        already_asked.retain(|hash| wanted.contains(hash));
-
+        // Pruned to what is still wanted, so it cannot outlive what it is about.
+        asked.hashes.retain(|hash| wanted.contains(hash));
         for hash in wanted {
-            if !already_asked.insert(hash) {
-                continue;
-            }
-            // One at a time rather than joined: a node that has just come back
-            // to a document it holds none of the content for would otherwise
-            // open a download per entry at once. Shuffled so that a group of
-            // readers repairing together does not all ask the same member.
-            // Asking twice for one hash is `already_asked`'s job, not this
-            // loop's — it used to be the other way round, and what that cost is
-            // in [`FETCH_AGAIN`].
-            let asked = tokio::time::timeout(
-                FETCH_DEADLINE,
-                downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.clone())),
-            )
-            .await;
-            match asked {
-                Ok(Ok(())) => {
-                    tracing::debug!(%hash, "fetched content nobody offered");
-                    news.content_landed();
-                }
-                // Ordinary rather than alarming: nobody reachable has it yet.
-                // Asked again when the group changes, or when this generation
-                // runs out — not on the next round.
-                Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
-                Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
+            if asked.hashes.insert(hash) {
+                fetch_one(&downloader, hash, &providers, &news).await;
             }
         }
+    }
+}
+
+/// The hashes asked about in this generation that did not arrive, and when
+/// the generation started.
+struct AskedThisGeneration {
+    hashes: HashSet<Hash>,
+    started: Instant,
+}
+
+impl Default for AskedThisGeneration {
+    fn default() -> Self {
+        Self {
+            hashes: HashSet::new(),
+            started: Instant::now(),
+        }
+    }
+}
+
+impl AskedThisGeneration {
+    fn start_again(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Waits [`FETCH_AGAIN`], starting a new generation whenever the membership
+/// changes meanwhile; `false` once the membership log is gone. A deadline
+/// rather than a fresh sleep, so a group whose membership keeps changing
+/// cannot hold the round off for ever.
+async fn wait_for_the_next_round(
+    membership: &mut watch::Receiver<MembershipState>,
+    asked: &mut AskedThisGeneration,
+) -> bool {
+    let next_round = Instant::now() + FETCH_AGAIN;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(next_round) => return true,
+            changed = membership.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+                tracing::debug!("the group changed; asking again for content that is missing");
+                asked.start_again();
+            }
+        }
+    }
+}
+
+/// Fetches one hash from `providers`, in a random order so that a group
+/// repairing together does not all ask the same member. One at a time, and for
+/// at most [`FETCH_DEADLINE`]: one peer that never answers must not hold up
+/// every other hash.
+async fn fetch_one(downloader: &Downloader, hash: Hash, providers: &[EndpointId], news: &News) {
+    let asked = tokio::time::timeout(
+        FETCH_DEADLINE,
+        downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.to_vec())),
+    )
+    .await;
+    match asked {
+        Ok(Ok(())) => {
+            tracing::debug!(%hash, "fetched content nobody offered");
+            news.content_landed();
+        }
+        // Ordinary rather than alarming: nobody reachable has it yet. Asked
+        // again in the next generation.
+        Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
+        Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
     }
 }
 
