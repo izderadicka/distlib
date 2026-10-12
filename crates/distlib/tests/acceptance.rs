@@ -248,6 +248,19 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
         std::fs::read(books.join("dune.epub")).unwrap(),
         "and hands back the bytes alice added"
     );
+    // And `distlib item` says what the item is and that bob holds it.
+    until_output(
+        bob.dir.path(),
+        &["item", &dune],
+        "bob's item view to name the book and say he holds it",
+        |out| {
+            out.lines()
+                .any(|line| line.trim_end() == "title       Dune")
+                && out
+                    .lines()
+                    .any(|line| line.starts_with("available   held here"))
+        },
+    );
 
     // Carol has been a member throughout, syncing the same catalogue: what is
     // asserted of her is that a fresh join sees the whole library, which is

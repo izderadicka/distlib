@@ -139,6 +139,11 @@ comments are cut to a sentence or two. One PR per group.
       `start_consensus` (allowlist, endpoint, gossip, node) and `open_uploads`. A new test,
       `uploads_follow_the_configuration_and_start_empty`, covers the uploads directory and its
       configured limit, which no test saw before.
+    - `commands::item`: **done**, without the exemption: one function per section
+      (`print_item_description`, `print_ratings_reviews_and_bookmarks`, `print_item_availability`,
+      `print_item_files`). The acceptance test now also reads the description and availability
+      lines, which no test checked before.
+    - Only `main` and `Config::to_starter_toml` keep the exemption, as planned.
   - Test files with scenario tests over 80 lines allow the lint at the file level, as they already
     allow `unwrap_used`.
 

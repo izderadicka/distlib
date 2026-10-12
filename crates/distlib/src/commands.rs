@@ -657,13 +657,17 @@ pub async fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
 }
 
 /// `distlib item`
-#[expect(
-    clippy::too_many_lines,
-    reason = "prints every section of an item in turn; a refactor candidate"
-)]
 pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     let answer = ask(paths, "library.item", json!({ "item_id": item_id })).await?;
+    print_item_description(item_id, &answer);
+    print_ratings_reviews_and_bookmarks(&answer);
+    print_item_availability(&answer["availability"]);
+    print_item_files(&answer["files"]);
+    Ok(())
+}
 
+/// The item's own fields: what it is, who made it, and what it is about.
+fn print_item_description(item_id: ItemId, answer: &Value) {
     println!("id          {item_id}");
     println!("kind        {}", answer["kind"].as_str().unwrap_or("?"));
     println!(
@@ -694,7 +698,10 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     if let Some(description) = answer["description"].as_str() {
         println!("description {description}");
     }
+}
 
+/// What members have said about the item.
+fn print_ratings_reviews_and_bookmarks(answer: &Value) {
     let ratings = &answer["ratings"];
     match ratings["average"].as_f64() {
         Some(average) => println!(
@@ -727,8 +734,10 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
             bookmark["bookmark_id"].as_str().unwrap_or("?")
         );
     }
+}
 
-    let found = &answer["availability"];
+/// Who holds the item's content, online or not known to be.
+fn print_item_availability(found: &Value) {
     println!(
         "available   {}",
         availability(&found["held"], &found["providers"])
@@ -741,19 +750,18 @@ pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
             println!("  {label:<9} {}", member.as_str().unwrap_or("?"));
         }
     }
+}
 
-    let files = answer["files"].as_object().map_or(0, |files| files.len());
-    println!("files       {files}");
-    if let Some(files) = answer["files"].as_object() {
-        for (blob, file) in files {
-            println!(
-                "  {blob}  {} ({} bytes)",
-                file["filename"].as_str().unwrap_or("?"),
-                file["size"].as_u64().unwrap_or(0)
-            );
-        }
+fn print_item_files(files: &Value) {
+    let files = files.as_object();
+    println!("files       {}", files.map_or(0, serde_json::Map::len));
+    for (blob, file) in files.into_iter().flatten() {
+        println!(
+            "  {blob}  {} ({} bytes)",
+            file["filename"].as_str().unwrap_or("?"),
+            file["size"].as_u64().unwrap_or(0)
+        );
     }
-    Ok(())
 }
 
 /// `distlib rate`. `None` clears this member's rating.
