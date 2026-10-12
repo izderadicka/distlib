@@ -79,11 +79,16 @@ comments are cut to a sentence or two. One PR per group.
   - `init`: new, existing, `--force` replacing the identity, the config written once;
   - `status`: no identity yet, and the node not running;
   - `ping`: against a running node, if it is cheap.
-  - `run`. These are the paths R2's mutations showed no test reaches: an expelled node exits with
-    its error; a node with the API disabled serves none; a node in no group says so; a founding
-    that fails is reported, and the node shut down (the same path as an API that cannot start,
-    which `a_node_whose_api_cannot_start_shuts_down_cleanly_and_says_why` covers since R3); the API server is shut down with the node; and
-    the runtime's shutdown keeps what a clean stop should keep (the blob store's records).
+  - `run`: **done** (`tests/running.rs`, and the clean-stop test in `founding.rs`).
+    - An expelled node exits with its error, as one sentence.
+    - With the API turned off, nothing listens on its port.
+    - A node in no group says how to get into one, and keeps running.
+    - A refused founding is reported, and the node shut down rather than dropped.
+    - A clean stop shuts the runtime down.
+
+    Of R2's seven survivors, six are now caught. The seventh, "the API server dropped as soon as
+    started", cannot be seen from outside the process: dropping a `Server` leaves its tasks
+    running until the process exits, and `shutdown()` only stops them a moment sooner.
 - **T2, `commit_as_follower` (50%)**: its fallbacks — first candidate unreachable, all
   unreachable, rejected. It also carries the question raised in #110: the doc comment says a core
   node that is not the leader forwards through its own Raft, and the code does not. **A correctness
