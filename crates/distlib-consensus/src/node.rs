@@ -206,6 +206,160 @@ fn raft_failed(source: impl std::error::Error + Send + Sync + 'static) -> NodeEr
     NodeError::Raft(Box::new(source))
 }
 
+/// The three handles on this node's Raft database.
+struct Stores {
+    /// What openraft writes, through a voter's Raft.
+    log: LogStore,
+    /// A second handle on the same log, for serving followers. redb readers
+    /// see a consistent snapshot without blocking the writer, so serving
+    /// cannot slow consensus.
+    served_log: LogStore,
+    state_machine: StateMachineStore,
+}
+
+fn open_stores(data_dir: &Path) -> Result<Stores> {
+    let path = data_dir.join(RAFT_DB);
+    let db = Arc::new(
+        Database::create(&path).map_err(|source| NodeError::Database {
+            path,
+            source: Box::new(source),
+        })?,
+    );
+    Ok(Stores {
+        log: LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?,
+        served_log: LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?,
+        state_machine: StateMachineStore::from_database(db).map_err(raft_failed)?,
+    })
+}
+
+/// Whether this node votes from the start.
+///
+/// The log decides, once there is one. Before that, configuration does — the
+/// same rule the allowlist follows, and for the same reason: a node cannot
+/// read a log it has no way to reach.
+fn starts_as_core(
+    state_machine: &StateMachineStore,
+    me: MemberId,
+    core: &[(MemberId, NodeAddr)],
+) -> bool {
+    let membership = state_machine.membership();
+    if membership.group_id().is_some() {
+        membership.is_core(&me)
+    } else {
+        core.iter().any(|(member, _)| *member == me)
+    }
+}
+
+/// Starts what the node's role at startup runs.
+///
+/// A voter reconciles the log's core group into Raft, which is what makes
+/// `CoreGroupChanged` mean anything; the task works out for itself whether it
+/// is the leader that may. A follower fetches the log instead.
+fn start_first_role(role: &Role) {
+    let Some(raft) = role.seat.raft() else {
+        start(
+            &role.follow,
+            tokio::spawn(follower::follow(role.following(), role.listens.clone())),
+        );
+        return;
+    };
+    let asking =
+        ask_once_for_the_directory(role.me, role.client.clone(), Arc::clone(&role.sources));
+    let enacting = core_group::enact(raft, role.state_machine.clone());
+    start(
+        &role.core_group,
+        // Joined rather than spawned beside it, so the one-shot ask lives and
+        // dies with the task that is already tracked here. `enact` never
+        // returns, so the join's only effect is to hold both under one handle.
+        tokio::spawn(async move {
+            tokio::join!(enacting, asking);
+        }),
+    );
+}
+
+/// Where the group is, for anything that dials by id alone, and the client
+/// that dials the core group with it.
+///
+/// Our own protocols carry a `NodeAddr` beside every member and never need the
+/// book; iroh-gossip subscribes with bare ids and cannot. Seeded from the
+/// configured core group — which is also a ticket's core group — and added to
+/// as the log and the core nodes say more.
+fn install_address_book_and_client(
+    endpoint: &Endpoint,
+    connections: &Connections,
+    directory: &Directory,
+    core: &[(MemberId, NodeAddr)],
+) -> Result<(AddressBook, MemberlogClient)> {
+    let addresses = AddressBook::install(endpoint).map_err(|_| NodeError::EndpointClosed)?;
+    addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
+    let client = MemberlogClient::new(
+        endpoint.clone(),
+        connections.clone(),
+        addresses.clone(),
+        directory.clone(),
+    );
+    Ok((addresses, client))
+}
+
+/// What answers this node's peers.
+///
+/// Built once, at the same moment as the seat they read, rather than in
+/// [`MembershipNode::protocols`].
+fn protocols_for(
+    role: &Role,
+    served_log: LogStore,
+    directory: &Directory,
+    memberlog: &MemberlogClient,
+) -> (RaftProtocol, MemberlogProtocol) {
+    let raft = RaftProtocol::new(
+        role.seat.clone(),
+        role.state_machine.clone(),
+        role.trusted.clone(),
+    );
+    let memberlog = MemberlogProtocol::new(
+        role.seat.clone(),
+        served_log,
+        role.state_machine.clone(),
+        directory.clone(),
+        memberlog.clone(),
+    );
+    (raft, memberlog)
+}
+
+/// Joins the group's gossip topic, and answers with the task and where this
+/// node's own address statements will appear.
+///
+/// The topic is the group's id, so this cannot join until there is a group. A
+/// founder has none for the moment before it founds one, and a new follower
+/// has none until its first fetch — so the task waits for one rather than the
+/// caller having to order any of that.
+fn spawn_join_topic(
+    role: &Role,
+    swarm: Gossip,
+    endpoint: &Endpoint,
+    directory: &Directory,
+    hints: &watch::Sender<gossip::Hint>,
+) -> (JoinHandle<()>, watch::Receiver<Option<SignedAddress>>) {
+    let (said, own_address) = watch::channel(None);
+    let joining = join_topic(
+        swarm,
+        role.state_machine.clone(),
+        role.me,
+        role.seat.raft().is_some(),
+        hints.clone(),
+        TopicParts {
+            endpoint: endpoint.clone(),
+            // The endpoint's key *is* this member's key — it is what the
+            // allowlist checks on every connection — so an announcement is
+            // signed by the same identity the group already authenticates.
+            secret: endpoint.secret_key().clone(),
+            directory: directory.clone(),
+            said,
+        },
+    );
+    (tokio::spawn(joining), own_address)
+}
+
 /// A task this node runs only while it has a particular role.
 ///
 /// Shared and replaceable, because a role now changes while the node runs: a
@@ -221,7 +375,6 @@ fn stop(task: &RoleTask) {
     }
 }
 
-/// Hands a role's task over to be held for the life of the node.
 /// A core node asks another core node where the group is, once, at startup.
 ///
 /// **The half of 2a-5 that was missing** (carried item C4). A follower asks for
@@ -248,6 +401,7 @@ async fn ask_once_for_the_directory(me: MemberId, client: MemberlogClient, sourc
     }
 }
 
+/// Hands a role's task over to be held for the life of the node.
 fn start(task: &RoleTask, handle: JoinHandle<()>) {
     *task.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
 }
@@ -383,10 +537,6 @@ impl MembershipNode {
     /// Once a `GroupFounded` has been applied the log wins, here as everywhere:
     /// a node the group was founded without is a follower whatever its config
     /// says.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "wiring of the membership node, one subsystem after another; a refactor candidate"
-    )]
     pub async fn start(
         transport: Transport,
         hooks: AllowlistHooks,
@@ -400,54 +550,21 @@ impl MembershipNode {
             directory,
         } = transport;
         let id = MemberId::from(endpoint.id());
-        let path = data_dir.join(RAFT_DB);
-        let db = Arc::new(
-            Database::create(&path).map_err(|source| NodeError::Database {
-                path,
-                source: Box::new(source),
-            })?,
-        );
-
-        let log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
-        // A second handle on the same database, for serving followers. openraft
-        // takes ownership of the one above, and redb readers see a consistent
-        // snapshot without blocking the writer — so this cannot slow consensus.
-        let served_log = LogStore::from_database(Arc::clone(&db)).map_err(raft_failed)?;
-        let state_machine = StateMachineStore::from_database(db).map_err(raft_failed)?;
+        let Stores {
+            log,
+            served_log,
+            state_machine,
+        } = open_stores(data_dir)?;
 
         // The node's connections, shared by everything it speaks: openraft's
         // replication, forwarded proposals, following the log, and whatever
         // protocols come later. All of them draw on the same set.
         let connections = Connections::new();
 
-        // Where the group is, for anything that dials by id alone. Our own
-        // protocols carry a `NodeAddr` beside every member and never need it;
-        // iroh-gossip subscribes with bare ids and cannot. Seeded from the
-        // configured core group — which is also a ticket's core group — and
-        // added to as the log and the core nodes say more.
-        let addresses = AddressBook::install(&endpoint).map_err(|_| NodeError::EndpointClosed)?;
-        // The other half of "where is everyone": the book above holds the core
-        // group, because that is all the log records, and this holds what
-        // members announce about themselves. See `distlib_net::Directory`.
-        let known_addresses = directory.clone();
-        addresses.learn_all(core.iter().map(|(member, addr)| (*member, addr)));
+        let (addresses, memberlog) =
+            install_address_book_and_client(&endpoint, &connections, &directory, &core)?;
 
-        let memberlog = MemberlogClient::new(
-            endpoint.clone(),
-            connections.clone(),
-            addresses.clone(),
-            directory.clone(),
-        );
-
-        // The log decides, once there is one. Before that, configuration does —
-        // the same rule the allowlist follows, and for the same reason: a node
-        // cannot read a log it has no way to reach.
-        let membership = state_machine.membership();
-        let is_core = if membership.group_id().is_some() {
-            membership.is_core(&id)
-        } else {
-            core.iter().any(|(member, _)| *member == id)
-        };
+        let is_core = starts_as_core(&state_machine, id, &core);
 
         // The gossip listener sends on this and the follow loop waits on it.
         // Seeded with `MayHaveMissed` because that is true at startup: this
@@ -459,76 +576,48 @@ impl MembershipNode {
         // closed channel and mistakes it for an answer.
         let (expelled, _) = watch::channel(false);
 
-        // Every node serves the same protocols, and the seat decides which of
-        // them can actually answer. Not a simplification: a `Router`'s
-        // protocols are fixed when it spawns, and `Router::shutdown` closes the
-        // endpoint — so a follower that may be promoted has to be listening on
-        // `distlib/raft/0` before it has a Raft to listen with. See [`alpns`].
-        //
-        // Forwarding does not go through this factory: a proposal travels over
-        // `distlib/memberlog/0`, which every member may speak, while the
-        // factory serves Raft's own replication between voters.
-        let network = RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone());
-        let config = Arc::new(raft_config().validate().map_err(raft_failed)?);
-
-        // A voter's openraft writes the log store now; the role task keeps a
-        // clone for every later promotion, which empties it first.
-        let seat = if is_core {
-            let raft = Raft::new(
-                RawMemberId::from(id),
-                Arc::clone(&config),
-                network.clone(),
-                log.clone(),
-                state_machine.clone(),
-            )
-            .await
-            .map_err(raft_failed)?;
-            Seat::holding(raft)
-        } else {
-            Seat::empty()
-        };
-
         // Configuration, until the log can say better. A follower being
         // promoted replaces this with what the log said, in the moment before
         // it blanks itself — see `TrustedCore`.
         let trusted = TrustedCore::new(core.iter().map(|(member, _)| *member).collect());
-
-        // Built here rather than in `protocols`, so that what answers a peer is
-        // decided once, at the same moment as the seat it reads.
-        let raft_protocol = RaftProtocol::new(seat.clone(), state_machine.clone(), trusted.clone());
-        let memberlog_protocol = MemberlogProtocol::new(
-            seat.clone(),
-            served_log,
-            state_machine.clone(),
-            directory.clone(),
-            memberlog.clone(),
-        );
-
         let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
-        let follow: RoleTask = Arc::new(Mutex::new(None));
-        let core_group: RoleTask = Arc::new(Mutex::new(None));
 
-        // The topic is the group's id, so this cannot join until there is a
-        // group. A founder has none for the moment before it founds one, and a
-        // new follower has none until its first fetch — so the task waits for
-        // one rather than the caller having to order any of that.
-        let (said, own_address) = watch::channel(None);
-        let gossip = tokio::spawn(join_topic(
-            swarm.clone(),
-            state_machine.clone(),
-            id,
-            is_core,
-            hints.clone(),
-            TopicParts {
-                endpoint: endpoint.clone(),
-                // The endpoint's key *is* this member's key — it is what the
-                // allowlist checks on every connection — so an announcement is
-                // signed by the same identity the group already authenticates.
-                secret: endpoint.secret_key().clone(),
-                directory: directory.clone(),
-                said,
-            },
-        ));
+        // Watching the log for a change of role, and making it true when one
+        // comes. Built first because a voter's Raft is built from it, exactly
+        // as a promoted node's is later.
+        let role = Role {
+            me: id,
+            config: Arc::new(raft_config().validate().map_err(raft_failed)?),
+            // Every node serves the same protocols, and the seat decides which
+            // of them can actually answer. Not a simplification: a `Router`'s
+            // protocols are fixed when it spawns, and `Router::shutdown` closes
+            // the endpoint — so a follower that may be promoted has to be
+            // listening on `distlib/raft/0` before it has a Raft to listen
+            // with. See [`alpns`].
+            //
+            // Forwarding does not go through this factory: a proposal travels
+            // over `distlib/memberlog/0`, which every member may speak, while
+            // the factory serves Raft's own replication between voters.
+            network: RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone()),
+            log,
+            state_machine: state_machine.clone(),
+            client: memberlog.clone(),
+            sources: Arc::clone(&sources),
+            expelled: expelled.clone(),
+            listens,
+            seat: Seat::empty(),
+            trusted,
+            follow: Arc::new(Mutex::new(None)),
+            core_group: Arc::new(Mutex::new(None)),
+        };
+        if is_core {
+            role.seat.take(new_raft(&role).await.map_err(raft_failed)?);
+        }
+
+        let (raft_protocol, memberlog_protocol) =
+            protocols_for(&role, served_log, &directory, &memberlog);
+        let (gossip, own_address) =
+            spawn_join_topic(&role, swarm.clone(), &endpoint, &directory, &hints);
 
         let allowlist_updates = tokio::spawn(follow_membership(
             state_machine.clone(),
@@ -538,47 +627,12 @@ impl MembershipNode {
         ));
         let evictions = tokio::spawn(hooks.evict_expelled());
 
-        // What makes `CoreGroupChanged` mean anything to Raft. Only a voter has
-        // a Raft to change, and only the leader may change it — the task sorts
-        // that out for itself rather than being started and stopped as
-        // leadership moves.
-        //
-        // A follower runs the other two instead: the loop that fetches the log,
-        // and the one waiting to be told it may stop.
-        let role = Role {
-            me: id,
-            config,
-            network,
-            log,
-            state_machine: state_machine.clone(),
-            client: memberlog.clone(),
-            sources: Arc::clone(&sources),
-            expelled: expelled.clone(),
-            listens: listens.clone(),
-            seat: seat.clone(),
-            trusted,
-            follow: Arc::clone(&follow),
-            core_group: Arc::clone(&core_group),
-        };
-        if !is_core {
-            start(
-                &follow,
-                tokio::spawn(follower::follow(role.following(), listens)),
-            );
-        } else if let Some(raft) = seat.raft() {
-            let asking = ask_once_for_the_directory(id, memberlog.clone(), Arc::clone(&sources));
-            let enacting = core_group::enact(raft, state_machine.clone());
-            start(
-                &core_group,
-                // Joined rather than spawned beside it, so the one-shot ask
-                // lives and dies with the task that is already tracked here.
-                // `enact` never returns, so the join's only effect is to hold
-                // both under one handle.
-                tokio::spawn(async move {
-                    tokio::join!(enacting, asking);
-                }),
-            );
-        }
+        start_first_role(&role);
+        let (seat, follow, core_group) = (
+            role.seat.clone(),
+            Arc::clone(&role.follow),
+            Arc::clone(&role.core_group),
+        );
         let role = tokio::spawn(serve_role(role));
 
         Ok(Self {
@@ -587,7 +641,9 @@ impl MembershipNode {
             sources,
             state_machine,
             endpoint,
-            known_addresses,
+            // Where members have said they can be reached; see
+            // `distlib_net::Directory`.
+            known_addresses: directory,
             own_address,
             raft_protocol,
             memberlog_protocol,
@@ -1239,6 +1295,22 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
     true
 }
 
+/// A Raft for this node, over its stores, as a voter starts one or a promoted
+/// node does.
+async fn new_raft(
+    role: &Role,
+) -> std::result::Result<Raft<TypeConfig>, Box<openraft::error::Fatal<RawMemberId>>> {
+    Raft::new(
+        RawMemberId::from(role.me),
+        Arc::clone(&role.config),
+        role.network.clone(),
+        role.log.clone(),
+        role.state_machine.clone(),
+    )
+    .await
+    .map_err(Box::new)
+}
+
 /// Waits for the log to say this node votes, and then makes that true.
 ///
 /// The other half of promotion; the first is [`crate::raft::core_group`] on
@@ -1276,9 +1348,6 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
 async fn take_the_seat(role: &Role) -> Option<u64> {
     let Role {
         me,
-        config,
-        network,
-        log,
         state_machine,
         seat,
         trusted,
@@ -1317,15 +1386,7 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
         return None;
     }
 
-    let raft = match Raft::new(
-        RawMemberId::from(*me),
-        Arc::clone(config),
-        network.clone(),
-        log.clone(),
-        state_machine.clone(),
-    )
-    .await
-    {
+    let raft = match new_raft(role).await {
         Ok(raft) => raft,
         Err(error) => {
             tracing::error!(%error, "could not start consensus after being promoted");
