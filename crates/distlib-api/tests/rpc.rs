@@ -607,7 +607,7 @@ impl Harness {
     }
 
     async fn shutdown(self) {
-        self.server.shutdown();
+        drop(self.server);
         self.node.shutdown().await;
         // Last, as production does it: a router's shutdown closes the endpoint
         // under it, and the nodes a test stopped itself still have theirs here.
@@ -712,6 +712,24 @@ async fn a_call_with_the_wrong_token_is_refused() {
     harness.call("node.status", Value::Null).await;
 
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_dropped_server_stops_listening() {
+    let harness = Harness::start().await;
+    let addr = harness.server.addr();
+    harness.call("node.status", Value::Null).await;
+
+    // Drops the server; nothing else here holds its listener.
+    harness.shutdown().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(addr).await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("nothing listens once the server is dropped");
 }
 
 #[tokio::test]

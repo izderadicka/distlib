@@ -93,8 +93,7 @@ comments are cut to a sentence or two. One PR per group.
     - A clean stop shuts the runtime down.
 
     Of R2's seven survivors, six are now caught. The seventh, "the API server dropped as soon as
-    started", cannot be seen from outside the process: dropping a `Server` leaves its tasks
-    running until the process exits, and `shutdown()` only stops them a moment sooner.
+    started", is caught since dropping a `Server` stops it (`impl Drop`, replacing `shutdown()`).
 - **T2, `commit_as_follower` (50%)**: its fallbacks — first candidate unreachable, all
   unreachable, rejected. It also carries the question raised in #110: the doc comment says a core
   node that is not the leader forwards through its own Raft, and the code does not. **A correctness

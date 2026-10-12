@@ -124,9 +124,8 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     for reporter in reporters {
         reporter.abort();
     }
-    if let Some(api) = api {
-        api.shutdown();
-    }
+    // Stop serving before the node it serves goes away.
+    drop(api);
     runtime.shutdown().await;
     if expelled {
         bail!(
