@@ -58,6 +58,11 @@ comments are cut to a sentence or two. One PR per group.
     reviews, bookmarks and wishes all repeat it now.
   - `commands::run` (118) → build the API from the runtime / wait for a stop or an expulsion / shut
     down.
+  - **Done.** `OwnedRows` in `store.rs` is a table whose rows belong to one key, replaced together.
+    Files, ratings, reviews, bookmarks and wish entries and comments use it. In code lines,
+    `commands::run` went from 78 to 36: `found_or_say_there_is_no_group`, `start_local_api`,
+    `spawn_reporters`, `wait_for_stop_or_expulsion`. `members` is replaced whole rather than by
+    key, so it stays as it was.
 - **R3, sync and consensus**
   - `fetch_content_nobody_offered` (97, `distlib-sync/src/catalogue.rs`) → wait for the next round
     / pick providers / fetch one hash.
@@ -70,6 +75,10 @@ comments are cut to a sentence or two. One PR per group.
   - `init`: new, existing, `--force` replacing the identity, the config written once;
   - `status`: no identity yet, and the node not running;
   - `ping`: against a running node, if it is cheap.
+  - `run`. These are the paths R2's mutations showed no test reaches: an expelled node exits with
+    its error; a node with the API disabled serves none; a node in no group says so; a founding
+    that fails is reported, and the node shut down; the API server is shut down with the node; and
+    the runtime's shutdown keeps what a clean stop should keep (the blob store's records).
 - **T2, `commit_as_follower` (50%)**: its fallbacks — first candidate unreachable, all
   unreachable, rejected. It also carries the question raised in #110: the doc comment says a core
   node that is not the leader forwards through its own Raft, and the code does not. **A correctness
