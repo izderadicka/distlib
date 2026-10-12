@@ -69,7 +69,7 @@ pub use methods::Api;
 use rpc::{Error, Request, Response};
 use uploads::UploadError;
 
-/// A running API server.
+/// A running API server. Dropping it stops serving.
 pub struct Server {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
@@ -86,9 +86,10 @@ impl Server {
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
+}
 
-    /// Stops serving.
-    pub fn shutdown(&self) {
+impl Drop for Server {
+    fn drop(&mut self) {
         self.task.abort();
         self.publishers
             .iter()
@@ -102,7 +103,7 @@ struct Shared {
     token: SecretString,
 }
 
-/// Binds `addr` and serves the API until the returned [`Server`] is shut down.
+/// Binds `addr` and serves the API until the returned [`Server`] is dropped.
 ///
 /// The event bus is `api.tasks`' — see [`events::bus`]. The server subscribes
 /// a receiver per watcher, and publishes the membership's and the catalogue
