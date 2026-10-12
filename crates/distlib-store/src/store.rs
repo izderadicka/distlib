@@ -514,7 +514,9 @@ const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_ind
                             year, lang, description, replicas, last_modified";
 
 /// The `item_files` columns, in the order [`files_of`] reads them.
-const FILE_COLUMNS: &str = "item, blob, role, format, size, filename, seq, disc, title, duration";
+const FILE_COLUMNS: &[&str] = &[
+    "item", "blob", "role", "format", "size", "filename", "seq", "disc", "title", "duration",
+];
 
 /// A table whose rows belong to one key, in its first column: an item's
 /// files, ratings, reviews and bookmarks, a wish's entries and comments.
@@ -524,8 +526,8 @@ const FILE_COLUMNS: &str = "item, blob, role, format, size, filename, seq, disc,
 /// goes, so the table never depends on what was projected into it before.
 struct OwnedRows {
     table: &'static str,
-    /// Comma-separated, the key first.
-    columns: &'static str,
+    /// The key first.
+    columns: &'static [&'static str],
 }
 
 const FILES: OwnedRows = OwnedRows {
@@ -534,23 +536,31 @@ const FILES: OwnedRows = OwnedRows {
 };
 const RATINGS: OwnedRows = OwnedRows {
     table: "ratings",
-    columns: "item, member, rating",
+    columns: &["item", "member", "rating"],
 };
 const REVIEWS: OwnedRows = OwnedRows {
     table: "reviews",
-    columns: "item, member, review",
+    columns: &["item", "member", "review"],
 };
 const BOOKMARKS: OwnedRows = OwnedRows {
     table: "bookmarks",
-    columns: "item, member, id, position, note, created_at, last_modified",
+    columns: &[
+        "item",
+        "member",
+        "id",
+        "position",
+        "note",
+        "created_at",
+        "last_modified",
+    ],
 };
 const WISH_ENTRIES: OwnedRows = OwnedRows {
     table: "wish_entries",
-    columns: "wish, member, entry",
+    columns: &["wish", "member", "entry"],
 };
 const WISH_COMMENTS: OwnedRows = OwnedRows {
     table: "wish_comments",
-    columns: "wish, member, comment",
+    columns: &["wish", "member", "comment"],
 };
 
 impl OwnedRows {
@@ -564,16 +574,19 @@ impl OwnedRows {
         mut insert: impl FnMut(&mut Statement<'_>, T) -> rusqlite::Result<usize>,
     ) -> rusqlite::Result<()> {
         let Self { table, columns } = self;
-        let key_column = columns.split(',').next().unwrap_or_default();
+        let key_column = columns
+            .first()
+            .expect("an OwnedRows names its columns, the key first");
         tx.execute(
             &format!("DELETE FROM {table} WHERE {key_column} = ?1"),
             params![key],
         )?;
-        let placeholders: Vec<String> = (1..=columns.split(',').count())
+        let placeholders: Vec<String> = (1..=columns.len())
             .map(|number| format!("?{number}"))
             .collect();
         let mut statement = tx.prepare(&format!(
-            "INSERT INTO {table} ({columns}) VALUES ({})",
+            "INSERT INTO {table} ({}) VALUES ({})",
+            columns.join(", "),
             placeholders.join(", ")
         ))?;
         for row in rows {
@@ -674,7 +687,10 @@ fn files_of(
     conn: &Connection,
     only: Option<ItemId>,
 ) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>> {
-    let (sql, params) = select_item_rows(&format!("{FILE_COLUMNS} FROM item_files"), only);
+    let (sql, params) = select_item_rows(
+        &format!("{} FROM item_files", FILE_COLUMNS.join(", ")),
+        only,
+    );
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(params))?;
 
