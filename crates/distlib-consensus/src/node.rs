@@ -501,6 +501,7 @@ impl MembershipNode {
             served_log,
             state_machine.clone(),
             directory.clone(),
+            memberlog.clone(),
         );
 
         let sources: SharedSources = Arc::new(Mutex::new(Sources { core, leader: None }));
@@ -919,8 +920,8 @@ impl MembershipNode {
     ///
     /// No leader hint to work from — a follower does not run Raft and so has no
     /// `ForwardToLeader` to be told — so it asks the core nodes it knows of,
-    /// leader first, until one commits it. A node that is not the leader
-    /// forwards through its own Raft, so any of them will do.
+    /// leader first, until one commits it. A core node that is not the leader
+    /// hands it on to the leader it knows of, so any of them will do.
     async fn commit_as_follower(&self, sources: &SharedSources, event: SignedEvent) -> Result<u64> {
         let candidates = follower::read(sources).candidates(self.id);
         if candidates.is_empty() {
@@ -977,7 +978,11 @@ impl MembershipNode {
 
             match (forward.leader_id, forward.leader_node) {
                 (Some(leader), Some(addr)) => {
-                    match self.forward(leader, addr, event.clone()).await {
+                    match self
+                        .memberlog
+                        .propose_to_leader(leader, &addr, event.clone())
+                        .await
+                    {
                         Ok(index) => return Ok(index),
 
                         // The rules refused it. Every node reaches that verdict
@@ -1038,30 +1043,6 @@ impl MembershipNode {
             Some((leader, source)) => Err(NodeError::Forward { leader, source }),
             None => Err(NodeError::NoLeader),
         }
-    }
-
-    /// Hands a proposal to the leader over the raft ALPN.
-    ///
-    /// Returns the leader's outcome unwrapped, so the caller can tell a verdict
-    /// — which no amount of retrying will change, since every node reaches it
-    /// identically — from a failure to reach the leader, which retrying might.
-    async fn forward(
-        &self,
-        leader: RawMemberId,
-        addr: NodeAddr,
-        event: SignedEvent,
-    ) -> std::result::Result<u64, ProposeError> {
-        tracing::debug!(leader = %leader, "forwarding a proposal to the leader");
-        // Not `Unreachable`: that names a member who could not be reached, and
-        // the only id we have here is one that is not a member id at all.
-        // Reporting it against `self.id` would blame the one node that is
-        // certainly reachable.
-        let leader = MemberId::try_from(leader).map_err(|error| {
-            ProposeError::NotCommitted(format!(
-                "the leader's id {leader} is not a member id: {error}"
-            ))
-        })?;
-        self.memberlog.propose(leader, &addr, event).await
     }
 
     /// Stops consensus and this node's background tasks.

@@ -12,8 +12,12 @@ use std::time::Duration;
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use distlib_consensus::{MemberRecord, MembershipEvent};
-use distlib_core::{MemberId, NodeAddr};
+use distlib_consensus::{
+    ConsensusError, MemberRecord, MemberlogClient, MembershipEvent, ProposeError, SignedEvent,
+    Timestamp, node::NodeError,
+};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
+use distlib_net::{AddressBook, Directory};
 use iroh::SecretKey;
 
 mod common;
@@ -1521,6 +1525,212 @@ async fn a_follower_proposes_through_a_core_node() {
     // §4.3 opens proposing to any member, and a follower has no Raft to commit
     // with — so it hands the event to a core node, which commits it as if the
     // proposal had originated there.
+    let (founder, follower) = a_founder_and_its_follower().await;
+
+    // A pledge, because that is the one thing only its owner may propose — so
+    // this could not have been committed by anybody else on its behalf.
+    follower
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: follower.id,
+                pledge_bytes: 4096,
+            },
+            &follower.secret,
+        )
+        .await
+        .expect("a follower must be able to propose");
+
+    wait_for(&founder, "the follower's pledge to commit", |membership| {
+        membership
+            .member(&follower.id)
+            .is_some_and(|record| record.pledge_bytes == 4096)
+    })
+    .await;
+
+    follower.shutdown().await;
+    founder.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_follower_hears_a_refusal_as_a_refusal() {
+    // Every node reaches the same verdict, so a refusal is the answer — not a
+    // core node that failed and is worth swapping for another.
+    let (founder, follower) = a_founder_and_its_follower().await;
+
+    let error = follower
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: founder.id,
+                pledge_bytes: 4096,
+            },
+            &follower.secret,
+        )
+        .await
+        .expect_err("only its owner may change a pledge");
+
+    assert!(
+        matches!(error, NodeError::Event(ConsensusError::PledgeNotOwn { .. })),
+        "the rules' verdict, not a failure to reach anyone; got {error:?}"
+    );
+    follower.shutdown().await;
+    founder.shutdown().await;
+}
+
+// Six seconds: it waits out connect timeouts against a core node that is gone.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_follower_that_reaches_no_core_node_says_who_it_tried() {
+    let (founder, follower) = a_founder_and_its_follower().await;
+    founder.shutdown().await;
+
+    let error = follower
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: follower.id,
+                pledge_bytes: 4096,
+            },
+            &follower.secret,
+        )
+        .await
+        .expect_err("nobody is there to commit it");
+
+    assert!(
+        matches!(
+            &error,
+            NodeError::Forward { leader, .. } if *leader == RawMemberId::from(founder.id)
+        ),
+        "names the core node it could not get to commit; got {error:?}"
+    );
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
+    // A member may ask any core node, and only one of them is the leader. The
+    // others hand the proposal on — once: a core node's own proposal is not
+    // handed on again, because its own Raft finds the leader for it.
+    let one = SecretKey::generate();
+    let two = SecretKey::generate();
+    let (one_id, two_id) = (MemberId::from(one.public()), MemberId::from(two.public()));
+    let first = Peer::start(one, vec![two_id]).await;
+    let second = Peer::start(two, vec![one_id]).await;
+
+    // `first` founds, so `first` is the leader and `second` is not.
+    first
+        .node
+        .init_group(
+            vec![
+                (first.record("first"), first.addr.clone()),
+                (second.record("second"), second.addr.clone()),
+            ],
+            &first.secret,
+        )
+        .await
+        .unwrap();
+
+    // A member who is not a voter, so it has no Raft to find the leader with.
+    let member = Peer::start_with(SecretKey::generate(), vec![first.id, second.id], vec![]).await;
+    first
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: member.record("member"),
+            },
+            &first.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&second, "the member to be admitted", |membership| {
+        membership.is_member(&member.id)
+    })
+    .await;
+    assert_ne!(
+        second
+            .node
+            .raft()
+            .unwrap()
+            .metrics()
+            .borrow()
+            .current_leader,
+        Some(RawMemberId::from(second.id)),
+        "this test is only meaningful while `second` is not the leader"
+    );
+
+    let signed_by = |peer: &Peer, event: MembershipEvent| {
+        SignedEvent::sign(
+            &peer.secret,
+            event,
+            Timestamp::now(),
+            second.node.membership().changed_at(),
+        )
+        .unwrap()
+    };
+    let client_of = |peer: &Peer| {
+        MemberlogClient::new(
+            peer.node.endpoint().clone(),
+            peer.node.connections().clone(),
+            AddressBook::default(),
+            Directory::default(),
+        )
+    };
+
+    // Handed on, and committed.
+    let pledge = MembershipEvent::PledgeChanged {
+        member: member.id,
+        pledge_bytes: 4096,
+    };
+    client_of(&member)
+        .propose(second.id, &second.addr, signed_by(&member, pledge))
+        .await
+        .expect("a core node that is not the leader hands it on");
+    wait_for(&first, "the member's pledge to commit", |membership| {
+        membership
+            .member(&member.id)
+            .is_some_and(|record| record.pledge_bytes == 4096)
+    })
+    .await;
+
+    // The leader's verdict comes back as a verdict.
+    let not_own = MembershipEvent::PledgeChanged {
+        member: first.id,
+        pledge_bytes: 1,
+    };
+    let refused = client_of(&member)
+        .propose(second.id, &second.addr, signed_by(&member, not_own))
+        .await
+        .expect_err("only its owner may change a pledge");
+    assert!(
+        matches!(
+            refused,
+            ProposeError::Rejected(ConsensusError::PledgeNotOwn { .. })
+        ),
+        "got {refused:?}"
+    );
+
+    // A core node's proposal is not handed on.
+    let own = MembershipEvent::PledgeChanged {
+        member: first.id,
+        pledge_bytes: 1,
+    };
+    let not_committed = client_of(&first)
+        .propose(second.id, &second.addr, signed_by(&first, own))
+        .await
+        .expect_err("one hop only");
+    assert!(
+        matches!(not_committed, ProposeError::NotCommitted(_)),
+        "got {not_committed:?}"
+    );
+
+    member.shutdown().await;
+    second.shutdown().await;
+    first.shutdown().await;
+}
+
+/// A single founder and a follower admitted by it that holds the log.
+async fn a_founder_and_its_follower() -> (Peer, Peer) {
     let founder = Peer::start(SecretKey::generate(), vec![]).await;
     founder
         .node
@@ -1562,30 +1772,7 @@ async fn a_follower_proposes_through_a_core_node() {
         membership.is_member(&follower.id)
     })
     .await;
-
-    // A pledge, because that is the one thing only its owner may propose — so
-    // this could not have been committed by anybody else on its behalf.
-    follower
-        .node
-        .propose(
-            MembershipEvent::PledgeChanged {
-                member: follower.id,
-                pledge_bytes: 4096,
-            },
-            &follower.secret,
-        )
-        .await
-        .expect("a follower must be able to propose");
-
-    wait_for(&founder, "the follower's pledge to commit", |membership| {
-        membership
-            .member(&follower.id)
-            .is_some_and(|record| record.pledge_bytes == 4096)
-    })
-    .await;
-
-    follower.shutdown().await;
-    founder.shutdown().await;
+    (founder, follower)
 }
 
 // Six seconds, and on its own the reason this binary took six: it waits out a

@@ -99,6 +99,16 @@ comments are cut to a sentence or two. One PR per group.
   unreachable, rejected. It also carries the question raised in #110: the doc comment says a core
   node that is not the leader forwards through its own Raft, and the code does not. **A correctness
   item: it may move ahead of this plan.**
+  - **Done.** A core node that is not the leader now hands a member's proposal on to the leader,
+    one hop only: a proposal from another core node is not handed on again, because that node's
+    own Raft finds the leader. Tests in `distlib-consensus/tests/node.rs`:
+    - a non-voter asking a core node that is not the leader: committed; a refusal comes back as
+      a refusal; a core node's own proposal is not handed on;
+    - a follower hears a refusal as the rules' verdict, not as a core node that failed;
+    - a follower that reaches no core node names the one it tried (slow lane).
+  - Not covered: "first candidate unreachable, the next one commits". The leader is always
+    tried first and the sources are rewritten after every fetch, so a test could not pin that
+    order without depending on timing.
 - **Later**: a Raft snapshot sent between nodes. `RaftClient::install_snapshot` is at 0%; the state
   machine side is tested (`distlib-consensus/tests/state_machine.rs`).
 
@@ -121,4 +131,4 @@ comments are cut to a sentence or two. One PR per group.
 
 ## Order
 
-R1 → R2 → R3 → T1 → the guard. T2 when Ivan decides.
+R1 → R2 → R3 → T1 → the guard → T2. All done.
