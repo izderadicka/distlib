@@ -500,21 +500,25 @@ test that fails only alongside others is a finding — a deadline too tight for 
 busy machine, or code that misbehaves when it is scheduled late — not something
 to serialise away. The full lane is about as long as its slowest test.
 
-Mutation checks come in two layers:
+Mutation checks:
 
-- **`scripts/mutate.py <mutations.toml>`** runs hand-written mutations of the
-  code, Rust or UI.
-  - First it refuses to run while a block of code the branch changed has no
-    mutation, or no stated reason for having none.
+- **Every PR: `scripts/mutate.py <mutations.toml>`** runs hand-written
+  mutations of the change's key behaviours, Rust or UI. It takes minutes.
   - Each mutation names the tests that should catch it. Only those are built
     and run, stopping at the first failure.
   - A mutation those tests miss is run against the whole suite before it is
     called a survivor.
   - Its docstring gives the file format.
-- **`cargo mutants --test-workspace=true --minimum-test-timeout=300 --in-diff <diff>`** ([cargo-mutants](https://mutants.rs))
-  makes mechanical mutations of every changed Rust function and runs the whole
-  workspace's tests on each, set up in `.cargo/mutants.toml`.
-  - It builds a copy of the tree, so it can run in the background.
+- **Now and then, e.g. at the end of a phase: the thorough pass.** It takes
+  an hour or more.
+  - `scripts/mutate.py <mutations.toml> --every-block [base]` first refuses
+    to run while a block of code changed since `base` has no mutation, or no
+    stated reason for having none.
+  - `cargo mutants --test-workspace=true --minimum-test-timeout=300 --in-diff <diff>`
+    ([cargo-mutants](https://mutants.rs)) makes mechanical mutations of every
+    changed Rust function and runs the whole workspace's tests on each. It is
+    set up in `.cargo/mutants.toml`, and builds a copy of the tree, so it can
+    run in the background.
 
 The test suite never contacts the public relay or DNS infrastructure — endpoints are
 either given explicit addresses or pointed at an in-process relay, so the suite is
