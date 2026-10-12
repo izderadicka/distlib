@@ -1144,11 +1144,15 @@ impl Role {
 /// that returned without emptying the seat would otherwise be called again at
 /// once, for ever.
 async fn serve_role(role: Role) {
+    let mut seated_at = role.state_machine.membership().changed_at();
     loop {
-        if role.seat.raft().is_none() && !take_the_seat(&role).await {
-            return;
+        if role.seat.raft().is_none() {
+            let Some(at) = take_the_seat(&role).await else {
+                return;
+            };
+            seated_at = at;
         }
-        if !stand_down(&role).await {
+        if !stand_down(&role, seated_at).await {
             return;
         }
     }
@@ -1185,16 +1189,21 @@ async fn serve_role(role: Role) {
 /// had as a voter, so nothing pokes its new follow loop and the timer is what
 /// it waits on.
 ///
+/// Only a membership newer than `seated_at`, the one that seated this node,
+/// can unseat it. A node catching up after promotion passes through older
+/// ones — from a snapshot, or entries applied in more than one batch — and
+/// those do not name it as core. Acting on one would stand it down, follow,
+/// be promoted again and loop. It also covers a founder, which is not core
+/// until it has founded.
+///
 /// Returns `true` once it has done it; `false` if the state machine went away,
 /// as its mirror does.
-async fn stand_down(role: &Role) -> bool {
+async fn stand_down(role: &Role, seated_at: u64) -> bool {
     let mut memberships = role.state_machine.subscribe();
     loop {
         {
             let seen = memberships.borrow_and_update();
-            // Founded, because a founder is not core until it has founded and
-            // the two are indistinguishable from here.
-            if seen.group_id().is_some() && !seen.is_core(&role.me) {
+            if seen.changed_at() > seated_at && !seen.is_core(&role.me) {
                 break;
             }
         }
@@ -1262,9 +1271,9 @@ async fn stand_down(role: &Role) -> bool {
 /// 5. **Start reconciling**, so this node does its share of putting later
 ///    core-group changes into effect once it is leader material.
 ///
-/// Returns `true` once it has done it; `false` if it could not, or if the
-/// state machine went away.
-async fn take_the_seat(role: &Role) -> bool {
+/// Returns the `changed_at` of the membership that seated it; `None` if it
+/// could not, or if the state machine went away.
+async fn take_the_seat(role: &Role) -> Option<u64> {
     let Role {
         me,
         config,
@@ -1279,15 +1288,19 @@ async fn take_the_seat(role: &Role) -> bool {
     } = role;
 
     let mut memberships = state_machine.subscribe();
-    loop {
-        if memberships.borrow_and_update().is_core(me) {
-            break;
+    let seated_at = loop {
+        let core_at = {
+            let seen = memberships.borrow_and_update();
+            seen.is_core(me).then(|| seen.changed_at())
+        };
+        if let Some(at) = core_at {
+            break at;
         }
         if memberships.changed().await.is_err() {
             tracing::error!("membership channel closed");
-            return false;
+            return None;
         }
-    }
+    };
     tracing::info!("the log says this node votes now; taking a seat in consensus");
 
     stop(follow);
@@ -1301,7 +1314,7 @@ async fn take_the_seat(role: &Role) -> bool {
         // is restarted, which is the honest outcome of a disk that will not
         // take a write.
         tracing::error!(%error, "could not clear this node's state to be promoted");
-        return false;
+        return None;
     }
 
     let raft = match Raft::new(
@@ -1316,7 +1329,7 @@ async fn take_the_seat(role: &Role) -> bool {
         Ok(raft) => raft,
         Err(error) => {
             tracing::error!(%error, "could not start consensus after being promoted");
-            return false;
+            return None;
         }
     };
 
@@ -1326,7 +1339,7 @@ async fn take_the_seat(role: &Role) -> bool {
         tokio::spawn(core_group::enact(raft, state_machine.clone())),
     );
     tracing::info!("this node is now a voter");
-    true
+    Some(seated_at)
 }
 
 /// Joins the group's gossip topic once there is a group, and stays on it.
