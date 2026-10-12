@@ -103,15 +103,19 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     // `init` and `whoami` make one, `run` only uses it.
     let secret = load_secret_key(&paths.secret_key_file())?;
     let runtime = Runtime::start(&secret, &config, &paths.data_dir).await?;
-    if let Err(error) =
-        found_or_say_there_is_no_group(&runtime, &config, &secret, found_group).await
-    {
-        // Shut down before returning: a live node dropped leaves iroh
-        // complaining about its endpoint, after the error that matters.
-        runtime.shutdown().await;
-        return Err(error);
-    }
-    let api = start_local_api(paths, &config, &secret, &runtime).await?;
+    let started = async {
+        found_or_say_there_is_no_group(&runtime, &config, &secret, found_group).await?;
+        start_local_api(paths, &config, &secret, &runtime).await
+    };
+    let api = match started.await {
+        Ok(api) => api,
+        Err(error) => {
+            // Shut down before returning: a live node dropped leaves iroh
+            // complaining about its endpoint, after the error that matters.
+            runtime.shutdown().await;
+            return Err(error);
+        }
+    };
     let reporters = spawn_reporters(&runtime);
 
     let expelled = wait_for_stop_or_expulsion(&mut stop, runtime.node()).await;

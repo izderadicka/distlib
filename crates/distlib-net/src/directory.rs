@@ -67,7 +67,7 @@ pub struct Directory {
     /// core node about where a *follower* is is precisely the trust this design
     /// does not ask for. Still O(members): one statement each, replaced in
     /// place.
-    heard: Arc<RwLock<BTreeMap<MemberId, SignedAddress>>>,
+    signed_addresses: Arc<RwLock<BTreeMap<MemberId, SignedAddress>>>,
     /// Bumped whenever an answer here *changes* — never when one is restated.
     ///
     /// Because knowing where somebody is only matters to whoever wanted to
@@ -90,7 +90,7 @@ impl Default for Directory {
     fn default() -> Self {
         Self {
             lookup: MemoryLookup::default(),
-            heard: Arc::default(),
+            signed_addresses: Arc::default(),
             learned: Arc::new(watch::channel(0).0),
         }
     }
@@ -155,11 +155,11 @@ impl Directory {
 
         // Held across the write, so two announcements arriving at once cannot
         // interleave into "the older one wins".
-        let mut heard = self
-            .heard
+        let mut signed_addresses = self
+            .signed_addresses
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if heard
+        if signed_addresses
             .get(&member)
             .is_some_and(|held| announced.applied() < held.applied())
         {
@@ -184,7 +184,7 @@ impl Directory {
             // The position still advances: it is what supersession is judged on,
             // and letting it go stale would make a later statement from this
             // member look older than it is.
-            heard.insert(member, announced.clone());
+            signed_addresses.insert(member, announced.clone());
             return Ok(false);
         }
 
@@ -194,7 +194,7 @@ impl Directory {
         tracing::debug!(%member, addr = ?endpoint_addr, "learned where a member is");
         self.lookup.remove_endpoint_info(member.endpoint_id());
         self.lookup.add_endpoint_info(endpoint_addr);
-        heard.insert(member, announced.clone());
+        signed_addresses.insert(member, announced.clone());
         // `send_modify` rather than `send`: there may be no subscriber, and a
         // directory that refused to record anything because nobody was
         // listening would be a strange thing indeed.
@@ -214,7 +214,7 @@ impl Directory {
 
     /// The log position of what is held for `member`, if anything.
     pub fn position_of(&self, member: MemberId) -> Option<u64> {
-        self.heard
+        self.signed_addresses
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&member)
@@ -234,7 +234,7 @@ impl Directory {
     /// the log, and the log is not this type's business: the caller intersects
     /// this with the allowlist it already has open.
     pub fn everything(&self) -> Vec<SignedAddress> {
-        self.heard
+        self.signed_addresses
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()

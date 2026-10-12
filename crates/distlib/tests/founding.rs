@@ -54,6 +54,33 @@ fn run_refuses_a_data_directory_with_no_identity() {
 }
 
 #[test]
+fn a_node_whose_api_cannot_start_shuts_down_cleanly_and_says_why() {
+    // A second node started with a copied config, for one, finds its api's
+    // port taken. It is a node by then, with an endpoint open, and it has to
+    // close that rather than drop it.
+    let friend = Friend::introduce();
+    friend.agree_on(&[(friend.id.clone(), friend.port)]);
+    let _taken = std::net::TcpListener::bind(("127.0.0.1", friend.api_port)).unwrap();
+
+    let mut node = friend.run(true);
+    let status = node.wait_until_gone().expect("the node exits by itself");
+
+    let log = node.log_contents();
+    assert!(
+        !status.success(),
+        "a node that cannot serve its api fails; log:\n{log}"
+    );
+    assert!(
+        log.contains("could not serve the api"),
+        "the error says what went wrong; log:\n{log}"
+    );
+    assert!(
+        !log.contains("Endpoint dropped without calling"),
+        "the node is shut down, not dropped; log:\n{log}"
+    );
+}
+
+#[test]
 fn a_commands_answer_is_not_mixed_with_its_log() {
     // stdout is what a script reads. Logs used to share it, so `distlib
     // ticket` on Windows — where reading the token always warns — printed the
