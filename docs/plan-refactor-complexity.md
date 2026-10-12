@@ -79,6 +79,12 @@ comments are cut to a sentence or two. One PR per group.
   - `init`: new, existing, `--force` replacing the identity, the config written once;
   - `status`: no identity yet, and the node not running;
   - `ping`: against a running node, if it is cheap.
+  - **Done** (`tests/node_commands.rs`, about a second each):
+    - `init` new; `init` again, which keeps the identity and an edited config; `init --force`,
+      with its warning.
+    - `status` with no identity; not running and in no group; a stopped founder's role, read from
+      the database.
+    - `ping` from an admitted member, echoed. A member nobody admitted is refused.
   - `run`: **done** (`tests/running.rs`, and the clean-stop test in `founding.rs`).
     - An expelled node exits with its error, as one sentence.
     - With the API turned off, nothing listens on its port.
