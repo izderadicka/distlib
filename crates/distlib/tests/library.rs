@@ -548,3 +548,23 @@ async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
 
     runtime.shutdown().await;
 }
+
+/// The runtime holds uploads where the data directory says, with the limit the
+/// configuration says, and clears what a previous run left behind.
+#[tokio::test]
+async fn uploads_follow_the_configuration_and_start_empty() {
+    let dir = TempDir::new().unwrap();
+    let data = DataDir::new(dir.path().to_path_buf());
+    let leftover = data.root().join("uploads").join("0".repeat(32));
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("half-sent"), b"never added").unwrap();
+    let key = SecretKey::generate();
+    let mut config = config(&[MemberId::from(key.public())]);
+    config.api.max_upload_bytes = 1234;
+
+    let runtime = Runtime::start(&key, &config, &data).await.unwrap();
+
+    assert_eq!(runtime.uploads().max_bytes(), 1234);
+    assert!(!leftover.exists(), "a previous run's upload is cleared");
+    runtime.shutdown().await;
+}
