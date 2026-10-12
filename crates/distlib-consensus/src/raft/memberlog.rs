@@ -17,7 +17,7 @@
 //! Phase 1b adds the other half — fetching the log — on this same ALPN, which
 //! is where §4.2's non-core followers get their copy.
 
-use distlib_core::{MemberId, NodeAddr, SignedAddress};
+use distlib_core::{MemberId, NodeAddr, RawMemberId, SignedAddress};
 use distlib_net::{
     AddressBook, Connections, Directory, IsRejection, NOT_A_VOTER_REASON, NetError, alpn,
     close_code,
@@ -27,7 +27,10 @@ use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
 };
-use openraft::Raft;
+use openraft::{
+    Raft,
+    error::{ClientWriteError, ForwardToLeader, RaftError},
+};
 use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
@@ -89,8 +92,8 @@ enum Request {
     /// A membership event the sender wants committed.
     ///
     /// Only the leader can commit one, so a core node that is not the leader
-    /// still has to hand it on — which it does through its own Raft, exactly as
-    /// if the proposal had originated there.
+    /// hands a member's proposal on to the leader it knows of. One hop only:
+    /// a proposal from another core node is not handed on again.
     Propose(SignedEvent),
 
     /// Everything committed since `cursor`.
@@ -265,6 +268,8 @@ pub struct MemberlogProtocol {
     /// copy. A core node listens to `ReachableAt` for no other reason than to
     /// be able to answer this.
     directory: Directory,
+    /// For handing a member's proposal on to the leader.
+    memberlog: MemberlogClient,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it.
@@ -281,18 +286,25 @@ impl MemberlogProtocol {
         log: LogStore,
         state_machine: StateMachineStore,
         directory: Directory,
+        memberlog: MemberlogClient,
     ) -> Self {
         Self {
             seat,
             log,
             state_machine,
             directory,
+            memberlog,
         }
     }
 
-    async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
+    async fn answer(
+        &self,
+        raft: &Raft<TypeConfig>,
+        sender: MemberId,
+        request: Request,
+    ) -> Response {
         match request {
-            Request::Propose(event) => Response::Proposed(self.propose(raft, event).await),
+            Request::Propose(event) => Response::Proposed(self.propose(raft, sender, event).await),
             Request::From { cursor } => Response::Fetched(self.fetch(raft, cursor)),
             Request::Directory => Response::Directory(self.serve_directory()),
         }
@@ -360,7 +372,12 @@ impl MemberlogProtocol {
         }
     }
 
-    async fn propose(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> ProposeOutcome {
+    async fn propose(
+        &self,
+        raft: &Raft<TypeConfig>,
+        sender: MemberId,
+        event: SignedEvent,
+    ) -> ProposeOutcome {
         // The other door into the log, and the one that is not this node's own
         // caller: a follower forwards an already-signed event here. Reading it
         // verifies the signature, so a refusal is attributable; see
@@ -373,16 +390,24 @@ impl MemberlogProtocol {
             Err(refused) => return ProposeOutcome::Rejected(refused),
         }
 
-        let written = match tokio::time::timeout(COMMIT_TIMEOUT, raft.client_write(event)).await {
-            Ok(written) => written,
-            Err(_) => {
-                return ProposeOutcome::NotCommitted(format!(
+        // Around the forward too, so the sender hears an answer before its
+        // own `EXCHANGE_TIMEOUT` gives up on this node.
+        tokio::time::timeout(COMMIT_TIMEOUT, self.commit_or_forward(raft, sender, event))
+            .await
+            .unwrap_or_else(|_| {
+                ProposeOutcome::NotCommitted(format!(
                     "the entry did not commit within {COMMIT_TIMEOUT:?}"
-                ));
-            }
-        };
+                ))
+            })
+    }
 
-        match written {
+    async fn commit_or_forward(
+        &self,
+        raft: &Raft<TypeConfig>,
+        sender: MemberId,
+        event: SignedEvent,
+    ) -> ProposeOutcome {
+        match raft.client_write(event.clone()).await {
             // The write reached the log; `data` is the state machine's verdict
             // on whether it then took effect.
             Ok(written) => match written.data {
@@ -391,11 +416,34 @@ impl MemberlogProtocol {
                 },
                 Err(rejected) => ProposeOutcome::Rejected(rejected),
             },
-            // Includes this node having lost leadership since the sender's hint
-            // was issued. Its own `ForwardToLeader` is no use to them — their
-            // Raft learns the new leader from replication — so it travels as a
-            // message rather than as routing advice.
+            // Handed on only for a member without a Raft of its own. A core
+            // sender is already forwarding, to us on a stale hint; its own
+            // Raft learns the new leader, so it asks again itself. That keeps
+            // it to one hop.
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(ForwardToLeader {
+                leader_id: Some(leader),
+                leader_node: Some(addr),
+            }))) if !self.state_machine.membership().is_core(&sender) => {
+                self.forward(leader, &addr, event).await
+            }
             Err(error) => ProposeOutcome::NotCommitted(error.to_string()),
+        }
+    }
+
+    /// Hands a member's proposal to the leader and passes its answer back.
+    async fn forward(
+        &self,
+        leader: RawMemberId,
+        addr: &NodeAddr,
+        event: SignedEvent,
+    ) -> ProposeOutcome {
+        match self.memberlog.propose_to_leader(leader, addr, event).await {
+            Ok(index) => ProposeOutcome::Applied { index },
+            Err(ProposeError::Rejected(error)) => ProposeOutcome::Rejected(error),
+            Err(ProposeError::NotCommitted(message)) => ProposeOutcome::NotCommitted(message),
+            Err(unreachable @ ProposeError::Unreachable { .. }) => {
+                ProposeOutcome::NotCommitted(unreachable.to_string())
+            }
         }
     }
 }
@@ -455,7 +503,8 @@ impl ProtocolHandler for MemberlogProtocol {
                 .map_err(AcceptError::from_err)?;
             let request: Request = postcard::from_bytes(&encoded).map_err(AcceptError::from_err)?;
 
-            let encoded = postcard::to_stdvec(&self.answer(&raft, request).await)
+            let sender = MemberId::from(connection.remote_id());
+            let encoded = postcard::to_stdvec(&self.answer(&raft, sender, request).await)
                 .map_err(AcceptError::from_err)?;
 
             send.write_all(&encoded)
@@ -533,6 +582,24 @@ impl MemberlogClient {
                 Err(ProposeError::NotCommitted(error))
             }
         }
+    }
+
+    /// Asks the leader Raft named to commit `event`.
+    pub(crate) async fn propose_to_leader(
+        &self,
+        leader: RawMemberId,
+        addr: &NodeAddr,
+        event: SignedEvent,
+    ) -> Result<u64, ProposeError> {
+        tracing::debug!(%leader, "forwarding a proposal to the leader");
+        // Not `Unreachable`: that names a member who could not be reached, and
+        // the only id we have here is one that is not a member id at all.
+        let leader = MemberId::try_from(leader).map_err(|error| {
+            ProposeError::NotCommitted(format!(
+                "the leader's id {leader} is not a member id: {error}"
+            ))
+        })?;
+        self.propose(leader, addr, event).await
     }
 
     /// Asks `member` for everything committed since `cursor`.
