@@ -111,6 +111,10 @@ comments are cut to a sentence or two. One PR per group.
     order without depending on timing.
 - **Later**: a Raft snapshot sent between nodes. `RaftClient::install_snapshot` is at 0%; the state
   machine side is tested (`distlib-consensus/tests/state_machine.rs`).
+  - **Done** (`a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot`). It found a bug: a
+    promoted node installing a snapshot taken before its promotion saw itself as not core,
+    stood down, and looped. Now only a membership newer than the one that seated a node can
+    stand it down.
 
 ## The guard
 

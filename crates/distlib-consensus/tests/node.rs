@@ -2422,3 +2422,111 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
     founder.shutdown().await;
     joiner.shutdown().await;
 }
+
+// In the slow lane with the test above, for the same reason: its waits are
+// bounded by the follower's 30-second timer.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot() {
+    // A promoted node starts with an empty log, and the entries it is missing
+    // may be gone: a leader purges what a snapshot covers. Then the only way
+    // to catch it up is `InstallSnapshot`, which openraft otherwise sends
+    // only past 5000 entries.
+    //
+    // The snapshot predates `CoreGroupChanged`, so installing it briefly shows
+    // a membership in which this node is not core. That used to stand it
+    // down, and it looped: follow, be promoted, install the snapshot again.
+    let (founder, joiner) = a_founder_and_its_follower().await;
+    let raft = founder.node.raft().unwrap();
+
+    raft.trigger().snapshot().await.unwrap();
+    let snapshot_index = founder.node.membership().changed_at();
+    until("the founder to take a snapshot", || {
+        raft.metrics()
+            .borrow()
+            .snapshot
+            .is_some_and(|snapshot| snapshot.index >= snapshot_index)
+    })
+    .await;
+    raft.trigger().purge_log(snapshot_index).await.unwrap();
+    until("the founder to purge what the snapshot covers", || {
+        raft.metrics()
+            .borrow()
+            .purged
+            .is_some_and(|purged| purged.index >= snapshot_index)
+    })
+    .await;
+
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![
+                    (founder.id, founder.addr.clone()),
+                    (joiner.id, joiner.addr.clone()),
+                ],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+
+    until_upto(PATIENTLY, "the joiner to take a seat in consensus", || {
+        joiner.node.raft().is_some()
+    })
+    .await;
+    until("openraft to make the joiner a voter", || {
+        raft.metrics()
+            .borrow()
+            .membership_config
+            .voter_ids()
+            .count()
+            == 2
+    })
+    .await;
+    wait_for_upto(
+        &joiner,
+        PATIENTLY,
+        "the promoted node to be caught up",
+        |membership| *membership == founder.node.membership(),
+    )
+    .await;
+    let installed = joiner
+        .node
+        .raft()
+        .expect("a promoted node votes")
+        .metrics()
+        .borrow()
+        .snapshot;
+    assert!(
+        installed.is_some_and(|snapshot| snapshot.index >= snapshot_index),
+        "caught up from the snapshot, the entries being gone; got {installed:?}"
+    );
+
+    // Ignoring older memberships must not keep it seated: a demotion is newer
+    // than the promotion, so it still stands down.
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(founder.id, founder.addr.clone())],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&founder, "the demotion to be pending").await;
+    joiner
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &joiner.secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        joiner.node.raft().is_none()
+    })
+    .await;
+    assert!(!joiner.node.is_core());
+
+    joiner.shutdown().await;
+    founder.shutdown().await;
+}
