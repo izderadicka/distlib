@@ -129,6 +129,12 @@ comments are cut to a sentence or two. One PR per group.
     - `main` (a flat match) and `Config::to_starter_toml` (a template) stay as they are;
     - `consensus::node::start` (137), `Runtime::start` (91) and `commands::item` (89) are refactor
       candidates.
+    - `consensus::node::start`: **done**, now under 80 lines and without the exemption. Its
+      steps: `open_stores`, `install_address_book_and_client`, `starts_as_core`,
+      `protocols_for`, `spawn_join_topic`, `start_first_role`; the startup Raft and a promoted
+      one are both built by `new_raft`. Not covered by any test, found by mutation: on restart,
+      the log rather than the configuration deciding whether the node votes; and the address
+      book being seeded with the configured core group.
   - Test files with scenario tests over 80 lines allow the lint at the file level, as they already
     allow `unwrap_used`.
 
