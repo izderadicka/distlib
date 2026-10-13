@@ -1704,12 +1704,15 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
         "this test is only meaningful while `second` is not the leader"
     );
 
+    // Against the leader's membership: `second` may not have applied what the
+    // leader just committed, and a proposal signed against its older view is
+    // refused as stale rather than for the reason being tested.
     let signed_by = |peer: &Peer, event: MembershipEvent| {
         SignedEvent::sign(
             &peer.secret,
             event,
             Timestamp::now(),
-            second.node.membership().changed_at(),
+            first.node.membership().changed_at(),
         )
         .unwrap()
     };
