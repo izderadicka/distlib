@@ -9,8 +9,9 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 **Status: a draft, under discussion.** Ivan's first review (#133) reshaped it: rendezvous hashing
 stays, `replicas` belongs to the group, and a node holds an item for one of three reasons — it added
-it, it is custodian, or it downloaded it — which the plan has to bind together. What is still open
-is under [Open questions](#open-questions), each with a proposal.
+it, it is custodian, or it downloaded it — which the plan has to bind together. The second settled
+the open questions but one, and added a local storage limit; see
+[Open questions](#open-questions).
 
 Phase 4 is complete and merged, and so is the refactor series that followed it
 ([`plan-refactor-complexity.md`](../plan-refactor-complexity.md)). Every member says what it holds in
@@ -40,8 +41,12 @@ shows up red in the members view.*
   ground truth 9). A weighted ring was considered and set aside for a later version.
 - **`replicas` is a group property, set when the group is founded** — Ivan, at the review (D2).
   A per-item value would let any member ask the whole group to store its items a hundred times.
-- **The creator keeps what it added; a download is a cache** — Ivan, at the review (D3). What was
+- **The creator keeps what it added; a download is a cache** — Ivan, at the review. What was
   exported is the user's and outside distlib; the copy in the store may go when space is short.
+  The creator's copy counts as one of the `replicas`.
+- **Two budgets: the pledge, shared with the group, and a local storage limit, larger than it** —
+  Ivan, at the second review. Pressure on the limit evicts the cache; what the node created or is
+  custodian of is never evicted.
 - **Custody comes from the log; a grace top-up covers a custodian that stays away** (D7). §9's "kill a
   custodian" and §5.5's "going offline changes nobody's custodian set" are both kept.
 - **Membership churn must not turn into storage churn** — Ivan, at the review (D5): custody is
@@ -178,12 +183,25 @@ of three reasons, and may have several at once:
 |---|---|---|---|
 | **Own** | the member that added it — its creator | always, while the member is a member | nothing: it is the member's contribution, and what the quota rule (D9) is measured on |
 | **Custody** | the members rendezvous hashing assigns (D1) | while assigned | the pledge |
-| **Cache** | anyone who downloaded it; a grace top-up's extra (D7); a former custodian | while there is room | the pledge, after custody |
+| **Cache** | anyone who downloaded it; a grace top-up's extra (D7); a former custodian | while there is room under the storage limit | the storage limit only |
+
+Own and custody are **mandatory**: nothing evicts them. Cache is **optional**: it is what goes when
+space is short.
 
 - **A blob goes only when no reason is left.** A download of an item this node is also custodian of
   is kept as long as the custody is; losing custody of an item still in the cache leaves it cached.
-- **The pledge is the space a member offers the group**: custody first, cache in whatever custody
-  leaves. When custody needs room, the cache gives it up, least recently used first.
+- **Two budgets, one shared with the group and one not** — Ivan, at the second review:
+  - **The pledge** is in the log: the space a member offers the group, which bounds its custody
+    (D6's overflow) and which the quota rule measures (D9).
+  - **The storage limit** is local, `[storage] limit_bytes` in the node's config, never shared: the
+    disk space distlib may use on this machine for all three reasons together. It must be larger
+    than the pledge — the difference is room for own items and the cache.
+  - **Pressure** is own + custody + cache above the limit, and it evicts the cache, least recently
+    used first, until the total fits.
+  - **Mandatory alone over the limit** — the member added more than the limit leaves room for, or
+    lowered the limit — evicts the whole cache and is then reported in `node.status` and on the Node
+    page; `library.add` refuses an add that would make it worse. `group.pledge_set` refuses a pledge
+    that is not below the limit.
 - **What the user exported is the user's.** `library.download` writes a file outside the store; the
   copy in the store is the cache, and freeing it never touches the export.
 
@@ -235,8 +253,10 @@ custodians(item) = the item's creator, then the members with the highest scores,
   slot in each; leaving or a weight change moves only that member's items.
 - **Proportional**: a member's expected share is its weight's share.
 - **Pure, in `distlib-core`**, property-tested in the fast lane for §10's three properties.
-- **The creator first** is open question Q1: it makes the creator's own copy count as one of the
-  `replicas`, which is also what makes the quota rule's 2× come out (D9).
+- **The creator first** (Q1, agreed): the creator's own copy counts as one of the `replicas`,
+  which is also what makes the quota rule's 2× come out (D9). Once the creator is no longer a
+  member, the top `replicas` by score. If two members created the same files, both keep them and
+  the first by score counts.
 
 **D2 — Group settings, set when the group is founded.** `GroupFounded` gains them:
 
@@ -247,6 +267,7 @@ weight_step_bytes   u64    default 10 GB    (D5)
 min_pledge_bytes    u64    default 100 GB   (§5.5)
 pending_expiry      u64    default 128      (C9)
 settle_secs         u32    default 1 h      (D5)
+max_settle_secs     u32    default 1 day    (D5)
 grace_secs          u32    default 1 h      (D7)
 leaving_secs        u32    default 7 days   (D6)
 challenge_secs      u32    default 7 days   (D10)
@@ -254,8 +275,8 @@ challenge_secs      u32    default 7 days   (D10)
 
 A founder that sets none gets the defaults. `node.status`, the CLI and a read-only section of the
 Node page show them. `Item::replicas` is removed from the catalogue schema (ground truth 3).
-**Whether any of these may change after founding is open question Q4**; the proposal is no, not in
-this phase.
+**They do not change after founding, in this phase** (Q4, agreed): changing `replicas` or `cap`
+reshuffles every item at once, and a group that needs it can found again (C37).
 
 **D3 — Effective weight.**
 
@@ -275,11 +296,18 @@ and the custodian that fetches the file finds out. Logged, not acted on — C35.
 **D5 — Membership churn does not become storage churn.** Ivan's concern at the review: custody that
 follows every change could get out of hand in a group whose membership moves often. Five fences:
 
-1. **Custody waits for membership to settle.** The pin manager recomputes custody only once the
-   membership has not changed for `settle_secs` — and at least once a day, so a group that never
-   settles still moves. Ten changes in an afternoon are one reshuffle in the evening. Nodes agree
-   on the result because they compute it from the same settled membership; they may start it a few
-   seconds apart.
+1. **Custody waits for membership to settle.** Two periods decide when custody is recomputed after
+   the membership changes:
+   - **`settle_secs`** — the pin manager waits until the membership has gone this long without a
+     change, then recomputes once. Each new join, expulsion or pledge change restarts the wait, so
+     ten changes in an afternoon are one reshuffle in the evening.
+   - **`max_settle_secs`** — the longest it waits regardless, so a large group whose membership
+     never stays still for `settle_secs` still moves its custody.
+
+   Too short, and a burst of changes is several reshuffles; too long, and a new member's pledge sits
+   unused and an expelled member's items stay a copy short meanwhile — which the grace top-up (D7)
+   covers after `grace_secs`. Nodes agree on the result because they compute it from the same
+   settled membership; they may start it a few seconds apart.
 2. **Weights move in steps** (D3): a pledge edited from 500 GB to 505 GB moves nothing.
 3. **Losing custody does not delete anything.** The item becomes cache (the tag table above), so a
    change that is undone costs nothing, and the new custodian can fetch it from the old one.
@@ -370,24 +398,19 @@ it. The members list shows each member's pledge beside its requirement.
 
 ## Open questions
 
-Each with a proposal; none blocks 5a.
+**Settled at the second review** — Ivan agreed with the proposals, with one change:
 
-- **Q1 — Does the creator's copy count as one of the `replicas`?** Proposed: yes. Custodians are the
-  creator plus the top `replicas − 1` others; once the creator is no longer a member, the top
-  `replicas`. It makes the creator accountable for its own items, saves a copy per item, and gives
-  D9's 2× its meaning. If two members created the same files, both keep them and the first by score
-  counts.
-- **Q2 — Is the cache bounded only by the pledge?** Proposed: yes — custody first, cache in what is
-  left, nothing beyond. A member that wants a larger cache raises its pledge. The alternative, a
-  local `cache_bytes` in the node's config, lets a member keep downloads without offering the space
-  to the group.
-- **Q3 — Does the creator's own copy count against its pledge?** Proposed: no (the table above): the
-  pledge is what a member holds *for others*, and D9 already ties it to what the member adds.
-- **Q4 — May settings change after founding?** Proposed: not in this phase. Changing `replicas` or
-  `cap` reshuffles every item at once; a group that needs it can found again. A
-  `GroupSettingsChanged` needing a core majority is the shape if it is wanted — C37.
-- **Q5 — `settle_secs` and the daily bound.** An hour and a day are guesses; a measurement on a
-  group with real churn will set them.
+- **Q1 — the creator's copy counts as one of the `replicas`.** In D1.
+- **Q2, Q3 — the cache is bounded by a local storage limit, not by the pledge**, and own items count
+  against that limit, not against the pledge. Ivan's change: a node has a disk limit of its own,
+  larger than its pledge, and pressure on it evicts what is not mandatory. In
+  [Why a node keeps an item](#why-a-node-keeps-an-item).
+- **Q4 — settings are fixed at founding.** In D2.
+
+**Still open:**
+
+- **Q5 — the values of `settle_secs` and `max_settle_secs`** (D5). An hour and a day are guesses; a
+  measurement on a group with real churn will set them.
 
 ---
 
@@ -435,10 +458,12 @@ a time, review before the next.
   custody, it keeps the item as cache until the item has its copies elsewhere; a queue fetches the
   one-copy items first; an item already cached is promoted without a fetch.
 
-- **5b-3 — the cache and its eviction (D3, Q2).** Last-used times, and eviction least recently used
-  first when custody needs room.
-  **Acceptance:** a node at its pledge evicts the oldest cached item to take on a new custody, never
-  an own or custody item; the exported file is untouched.
+- **5b-3 — the storage limit and the cache's eviction.** `[storage] limit_bytes`, last-used times,
+  and eviction least recently used first whenever own + custody + cache is over the limit.
+  **Acceptance:** a node at its limit evicts the oldest cached item to take on a new custody or a new
+  download, never an own or custody item; the exported file is untouched; mandatory items alone over
+  the limit are reported, and an add that would grow them is refused; a pledge not below the limit
+  is refused.
 
 - **5b-4 — the grace top-up (D7).**
   **Acceptance:** §9's first half — five nodes, `replicas = 3`, `grace_secs` a few seconds at
