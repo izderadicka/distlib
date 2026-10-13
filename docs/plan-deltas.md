@@ -250,7 +250,9 @@ as before, deviations from the design land here, in the PR that causes them.
 
 ## Phase 5 — Custodianship & quotas
 
-*Not started.*
+*Planned.* The sequencing plan is
+[`plan-phases/phase-5-custodianship-quotas.md`](plan-phases/phase-5-custodianship-quotas.md); as
+before, deviations from the design land here, in the PR that causes them.
 
 ## Phase 6 — Hardening & release
 
