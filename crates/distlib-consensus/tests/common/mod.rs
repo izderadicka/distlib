@@ -76,6 +76,7 @@ impl Peer {
         // Dropped as well as shut down: the node holds the Raft database open
         // for as long as it is alive, and a second start would be refused it.
         drop((node, router));
+        until_released(&_dir.path().join(distlib_consensus::RAFT_DB)).await;
         let core = founding_core(&secret, &bootstrap);
         Self::start_in(_dir, secret, bootstrap, core).await
     }
@@ -163,6 +164,24 @@ impl Peer {
             pledge_bytes: 0,
         }
     }
+}
+
+/// Waits until nothing holds the Raft database at `path` open.
+///
+/// Dropping a node is not enough on its own: its aborted tasks hold clones of
+/// the database until the runtime gets round to dropping them, which on a slow
+/// runner is after the next start has been refused the file.
+async fn until_released(path: &std::path::Path) {
+    tokio::time::timeout(SOON, async {
+        while matches!(
+            redb::Database::create(path),
+            Err(redb::DatabaseError::DatabaseAlreadyOpen)
+        ) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the old node to let go of its database");
 }
 
 /// `bootstrap` and this node, all in the founding core group.
