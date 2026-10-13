@@ -58,16 +58,26 @@ impl Peer {
     /// The common case: everyone this node talks to before there is a log is
     /// somebody it is founding with.
     pub async fn start(secret: SecretKey, bootstrap: Vec<MemberId>) -> Self {
-        let id = MemberId::from(secret.public());
-        // Addresses are empty because a core node never dials from this list —
-        // Raft carries its own addressing, and only a follower fetches from it.
-        let core = bootstrap
-            .iter()
-            .copied()
-            .chain([id])
-            .map(|member| (member, NodeAddr::default()))
-            .collect();
+        let core = founding_core(&secret, &bootstrap);
         Self::start_with(secret, bootstrap, core).await
+    }
+
+    /// Stops this node and starts it again on the same data directory, with
+    /// the configuration [`Peer::start`] gives it.
+    pub async fn restart(self, bootstrap: Vec<MemberId>) -> Self {
+        self.shutdown().await;
+        let Self {
+            secret,
+            _dir,
+            node,
+            router,
+            ..
+        } = self;
+        // Dropped as well as shut down: the node holds the Raft database open
+        // for as long as it is alive, and a second start would be refused it.
+        drop((node, router));
+        let core = founding_core(&secret, &bootstrap);
+        Self::start_in(_dir, secret, bootstrap, core).await
     }
 
     /// Starts a node whose founding core group is stated separately.
@@ -81,9 +91,17 @@ impl Peer {
         bootstrap: Vec<MemberId>,
         core: Vec<(MemberId, NodeAddr)>,
     ) -> Self {
+        Self::start_in(TempDir::new().unwrap(), secret, bootstrap, core).await
+    }
+
+    async fn start_in(
+        dir: TempDir,
+        secret: SecretKey,
+        bootstrap: Vec<MemberId>,
+        core: Vec<(MemberId, NodeAddr)>,
+    ) -> Self {
         init_logging();
         let id = MemberId::from(secret.public());
-        let dir = TempDir::new().unwrap();
 
         // The bootstrap seed and the hooks share one channel; the node gets the
         // write half. Exactly the arrangement production uses.
@@ -145,6 +163,19 @@ impl Peer {
             pledge_bytes: 0,
         }
     }
+}
+
+/// `bootstrap` and this node, all in the founding core group.
+///
+/// Addresses are empty because a core node never dials from this list — Raft
+/// carries its own addressing, and only a follower fetches from it.
+fn founding_core(secret: &SecretKey, bootstrap: &[MemberId]) -> Vec<(MemberId, NodeAddr)> {
+    bootstrap
+        .iter()
+        .copied()
+        .chain([MemberId::from(secret.public())])
+        .map(|member| (member, NodeAddr::default()))
+        .collect()
 }
 
 /// The default bound: long enough for anything gossip or Raft does promptly.
