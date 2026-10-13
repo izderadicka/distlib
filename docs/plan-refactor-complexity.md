@@ -133,8 +133,11 @@ comments are cut to a sentence or two. One PR per group.
       steps: `open_stores`, `install_address_book_and_client`, `starts_as_core`,
       `protocols_for`, `spawn_join_topic`, `start_first_role`; the startup Raft and a promoted
       one are both built by `new_raft`. Not covered by any test, found by mutation: on restart,
-      the log rather than the configuration deciding whether the node votes; and the address
-      book being seeded with the configured core group.
+      the log rather than the configuration deciding whether the node votes (**now covered** by
+      `a_demoted_node_restarted_with_a_stale_config_does_not_vote`); and the address book being
+      seeded with the configured core group (still not: the log and
+      the core nodes' answers fill the book before anything dials by id alone, so leaving the
+      seed out changes nothing a test can see).
     - `Runtime::start`: **done**, under 80 and without the exemption. Its steps:
       `start_consensus` (allowlist, endpoint, gossip, node) and `open_uploads`. A new test,
       `uploads_follow_the_configuration_and_start_empty`, covers the uploads directory and its

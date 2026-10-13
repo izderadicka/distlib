@@ -752,6 +752,51 @@ async fn a_core_node_the_log_demotes_stands_down_and_starts_following() {
     }
 }
 
+#[tokio::test]
+async fn a_demoted_node_restarted_with_a_stale_config_does_not_vote() {
+    // Configuration says who votes only until there is a log. A node the log
+    // has demoted, restarted with a config that still names it core, must come
+    // back as a follower: once seated, only a newer membership can stand it
+    // down, and the one it would have sat down on is already the latest.
+    let mut peers = a_founded_trio().await;
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![
+                    (peers[0].id, peers[0].addr.clone()),
+                    (peers[1].id, peers[1].addr.clone()),
+                ],
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the demotion to be pending on the second voter").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+    until("the demoted node to give up its seat", || {
+        peers[2].node.raft().is_none()
+    })
+    .await;
+
+    let demoted = peers.pop().unwrap();
+    let restarted = demoted.restart(vec![peers[0].id, peers[1].id]).await;
+
+    assert!(
+        restarted.node.raft().is_none() && !restarted.node.is_core(),
+        "the log, not the stale config, decides that it does not vote"
+    );
+
+    restarted.shutdown().await;
+    for peer in peers {
+        peer.shutdown().await;
+    }
+}
+
 /// MEM-04's other half: the demoted node keeps up with changes made after it
 /// stood down, instead of freezing at the membership it held.
 ///
