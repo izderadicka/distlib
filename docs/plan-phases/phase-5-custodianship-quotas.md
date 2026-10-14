@@ -58,6 +58,12 @@ pinned data fails probes from 2 peers and shows up red in the members list.*
 - **Overflow and `MemberLeaving` are out of phase 5** (round 4): there is plenty to do. A load
   factor shows when a group's custody outgrows its weight (D9).
 - **A probe is iroh-blobs' own verified chunk probe** (ground truth 8), not a new protocol.
+- **The creator is never ranked as a custodian of its own item** (round 5): its copy is the first
+  replica, and the ranking fills the rest (D1).
+- **The quota warns before it refuses** (round 5): a big red warning when under-pledged, a refusal
+  only when far under (D8).
+- **Recomputing custody runs on all cores with rayon, above a size where that pays** (round 5;
+  5a-2).
 
 **The scale target:** groups of **thousands of members**, with phase 4's items target — about 100k
 easy, 10M working — and some nodes holding a large share of the library.
@@ -250,19 +256,27 @@ for eviction.
 
 ```text
 score(item, m)   = −w(m) / ln(h(item, m)),   h ∈ (0, 1) from BLAKE3("distlib.custody.v1" || item || m)
-custodians(item) = its creator, then the members with the highest scores, `replicas` in all;
-                   once the creator is no longer a member, the top `replicas` by score
+custodians(item) = the top `replicas − 1` by score among members other than the creator,
+                   while the creator is a member; the top `replicas` by score once it is not
 ```
 
+- **The creator is never ranked.** Its copy is the item's first replica by being its own, so the
+  ranking skips it and fills the remaining `replicas − 1` slots from the other members. A creator that
+  would have scored in the top is therefore never custodian of its own item, never counts it twice,
+  and never holds a `custody/` tag beside its `own/` one. Its own items count against its storage
+  limit, not its pledge — the pledge is for other members' items, which is what D8 measures.
+- **The creator leaving** — expelled — turns its slot into one more ranked slot: the member ranked
+  next fetches the item, one copy, D7's rate.
 - **Deterministic**: every node computes the same floats from the same bytes; ties, astronomically
   rare, break by member id.
 - **Minimal reshuffle**: a member joining takes only the items where it outscores somebody, one slot
   in each; an expulsion or a weight change moves only that member's items.
 - **Proportional**: a member's expected share is its weight's share.
 - **"Am I custodian" stops early** (ground truth 9): the node scores itself, then the others in a fixed
-  order, and stops at `replicas − 1` higher scores (one slot is the creator's).
+  order, skipping the creator, and stops at `replicas − 1` higher scores.
 - **Two creators** — two members who added the same files at once (ground truth 5) — both keep their
-  copy, and the first by score counts as the creator's slot.
+  copy as their own, and both are skipped by the ranking: the item has one copy more than
+  `replicas`, which is rare and errs towards safety.
 - **Pure, in `distlib-core`**, property-tested in the fast lane for §10's three properties.
 
 **D2 — Group settings, set when the group is founded.** `GroupFounded` gains them:
@@ -354,17 +368,25 @@ required_pledge(m) = max(min_pledge_bytes, (replicas − 1) × added_bytes(m))
 ```
 
 2× at `replicas = 3`, and still fair if a group founds with 2 or 5. A file key written by two members
-counts against both: rare, and it errs towards more storage. Enforcement is **soft and local**, as
-§5.5 says: `library.add` refuses an add that would leave the pledge below the requirement, telling
-the member the pledge it would need, and `group.pledge_set` refuses to go below it. The members list
-shows each member's pledge beside its requirement.
+counts against both: rare, and it errs towards more storage.
+
+Enforcement is **soft and local**, as §5.5 says, and **warns before it refuses**:
+
+- **Under-pledged** — pledge below the requirement: the add or the pledge change goes through, with a
+  big red warning that names the pledge needed — in the CLI's output, on the add page, and beside the
+  member in the members list.
+- **Far under-pledged** — the requirement more than twice the pledge: `library.add` refuses an add
+  that would get there, and `group.pledge_set` refuses a pledge that would, both telling the member
+  the pledge needed.
+
+The factor of two is a constant, not a group setting, until a group needs another (Q9).
 
 **D9 — The load factor, instead of overflow.** Custody follows weight, and weight is the pledge
 capped, so when large members are capped the rest are asked for more than their pledges. Everyone
 can compute the group's **load factor** cheaply:
 
 ```text
-demand = Σ over items of size × (custodian slots not held by the item's creator)
+demand = Σ over items of size × (ranked custodian slots: replicas − 1, or replicas once the creator is gone)
 load   = demand / Σ w(m)
 ```
 
@@ -433,6 +455,8 @@ The design is agreed; these numbers are guesses until something is measured:
   random. At 1,000 members that is about 290,000 probes a day across the group, each a 1 KiB chunk.
 - **Q8 — `min_fetch_rate`** (D7): 1 MB/s is about 86 GB a day — enough for a newcomer's share in a
   modest group, slow for a large one. A measurement of a real rebalance will set it.
+- **Q9 — "far under-pledged"** (D8): a requirement more than twice the pledge. With the defaults, a
+  member pledging 100 GB adds up to 50 GB freely, is warned up to 100 GB, and is refused beyond.
 
 ---
 
@@ -453,12 +477,17 @@ a time, review before the next.
   **Watch for:** this is the first risk (below). Nothing untags on purpose until it is in.
 
 - **5a-2 — rendezvous scoring (D1, D3).** `distlib-core::custody`: the score, weights with the cap and
-  the step, `custodians(item)` for one item with the creator first, and the early-stopping
-  `is_custodian(item, me)` — pure.
+  the step, `custodians(item)` for one item with the creator skipped, the early-stopping
+  `is_custodian(item, me)`, and `custody_of(me, items)` — the whole pass that 5b-1 runs — all pure.
+  The pass runs on rayon's pool once the item count is above a threshold, sequentially below it; the
+  PR measures both and sets the threshold where parallel starts to win. rayon 1.12 is already built,
+  for tantivy's search index; it becomes a direct dependency of `distlib-core`.
   **Acceptance, as property tests:** the same inputs give the same custodians in any input order; a
   member joining moves only items where it now outscores somebody, each by one slot; load is
   proportional to weight within a stated tolerance over random weights; a pledge change within one
-  step moves nothing; `is_custodian` agrees with `custodians` on every item.
+  step moves nothing; `is_custodian` agrees with `custodians` on every item; the creator is never
+  among its own item's custodians, and its expulsion adds exactly one; `custody_of` gives the same
+  set in parallel as sequentially.
 
 - **5a-3 — group settings at founding (D2, C9).** `GroupFounded` carries them, `Item::replicas` goes,
   and the settings show in `node.status`, the CLI and the Node page. `PENDING_EXPIRY` reads the
@@ -495,9 +524,11 @@ a time, review before the next.
   none.
 
 - **5b-5 — the quota rule (D8).** The authorship table, `added_bytes` and `required_pledge`, the
-  refusals in `library.add` and `group.pledge_set`, and the requirement in the members list.
+  warnings and refusals in `library.add` and `group.pledge_set`, and the requirement in the members
+  list.
   **Acceptance:** at `replicas = 3`, a member with a 100 GB pledge adding files totalling 60 GB is
-  refused and told 120 GB; raising the pledge lets the add through.
+  warned and told 120 GB, and the add goes through; adding 110 GB is refused, told 220 GB; raising
+  the pledge clears the warning; lowering it to below half the requirement is refused.
 
 - **5b-6 — keeping, in the UI.** The item page's custodians with their online state; the Node page's
   pledge, requirement, storage limit, load factor, and bytes held as own, custody and cache.
@@ -630,6 +661,7 @@ on the phase's diff), and [`manual-check.md`](../manual-check.md) grows within i
 - dave adds a book: it is his own, and one more member is its custodian and fetched it unasked;
 - bob, its custodian, is stopped: nothing moves; dave stopped too, after the delay a third member
   fetches an emergency copy; both back, nothing moves;
-- erin, under-pledged, is refused an add and told what pledge she needs;
+- erin, under-pledged, sees a red warning on an add, then is refused a much larger one, and is told
+  the pledge needed both times;
 - bob deletes a pinned file by hand: probes from two members fail, he is red on the Node page and in
   the suspects view, and `distlib expel bob --with-evidence` proposes with the evidence as its reason.
