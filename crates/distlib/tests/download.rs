@@ -833,8 +833,10 @@ async fn downloading_an_item_whose_files_share_a_name_is_refused() {
     let second = discs.join("disc2/track01.mp3");
     std::fs::write(&second, b"disc two, track one").unwrap();
 
-    let (first_hash, first_size) = runtime.catalogue().add_file(&first).await.unwrap();
-    let (second_hash, second_size) = runtime.catalogue().add_file(&second).await.unwrap();
+    let first = runtime.catalogue().add_file(&first).await.unwrap();
+    let (first_hash, first_size) = (first.hash, first.size);
+    let second = runtime.catalogue().add_file(&second).await.unwrap();
+    let (second_hash, second_size) = (second.hash, second.size);
     let item = ItemId::from_content_hashes(&[*first_hash.as_bytes(), *second_hash.as_bytes()]);
     let track = |size| FileRecord {
         role: FileRole::Content,

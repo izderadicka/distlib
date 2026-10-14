@@ -23,7 +23,7 @@ use distlib_core::{
     WishStatus,
 };
 use distlib_net::Transport;
-use distlib_sync::{Catalogue, catalogue_key};
+use distlib_sync::{Catalogue, CatalogueStorage, catalogue_key};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -97,10 +97,14 @@ impl Node {
         // In memory: this test is about convergence, not about what survives a
         // restart, and `FsStore` spawns a runtime of its own per node.
         let blobs = MemStore::new();
-        let catalogue =
-            Catalogue::start(transport, (*blobs).clone(), documents, &secret, membership)
-                .await
-                .unwrap();
+        let storage = CatalogueStorage {
+            blobs: (*blobs).clone(),
+            documents,
+            protect: None,
+        };
+        let catalogue = Catalogue::start(transport, storage, &secret, membership)
+            .await
+            .unwrap();
         // **Gossip is served here, not by the catalogue.** A document's live
         // updates ride the process's gossip swarm — without it a node gets
         // only what the first reconciliation brought and never hears another

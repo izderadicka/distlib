@@ -29,7 +29,7 @@ use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
 };
-use distlib_sync::{Availability, Catalogue, Sources};
+use distlib_sync::{Availability, Catalogue, CatalogueStorage, Sources};
 use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::{
     Request, StatusCode,
@@ -180,8 +180,11 @@ impl Harness {
         let blobs = distlib_net::Blobs::new(&media, &endpoint);
         let catalogue = Catalogue::start(
             transport.clone(),
-            (*media).clone(),
-            None,
+            CatalogueStorage {
+                blobs: (*media).clone(),
+                documents: None,
+                protect: None,
+            },
             &secret,
             node.subscribe(),
         )
@@ -326,8 +329,11 @@ impl Harness {
                 blobs = Some(distlib_net::Blobs::new(&media, &endpoint));
                 let started = Catalogue::start(
                     transport.clone(),
-                    (*media).clone(),
-                    None,
+                    CatalogueStorage {
+                        blobs: (*media).clone(),
+                        documents: None,
+                        protect: None,
+                    },
                     secret,
                     node.subscribe(),
                 )

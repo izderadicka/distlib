@@ -13,7 +13,9 @@ pub mod error;
 
 pub use availability::{Availability, Holdings, Sources};
 pub use catalogue::{
-    Catalogue, ItemBookmarks, ReadBookmark, ReadItem, ReadWish, alpns, catalogue_key,
+    Catalogue, CatalogueStorage, ImportedFile, ItemBookmarks, ReadBookmark, ReadItem, ReadWish,
+    alpns, catalogue_key,
 };
 pub use changes::{Batch, Changes, LastSync, SyncState};
 pub use error::{Result, SyncError};
+pub use iroh_docs::engine::ProtectCallbackHandler;

@@ -51,6 +51,7 @@ pub struct Config {
     pub api: ApiConfig,
     pub library: LibraryConfig,
     pub availability: AvailabilityConfig,
+    pub storage: StorageConfig,
 }
 
 /// How this node talks to the network.
@@ -145,6 +146,23 @@ impl Default for AvailabilityConfig {
     fn default() -> Self {
         Self {
             beat_interval_secs: NonZeroU32::new(60).expect("sixty is not zero"),
+        }
+    }
+}
+
+/// The blobs this node keeps on disk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StorageConfig {
+    /// Seconds between garbage collection passes, which delete every blob
+    /// nothing keeps any more. Never zero, which would collect without pause.
+    pub gc_interval_secs: NonZeroU32,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            gc_interval_secs: NonZeroU32::new(60 * 60).expect("an hour is not zero"),
         }
     }
 }
@@ -339,7 +357,12 @@ impl Config {
              # Seconds between the heartbeats that tell the group this node is\n\
              # online, stretched in groups of more than fifty, to at most 20\n\
              # minutes. Peers count the node offline after three missed.\n\
-             beat_interval_secs = {beat_interval}\n",
+             beat_interval_secs = {beat_interval}\n\
+             \n\
+             [storage]\n\
+             # Seconds between passes that delete the blobs nothing keeps any\n\
+             # more. What you added, and what you downloaded, is kept.\n\
+             gc_interval_secs = {gc_interval}\n",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
@@ -348,6 +371,7 @@ impl Config {
             max_upload = self.api.max_upload_bytes,
             download_dir = self.library.download_dir.display(),
             beat_interval = self.availability.beat_interval_secs,
+            gc_interval = self.storage.gc_interval_secs,
             core = self
                 .consensus
                 .core

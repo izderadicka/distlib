@@ -198,6 +198,9 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         availability: distlib_core::AvailabilityConfig {
             beat_interval_secs: 17.try_into().unwrap(),
         },
+        storage: distlib_core::StorageConfig {
+            gc_interval_secs: 19.try_into().unwrap(),
+        },
     };
 
     let rendered = config.to_starter_toml();

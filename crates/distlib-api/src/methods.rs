@@ -15,14 +15,14 @@ use std::{
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
-    ItemKind, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series, TaskId, Ticket,
-    Wish, WishFields, WishId, WishStatus,
+    ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
+    TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
 };
-use distlib_sync::{Availability, Catalogue, SyncError, SyncState};
+use distlib_sync::{Availability, Catalogue, ImportedFile, SyncError, SyncState};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -798,17 +798,29 @@ impl Api {
     /// a title cannot replace a better one, and gains only the files it lacks.
     /// Two nodes adding the same files compute the same id, so they converge
     /// on one item without coordinating.
+    ///
+    /// Every file imported is kept as this node's own, whether or not the
+    /// item was new: whoever adds files means to share them.
     async fn add(&self, params: Add) -> Result<Value, Error> {
         // Taken first, so a refused call still deletes its uploads, when
         // `_staged` is dropped.
         let (uploaded, _staged) = self.take_uploads(&params.uploads).await?;
-        let item = self
+        let (item, imported) = self
             .item_from_files(files_or_uploads(&params.files, &uploaded)?)
             .await?;
-        match self.catalogue.item(item.id).await.map_err(sync_error)? {
-            Some(existing) => self.add_missing_files(item, &existing).await,
-            None => self.write_new_item(item, params).await,
+        let id = item.id;
+        let answer = match self.catalogue.item(id).await.map_err(sync_error)? {
+            Some(existing) => self.add_missing_files(item, &existing).await?,
+            None => self.write_new_item(item, params).await?,
+        };
+        // After the write, so a refused or failed add leaves nothing kept.
+        for file in &imported {
+            self.blobs
+                .keep(KeepReason::Own, id, file.hash)
+                .await
+                .map_err(net_error)?;
         }
+        Ok(answer)
     }
 
     /// Takes the uploads named: their paths, and the guards that delete them
@@ -832,15 +844,19 @@ impl Api {
     }
 
     /// An item of the files at `paths`, its id the fingerprint of what it
-    /// holds. Two different files under one name are refused here, while
-    /// whoever named them can still rename one.
-    async fn item_from_files(&self, paths: &[PathBuf]) -> Result<Item, Error> {
+    /// holds, and the imported files, kept until they are tagged. Two
+    /// different files under one name are refused here, while whoever named
+    /// them can still rename one.
+    async fn item_from_files(&self, paths: &[PathBuf]) -> Result<(Item, Vec<ImportedFile>), Error> {
         // Keyed on the blob, so the same file named twice is not a collision.
         let mut named: BTreeMap<String, &PathBuf> = BTreeMap::new();
         // A placeholder id until every file is hashed.
         let mut item = Item::new(ItemId::from_bytes([0; 32]));
+        let mut imported = Vec::with_capacity(paths.len());
         for path in paths {
-            let (hash, record) = self.hash_file(path).await?;
+            let (file, record) = self.hash_file(path).await?;
+            let hash = file.hash;
+            imported.push(file);
             if !item.files.contains_key(&hash)
                 && let Some(first) = named.get(&record.filename)
             {
@@ -858,7 +874,7 @@ impl Api {
         item.id = item
             .fingerprint()
             .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
-        Ok(item)
+        Ok((item, imported))
     }
 
     /// Writes the files of `item` that `existing`, at the same id, lacks, and
@@ -1007,7 +1023,7 @@ impl Api {
         // handle onto something shared.
         let api = self.clone();
         tokio::spawn(async move {
-            match api.fetch_all(targets, &providers, &mut task).await {
+            match api.fetch_all(item_id, targets, &providers, &mut task).await {
                 Ok(files) => {
                     api.recheck_holdings(item_id).await;
                     task.finish(files);
@@ -1040,8 +1056,12 @@ impl Api {
     /// the moment it is found, and one being fetched counts what it has so far.
     /// A file counts towards `files_done` once it is written out — or at once,
     /// if it was at its destination already.
+    ///
+    /// Every file taken from the store is kept as cache, tagged before it is
+    /// fetched so its bytes are kept from the moment they land.
     async fn fetch_all(
         &self,
+        item_id: ItemId,
         targets: Vec<Target>,
         providers: &[MemberId],
         task: &mut tasks::Download,
@@ -1067,6 +1087,10 @@ impl Api {
                 });
                 continue;
             }
+            self.blobs
+                .keep(KeepReason::Cache, item_id, hash)
+                .await
+                .map_err(net_error)?;
             // Asked before the network is: this node may be the one that
             // added the item, or may have downloaded it before, and in a
             // group of one there is nobody to ask at all.
@@ -1221,7 +1245,7 @@ impl Api {
     /// left `None` for the same reason `library.add` takes no per-file
     /// arguments for them yet — chaptered audiobooks are real, but nothing
     /// calls this with that shape today.
-    async fn hash_file(&self, path: &std::path::Path) -> Result<(ContentHash, FileRecord), Error> {
+    async fn hash_file(&self, path: &std::path::Path) -> Result<(ImportedFile, FileRecord), Error> {
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1238,7 +1262,7 @@ impl Api {
                 ))
             })?;
 
-        let (hash, size) = self
+        let file = self
             .catalogue
             .add_file(path)
             .await
@@ -1247,8 +1271,9 @@ impl Api {
                 other => Error::failed(other.to_string()),
             })?;
 
+        let size = file.size;
         Ok((
-            hash,
+            file,
             FileRecord {
                 role: FileRole::Content,
                 format,

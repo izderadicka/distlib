@@ -172,8 +172,9 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contri
     let file_b = dir.path().join("chapter-2.mp3");
     std::fs::write(&file_b, b"chapter two").unwrap();
 
-    let (hash_a, size_a) = runtime.catalogue().add_file(&file_a).await.unwrap();
-    let (hash_b, _) = runtime.catalogue().add_file(&file_b).await.unwrap();
+    let a = runtime.catalogue().add_file(&file_a).await.unwrap();
+    let (hash_a, size_a) = (a.hash, a.size);
+    let hash_b = runtime.catalogue().add_file(&file_b).await.unwrap().hash;
     let item_id = ItemId::from_content_hashes(&[*hash_a.as_bytes(), *hash_b.as_bytes()]);
 
     // Somebody already created this item, and only chapter one's file entry

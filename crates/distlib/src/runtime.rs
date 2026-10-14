@@ -25,9 +25,12 @@ use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
-use distlib_sync::{Availability, Catalogue, Sources};
+use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
-use iroh_blobs::store::fs::FsStore;
+use iroh_blobs::store::{
+    GcConfig, ProtectCb,
+    fs::{FsStore, options::Options},
+};
 use tokio::sync::broadcast;
 
 /// A node and the transport it is served on.
@@ -86,9 +89,8 @@ impl Runtime {
         // because iroh-docs cannot be built without one: an entry's value is a
         // blob. Both are handed the transport the node already has — one
         // endpoint, one gossip, whatever the process grows next.
-        let blobs = FsStore::load(data_dir.blobs_dir())
-            .await
-            .with_context(|| format!("could not open {}", data_dir.blobs_dir().display()))?;
+        let (protect, protected_by_documents) = ProtectCallbackHandler::new();
+        let blobs = open_blobs(config, data_dir, protected_by_documents).await?;
         // One store, two users of it, and the sharing is the point rather
         // than an economy: `library.download` fetching a media blob has to
         // land it in the very store `Catalogue::protocols`' `BlobsProtocol`
@@ -97,8 +99,11 @@ impl Runtime {
         let media = Blobs::new(&blobs, &endpoint);
         let catalogue = Catalogue::start(
             transport.clone(),
-            (*blobs).clone(),
-            Some(data_dir.docs_dir()),
+            CatalogueStorage {
+                blobs: (*blobs).clone(),
+                documents: Some(data_dir.docs_dir()),
+                protect: Some(protect),
+            },
             secret,
             node.subscribe(),
         )
@@ -339,6 +344,25 @@ async fn start_consensus(
     .await
     .context("could not start consensus")?;
     Ok((transport, Arc::new(node)))
+}
+
+/// The blob store, collecting every `[storage] gc_interval_secs` what neither
+/// a tag nor `protected` keeps.
+///
+/// `protected` is the documents' half of the collection: every blob a
+/// catalogue entry references. A pass whose callback cannot answer is
+/// skipped, not run without it.
+async fn open_blobs(config: &Config, data_dir: &DataDir, protected: ProtectCb) -> Result<FsStore> {
+    let root = data_dir.blobs_dir();
+    // What `FsStore::load` does, with collection switched on.
+    let mut options = Options::new(&root);
+    options.gc = Some(GcConfig {
+        interval: Duration::from_secs(u64::from(config.storage.gc_interval_secs.get())),
+        add_protected: Some(protected),
+    });
+    FsStore::load_with_opts(root.join("blobs.db"), options)
+        .await
+        .with_context(|| format!("could not open {}", root.display()))
 }
 
 /// Where the web UI's uploads wait for `library.add`.

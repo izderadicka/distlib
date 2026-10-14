@@ -19,8 +19,7 @@ use tokio::time::Instant;
 use crate::error::{Result, SyncError};
 
 /// The one name the newest base is kept under, so publishing the next one
-/// unprotects the last rather than keeping every list for ever (D5; the old
-/// ones wait for phase 5's GC, C26).
+/// unprotects the last, and garbage collection deletes it (D5, C26).
 pub(super) const BASE_TAG: &str = "distlib/availability/base";
 
 /// How long the set has to stay unchanged before a delta is folded into a
