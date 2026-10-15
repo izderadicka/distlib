@@ -36,13 +36,14 @@ use iroh::{EndpointAddr, EndpointId, SecretKey};
 use iroh_blobs::{
     BlobsProtocol, Hash, HashAndFormat,
     api::Store as BlobStore,
+    api::TempTag,
     api::downloader::{Downloader, Shuffled},
     api::proto::BlobStatus,
 };
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
     api::Doc,
-    engine::{DefaultAuthorStorage, Engine},
+    engine::{DefaultAuthorStorage, Engine, ProtectCallbackHandler},
     protocol::Docs,
     store::{Query, Store as DocumentStore},
 };
@@ -172,6 +173,28 @@ struct CommunityEntries<T> {
     waiting_for_content: bool,
 }
 
+/// A local file imported into the blob store, kept from garbage collection
+/// only while this is held: whoever imported it tags it before letting go.
+#[derive(Debug)]
+pub struct ImportedFile {
+    pub hash: ContentHash,
+    pub size: u64,
+    _protected: TempTag,
+}
+
+/// Where the catalogue keeps what it holds.
+#[derive(Debug)]
+pub struct CatalogueStorage {
+    /// The blob store entry values live in, shared with media.
+    pub blobs: BlobStore,
+    /// The directory for the documents; `None` keeps them in memory.
+    pub documents: Option<PathBuf>,
+    /// The other half of `blobs`' garbage collection callback, through which
+    /// the documents protect every blob they reference. `None` for a store
+    /// that never collects.
+    pub protect: Option<ProtectCallbackHandler>,
+}
+
 /// The catalogue subsystem: the document, the stores under it, and the task
 /// that opens it once this node knows which group it is in.
 #[derive(Debug, Clone)]
@@ -204,7 +227,7 @@ struct Inner {
 }
 
 impl Catalogue {
-    /// Starts the catalogue on `transport`, storing documents under `store`.
+    /// Starts the catalogue on `transport`, keeping what it holds in `storage`.
     ///
     /// Returns as soon as the engines are up, which is before there is a
     /// document: the catalogue's identity comes from the group id, and a node
@@ -213,14 +236,18 @@ impl Catalogue {
     /// document and starts syncing with the core group.
     pub async fn start(
         transport: Transport,
-        blobs: BlobStore,
-        documents: Option<PathBuf>,
+        storage: CatalogueStorage,
         key: &SecretKey,
         membership: watch::Receiver<MembershipState>,
     ) -> Result<Self> {
         // A directory rather than a file, because iroh-docs keeps its author
         // storage beside the replicas and later phases may keep more; the
         // caller names the directory and this owns what is in it.
+        let CatalogueStorage {
+            blobs,
+            documents,
+            protect,
+        } = storage;
         let replicas = match &documents {
             Some(dir) => {
                 let failed = |source: std::io::Error| SyncError::DocumentStore {
@@ -256,7 +283,7 @@ impl Catalogue {
             blobs.clone(),
             downloader.clone(),
             DefaultAuthorStorage::Mem,
-            None,
+            protect,
         )
         .await
         .map_err(SyncError::docs("started"))?;
@@ -426,7 +453,11 @@ impl Catalogue {
     /// [`iroh_blobs::ALPN`] from, which is what makes the result fetchable by
     /// anyone the moment an entry names it — there is only one blob store
     /// backing one catalogue, the one 2a-2 wired in at construction.
-    pub async fn add_file(&self, path: &Path) -> Result<(ContentHash, u64)> {
+    ///
+    /// Kept only while the returned [`ImportedFile`] is held, since the item
+    /// it belongs to, and so the tag that keeps it, is not known until every
+    /// file of the item is hashed.
+    pub async fn add_file(&self, path: &Path) -> Result<ImportedFile> {
         let size = tokio::fs::metadata(path)
             .await
             .map_err(|source| SyncError::LocalFile {
@@ -434,15 +465,20 @@ impl Catalogue {
                 source,
             })?
             .len();
-        let tag = self
+        let protected = self
             .inner
             .blobs
             .store()
             .blobs()
             .add_path(path)
+            .temp_tag()
             .await
             .map_err(SyncError::content("importing a local file"))?;
-        Ok((ContentHash::from_bytes(*tag.hash.as_bytes()), size))
+        Ok(ImportedFile {
+            hash: ContentHash::from_bytes(*protected.hash().as_bytes()),
+            size,
+            _protected: protected,
+        })
     }
 
     /// Writes what `item` says, and only that.

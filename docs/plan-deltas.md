@@ -250,9 +250,15 @@ as before, deviations from the design land here, in the PR that causes them.
 
 ## Phase 5 — Custodianship & quotas
 
-*Planned.* The sequencing plan is
+*In progress.* The sequencing plan is
 [`plan-phases/phase-5-custodianship-quotas.md`](plan-phases/phase-5-custodianship-quotas.md); as
-before, deviations from the design land here, in the PR that causes them.
+before, deviations from the design land here, in the PR that causes them. P5-1 is reserved for §9's
+reworded acceptance, recorded in 5c-4.
+
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P5-2 | §5.5 | custodians **pin**; "every downloaded item is automatically provided (seeded) while it remains on disk — download implies serve" | **A blob is kept by tags, one per reason it is kept, and garbage collection deletes the rest.** `own/<item>/<blob>` for what `library.add` imported, `cache/<item>/<blob>` for what `library.download` took from the store; `custody/` comes with the pin manager (5b-2). The catalogue's own content is kept by iroh-docs' protect callback, not a tag. **A download is served while its copy in the store is cached**, not while the file the user exported exists: the export is a copy, the user's to move or delete. | iroh-blobs keeps a blob while a tag names it and offers no other way to delete one, so a reason to keep is a tag. Turning GC on was needed before anything can be released, and every kind of blob distlib writes needed its keeper first, or the first pass would have taken it. A refused `library.add` used to leave an automatic tag nothing deleted; it now leaves nothing. Blobs from before this keep their automatic tags, so they stay for ever; downloads from before have none and go on the first pass (no migration before a release, C23). |
+| P5-3 | §7.1 (`admin.gc`) | `admin.gc` is an API method | **GC runs on a timer**, every `[storage] gc_interval_secs` (an hour by default); there is no `admin.gc`. | Nothing yet needs a pass on demand, and iroh-blobs runs its passes only on its own schedule: the one-pass function is private. 5b-3's eviction frees space by deleting tags and lets the next pass collect. |
 
 ## Phase 6 — Hardening & release
 

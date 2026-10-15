@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use distlib_core::{ContentHash, MemberId};
+use distlib_core::{ContentHash, ItemId, KeepReason, MemberId};
 use futures_lite::StreamExt as _;
 use iroh::Endpoint;
 use iroh_blobs::{
@@ -94,6 +94,24 @@ impl Blobs {
                 source: Box::new(source),
             })?;
         Ok(matches!(status, BlobStatus::Complete { .. }))
+    }
+
+    /// Keeps `hash`, one of `item`'s blobs, for `reason`, until that reason
+    /// is released: garbage collection deletes only what no tag keeps.
+    ///
+    /// The blob need not be here yet. Tagging a hash before fetching it keeps
+    /// the fetch's bytes from the moment they land.
+    pub async fn keep(&self, reason: KeepReason, item: ItemId, hash: ContentHash) -> Result<()> {
+        let tag = reason.tag(item, hash);
+        self.store
+            .tags()
+            .set(&tag, to_blobs(hash))
+            .await
+            .map_err(|source| NetError::Keep {
+                hash,
+                tag,
+                source: Box::new(source),
+            })
     }
 
     /// Fetches `hash` into the store this was built from, trying `providers`

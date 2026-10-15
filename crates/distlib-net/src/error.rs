@@ -105,6 +105,16 @@ pub enum NetError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// A blob could not be tagged, so nothing keeps it from the next garbage
+    /// collection.
+    #[error("could not tag {hash} as {tag}")]
+    Keep {
+        hash: ContentHash,
+        tag: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// A blob could not be written out to a file.
     ///
     /// Carries the target as well as the hash because every likely cause is

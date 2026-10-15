@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 pub mod id;
 pub mod identity;
+pub mod keeping;
 pub mod paths;
 pub mod private_file;
 pub mod ticket;
@@ -30,10 +31,11 @@ pub use community::{
 };
 pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
-    RelayMode,
+    RelayMode, StorageConfig,
 };
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
 pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};
+pub use keeping::KeepReason;
 pub use paths::DataDir;
 pub use ticket::Ticket;

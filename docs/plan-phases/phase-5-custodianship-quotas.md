@@ -7,7 +7,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 ## Context
 
-**Status: agreed in discussion with Ivan, not started.** Four rounds of review on #133 shaped it;
+**Status: agreed in discussion with Ivan, in progress — 5a-1 done (#134).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -467,7 +467,7 @@ a time, review before the next.
 
 ### 5a — foundations (3 PRs)
 
-- **5a-1 — GC on, and nothing lost to it.** `own/` tags for what `library.add` imports, replacing the
+- **5a-1 — GC on, and nothing lost to it.** *Done in #134; deltas P5-2 and P5-3.* `own/` tags for what `library.add` imports, replacing the
   automatic ones; `cache/` tags for downloads; the catalogue registers iroh-docs' protect handler;
   GC runs hourly. Closes C26: superseded base lists are collected.
   **Acceptance:** a real GC pass on a node that has added a file, downloaded one and synced a
@@ -599,6 +599,7 @@ Every open C-number appears here once.
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
+| **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3**, whose eviction relies on passes running: watch for it, and restart collection or report it in `node.status`. |
 
 ---
 
