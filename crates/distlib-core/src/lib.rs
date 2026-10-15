@@ -9,6 +9,7 @@ pub mod availability;
 pub mod catalogue;
 pub mod community;
 pub mod config;
+pub mod custody;
 pub mod error;
 pub mod event;
 pub mod id;
@@ -33,6 +34,7 @@ pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
     RelayMode, StorageConfig,
 };
+pub use custody::{CustodyGroup, ItemCreators, WeightRule};
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
 pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};

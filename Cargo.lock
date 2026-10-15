@@ -1228,6 +1228,7 @@ dependencies = [
  "iroh",
  "postcard",
  "proptest",
+ "rayon",
  "secrecy",
  "serde",
  "serde_json",

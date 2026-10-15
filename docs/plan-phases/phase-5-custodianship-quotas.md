@@ -7,7 +7,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 ## Context
 
-**Status: agreed in discussion with Ivan, in progress — 5a-1 done (#134).** Four rounds of review on #133 shaped it;
+**Status: agreed in discussion with Ivan, in progress — 5a-1 done (#134), 5a-2 done.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -36,9 +36,10 @@ pinned data fails probes from 2 peers and shows up red in the members list.*
 
 - **Rendezvous hashing, as §5.5 has it** (round 1). The goal for this version is groups of
   thousands of members. A weighted ring was measured and set aside for a later version.
-- **"Am I custodian of this item?" stops early** (round 3, measured — ground truth 9): about six or
-  seven scores per item at any group size, so recomputing custody for every item costs about half a
-  second per million items on one thread.
+- **"Am I custodian of this item?" stops early** (round 3, measured — ground truth 9): about a dozen
+  scores per item at 1,000 members, growing only with the logarithm of the group, so recomputing
+  custody for every item costs about two seconds per million items on one thread, a quarter of a
+  second on twelve.
 - **`replicas` is a group property, set when the group is founded**, and settings do not change after
   founding in this phase (rounds 1–2).
 - **The creator keeps what it added, and its copy is one of the `replicas`** (rounds 1–2).
@@ -149,11 +150,12 @@ Verified against the tree and the vendored crate sources in `~/.cargo/registry` 
    | Question | How | Cost |
    |---|---|---|
    | Custodians of one known item | score every member, keep the top | ~58 µs at 1,000 members, ~0.3 ms at 5,000 |
-   | **Am I custodian of this item?** | score myself, then the others **until `replicas` of them outscore me** | **6–7 scores per item on average, at 100, 1,000 or 5,000 members**: 1M items in ~0.5 s, 10M in ~5 s, one thread |
+   | **Am I custodian of this item?** | score myself, then the others **until `replicas` of them outscore me** | **~12 scores per item at 1,000 members** (measured again in 5a-2, mixed weights; the first throwaway measurement's 6–7 was wrong): 1M items in ~2 s on one thread, ~0.25 s on 12 |
    | Everyone's custody at once | every item × every member | 1M items × 1,000 members ~58 s, ~7 s on 12 threads |
 
    The early stop works because a member that is not custodian of an item meets `replicas` higher
-   scores quickly, whatever the group's size. **So recomputing a node's own custody after a
+   scores quickly: about 2·ln(N) scores on average, since an item where this member happens to score
+   high takes longer to rule out. A score is one keyed BLAKE3 of one 64-byte block, ~71 ns. **So recomputing a node's own custody after a
    membership change is cheap**; only a rule that needs *everyone's* custody — overflow was one —
    would pay the last row, and phase 5 has none.
 
@@ -255,7 +257,8 @@ for eviction.
 **D1 — Rendezvous hashing, as §5.5 writes it, with the creator first.**
 
 ```text
-score(item, m)   = −w(m) / ln(h(item, m)),   h ∈ (0, 1) from BLAKE3("distlib.custody.v1" || item || m)
+score(item, m)   = −w(m) / ln(h(item, m)),   h ∈ (0, 1) from keyed BLAKE3(item || m), keyed by
+                   derive_key("distlib.custody.v1")
 custodians(item) = the top `replicas − 1` by score among members other than the creator,
                    while the creator is a member; the top `replicas` by score once it is not
 ```
@@ -267,8 +270,11 @@ custodians(item) = the top `replicas − 1` by score among members other than th
   limit, not its pledge — the pledge is for other members' items, which is what D8 measures.
 - **The creator leaving** — expelled — turns its slot into one more ranked slot: the member ranked
   next fetches the item, one copy, D7's rate.
-- **Deterministic**: every node computes the same floats from the same bytes; ties, astronomically
-  rare, break by member id.
+- **Deterministic, but for near-ties**: every node computes the same hash and the same `h` from the
+  same bytes; ties, astronomically rare, break by member id. `ln` is the platform's math library,
+  which may differ in the last bit between platforms (P5-4), so two nodes can order a near-tie
+  differently: about one item in 10¹⁷ per recompute, costing one copy too many or too few.
+  Accepted; `libm::log` would make it exact.
 - **Minimal reshuffle**: a member joining takes only the items where it outscores somebody, one slot
   in each; an expulsion or a weight change moves only that member's items.
 - **Proportional**: a member's expected share is its weight's share.
@@ -476,7 +482,8 @@ a time, review before the next.
   file is.
   **Watch for:** this is the first risk (below). Nothing untags on purpose until it is in.
 
-- **5a-2 — rendezvous scoring (D1, D3).** `distlib-core::custody`: the score, weights with the cap and
+- **5a-2 — rendezvous scoring (D1, D3).** *Done; deltas P5-4 and P5-5. Parallel from 1,024 items,
+  measured.* `distlib-core::custody`: the score, weights with the cap and
   the step, `custodians(item)` for one item with the creator skipped, the early-stopping
   `is_custodian(item, me)`, and `custody_of(me, items)` — the whole pass that 5b-1 runs — all pure.
   The pass runs on rayon's pool once the item count is above a threshold, sequentially below it; the
