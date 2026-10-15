@@ -42,7 +42,7 @@ async fn a_group<const N: usize>(dir: &Path, keys: [&SecretKey; N]) -> [Runtime;
         .collect();
     runtimes[0]
         .node()
-        .init_group(founders, keys[0])
+        .init_group(founders, Default::default(), keys[0])
         .await
         .unwrap();
     for runtime in &runtimes {

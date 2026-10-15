@@ -164,6 +164,8 @@ impl Api {
             // A count, not a listing. Status is a summary and every other field
             // in it is one line; `group.pending` is where the detail lives.
             "pending": membership.pending().count(),
+            // Fixed at founding, so null until there is a group.
+            "settings": membership.group_id().map(|_| membership.settings()),
             "sync": sync_block(&self.catalogue.sync_status().borrow()),
         }))
     }

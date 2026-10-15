@@ -160,6 +160,10 @@ pub enum ConsensusError {
     /// and because a domain error has no business naming a codec's type.
     #[error("could not encode an event: {message}")]
     Encode { message: String },
+
+    /// A group was founded with settings that contradict each other.
+    #[error("the group settings are inconsistent: {reason}")]
+    InvalidSettings { reason: String },
 }
 
 impl From<postcard::Error> for ConsensusError {

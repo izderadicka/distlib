@@ -91,7 +91,11 @@ async fn alice_and_bob_collecting(dir: &Path) -> (Runtime, SecretKey, Runtime, S
     .unwrap();
     alice
         .node()
-        .init_group(vec![(record(alice_id, "alice"), bound(&alice))], &alice_key)
+        .init_group(
+            vec![(record(alice_id, "alice"), bound(&alice))],
+            Default::default(),
+            &alice_key,
+        )
         .await
         .unwrap();
     alice

@@ -197,7 +197,11 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     .unwrap();
     alice
         .node()
-        .init_group(vec![(record(alice_id, "alice"), bound(&alice))], &alice_key)
+        .init_group(
+            vec![(record(alice_id, "alice"), bound(&alice))],
+            Default::default(),
+            &alice_key,
+        )
         .await
         .unwrap();
     for (member, name) in [(bob_id, "bob"), (carol_id, "carol")] {
@@ -798,7 +802,11 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     tokio::time::timeout(SOON, runtime.catalogue().ready())

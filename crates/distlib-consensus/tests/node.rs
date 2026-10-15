@@ -16,7 +16,7 @@ use distlib_consensus::{
     ConsensusError, MemberRecord, MemberlogClient, MembershipEvent, ProposeError, SignedEvent,
     Timestamp, node::NodeError,
 };
-use distlib_core::{MemberId, NodeAddr, RawMemberId};
+use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AddressBook, Directory};
 use iroh::SecretKey;
 
@@ -71,6 +71,7 @@ async fn a_founded_group_derives_its_membership_from_the_log() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -107,6 +108,7 @@ async fn admitting_a_member_reaches_every_node() {
                 (first.record("first"), first.addr.clone()),
                 (second.record("second"), second.addr.clone()),
             ],
+            Default::default(),
             &first.secret,
         )
         .await
@@ -189,6 +191,7 @@ async fn founding_replaces_the_seed_with_the_log() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -233,6 +236,7 @@ async fn a_follower_can_propose() {
                 (first.record("first"), first.addr.clone()),
                 (second.record("second"), second.addr.clone()),
             ],
+            Default::default(),
             &first.secret,
         )
         .await
@@ -295,6 +299,7 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -357,7 +362,7 @@ async fn three_founders_converge_on_one_group() {
         .collect();
     peers[0]
         .node
-        .init_group(founders, &peers[0].secret)
+        .init_group(founders, Default::default(), &peers[0].secret)
         .await
         .unwrap();
 
@@ -411,7 +416,7 @@ async fn a_founded_trio() -> Vec<Peer> {
         .collect();
     peers[0]
         .node
-        .init_group(founders, &peers[0].secret)
+        .init_group(founders, Default::default(), &peers[0].secret)
         .await
         .unwrap();
     for peer in &peers {
@@ -579,6 +584,7 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -1281,6 +1287,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -1404,6 +1411,7 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -1481,6 +1489,7 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -1671,6 +1680,7 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
                 (first.record("first"), first.addr.clone()),
                 (second.record("second"), second.addr.clone()),
             ],
+            Default::default(),
             &first.secret,
         )
         .await
@@ -1777,13 +1787,36 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
     first.shutdown().await;
 }
 
+/// 5a-3's acceptance: what the founder decided is what every node reads, a
+/// follower that only fetched the log included.
+#[tokio::test]
+async fn a_follower_reads_the_settings_the_group_was_founded_with() {
+    let settings = GroupSettings {
+        replicas: 2.try_into().unwrap(),
+        ..GroupSettings::default()
+    };
+    let (founder, follower) = a_founder_and_its_follower_with(settings.clone()).await;
+
+    assert_eq!(founder.node.membership().settings(), &settings);
+    assert_eq!(follower.node.membership().settings(), &settings);
+
+    follower.shutdown().await;
+    founder.shutdown().await;
+}
+
 /// A single founder and a follower admitted by it that holds the log.
 async fn a_founder_and_its_follower() -> (Peer, Peer) {
+    a_founder_and_its_follower_with(GroupSettings::default()).await
+}
+
+/// [`a_founder_and_its_follower`], the group founded with `settings`.
+async fn a_founder_and_its_follower_with(settings: GroupSettings) -> (Peer, Peer) {
     let founder = Peer::start(SecretKey::generate(), vec![]).await;
     founder
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            settings,
             &founder.secret,
         )
         .await
@@ -1841,6 +1874,7 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -1911,6 +1945,7 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -2033,7 +2068,7 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
         .collect();
     peers[0]
         .node
-        .init_group(founders, &peers[0].secret)
+        .init_group(founders, Default::default(), &peers[0].secret)
         .await
         .unwrap();
     for peer in &peers {
@@ -2120,7 +2155,7 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
         .collect();
     core[0]
         .node
-        .init_group(founders, &core[0].secret)
+        .init_group(founders, Default::default(), &core[0].secret)
         .await
         .unwrap();
     for peer in &core {
@@ -2190,6 +2225,7 @@ async fn a_follower_reports_where_the_core_group_is() {
         .node
         .init_group(
             vec![(founder.record("the founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
@@ -2252,7 +2288,11 @@ async fn an_expelled_follower_stops_asking_and_says_so() {
 
     let core = Peer::start(core_key, vec![follower_id]).await;
     core.node
-        .init_group(vec![(core.record("core"), core.addr.clone())], &core.secret)
+        .init_group(
+            vec![(core.record("core"), core.addr.clone())],
+            Default::default(),
+            &core.secret,
+        )
         .await
         .unwrap();
     core.node
@@ -2336,6 +2376,7 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
         .node
         .init_group(
             vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await

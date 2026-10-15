@@ -11,55 +11,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, GroupSettings, MemberId, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ConsensusError, Result},
-    event::{MemberRecord, MembershipEvent, check_founders},
+    event::{MemberRecord, MembershipEvent, check_founders, check_settings},
     signed::SignedEvent,
 };
-
-/// How far the log may advance past a proposal before it stops waiting.
-///
-/// Counted in log entries rather than in time. Not because a timestamp could
-/// not be folded — `at` is signed, so every node reads the same bytes and would
-/// reach the same verdict — but because nothing *verifies* it (P1-3). Expiring
-/// on time needs a "now", and the fold has none: the only candidate is the
-/// timestamp of whatever entry is being applied, which is equally self-reported.
-/// So one member whose clock is a year fast would sweep the whole pending set
-/// the moment they committed anything. That is not an attack — §2 assumes
-/// members do not attack the protocol — it is a misconfiguration, and
-/// misconfigured clocks are ordinary. Log position carries no such blast radius,
-/// and compaction neither renumbers nor reuses it.
-///
-/// **What this does and does not fix.** It bounds the map — which is re-encoded
-/// into redb on every apply, so unbounded growth is write amplification on the
-/// hot path, not just memory — and it clears a slot whose proposer has gone away
-/// without withdrawing it. It does *not* make a proposal expire after any
-/// amount of *time*: in a quiet group a year-old proposal may be three entries
-/// old and will still be waiting. Nothing available fixes that, and pretending
-/// otherwise would be worse than saying so.
-///
-/// A hundred and twenty-eight, because a contested expulsion in a five-voter
-/// group is four entries, so this is thirty-odd governance decisions. A proposal
-/// that has watched that many go past is not under discussion any more.
-///
-/// **One number for every group is known to be wrong, and wrong in opposite
-/// directions at the two ends.** A group with heavy membership churn burns this
-/// quickly, so a genuine deliberation can be swept while it is still being had;
-/// a settled group of three friends may never reach it, so the abandoned slot
-/// this exists to clear is never cleared for them. Deferred rather than guessed
-/// at, and recorded against P2-6 under "Carried out of Phase 2" in
-/// `docs/plan-phases/phase-2-catalogue.md` — nobody has yet watched a real
-/// group's membership-event rate, so choosing a better number now would be
-/// guessing with extra steps.
-///
-/// Not refreshed by approvals. A proposal that cannot gather its threshold
-/// within this much group activity is not going to, and a rule that could be
-/// held open indefinitely by one member approving periodically would be a
-/// slower version of the thing being fixed.
-pub const PENDING_EXPIRY: u64 = 128;
 
 /// Who the group is, as of the events applied so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +46,12 @@ pub struct MembershipState {
     /// applies move it — not Raft's blank entries, and not refused proposals —
     /// so a leader election does not invalidate proposals in flight.
     changed_at: u64,
+    /// What the group decided at founding; the defaults until then.
+    ///
+    /// Its `pending_expiry` is counted in log entries rather than in time
+    /// because nothing verifies an entry's timestamp (P1-3): one member whose
+    /// clock is a year fast would otherwise sweep every pending proposal.
+    settings: GroupSettings,
 }
 
 /// A submitted change that has not yet collected the approvals it needs.
@@ -230,8 +195,12 @@ impl MembershipState {
         }
 
         match event {
-            MembershipEvent::GroupFounded { group_id, founders } => {
-                self.found(*group_id, founders, proposer)?;
+            MembershipEvent::GroupFounded {
+                group_id,
+                founders,
+                settings,
+            } => {
+                self.found(*group_id, founders, settings, proposer)?;
             }
 
             event => {
@@ -263,10 +232,11 @@ impl MembershipState {
         // Then drop whatever the log has now left behind. After the dispatch
         // above rather than before it, so a refused entry changes nothing; the
         // consequence is that the last index at which a proposal can still be
-        // approved is exactly `proposal + PENDING_EXPIRY` — an approval landing
+        // approved is exactly `proposal + pending_expiry` — an approval landing
         // there is dispatched, and only then is the proposal swept.
+        let expiry = self.settings.pending_expiry.get();
         self.pending
-            .retain(|proposal, _| index.saturating_sub(*proposal) < PENDING_EXPIRY);
+            .retain(|proposal, _| index.saturating_sub(*proposal) < expiry);
         Ok(())
     }
 
@@ -418,7 +388,7 @@ impl MembershipState {
         // Refused rather than superseded, because superseding would let anybody
         // discard the approvals a proposal had gathered by proposing again.
         // That leaves a slot only its proposer can clear — which is what
-        // `Withdrawn` is for, and what [`PENDING_EXPIRY`] is for when the
+        // `Withdrawn` is for, and what the `pending_expiry` setting is for when the
         // proposer has gone away.
         if let Some(proposed_about) = subject(event)
             && let Some((waiting, _)) = self
@@ -578,6 +548,11 @@ impl MembershipState {
         self.group
     }
 
+    /// What the group decided at founding; the defaults before it is founded.
+    pub fn settings(&self) -> &GroupSettings {
+        &self.settings
+    }
+
     /// The current Raft voters, each with the address the group records for it.
     pub fn core(&self) -> &BTreeMap<MemberId, NodeAddr> {
         &self.core
@@ -596,7 +571,10 @@ impl MembershipState {
     /// something, so a proposal can sit at the same number for a month and then
     /// go in an afternoon. Anything displaying it should say so.
     pub fn expires_after(&self, proposal: u64) -> u64 {
-        PENDING_EXPIRY.saturating_sub(self.changed_at.saturating_sub(proposal) + 1)
+        self.settings
+            .pending_expiry
+            .get()
+            .saturating_sub(self.changed_at.saturating_sub(proposal) + 1)
     }
 
     /// Changes waiting for approvals, each with the log index that
@@ -643,14 +621,17 @@ impl MembershipState {
         &mut self,
         group_id: GroupId,
         founders: &[(MemberRecord, NodeAddr)],
+        settings: &GroupSettings,
         proposer: MemberId,
     ) -> Result<()> {
         if self.group.is_some() {
             return Err(ConsensusError::AlreadyFounded);
         }
-        // Non-empty and duplicate-free. Re-checked here rather than trusted from
-        // the constructor, because this event may have arrived from another node.
+        // Non-empty and duplicate-free, and settings that agree with each other.
+        // Re-checked here rather than trusted from the constructor, because this
+        // event may have arrived from another node.
         check_founders(founders)?;
+        check_settings(settings)?;
         // A founder who is not in their own founding set would create a group
         // they are not a member of, and could never propose anything to it.
         if !founders
@@ -661,6 +642,7 @@ impl MembershipState {
         }
 
         self.group = Some(group_id);
+        self.settings = settings.clone();
         self.members = founders
             .iter()
             .map(|(founder, _)| (founder.member_id, founder.clone()))

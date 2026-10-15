@@ -74,6 +74,7 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
+            Default::default(),
             &alice_key,
         )
         .await
@@ -189,7 +190,11 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
     .unwrap();
     alice
         .node()
-        .init_group(vec![(record(alice_id, "alice"), bound(&alice))], &alice_key)
+        .init_group(
+            vec![(record(alice_id, "alice"), bound(&alice))],
+            Default::default(),
+            &alice_key,
+        )
         .await
         .unwrap();
 
@@ -1597,7 +1602,11 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
     .unwrap();
     alice
         .node()
-        .init_group(vec![(record(alice_id, "alice"), bound(&alice))], &alice_key)
+        .init_group(
+            vec![(record(alice_id, "alice"), bound(&alice))],
+            Default::default(),
+            &alice_key,
+        )
         .await
         .unwrap();
 

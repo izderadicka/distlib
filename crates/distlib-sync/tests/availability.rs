@@ -331,6 +331,7 @@ fn group(core: &[(&SecretKey, &Node)], followers: &[MemberId]) -> MembershipStat
         core.iter()
             .map(|(_, node)| (record(node.id), node.addr.clone()))
             .collect(),
+        Default::default(),
         Timestamp::from_millis(1),
     )
     .unwrap();

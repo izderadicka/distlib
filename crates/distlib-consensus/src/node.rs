@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_core::{MemberId, NodeAddr, RawMemberId, SignedAddress};
+use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId, SignedAddress};
 use distlib_net::{
     AddressBook, AllowlistHooks, AllowlistWriter, Connections, Directory, Protocols, Transport,
     alpn, ping::PingProtocol,
@@ -830,6 +830,7 @@ impl MembershipNode {
     pub async fn init_group(
         &self,
         founders: Vec<(MemberRecord, NodeAddr)>,
+        settings: GroupSettings,
         secret_key: &SecretKey,
     ) -> Result<()> {
         let voters: BTreeMap<_, _> = founders
@@ -855,7 +856,7 @@ impl MembershipNode {
         // The same pairs Raft was initialised with, so the log records the
         // addressing rather than leaving `raft.initialize` as its only home.
         self.propose(
-            MembershipEvent::found(founders, Timestamp::now())?,
+            MembershipEvent::found(founders, settings, Timestamp::now())?,
             secret_key,
         )
         .await

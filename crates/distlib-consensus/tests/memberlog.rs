@@ -72,9 +72,13 @@ impl Group {
         .unwrap();
         let router = distlib_net::serve(endpoint, node.protocols());
 
-        node.init_group(vec![(record(id, "founder"), addr.clone())], &secret)
-            .await
-            .unwrap();
+        node.init_group(
+            vec![(record(id, "founder"), addr.clone())],
+            Default::default(),
+            &secret,
+        )
+        .await
+        .unwrap();
 
         Self {
             node,

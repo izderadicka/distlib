@@ -290,6 +290,7 @@ fn sample_event() -> distlib_consensus::SignedEvent {
         &secret,
         MembershipEvent::found(
             vec![(record, NodeAddr::default())],
+            Default::default(),
             Timestamp::from_millis(1),
         )
         .unwrap(),

@@ -90,7 +90,11 @@ async fn a_node(dir: &Path) -> Runtime {
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     runtime.catalogue().ready().await;
@@ -165,6 +169,7 @@ async fn an_item_written_on_one_node_is_news_on_the_other() {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
+            Default::default(),
             &alice_key,
         )
         .await
