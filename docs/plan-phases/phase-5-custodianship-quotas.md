@@ -270,8 +270,11 @@ custodians(item) = the top `replicas − 1` by score among members other than th
   limit, not its pledge — the pledge is for other members' items, which is what D8 measures.
 - **The creator leaving** — expelled — turns its slot into one more ranked slot: the member ranked
   next fetches the item, one copy, D7's rate.
-- **Deterministic**: every node computes the same floats from the same bytes; ties, astronomically
-  rare, break by member id.
+- **Deterministic, but for near-ties**: every node computes the same hash and the same `h` from the
+  same bytes; ties, astronomically rare, break by member id. `ln` is the platform's math library,
+  which may differ in the last bit between platforms (P5-4), so two nodes can order a near-tie
+  differently: about one item in 10¹⁷ per recompute, costing one copy too many or too few.
+  Accepted; `libm::log` would make it exact.
 - **Minimal reshuffle**: a member joining takes only the items where it outscores somebody, one slot
   in each; an expulsion or a weight change moves only that member's items.
 - **Proportional**: a member's expected share is its weight's share.

@@ -189,6 +189,9 @@ impl Ranked {
         // a step so that neither end of the interval is reached.
         let bits = u64::from_le_bytes(first) >> 11;
         let h = (bits as f64 + 0.5) / (1_u64 << 53) as f64;
+        // `ln` is the platform's: glibc and Windows' runtime may differ in the
+        // last bit, so two nodes can rank a near-tie differently (P5-4).
+        // `libm::log` would make it the same everywhere.
         Self {
             score: -weight / h.ln(),
             member,
