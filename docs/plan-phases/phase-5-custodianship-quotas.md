@@ -7,7 +7,8 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 
 ## Context
 
-**Status: agreed in discussion with Ivan, in progress — 5a-1 done (#134), 5a-2 done.** Four rounds of review on #133 shaped it;
+**Status: agreed in discussion with Ivan, in progress — 5a-1 done (#134), 5a-2 done (#135),
+5a-3a done.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -498,7 +499,10 @@ a time, review before the next.
 
 - **5a-3 — group settings at founding (D2, C9).** `GroupFounded` carries them, `Item::replicas` goes,
   and the settings show in `node.status`, the CLI and the Node page. `PENDING_EXPIRY` reads the
-  setting.
+  setting. *Split in two:* **5a-3a** *(done; delta P5-6)* — the settings in the log, set from a
+  founder's `[group]` config section, `pending_expiry` from them, `node.status` and `distlib status`,
+  a warning when `[group]` disagrees with the log; **5a-3b** — `Item::replicas` removed (catalogue,
+  read model, item page) and the Node page's read-only settings.
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
@@ -583,7 +587,7 @@ Every open C-number appears here once.
 | **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged.** |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
 | **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas (5a-2, 5b-5). `created` and `modified_by` stay open. |
-| **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3.** |
+| **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3a.** |
 | **C13** | Gossip does not change sides when a node is promoted | **Deferred.** |
 | **C15**–**C19** | Read-only admin; Windows file privacy and service; clearing a field; downloads as in-memory tasks | **Unchanged.** C15 is why expulsion with evidence is CLI and API only. |
 | **C21** | Title sort | **Unchanged.** |

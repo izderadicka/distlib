@@ -76,7 +76,7 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
         .collect();
     core[0]
         .node
-        .init_group(founders, &core[0].secret)
+        .init_group(founders, Default::default(), &core[0].secret)
         .await
         .unwrap();
     for peer in &core {

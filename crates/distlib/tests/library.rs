@@ -69,6 +69,7 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
+            Default::default(),
             &alice_key,
         )
         .await
@@ -162,7 +163,11 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contri
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     runtime.catalogue().ready().await;
@@ -279,7 +284,11 @@ async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fi
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     runtime.catalogue().ready().await;
@@ -357,7 +366,11 @@ async fn adding_two_different_files_under_one_name_is_refused() {
     // it makes the call *succeed* and write the item this refuses.
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     runtime.catalogue().ready().await;
@@ -427,6 +440,7 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
+            Default::default(),
             &alice_key,
         )
         .await
@@ -527,7 +541,11 @@ async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
     runtime.catalogue().ready().await;

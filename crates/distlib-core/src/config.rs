@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     addr::NodeAddr,
     error::{CoreError, Result},
+    group_settings::GroupSettings,
     id::MemberId,
 };
 
@@ -52,6 +53,10 @@ pub struct Config {
     pub library: LibraryConfig,
     pub availability: AvailabilityConfig,
     pub storage: StorageConfig,
+    /// The settings of a group this node founds, written into the founding
+    /// entry. Read only by `distlib run --found-group`; the defaults when
+    /// absent.
+    pub group: Option<GroupSettings>,
 }
 
 /// How this node talks to the network.
@@ -362,7 +367,9 @@ impl Config {
              [storage]\n\
              # Seconds between passes that delete the blobs nothing keeps any\n\
              # more. What you added, and what you downloaded, is kept.\n\
-             gc_interval_secs = {gc_interval}\n",
+             gc_interval_secs = {gc_interval}\n\
+             \n\
+             {group}",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
             relay_urls = quoted(&self.net.relay_urls),
@@ -372,6 +379,7 @@ impl Config {
             download_dir = self.library.download_dir.display(),
             beat_interval = self.availability.beat_interval_secs,
             gc_interval = self.storage.gc_interval_secs,
+            group = group_section(self.group.as_ref()),
             core = self
                 .consensus
                 .core
@@ -381,6 +389,53 @@ impl Config {
                 .join(", "),
         )
     }
+}
+
+/// The `[group]` section: `group`'s values, or the defaults commented out
+/// when there is none, so the file shows what a founder may set.
+fn group_section(group: Option<&GroupSettings>) -> String {
+    let (settings, prefix) = match group {
+        Some(settings) => (settings.clone(), ""),
+        None => (GroupSettings::default(), "# "),
+    };
+    let GroupSettings {
+        replicas,
+        cap_bytes,
+        weight_step_bytes,
+        min_pledge_bytes,
+        pending_expiry,
+        settle_secs,
+        max_settle_secs,
+        emergency_after_secs,
+        min_fetch_rate,
+        probes,
+        probe_every_secs,
+        failure_window_secs,
+    } = settings;
+    let values = [
+        format!("replicas = {replicas}"),
+        format!("cap_bytes = {cap_bytes}"),
+        format!("weight_step_bytes = {weight_step_bytes}"),
+        format!("min_pledge_bytes = {min_pledge_bytes}"),
+        format!("pending_expiry = {pending_expiry}"),
+        format!("settle_secs = {settle_secs}"),
+        format!("max_settle_secs = {max_settle_secs}"),
+        format!("emergency_after_secs = {emergency_after_secs}"),
+        format!("min_fetch_rate = {min_fetch_rate}"),
+        format!("probes = {probes}"),
+        format!("probe_every_secs = {probe_every_secs}"),
+        format!("failure_window_secs = {failure_window_secs}"),
+    ];
+    let mut section = String::from(
+        "# The settings of a group this node founds, written into the founding\n\
+         # entry by `distlib run --found-group` and fixed from then on: a node\n\
+         # that joins a group, or has founded one already, ignores them.\n",
+    );
+    section.push_str(&format!("{prefix}[group]\n"));
+    for value in values {
+        section.push_str(&format!("{prefix}{value}\n"));
+    }
+    section
 }
 
 impl CoreMember {

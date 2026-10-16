@@ -12,6 +12,7 @@ pub mod config;
 pub mod custody;
 pub mod error;
 pub mod event;
+pub mod group_settings;
 pub mod id;
 pub mod identity;
 pub mod keeping;
@@ -37,6 +38,7 @@ pub use config::{
 pub use custody::{CustodyGroup, ItemCreators, WeightRule};
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
+pub use group_settings::GroupSettings;
 pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};
 pub use keeping::KeepReason;
 pub use paths::DataDir;

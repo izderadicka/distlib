@@ -118,6 +118,38 @@ fn status_of_a_stopped_founder_reads_its_role_from_the_database() {
     assert!(printed.contains("node        not running"), "{printed}");
 }
 
+/// 5a-3: a founder's `[group]` is what its group is founded with, and
+/// `distlib status` shows it whether the node is running or not. A config
+/// that says otherwise later is warned about, not obeyed: the log's settings
+/// are fixed.
+#[test]
+fn a_group_founded_from_the_config_keeps_its_settings_when_the_config_changes() {
+    let founder = Friend::introduce();
+    founder.agree_on(&[(founder.id.clone(), founder.port)]);
+    let config = founder.dir.path().join("config.toml");
+    let agreed = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{agreed}\n[group]\nreplicas = 2\n")).unwrap();
+
+    let mut node = founder.run(true);
+    node.wait_for("members=1");
+    founder.wait_for_status("the node to answer", |status| {
+        status.contains("node        running") && status.contains("replicas = 2")
+    });
+    node.stop();
+    let printed = run_command(founder.dir.path(), &["status"]);
+    assert!(printed.contains("node        not running"), "{printed}");
+    assert!(printed.contains("replicas = 2"), "{printed}");
+
+    std::fs::write(&config, format!("{agreed}\n[group]\nreplicas = 4\n")).unwrap();
+    let mut node = founder.run(false);
+    node.wait_for("differs from the settings this group was founded with");
+    let printed = founder.wait_for_status("the node to answer", |status| {
+        status.contains("node        running")
+    });
+    assert!(printed.contains("replicas = 2"), "{printed}");
+    node.stop();
+}
+
 #[test]
 fn ping_reaches_a_running_member_and_prints_the_echo() {
     let founder = Friend::introduce();

@@ -3,12 +3,11 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_consensus::{
-    ConsensusError, MemberRecord, MembershipEvent, MembershipState, PENDING_EXPIRY, SignedEvent,
-    Timestamp,
+    ConsensusError, MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, GroupSettings, MemberId, NodeAddr};
 use iroh::SecretKey;
 // The property tests, and only they, are generated.
 #[cfg(feature = "slow-tests")]
@@ -120,6 +119,11 @@ fn the_pending_one(state: &MembershipState) -> u64 {
 /// and the size of the core group is what sets every threshold in §4.4, so a
 /// test that needs three voters has to start with three.
 fn founded_by(n: usize) -> (MembershipState, Vec<Signer>) {
+    founded_by_with(n, GroupSettings::default())
+}
+
+/// [`founded_by`], with `settings` written into the founding entry.
+fn founded_by_with(n: usize, settings: GroupSettings) -> (MembershipState, Vec<Signer>) {
     let signers: Vec<Signer> = (0..n).map(|_| Signer::generate()).collect();
     let founders = signers
         .iter()
@@ -130,7 +134,7 @@ fn founded_by(n: usize) -> (MembershipState, Vec<Signer>) {
     propose(
         &mut state,
         &signers[0],
-        MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(founders, settings, Timestamp::from_millis(1)).unwrap(),
     )
     .unwrap();
     (state, signers)
@@ -151,7 +155,12 @@ fn founded() -> (MembershipState, Signer) {
     propose(
         &mut state,
         &alice,
-        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(
+            vec![alice.founder("alice")],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap(),
     )
     .unwrap();
     (state, alice)
@@ -190,7 +199,12 @@ fn a_group_is_founded_only_once() {
     let (mut state, alice) = founded();
 
     let again = alice.sign(
-        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(2)).unwrap(),
+        MembershipEvent::found(
+            vec![alice.founder("alice")],
+            Default::default(),
+            Timestamp::from_millis(2),
+        )
+        .unwrap(),
         state.changed_at(),
     );
 
@@ -226,7 +240,12 @@ fn a_founder_must_be_in_their_own_founding_set() {
     let mut state = MembershipState::new();
 
     let event = alice.sign(
-        MembershipEvent::found(vec![bob.founder("bob")], Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(
+            vec![bob.founder("bob")],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap(),
         state.changed_at(),
     );
 
@@ -242,6 +261,7 @@ fn a_repeated_founder_is_refused_when_building_the_event() {
 
     let built = MembershipEvent::found(
         vec![alice.founder("alice"), alice.founder("alice again")],
+        Default::default(),
         Timestamp::from_millis(1),
     );
 
@@ -271,6 +291,7 @@ fn a_repeated_founder_is_refused_on_apply() {
                 bob.founder("bob"),
                 alice.founder("dup"),
             ],
+            settings: Box::default(),
         },
         state.changed_at(),
     );
@@ -284,9 +305,58 @@ fn a_repeated_founder_is_refused_on_apply() {
 #[test]
 fn a_group_cannot_be_founded_empty() {
     assert_eq!(
-        MembershipEvent::found(Vec::new(), Timestamp::from_millis(1)).unwrap_err(),
+        MembershipEvent::found(Vec::new(), Default::default(), Timestamp::from_millis(1))
+            .unwrap_err(),
         ConsensusError::NoFounders
     );
+}
+
+#[test]
+fn the_group_keeps_the_settings_it_was_founded_with() {
+    let unfounded = MembershipState::new();
+    assert_eq!(unfounded.settings(), &GroupSettings::default());
+
+    let settings = GroupSettings {
+        replicas: 2.try_into().unwrap(),
+        probes: false,
+        ..GroupSettings::default()
+    };
+    let (state, _) = founded_by_with(1, settings.clone());
+    assert_eq!(state.settings(), &settings);
+}
+
+#[test]
+fn settings_that_contradict_each_other_are_refused_whoever_built_the_entry() {
+    let contradictory = GroupSettings {
+        settle_secs: 10,
+        max_settle_secs: 5,
+        ..GroupSettings::default()
+    };
+    let alice = Signer::generate();
+    assert!(matches!(
+        MembershipEvent::found(
+            vec![alice.founder("alice")],
+            contradictory.clone(),
+            Timestamp::from_millis(1)
+        ),
+        Err(ConsensusError::InvalidSettings { .. })
+    ));
+
+    // Built by hand, as a node that skipped the constructor would.
+    let mut state = MembershipState::new();
+    let event = alice.sign(
+        MembershipEvent::GroupFounded {
+            group_id: GroupId::from_bytes([7; 32]),
+            founders: vec![alice.founder("alice")],
+            settings: Box::new(contradictory),
+        },
+        state.changed_at(),
+    );
+    assert!(matches!(
+        apply_next(&mut state, &event),
+        Err(ConsensusError::InvalidSettings { .. })
+    ));
+    assert_eq!(state.group_id(), None);
 }
 
 #[test]
@@ -305,7 +375,7 @@ fn the_group_id_derivation_is_fixed() {
         .collect();
 
     let MembershipEvent::GroupFounded { group_id, .. } =
-        MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap()
+        MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1)).unwrap()
     else {
         panic!("found() builds a GroupFounded");
     };
@@ -322,8 +392,18 @@ fn the_group_id_does_not_depend_on_founder_order() {
     let bob = Signer::generate();
     let at = Timestamp::from_millis(7);
 
-    let one = MembershipEvent::found(vec![alice.founder("a"), bob.founder("b")], at).unwrap();
-    let other = MembershipEvent::found(vec![bob.founder("b"), alice.founder("a")], at).unwrap();
+    let one = MembershipEvent::found(
+        vec![alice.founder("a"), bob.founder("b")],
+        Default::default(),
+        at,
+    )
+    .unwrap();
+    let other = MembershipEvent::found(
+        vec![bob.founder("b"), alice.founder("a")],
+        Default::default(),
+        at,
+    )
+    .unwrap();
 
     let (
         MembershipEvent::GroupFounded {
@@ -534,6 +614,7 @@ fn founding_records_where_each_founder_is() {
         &alice,
         MembershipEvent::found(
             vec![alice.founder("alice"), bob.founder("bob")],
+            Default::default(),
             Timestamp::from_millis(1),
         )
         .unwrap(),
@@ -1496,12 +1577,24 @@ fn advance_to(state: &mut MembershipState, who: &Signer, upto: u64) {
     assert_eq!(state.changed_at(), upto, "the filler must land exactly");
 }
 
+/// How long proposals wait in the expiry tests: short, and not the default,
+/// so a sweep that ignored the group's setting would be at the wrong index.
+const EXPIRY: u64 = 5;
+
+/// The default settings, but with proposals waiting `changes` changes.
+fn expiring_after(changes: u64) -> GroupSettings {
+    GroupSettings {
+        pending_expiry: changes.try_into().unwrap(),
+        ..GroupSettings::default()
+    }
+}
+
 #[test]
 fn a_proposal_can_be_approved_on_the_last_index_before_it_expires() {
     // The boundary itself rather than somewhere near it. An off-by-one in a
     // rule that silently deletes governance state does not look like an
     // off-by-one — it looks like an approval that did nothing.
-    let (mut state, founders) = founded_by(3);
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
     let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
 
     propose(
@@ -1516,8 +1609,8 @@ fn a_proposal_can_be_approved_on_the_last_index_before_it_expires() {
     let proposal = the_pending_one(&state);
 
     // The sweep runs after the dispatch, so an approval landing exactly
-    // `PENDING_EXPIRY` entries later is still acted on.
-    advance_to(&mut state, alice, proposal + PENDING_EXPIRY - 1);
+    // `EXPIRY` entries later is still acted on.
+    advance_to(&mut state, alice, proposal + EXPIRY - 1);
     assert_eq!(
         state.expires_after(proposal),
         0,
@@ -1534,7 +1627,7 @@ fn a_proposal_stops_waiting_once_the_log_has_moved_past_it() {
     // what bounds the map: `MembershipState` is re-encoded into redb on every
     // apply, so a proposal nobody will ever decide is write amplification on
     // the hot path for the life of the group.
-    let (mut state, founders) = founded_by(3);
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
     let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
 
     propose(
@@ -1548,7 +1641,7 @@ fn a_proposal_stops_waiting_once_the_log_has_moved_past_it() {
     .unwrap();
     let proposal = the_pending_one(&state);
 
-    advance_to(&mut state, alice, proposal + PENDING_EXPIRY);
+    advance_to(&mut state, alice, proposal + EXPIRY);
     assert_eq!(state.pending().count(), 0, "swept");
 
     assert_eq!(
@@ -1567,7 +1660,7 @@ fn a_subject_is_free_again_once_its_proposal_has_expired() {
     // The two rules have to fit together: one proposal per subject would be a
     // slot nothing could reuse if expiry did not eventually clear it. This is
     // what makes refusing a duplicate safe when the proposer has gone away.
-    let (mut state, founders) = founded_by(3);
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
     let (alice, carol) = (&founders[0], &founders[2]);
     let expel = |reason: &str| MembershipEvent::MemberExpelled {
         member: carol.id,
@@ -1581,7 +1674,7 @@ fn a_subject_is_free_again_once_its_proposal_has_expired() {
         Err(ConsensusError::AlreadyPending { .. })
     ));
 
-    advance_to(&mut state, alice, proposal + PENDING_EXPIRY);
+    advance_to(&mut state, alice, proposal + EXPIRY);
 
     propose(&mut state, alice, expel("asking afresh")).unwrap();
     assert_eq!(state.pending().count(), 1, "the subject is free again");
@@ -1751,8 +1844,12 @@ fn founding_is_proposed_against_the_empty_membership() {
     // needs no exception for founding.
     let alice = Signer::generate();
     let mut state = MembershipState::new();
-    let founding =
-        MembershipEvent::found(vec![alice.founder("alice")], Timestamp::from_millis(1)).unwrap();
+    let founding = MembershipEvent::found(
+        vec![alice.founder("alice")],
+        Default::default(),
+        Timestamp::from_millis(1),
+    )
+    .unwrap();
 
     let invented = alice.sign(founding.clone(), 9);
     assert_eq!(
@@ -1922,7 +2019,7 @@ fn apply_scenario(
             .map(|s| s.founder("founder"))
             .collect();
         let signed = pool[0].sign(
-            MembershipEvent::found(records, Timestamp::from_millis(1)).unwrap(),
+            MembershipEvent::found(records, Default::default(), Timestamp::from_millis(1)).unwrap(),
             state.changed_at(),
         );
         let _ = apply_next(state, &signed);

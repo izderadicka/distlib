@@ -148,7 +148,8 @@ fn admitting(founded: &MembershipState, member: MemberRecord, by: &SecretKey) ->
 
 /// The projection a founded two-member group produces, folded by hand.
 fn founded(founders: Vec<(MemberRecord, NodeAddr)>, by: &SecretKey) -> MembershipState {
-    let event = MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap();
+    let event =
+        MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1)).unwrap();
     let signed = SignedEvent::sign(by, event, Timestamp::from_millis(1), 0).unwrap();
     let mut state = MembershipState::new();
     state.apply(1, &signed).unwrap();

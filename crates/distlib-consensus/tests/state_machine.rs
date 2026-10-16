@@ -81,6 +81,7 @@ fn founding(founder: &Signer) -> Entry<TypeConfig> {
         founder.sign(
             MembershipEvent::found(
                 vec![(founder.record("founder"), NodeAddr::default())],
+                Default::default(),
                 Timestamp::from_millis(1),
             )
             .unwrap(),

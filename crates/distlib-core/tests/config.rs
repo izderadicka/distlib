@@ -201,6 +201,12 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         storage: distlib_core::StorageConfig {
             gc_interval_secs: 19.try_into().unwrap(),
         },
+        group: Some(distlib_core::GroupSettings {
+            replicas: 2.try_into().unwrap(),
+            probes: false,
+            settle_secs: 60,
+            ..distlib_core::GroupSettings::default()
+        }),
     };
 
     let rendered = config.to_starter_toml();
@@ -208,6 +214,22 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         jail.create_file(CONFIG, &rendered)?;
 
         assert_eq!(Config::load(Path::new(CONFIG)).unwrap(), config);
+        Ok(())
+    });
+}
+
+#[test]
+fn a_starter_file_without_group_settings_shows_them_commented_out() {
+    // A node that is not founding has no `[group]`; its file shows what a
+    // founder could set without setting it, and reads back without one.
+    let rendered = Config::default().to_starter_toml();
+    assert!(
+        rendered.contains("# [group]\n# replicas = 3\n"),
+        "{rendered}"
+    );
+    Jail::expect_with(move |jail| {
+        jail.create_file(CONFIG, &rendered)?;
+        assert_eq!(Config::load(Path::new(CONFIG)).unwrap().group, None);
         Ok(())
     });
 }

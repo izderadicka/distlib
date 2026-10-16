@@ -137,7 +137,8 @@ pub async fn run(paths: &Paths, found_group: bool) -> Result<()> {
     Ok(())
 }
 
-/// Founds a group if asked to; otherwise warns when this node is in none.
+/// Founds a group if asked to; otherwise warns when this node is in none, or
+/// when its `[group]` says something the group was not founded with.
 async fn found_or_say_there_is_no_group(
     runtime: &Runtime,
     config: &Config,
@@ -148,10 +149,20 @@ async fn found_or_say_there_is_no_group(
     if found_group {
         return found(node, config, secret, member_id(secret)).await;
     }
-    if node.membership().group_id().is_none() {
+    let membership = node.membership();
+    if membership.group_id().is_none() {
         tracing::warn!(
             "this node is in no group; found one with `distlib run --found-group`, or wait \
              for a founder to admit it"
+        );
+    } else if config
+        .group
+        .as_ref()
+        .is_some_and(|configured| configured != membership.settings())
+    {
+        tracing::warn!(
+            "[group] in the config differs from the settings this group was founded with; \
+             those are fixed, so [group] is ignored — `distlib status` shows them"
         );
     }
     Ok(())
@@ -1343,6 +1354,7 @@ fn print_live_status(live: &Value) {
         0 => {}
         pending => println!("pending     {pending} awaiting approval — see `distlib pending`"),
     }
+    print_settings(&live["settings"]);
     println!("node        running");
 }
 
@@ -1360,6 +1372,9 @@ fn print_stored_status(paths: &Paths, me: MemberId) {
                     "not a member of this group"
                 };
                 println!("role        {role}");
+                if let Ok(settings) = serde_json::to_value(membership.settings()) {
+                    print_settings(&settings);
+                }
             } else {
                 println!("group       none yet");
             }
@@ -1578,7 +1593,8 @@ async fn found(
 
     let names: Vec<_> = founders.iter().map(|(r, _)| display(r)).collect();
     tracing::info!(founders = names.join(", "), "founding the group");
-    node.init_group(founders, secret).await?;
+    let settings = config.group.clone().unwrap_or_default();
+    node.init_group(founders, settings, secret).await?;
     Ok(())
 }
 
@@ -1755,6 +1771,18 @@ fn print_group(membership: &MembershipState) -> bool {
         membership.core().len()
     );
     true
+}
+
+/// The group's settings, one `key = value` line each, as `[group]` spells
+/// them. Nothing before the group is founded.
+fn print_settings(settings: &Value) {
+    let Some(settings) = settings.as_object() else {
+        return;
+    };
+    for (index, (key, value)) in settings.iter().enumerate() {
+        let label = if index == 0 { "settings" } else { "" };
+        println!("{label:<12}{key} = {value}");
+    }
 }
 
 /// One member, named if they have a name.

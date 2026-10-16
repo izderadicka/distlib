@@ -4,7 +4,7 @@
 //! the only Raft state in the system (§4.2); the catalogue and everything else
 //! sync by other means.
 
-use distlib_core::{GroupId, MemberId, NodeAddr};
+use distlib_core::{GroupId, GroupSettings, MemberId, NodeAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConsensusError, Result};
@@ -92,6 +92,10 @@ pub enum MembershipEvent {
     GroupFounded {
         group_id: GroupId,
         founders: Vec<(MemberRecord, NodeAddr)>,
+        /// What the group decided once, for good: replicas, custody weights,
+        /// how long proposals wait (phase 5's D2). Boxed, so the one entry
+        /// that carries it does not make every other event as large.
+        settings: Box<GroupSettings>,
     },
 
     /// A new member joins.
@@ -219,9 +223,14 @@ impl MembershipEvent {
     /// into a map, so `[a, a, b]` yields two members but an id derived from
     /// three entries. Two different events would then describe the same group
     /// under different ids.
-    pub fn found(founders: Vec<(MemberRecord, NodeAddr)>, at: Timestamp) -> Result<Self> {
+    pub fn found(
+        founders: Vec<(MemberRecord, NodeAddr)>,
+        settings: GroupSettings,
+        at: Timestamp,
+    ) -> Result<Self> {
         // Checking and sorting are the same pass, and this needs both.
         let ids = checked_ids(&founders)?;
+        check_settings(&settings)?;
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(GROUP_ID_TAG);
@@ -237,8 +246,18 @@ impl MembershipEvent {
         Ok(Self::GroupFounded {
             group_id: GroupId::from_bytes(*hasher.finalize().as_bytes()),
             founders,
+            settings: Box::new(settings),
         })
     }
+}
+
+/// Refuses settings that contradict each other.
+pub(crate) fn check_settings(settings: &GroupSettings) -> Result<()> {
+    settings
+        .check()
+        .map_err(|reason| ConsensusError::InvalidSettings {
+            reason: reason.to_owned(),
+        })
 }
 
 /// The founders' ids, sorted — if the set is a valid one: non-empty, and no

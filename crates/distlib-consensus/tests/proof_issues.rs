@@ -92,7 +92,7 @@ fn founded_by(n: usize) -> (MembershipState, Vec<Signer>) {
     propose(
         &mut state,
         &signers[0],
-        MembershipEvent::found(founders, Timestamp::from_millis(1)).unwrap(),
+        MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1)).unwrap(),
     )
     .unwrap();
     (state, signers)
@@ -122,6 +122,7 @@ fn founding_entry(founder: &Signer) -> Entry<TypeConfig> {
         founder.sign(
             MembershipEvent::found(
                 vec![(founder.record("founder"), NodeAddr::default())],
+                Default::default(),
                 Timestamp::from_millis(1),
             )
             .unwrap(),
@@ -583,6 +584,7 @@ fn mem_06_free_text_on_a_proposal_is_bounded() {
     assert!(
         MembershipEvent::found(
             vec![(record.clone(), NodeAddr::default())],
+            Default::default(),
             Timestamp::from_millis(1)
         )
         .unwrap()

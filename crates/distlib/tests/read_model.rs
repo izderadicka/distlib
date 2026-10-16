@@ -154,6 +154,7 @@ async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
+            Default::default(),
             &alice_key,
         )
         .await
@@ -405,7 +406,11 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
 
@@ -530,7 +535,11 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         .unwrap();
     runtime
         .node()
-        .init_group(vec![(record(id, "solo"), bound(&runtime))], &key)
+        .init_group(
+            vec![(record(id, "solo"), bound(&runtime))],
+            Default::default(),
+            &key,
+        )
         .await
         .unwrap();
 

@@ -207,6 +207,7 @@ impl Harness {
                 },
                 addr,
             )],
+            Default::default(),
             &secret,
         )
         .await
@@ -369,7 +370,10 @@ impl Harness {
                 )
             })
             .collect();
-        nodes[0].init_group(founders, &secrets[0]).await.unwrap();
+        nodes[0]
+            .init_group(founders, Default::default(), &secrets[0])
+            .await
+            .unwrap();
         for node in &nodes {
             timeout(Duration::from_secs(15), async {
                 while node.membership().group_id().is_none() {
