@@ -709,6 +709,12 @@ fn print_item_description(item_id: ItemId, answer: &Value) {
     if let Some(description) = answer["description"].as_str() {
         println!("description {description}");
     }
+    if let Some(added_by) = answer["added_by"]
+        .as_array()
+        .filter(|list| !list.is_empty())
+    {
+        println!("added by    {}", join_strings(added_by));
+    }
 }
 
 /// What members have said about the item.

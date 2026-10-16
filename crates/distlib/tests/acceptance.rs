@@ -248,14 +248,17 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
         std::fs::read(books.join("dune.epub")).unwrap(),
         "and hands back the bytes alice added"
     );
-    // And `distlib item` says what the item is and that bob holds it.
+    // And `distlib item` says what the item is, who added it and that bob
+    // holds it.
+    let added_by_alice = format!("added by    {}", alice.id);
     until_output(
         bob.dir.path(),
         &["item", &dune],
-        "bob's item view to name the book and say he holds it",
+        "bob's item view to name the book, its adder and say he holds it",
         |out| {
             out.lines()
                 .any(|line| line.trim_end() == "title       Dune")
+                && out.lines().any(|line| line.trim_end() == added_by_alice)
                 && out
                     .lines()
                     .any(|line| line.starts_with("available   held here"))

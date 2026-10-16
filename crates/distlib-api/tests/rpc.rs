@@ -1536,6 +1536,7 @@ async fn library_item_reads_the_stored_record() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
+            file_authors: Default::default(),
         })
         .await
         .unwrap();
@@ -1572,6 +1573,7 @@ async fn library_item_summarises_ratings_and_lists_reviews() {
             ]),
             reviews: BTreeMap::from([(other, review)]),
             last_modified: 1,
+            file_authors: Default::default(),
         })
         .await
         .unwrap();
@@ -1754,6 +1756,7 @@ async fn bookmarks_are_listed_on_the_item_and_found_across_the_group() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
+            file_authors: Default::default(),
         })
         .await
         .unwrap();
@@ -1930,6 +1933,7 @@ async fn community_wish_list_resolves_filters_and_orders_wishes() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
+            file_authors: Default::default(),
         })
         .await
         .unwrap();
@@ -2074,6 +2078,7 @@ async fn library_search_ranks_and_reads_hits_back() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
+            file_authors: Default::default(),
         })
         .await
         .unwrap();
@@ -2118,6 +2123,7 @@ async fn a_long_library_reads_in_pages_with_nothing_twice_and_nothing_missed() {
                 ratings: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 last_modified: 1,
+                file_authors: Default::default(),
             })
             .await
             .unwrap();

@@ -1,7 +1,7 @@
 //! The SQLite database itself: opening it, and the rows it holds.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
 };
@@ -56,9 +56,18 @@ pub struct StoredItem {
     pub ratings: BTreeMap<MemberId, Rating>,
     /// Each current member's review.
     pub reviews: BTreeMap<MemberId, Review>,
+    /// Who wrote each of the item's file keys, members or not.
+    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
     /// The newest entry timestamp this item was projected from — §5.2's
     /// `last_modified`, in microseconds since the epoch.
     pub last_modified: u64,
+}
+
+impl StoredItem {
+    /// Who added the item: whoever wrote any of its file keys.
+    pub fn creators(&self) -> BTreeSet<MemberId> {
+        self.file_authors.values().flatten().copied().collect()
+    }
 }
 
 /// One row of `bookmarks`: a member's bookmark on an item.
@@ -534,6 +543,10 @@ const FILES: OwnedRows = OwnedRows {
     table: "item_files",
     columns: FILE_COLUMNS,
 };
+const FILE_AUTHORS: OwnedRows = OwnedRows {
+    table: "file_authors",
+    columns: &["item", "blob", "member"],
+};
 const RATINGS: OwnedRows = OwnedRows {
     table: "ratings",
     columns: &["item", "member", "rating"],
@@ -667,6 +680,13 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             file.duration,
         ])
     })?;
+    let authorship = stored
+        .file_authors
+        .iter()
+        .flat_map(|(blob, authors)| authors.iter().map(move |author| (blob, author)));
+    FILE_AUTHORS.replace(tx, &id, authorship, |insert, (blob, author)| {
+        insert.execute(params![id, blob.to_string(), author.to_string()])
+    })?;
     RATINGS.replace(tx, &id, &stored.ratings, |insert, (member, rating)| {
         insert.execute(params![id, member.to_string(), rating.get()])
     })?;
@@ -718,6 +738,7 @@ fn files_of(
 /// per table, and handed to each item as it is read.
 struct ItemDetails {
     files: BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>,
+    file_authors: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>,
     ratings: BTreeMap<ItemId, BTreeMap<MemberId, Rating>>,
     reviews: BTreeMap<ItemId, BTreeMap<MemberId, Review>>,
 }
@@ -726,6 +747,7 @@ impl ItemDetails {
     fn read(conn: &Connection, only: Option<ItemId>) -> rusqlite::Result<Self> {
         Ok(Self {
             files: files_of(conn, only)?,
+            file_authors: file_authors_of(conn, only)?,
             ratings: member_values_by_item(conn, "ratings", "rating", only, |row| {
                 Rating::try_from(row.get::<_, u8>(2)?).map_err(unreadable(2, "rating"))
             })?,
@@ -739,9 +761,31 @@ impl ItemDetails {
     fn attach_to(&mut self, stored: &mut StoredItem) {
         let id = stored.item.id;
         stored.item.files = self.files.remove(&id).unwrap_or_default();
+        stored.file_authors = self.file_authors.remove(&id).unwrap_or_default();
         stored.ratings = self.ratings.remove(&id).unwrap_or_default();
         stored.reviews = self.reviews.remove(&id).unwrap_or_default();
     }
+}
+
+/// Every file key's authors, or just one item's, grouped by item, then blob.
+fn file_authors_of(
+    conn: &Connection,
+    only: Option<ItemId>,
+) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>> {
+    let (sql, params) = select_item_rows("item, blob, member FROM file_authors", only);
+    let mut statement = conn.prepare(&sql)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+
+    let mut grouped: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>> = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        grouped
+            .entry(identifier(row, 0, "item")?)
+            .or_default()
+            .entry(identifier(row, 1, "blob")?)
+            .or_default()
+            .insert(identifier(row, 2, "member")?);
+    }
+    Ok(grouped)
 }
 
 /// The `column` of every row of `table` — or of just one item's rows —
@@ -814,6 +858,7 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<StoredItem> {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: row.get(10)?,
+        file_authors: BTreeMap::new(),
     })
 }
 

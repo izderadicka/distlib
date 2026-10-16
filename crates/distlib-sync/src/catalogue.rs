@@ -32,7 +32,7 @@ use distlib_core::{
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
-use iroh::{EndpointAddr, EndpointId, SecretKey};
+use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
 use iroh_blobs::{
     BlobsProtocol, Hash, HashAndFormat,
     api::Store as BlobStore,
@@ -113,6 +113,10 @@ pub struct ReadItem {
     pub ratings: BTreeMap<MemberId, Rating>,
     /// Every member's review, counted the same way.
     pub reviews: BTreeMap<MemberId, Review>,
+    /// Who wrote each of the item's file keys: every author, not only the
+    /// latest, since iroh-docs keeps one entry per key and author. Whoever
+    /// wrote one added the item (phase 5's D1 and D8).
+    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
     /// The newest timestamp among the item's own entries, in microseconds
     /// since the epoch — iroh-docs' own clock for the record. A rating or a
     /// review is not a change to the item, so neither moves it.
@@ -576,8 +580,10 @@ impl Catalogue {
         let reviews = self
             .read_community_entries(CommunityKey::reviews_of(id), Review::decode)
             .await?;
+        let file_authors = self.read_file_authors(id).await?;
         Ok(Some(ReadItem {
             item,
+            file_authors,
             waiting_for_content: waiting_for_content
                 || ratings.waiting_for_content
                 || reviews.waiting_for_content,
@@ -585,6 +591,39 @@ impl Catalogue {
             reviews: values_by_member(reviews.entries),
             last_modified,
         }))
+    }
+
+    /// Who wrote each of `id`'s file keys.
+    async fn read_file_authors(
+        &self,
+        id: ItemId,
+    ) -> Result<BTreeMap<ContentHash, BTreeSet<MemberId>>> {
+        let doc = self.document()?;
+        let entries = doc
+            .get_many(Query::all().key_prefix(Key::prefix_of(id)))
+            .await
+            .map_err(SyncError::docs("read from"))?;
+        tokio::pin!(entries);
+
+        let mut authors: BTreeMap<ContentHash, BTreeSet<MemberId>> = BTreeMap::new();
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(SyncError::docs("read from"))?;
+            let Some(Key::File { blob, .. }) = Key::parse(entry.key()) else {
+                continue;
+            };
+            match PublicKey::from_bytes(entry.author().as_bytes()) {
+                Ok(author) => {
+                    authors
+                        .entry(blob)
+                        .or_default()
+                        .insert(MemberId::from(author));
+                }
+                Err(_) => {
+                    tracing::warn!(author = %entry.author(), "a file key's author is not a member id")
+                }
+            }
+        }
+        Ok(authors)
     }
 
     /// Rates `item` as this node's member, replacing its earlier rating.
