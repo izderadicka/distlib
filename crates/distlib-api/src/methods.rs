@@ -487,7 +487,6 @@ impl Api {
         let mut record = summary(&stored);
         record["lang"] = json!(stored.item.lang);
         record["description"] = json!(stored.item.description);
-        record["replicas"] = json!(stored.item.replicas);
         record["files"] = json!(stored.item.files);
         record["last_modified"] = json!(stored.last_modified);
         record["availability"] = self.seen().of(&params.item_id);
@@ -529,13 +528,6 @@ impl Api {
     /// metadata — no files, and an id nothing fingerprints to.
     async fn edit_metadata(&self, params: EditMetadata) -> Result<Value, Error> {
         let EditMetadata { item_id, fields } = params;
-        // How many copies the group keeps is custodianship (§5.5), phase 5's,
-        // and not something a metadata edit should move in passing.
-        if fields.replicas.is_some() {
-            return Err(Error::invalid_params(
-                "replicas is not metadata, and library.edit_metadata does not write it",
-            ));
-        }
         let mut edit = Item::new(item_id);
         edit.set(fields);
         if edit == Item::new(item_id) {

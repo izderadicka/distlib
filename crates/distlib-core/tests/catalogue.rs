@@ -23,7 +23,6 @@ fn an_item() -> Item {
     item.year = Some(1969);
     item.lang = Some("en".to_owned());
     item.description = Some("Winter, and an envoy.".to_owned());
-    item.replicas = Some(3);
     item.files
         .insert(hash(1), a_file(FileRole::Content, "01.mp3"));
     item.files

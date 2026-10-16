@@ -53,7 +53,6 @@ fn an_item(seed: u8, title: &str) -> Item {
         year: Some(1965),
         lang: Some("en".to_owned()),
         description: Some("A desert planet, and the spice.".to_owned()),
-        replicas: Some(3),
         files: BTreeMap::from([(
             ContentHash::from_bytes([seed; 32]),
             FileRecord {

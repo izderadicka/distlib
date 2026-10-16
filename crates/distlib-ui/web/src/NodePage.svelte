@@ -6,7 +6,7 @@
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
-  import { bytes, instant } from "./lib/format";
+  import { bytes, duration, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
   import { call, type Member, type NodeStatus, Unauthorised } from "./lib/rpc";
 
@@ -79,6 +79,36 @@
       {/if}
     </dl>
   </section>
+
+  {#if status.settings}
+    {@const settings = status.settings}
+    <section>
+      <h2>Group settings</h2>
+      <p class="hint">Decided when the group was founded, and fixed since.</p>
+      <dl>
+        <dt>Copies of each item</dt>
+        <dd>{settings.replicas}, the adder's own included</dd>
+        <dt>Weight cap</dt>
+        <dd>{bytes(settings.cap_bytes)}</dd>
+        <dt>Weight step</dt>
+        <dd>{bytes(settings.weight_step_bytes)}</dd>
+        <dt>Minimum pledge</dt>
+        <dd>{bytes(settings.min_pledge_bytes)}</dd>
+        <dt>Custody follows membership</dt>
+        <dd>after {duration(settings.settle_secs)} without a change, {duration(settings.max_settle_secs)} at most</dd>
+        <dt>Emergency copy</dt>
+        <dd>after {duration(settings.emergency_after_secs)} with one copy left</dd>
+        <dt>Minimum fetch rate</dt>
+        <dd>{bytes(settings.min_fetch_rate)}/s</dd>
+        <dt>Probes</dt>
+        <dd>{settings.probes ? `every ${duration(settings.probe_every_secs)}` : "off"}</dd>
+        <dt>Probe failures count for</dt>
+        <dd>{duration(settings.failure_window_secs)}</dd>
+        <dt>Proposals wait</dt>
+        <dd>{settings.pending_expiry} changes for approval</dd>
+      </dl>
+    </section>
+  {/if}
 
   <section>
     <h2>Members <span class="count">{members.length}</span></h2>

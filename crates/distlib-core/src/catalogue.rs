@@ -182,7 +182,6 @@ fields! {
     Year        => "year",        year:        i32;
     Lang        => "lang",        lang:        String;
     Description => "description", description: String;
-    Replicas    => "replicas",    replicas:    u32;
 }
 
 /// A key in the catalogue document.
@@ -286,9 +285,6 @@ pub struct Item {
     pub year: Option<i32>,
     pub lang: Option<String>,
     pub description: Option<String>,
-    /// How many copies the group should keep (§5.5). Absent means the group's
-    /// default, which is not this type's business.
-    pub replicas: Option<u32>,
     pub files: BTreeMap<ContentHash, FileRecord>,
 }
 
@@ -305,7 +301,6 @@ impl Item {
             year: None,
             lang: None,
             description: None,
-            replicas: None,
             files: BTreeMap::new(),
         }
     }

@@ -122,11 +122,10 @@ fn item() -> impl Strategy<Value = Item> {
         any::<Option<i32>>(),
         proptest::option::of(text()),
         proptest::option::of(text()),
-        any::<Option<u32>>(),
         proptest::collection::btree_map(content_hash(), file_record(), 0..4),
     )
         .prop_map(
-            |(
+            |(id, kind, title, authors, genres, series, year, lang, description, files)| Item {
                 id,
                 kind,
                 title,
@@ -136,19 +135,6 @@ fn item() -> impl Strategy<Value = Item> {
                 year,
                 lang,
                 description,
-                replicas,
-                files,
-            )| Item {
-                id,
-                kind,
-                title,
-                authors,
-                genres,
-                series,
-                year,
-                lang,
-                description,
-                replicas,
                 files,
             },
         )

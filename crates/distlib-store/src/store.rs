@@ -511,7 +511,7 @@ impl Store {
 /// positional agreement: a column added to one and not the other reads the
 /// wrong value out of the right row, and nothing would catch it.
 const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_index, \
-                            year, lang, description, replicas, last_modified";
+                            year, lang, description, last_modified";
 
 /// The `item_files` columns, in the order [`files_of`] reads them.
 const FILE_COLUMNS: &[&str] = &[
@@ -630,14 +630,14 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
     )?;
     tx.execute(
         "INSERT INTO items (id, kind, title, authors, genres, series, series_index, \
-                            year, lang, description, replicas, last_modified) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                            year, lang, description, last_modified) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(id) DO UPDATE SET \
              kind = excluded.kind, title = excluded.title, authors = excluded.authors, \
              genres = excluded.genres, series = excluded.series, \
              series_index = excluded.series_index, year = excluded.year, \
              lang = excluded.lang, description = excluded.description, \
-             replicas = excluded.replicas, last_modified = excluded.last_modified",
+             last_modified = excluded.last_modified",
         params![
             id,
             item.kind.as_ref().map(word).transpose()?,
@@ -649,7 +649,6 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             item.year,
             item.lang,
             item.description,
-            item.replicas,
             stored.last_modified,
         ],
     )?;
@@ -810,12 +809,11 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<StoredItem> {
             year: row.get(7)?,
             lang: row.get(8)?,
             description: row.get(9)?,
-            replicas: row.get(10)?,
             files: BTreeMap::new(),
         },
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
-        last_modified: row.get(11)?,
+        last_modified: row.get(10)?,
     })
 }
 
