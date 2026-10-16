@@ -488,6 +488,8 @@ impl Api {
         record["lang"] = json!(stored.item.lang);
         record["description"] = json!(stored.item.description);
         record["files"] = json!(stored.item.files);
+        // Whoever wrote one of its file keys, members or not any more.
+        record["added_by"] = json!(stored.creators());
         record["last_modified"] = json!(stored.last_modified);
         record["availability"] = self.seen().of(&params.item_id);
         record["ratings"] = ratings_summary(&stored.ratings, self.node.id());

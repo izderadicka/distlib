@@ -8,7 +8,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
-5a-3a (#136), 5a-3b.** Four rounds of review on #133 shaped it;
+5a-3a (#136), 5a-3b (#137); 5b-1a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -469,7 +469,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Sixteen PRs — fourteen planned, 5a-3 split in two, and 5c-0 added in review. Each ends compiling,
+Seventeen PRs — fourteen planned, 5a-3 and 5b-1 each split in two, and 5c-0 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -507,7 +507,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (6 PRs)
+### 5b — keeping items (7 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -515,6 +515,10 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** five in-process nodes agree on every item's custodians; a burst of membership
   changes inside `settle_secs` causes one recompute, and a group that never settles recomputes at
   `max_settle_secs`; the load factor matches a hand-computed one.
+  *Split in two:* **5b-1a** *(delta P5-8)* — every author of an item's file keys read from the
+  catalogue into the read model's `file_authors` table, shown as `added_by` by `library.item` and
+  `distlib item`; **5b-1b** — the custody service, in a new `distlib-custody` crate, with the
+  custodians in `library.item` and custody in `node.status`. The item page's custodians move to 5b-6.
 
 - **5b-2 — the pin manager (D5, D7).** Custody tags set and released; a released item falls into the
   cache, and only once it has its copies elsewhere; fetches throttled and prioritized.
@@ -535,7 +539,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   the delay; one custodian stopped of three causes no fetch; a holder back within the delay causes
   none.
 
-- **5b-5 — the quota rule (D8).** The authorship table, `added_bytes` and `required_pledge`, the
+- **5b-5 — the quota rule (D8).** `added_bytes` (from 5b-1a's `file_authors` table) and `required_pledge`, the
   warnings and refusals in `library.add` and `group.pledge_set`, and the requirement in the members
   list.
   **Acceptance:** at `replicas = 3`, a member with a 100 GB pledge adding files totalling 60 GB is
@@ -597,7 +601,7 @@ Every open C-number appears here once.
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
 | **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged.** |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
-| **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas (5a-2, 5b-5). `created` and `modified_by` stay open. |
+| **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas — the read model's `file_authors`, shown as `added_by` (5b-1a, P5-8). `created` and `modified_by` stay open. |
 | **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3a.** |
 | **C13** | Gossip does not change sides when a node is promoted | **Deferred.** |
 | **C15**–**C19** | Read-only admin; Windows file privacy and service; clearing a field; downloads as in-memory tasks | **Unchanged.** C15 is why expulsion with evidence is CLI and API only. |

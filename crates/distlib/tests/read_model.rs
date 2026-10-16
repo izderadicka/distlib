@@ -15,7 +15,11 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::Duration,
+};
 
 use distlib::Runtime;
 use distlib_core::{
@@ -606,6 +610,42 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     assert_eq!(record["title"], json!("Dune"));
     assert_eq!(record["authors"], json!(["Frank Herbert", "Brian Herbert"]));
     assert_eq!(record["files"].as_object().unwrap().len(), 1);
+    assert_eq!(record["added_by"], json!([id]));
 
     runtime.shutdown().await;
+}
+
+/// Two members who each wrote the same file key both added the item: the
+/// read model keeps every author of a key, not only the latest (5b-1a).
+#[tokio::test(flavor = "multi_thread")]
+async fn both_members_who_wrote_a_file_key_are_its_authors() {
+    let dir = TempDir::new().unwrap();
+    let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
+    alice.catalogue().ready().await;
+    bob.catalogue().ready().await;
+
+    let item = an_item(4, "Dune");
+    alice.catalogue().write(&item).await.unwrap();
+    bob.catalogue().write(&item).await.unwrap();
+
+    let both = BTreeSet::from([alice.node().id(), bob.node().id()]);
+    let expected = BTreeMap::from([(ContentHash::from_bytes([4; 32]), both.clone())]);
+    for node in [&alice, &bob] {
+        tokio::time::timeout(SOON, async {
+            loop {
+                let stored = node.store().item(item.id).await.unwrap();
+                if stored.is_some_and(|stored| stored.file_authors == expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("each node records both members as the file key's authors");
+    }
+    let stored = alice.store().item(item.id).await.unwrap().unwrap();
+    assert_eq!(stored.creators(), both);
+
+    bob.shutdown().await;
+    alice.shutdown().await;
 }

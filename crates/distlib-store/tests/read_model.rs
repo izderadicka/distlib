@@ -160,13 +160,21 @@ fn stored() -> impl Strategy<Value = StoredItem> {
         proptest::collection::btree_map(member(), rating(), 0..3),
         proptest::collection::btree_map(member(), review(), 0..3),
         any::<u64>(),
+        proptest::collection::btree_map(
+            content_hash(),
+            proptest::collection::btree_set(member(), 1..3),
+            0..3,
+        ),
     )
-        .prop_map(|(item, ratings, reviews, last_modified)| StoredItem {
-            item,
-            ratings,
-            reviews,
-            last_modified: last_modified >> 1,
-        })
+        .prop_map(
+            |(item, ratings, reviews, last_modified, file_authors)| StoredItem {
+                item,
+                ratings,
+                reviews,
+                last_modified: last_modified >> 1,
+                file_authors,
+            },
+        )
 }
 
 /// Items with distinct ids, so a set of them has a well-defined projection.
@@ -414,6 +422,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
             Review::try_from("Spice".to_owned()).expect("a review"),
         )]),
         last_modified: 100,
+        file_authors: Default::default(),
     };
     store
         .upsert_item(whole)
@@ -431,6 +440,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 200,
+        file_authors: Default::default(),
     };
     store
         .upsert_item(partial.clone())
@@ -513,6 +523,7 @@ async fn bookmarks_are_found_by_text_member_and_item() {
                 ratings: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 last_modified: 1,
+                file_authors: Default::default(),
             })
             .await
             .expect("written");
@@ -634,6 +645,7 @@ async fn a_store_reopens_onto_what_it_already_held() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
+        file_authors: Default::default(),
     };
 
     let first = Store::open(Some(dir.path().to_path_buf()))
@@ -681,6 +693,7 @@ async fn a_store_of_another_version_is_started_afresh() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
+        file_authors: Default::default(),
     };
     store.upsert_item(stored.clone()).await.expect("written");
     assert_eq!(store.item(id).await.expect("read"), Some(stored));
@@ -703,6 +716,7 @@ async fn a_store_of_another_version_is_started_afresh() {
         tables,
         [
             "bookmarks",
+            "file_authors",
             "item_files",
             "items",
             "members",
