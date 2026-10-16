@@ -245,7 +245,7 @@ async fn custody_follows_a_read_model_rebuilt_at_a_start() {
         .collect();
     let group_config = config(&ids);
     let bobs_dir = DataDir::new(dir.path().join("bob"));
-    let runtimes = vec![
+    let mut runtimes = vec![
         Runtime::start(
             &keys[0],
             &group_config,
@@ -264,7 +264,8 @@ async fn custody_follows_a_read_model_rebuilt_at_a_start() {
     };
     let pledges = [(ids[0], 100 * GB), (ids[1], 100 * GB)];
     found(&runtimes, &keys[0], &pledges, &settings).await;
-    let [alice, bob] = <[Runtime; 2]>::try_from(runtimes).ok().unwrap();
+    let bob = runtimes.pop().unwrap();
+    let alice = runtimes.pop().unwrap();
 
     alice.catalogue().ready().await;
     for seed in 1..=3 {
