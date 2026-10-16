@@ -974,18 +974,6 @@ async fn an_edit_must_say_what_to_write() {
         .await;
     assert_eq!(code(&no_fields), -32602, "{no_fields}");
 
-    let not_a_field = harness
-        .refuse(
-            "library.edit_metadata",
-            json!({ "item_id": item_id, "fields": { "replicas": 5 } }),
-        )
-        .await;
-    assert_eq!(
-        code(&not_a_field),
-        -32602,
-        "replicas is custodianship, not metadata: {not_a_field}"
-    );
-
     let no_such_field = harness
         .refuse(
             "library.edit_metadata",

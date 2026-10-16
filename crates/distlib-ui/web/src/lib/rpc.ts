@@ -22,12 +22,33 @@ export interface NodeStatus {
   /** How far a follower has read the log; `null` on a voter. */
   followed_upto: number | null;
   pending: number;
+  /** What the group decided when it was founded; `null` before there is one. */
+  settings: GroupSettings | null;
   /** The catalogue's swarm, as this node sees it. */
   sync: {
     /** The members this node is a catalogue gossip neighbour of. */
     neighbours: string[];
     last_sync: LastSync[];
   };
+}
+
+/** A group's settings, fixed when it was founded. */
+export interface GroupSettings {
+  /** Copies kept of each item, the adder's own included. */
+  replicas: number;
+  cap_bytes: number;
+  weight_step_bytes: number;
+  min_pledge_bytes: number;
+  /** Changes a proposal waits for its approvals. */
+  pending_expiry: number;
+  settle_secs: number;
+  max_settle_secs: number;
+  emergency_after_secs: number;
+  /** Bytes per second. */
+  min_fetch_rate: number;
+  probes: boolean;
+  probe_every_secs: number;
+  failure_window_secs: number;
 }
 
 /** How the last catalogue sync round with one member ended. */
@@ -136,7 +157,6 @@ export interface ListedBookmark extends BookmarkRecord {
 export interface ItemRecord extends ItemSummary {
   lang: string | null;
   description: string | null;
-  replicas: number | null;
   /** By each file's content hash. */
   files: Record<string, FileRecord>;
   /** Microseconds since the epoch. */

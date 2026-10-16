@@ -24,6 +24,7 @@ const STATUS: NodeStatus = {
   leader: ME,
   followed_upto: null,
   pending: 0,
+  settings: null,
   sync: { neighbours: [], last_sync: [] },
 };
 const MEMBERS: Members = { group: null, changed_at: 1, members: [] };
@@ -111,7 +112,6 @@ describe("the shell", () => {
         year: null,
         lang: null,
         description: null,
-        replicas: null,
         files: {},
         last_modified: 0,
         availability: { held: false, providers: 0 },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { availability, bytes, instant, memberName, ratingSummary } from "./format";
+import { availability, bytes, duration, instant, memberName, ratingSummary } from "./format";
 
 describe("writing a size", () => {
   it("uses the largest decimal unit it reaches, to one place", () => {
@@ -12,6 +12,19 @@ describe("writing a size", () => {
 
   it("stops at petabytes", () => {
     expect(bytes(2e18)).toBe("2000 PB");
+  });
+});
+
+describe("writing a span of time", () => {
+  it("uses the largest unit it is a whole number of", () => {
+    expect(duration(86_400)).toBe("1 day");
+    expect(duration(7 * 86_400)).toBe("7 days");
+    expect(duration(3600)).toBe("1 hour");
+    expect(duration(5400)).toBe("90 minutes");
+    expect(duration(300)).toBe("5 minutes");
+    expect(duration(90)).toBe("90 seconds");
+    expect(duration(1)).toBe("1 second");
+    expect(duration(0)).toBe("0 seconds");
   });
 });
 

@@ -15,6 +15,21 @@ export function bytes(count: number): string {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} ${BYTE_UNITS[unit]}`;
 }
 
+const DURATION_UNITS: [seconds: number, one: string, many: string][] = [
+  [24 * 60 * 60, "day", "days"],
+  [60 * 60, "hour", "hours"],
+  [60, "minute", "minutes"],
+  [1, "second", "seconds"],
+];
+
+/** A span of seconds in the largest unit it is a whole number of: `1 day`, `90 seconds`. */
+export function duration(seconds: number): string {
+  const [size, one, many] =
+    DURATION_UNITS.find(([size]) => seconds >= size && seconds % size === 0) ?? DURATION_UNITS[3];
+  const count = seconds / size;
+  return `${count} ${count === 1 ? one : many}`;
+}
+
 /** A moment the read model records, in microseconds since the epoch. */
 export function instant(micros: number): Date {
   return new Date(micros / 1000);

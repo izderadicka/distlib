@@ -28,7 +28,7 @@
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 4;
+pub const READ_MODEL_VERSION: u32 = 5;
 
 /// Run on every connection, before anything else.
 ///
@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS items (
     year          INTEGER,
     lang          TEXT,
     description   TEXT,
-    replicas      INTEGER,
     last_modified INTEGER NOT NULL
 ) STRICT;
 

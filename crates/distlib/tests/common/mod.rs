@@ -21,8 +21,33 @@ use std::{
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MemberRecord;
-use distlib_core::{Config, CoreMember, ItemId, MemberId, NetConfig, NodeAddr};
+use distlib_core::{Config, CoreMember, DataDir, ItemId, MemberId, NetConfig, NodeAddr};
 use iroh::SecretKey;
+
+/// Waits until a stopped runtime has let go of every database in `data_dir`.
+///
+/// Dropping a runtime does not release them at once: tasks it spawned are
+/// aborted, and finish being dropped a moment later. Starting again on the
+/// same directory before then is refused the lock — found on macOS CI.
+pub async fn until_released(data_dir: &DataDir) {
+    let databases = [
+        data_dir.raft_db(),
+        data_dir.blobs_dir().join("blobs.db"),
+        data_dir.docs_dir().join("docs.redb"),
+    ];
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for database in &databases {
+            while matches!(
+                redb::Database::create(database),
+                Err(redb::DatabaseError::DatabaseAlreadyOpen)
+            ) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    })
+    .await
+    .expect("the stopped runtime to let go of its databases");
+}
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
 ///

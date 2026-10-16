@@ -33,7 +33,6 @@ const MLOCI: ItemRecord = {
   kind: "audiobook",
   lang: null,
   last_modified: 1790521054348270,
-  replicas: null,
   series: { index: 1.0, name: "Mloci" },
   title: "Válka s mloky",
   year: 1936,
@@ -135,20 +134,20 @@ describe("the item page", () => {
   });
 
   it("shows what is said only on an item's own page", async () => {
-    answer = { ...MLOCI, lang: "cs", replicas: 3, description: "Satira.\nO mlocích." };
+    answer = { ...MLOCI, lang: "cs", description: "Satira.\nO mlocích." };
     open();
 
     await screen.findByText(/Satira\./);
-    expect(details()).toMatchObject({ Language: "cs", "Copies kept": "3" });
+    expect(details()).toMatchObject({ Language: "cs" });
     expect(document.querySelector(".description")?.textContent).toBe("Satira.\nO mlocích.");
   });
 
-  it("shows a year and a number of copies of nought", async () => {
-    answer = { ...MLOCI, year: 0, replicas: 0 };
+  it("shows a year of nought", async () => {
+    answer = { ...MLOCI, year: 0 };
     open();
 
     await screen.findByText("Válka s mloky");
-    expect(details()).toMatchObject({ Year: "0", "Copies kept": "0" });
+    expect(details()).toMatchObject({ Year: "0" });
   });
 
   it("names a series without its place when it has none", async () => {

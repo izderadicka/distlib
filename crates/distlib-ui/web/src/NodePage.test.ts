@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NodePage from "./NodePage.svelte";
-import { call, type Members, type NodeStatus, RpcError, Unauthorised } from "./lib/rpc";
+import { call, type GroupSettings, type Members, type NodeStatus, RpcError, Unauthorised } from "./lib/rpc";
 import { fakeListen } from "./testing";
 
 vi.mock("./lib/rpc", async (original) => ({
@@ -13,6 +13,22 @@ vi.mock("./lib/rpc", async (original) => ({
 const ME = "a".repeat(64);
 const CAROL = "c".repeat(64);
 const DAVE = "d".repeat(64);
+
+/** Not the defaults, so each line shows the value it was given. */
+const SETTINGS: GroupSettings = {
+  replicas: 2,
+  cap_bytes: 1_000_000_000_000,
+  weight_step_bytes: 5_000_000_000,
+  min_pledge_bytes: 50_000_000_000,
+  pending_expiry: 64,
+  settle_secs: 600,
+  max_settle_secs: 7200,
+  emergency_after_secs: 172_800,
+  min_fetch_rate: 2_000_000,
+  probes: true,
+  probe_every_secs: 90,
+  failure_window_secs: 86_400,
+};
 
 const STATUS: NodeStatus = {
   member: ME,
@@ -25,6 +41,7 @@ const STATUS: NodeStatus = {
   leader: ME,
   followed_upto: null,
   pending: 1,
+  settings: SETTINGS,
   sync: { neighbours: [], last_sync: [] },
 };
 
@@ -97,6 +114,46 @@ describe("the node page", () => {
     expect(rows[1]).toContain("carol");
     expect(rows[1]).toContain("follower");
     expect(rows[1]).toContain("0 B");
+  });
+
+  it("shows the settings the group was founded with", async () => {
+    open();
+
+    await screen.findByText("Group settings");
+    const said = Object.fromEntries(
+      [...document.querySelectorAll("section:nth-of-type(2) dt")].map((term) => [
+        term.textContent,
+        term.nextElementSibling?.textContent,
+      ]),
+    );
+    expect(said).toEqual({
+      "Copies of each item": "2, the adder's own included",
+      "Weight cap": "1 TB",
+      "Weight step": "5 GB",
+      "Minimum pledge": "50 GB",
+      "Custody follows membership": "after 10 minutes without a change, 2 hours at most",
+      "Emergency copy": "after 2 days with one copy left",
+      "Minimum fetch rate": "2 MB/s",
+      Probes: "every 90 seconds",
+      "Probe failures count for": "1 day",
+      "Proposals wait": "64 changes for approval",
+    });
+  });
+
+  it("says when the group does not probe", async () => {
+    answer = { ...answer, status: { ...STATUS, settings: { ...SETTINGS, probes: false } } };
+    open();
+
+    await screen.findByText("Group settings");
+    expect(screen.getByText(wholly("dd", "off"))).toBeTruthy();
+  });
+
+  it("shows no settings before there is a group", async () => {
+    answer = { ...answer, status: { ...STATUS, group: null, settings: null } };
+    open();
+
+    await screen.findByText(ME);
+    expect(screen.queryByText("Group settings")).toBeNull();
   });
 
   it("shows each member's place in the catalogue's swarm", async () => {

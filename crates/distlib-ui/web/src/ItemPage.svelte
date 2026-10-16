@@ -106,7 +106,6 @@
       {#if item.kind}<dt>Type</dt><dd>{item.kind}</dd>{/if}
       {#if item.lang}<dt>Language</dt><dd>{item.lang}</dd>{/if}
       {#if item.genres}<dt>Genres</dt><dd>{item.genres.join(", ")}</dd>{/if}
-      {#if item.replicas !== null}<dt>Copies kept</dt><dd>{item.replicas}</dd>{/if}
       <dt>Availability</dt>
       <dd>{availability(item.availability)}</dd>
       <dt>Rating</dt>

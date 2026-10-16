@@ -2525,7 +2525,13 @@ async fn a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot() {
     // The snapshot predates `CoreGroupChanged`, so installing it briefly shows
     // a membership in which this node is not core. That used to stand it
     // down, and it looped: follow, be promoted, install the snapshot again.
-    let (founder, joiner) = a_founder_and_its_follower().await;
+    // Settings other than the defaults, so that a snapshot without them
+    // would not pass for one with them.
+    let settings = GroupSettings {
+        replicas: 2.try_into().unwrap(),
+        ..GroupSettings::default()
+    };
+    let (founder, joiner) = a_founder_and_its_follower_with(settings.clone()).await;
     let raft = founder.node.raft().unwrap();
 
     raft.trigger().snapshot().await.unwrap();
@@ -2590,6 +2596,11 @@ async fn a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot() {
     assert!(
         installed.is_some_and(|snapshot| snapshot.index >= snapshot_index),
         "caught up from the snapshot, the entries being gone; got {installed:?}"
+    );
+    assert_eq!(
+        joiner.node.membership().settings(),
+        &settings,
+        "the settings travel in the snapshot"
     );
 
     // Ignoring older memberships must not keep it seated: a demotion is newer

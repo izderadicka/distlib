@@ -14,7 +14,6 @@ const MLOCI: ItemRecord = {
   year: 1936,
   lang: null,
   description: null,
-  replicas: null,
   files: {},
   last_modified: 1790521054348270,
   availability: { held: false, providers: 1 },
