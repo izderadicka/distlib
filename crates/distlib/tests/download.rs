@@ -38,7 +38,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 mod common;
-use common::{api, bound, config, following, record, until_projected};
+use common::{api, bound, config, following, record, until_projected, until_released};
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
 /// project.
@@ -318,10 +318,11 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     // The restart. Bob comes back on a fresh port with the same data
     // directory, which is the only thing carrying the blob across.
     bob.shutdown().await;
-    // Dropped as well as shut down: the runtime holds the redb file open for
+    // Dropped as well as shut down: the runtime holds its databases open for
     // as long as it is alive, and `start` on the same directory would be
-    // refused the lock.
+    // refused the lock — and after the drop, until its tasks are gone too.
     drop(bob);
+    until_released(&bobs_dir).await;
     let bob = Runtime::start(&bob_key, &joining, &bobs_dir).await.unwrap();
     tokio::time::timeout(SOON, bob.catalogue().ready())
         .await

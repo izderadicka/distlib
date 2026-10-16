@@ -1153,6 +1153,7 @@ dependencies = [
  "distlib-sync",
  "iroh",
  "iroh-blobs",
+ "redb",
  "secrecy",
  "serde_json",
  "tempfile",

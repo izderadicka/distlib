@@ -44,6 +44,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# Only to wait for a stopped runtime to let go of its databases.
+redb = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
