@@ -18,6 +18,7 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
     TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
+use distlib_custody::Custody;
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
@@ -86,6 +87,8 @@ pub struct Api {
     pub downloads: PathBuf,
     /// Files `POST /upload` has received, for `library.add`'s `uploads`.
     pub uploads: Uploads,
+    /// Which items this node keeps for the group, and each item's custodians.
+    pub custody: Custody,
 }
 
 impl Api {
@@ -166,6 +169,8 @@ impl Api {
             "pending": membership.pending().count(),
             // Fixed at founding, so null until there is a group.
             "settings": membership.group_id().map(|_| membership.settings()),
+            // Null until custody has been computed.
+            "custody": self.custody.status(),
             "sync": sync_block(&self.catalogue.sync_status().borrow()),
         }))
     }
@@ -490,6 +495,8 @@ impl Api {
         record["files"] = json!(stored.item.files);
         // Whoever wrote one of its file keys, members or not any more.
         record["added_by"] = json!(stored.creators());
+        // Null until custody has been computed.
+        record["custodians"] = json!(self.custody.custodians(&stored.custody_item()));
         record["last_modified"] = json!(stored.last_modified);
         record["availability"] = self.seen().of(&params.item_id);
         record["ratings"] = ratings_summary(&stored.ratings, self.node.id());

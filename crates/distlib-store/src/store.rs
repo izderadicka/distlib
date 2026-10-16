@@ -7,8 +7,8 @@ use std::{
 };
 
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, Item, ItemId, MemberId, Rating, Review,
-    Series, Wish, WishId,
+    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, Item, ItemId, MemberId,
+    Rating, Review, Series, Wish, WishId,
 };
 use rusqlite::{Connection, Row, Statement, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
@@ -66,8 +66,25 @@ pub struct StoredItem {
 impl StoredItem {
     /// Who added the item: whoever wrote any of its file keys.
     pub fn creators(&self) -> BTreeSet<MemberId> {
-        self.file_authors.values().flatten().copied().collect()
+        creators_of(&self.file_authors)
     }
+
+    /// The item as custody sees it: its creators, and all of its files' size.
+    pub fn custody_item(&self) -> CustodyItem {
+        CustodyItem {
+            item: self.item.id,
+            creators: self.creators().into_iter().collect(),
+            size_bytes: self
+                .item
+                .files
+                .values()
+                .fold(0, |total, file| total.saturating_add(file.size)),
+        }
+    }
+}
+
+fn creators_of(file_authors: &BTreeMap<ContentHash, BTreeSet<MemberId>>) -> BTreeSet<MemberId> {
+    file_authors.values().flatten().copied().collect()
 }
 
 /// One row of `bookmarks`: a member's bookmark on an item.
@@ -373,6 +390,38 @@ impl Store {
             let mut stored = row_to_item(row)?;
             details.attach_to(&mut stored);
             Ok(Some(stored))
+        })
+        .await
+    }
+
+    /// Every item as custody sees it, as [`StoredItem::custody_item`] would
+    /// give it, without reading the rest of each item.
+    pub async fn custody_items(&self) -> Result<Vec<CustodyItem>> {
+        self.read(|conn| {
+            let mut file_authors = file_authors_of(conn, None)?;
+            // `TOTAL` rather than `SUM`, which fails on an overflow: one absurd
+            // size written by one member must not stop every node's custody.
+            let mut statement = conn.prepare(
+                "SELECT items.id, TOTAL(item_files.size) FROM items \
+                 LEFT JOIN item_files ON item_files.item = items.id \
+                 GROUP BY items.id ORDER BY items.id",
+            )?;
+            let mut rows = statement.query([])?;
+            let mut items = Vec::new();
+            while let Some(row) = rows.next()? {
+                let item: ItemId = identifier(row, 0, "id")?;
+                let creators = file_authors
+                    .remove(&item)
+                    .map(|authors| creators_of(&authors).into_iter().collect())
+                    .unwrap_or_default();
+                items.push(CustodyItem {
+                    item,
+                    creators,
+                    // Saturating, as the sum in `custody_item` is.
+                    size_bytes: row.get::<_, f64>(1)? as u64,
+                });
+            }
+            Ok(items)
         })
         .await
     }

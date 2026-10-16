@@ -6,6 +6,8 @@ use std::num::{NonZeroU8, NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
+use crate::WeightRule;
+
 const GB: u64 = 1_000_000_000;
 const HOUR: u32 = 60 * 60;
 const DAY: u32 = 24 * HOUR;
@@ -65,6 +67,14 @@ impl Default for GroupSettings {
 }
 
 impl GroupSettings {
+    /// How a pledge becomes a custody weight under these settings.
+    pub fn weight_rule(&self) -> WeightRule {
+        WeightRule {
+            cap_bytes: self.cap_bytes,
+            step_bytes: self.weight_step_bytes.get(),
+        }
+    }
+
     /// Refuses settings that contradict each other, naming what is wrong.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.weight_step_bytes.get() > self.cap_bytes {

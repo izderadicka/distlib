@@ -193,6 +193,7 @@ async fn start_local_api(
         tasks: runtime.tasks().clone(),
         downloads: runtime.downloads().to_path_buf(),
         uploads: runtime.uploads().clone(),
+        custody: runtime.custody().clone(),
     };
     Ok(Some(serve_api(paths, config, api).await?))
 }
@@ -714,6 +715,12 @@ fn print_item_description(item_id: ItemId, answer: &Value) {
         .filter(|list| !list.is_empty())
     {
         println!("added by    {}", join_strings(added_by));
+    }
+    if let Some(custodians) = answer["custodians"]
+        .as_array()
+        .filter(|list| !list.is_empty())
+    {
+        println!("custodians  {}", join_strings(custodians));
     }
 }
 
@@ -1361,6 +1368,7 @@ fn print_live_status(live: &Value) {
         pending => println!("pending     {pending} awaiting approval — see `distlib pending`"),
     }
     print_settings(&live["settings"]);
+    print_custody(&live["custody"]);
     println!("node        running");
 }
 
@@ -1789,6 +1797,21 @@ fn print_settings(settings: &Value) {
         let label = if index == 0 { "settings" } else { "" };
         println!("{label:<12}{key} = {value}");
     }
+}
+
+/// This node's custody and the group's load, once computed.
+fn print_custody(custody: &Value) {
+    if custody.is_null() {
+        return;
+    }
+    let load = custody["load_factor"].as_f64().map_or_else(
+        || "none".to_owned(),
+        |load| format!("{:.0} %", load * 100.0),
+    );
+    println!(
+        "custody     {} items, {} bytes; group load {load}",
+        custody["items"], custody["bytes"]
+    );
 }
 
 /// One member, named if they have a name.

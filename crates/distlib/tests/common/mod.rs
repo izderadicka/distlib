@@ -159,5 +159,6 @@ pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         tasks: runtime.tasks().clone(),
         downloads: runtime.downloads().to_path_buf(),
         uploads: runtime.uploads().clone(),
+        custody: runtime.custody().clone(),
     }
 }

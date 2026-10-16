@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeSet, sync::LazyLock};
 
-use distlib_core::{CustodyGroup, ItemCreators, ItemId, MemberId, WeightRule};
+use distlib_core::{CustodyGroup, CustodyItem, ItemId, MemberId, WeightRule};
 use iroh::SecretKey;
 use proptest::prelude::*;
 
@@ -30,11 +30,12 @@ fn item(n: u32) -> ItemId {
 }
 
 /// Items numbered `0..count`, each created by one of `creators` in turn.
-fn items(count: u32, creators: &[MemberId]) -> Vec<ItemCreators> {
+fn items(count: u32, creators: &[MemberId]) -> Vec<CustodyItem> {
     (0..count)
-        .map(|n| ItemCreators {
+        .map(|n| CustodyItem {
             item: item(n),
             creators: vec![creators[n as usize % creators.len()]],
+            size_bytes: 0,
         })
         .collect()
 }
@@ -232,4 +233,29 @@ fn custody_of_is_is_custodian_over_every_item() {
             assert_eq!(group.custody_of(*member, &all), one_by_one);
         }
     }
+}
+
+#[test]
+fn the_load_factor_is_each_items_size_per_slot_over_the_total_weight() {
+    let [a, b, c, outsider] = [POOL[0], POOL[1], POOL[2], POOL[3]];
+    let group = CustodyGroup::new(REPLICAS, RULE, [(a, 500), (b, 305), (c, 0)]);
+    // Its creator is a member, so two slots: 2 × 100.
+    let by_a_member = CustodyItem {
+        item: item(1),
+        creators: vec![c],
+        size_bytes: 100,
+    };
+    // Its creator is not, so three: 3 × 40.
+    let by_an_outsider = CustodyItem {
+        item: item(2),
+        creators: vec![outsider],
+        size_bytes: 40,
+    };
+    let demand = u128::from(group.demand_bytes(&by_a_member) + group.demand_bytes(&by_an_outsider));
+    assert_eq!(demand, 320);
+    // 500 and 305 weigh 500 and 300.
+    assert_eq!(group.load_factor(demand), Some(0.4));
+
+    let weightless = CustodyGroup::new(REPLICAS, RULE, [(a, 0)]);
+    assert_eq!(weightless.load_factor(demand), None);
 }

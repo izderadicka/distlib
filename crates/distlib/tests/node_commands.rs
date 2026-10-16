@@ -132,8 +132,11 @@ fn a_group_founded_from_the_config_keeps_its_settings_when_the_config_changes() 
 
     let mut node = founder.run(true);
     node.wait_for("members=1");
+    // And its custody, once computed: nothing yet to keep.
     founder.wait_for_status("the node to answer", |status| {
-        status.contains("node        running") && status.contains("replicas = 2")
+        status.contains("node        running")
+            && status.contains("replicas = 2")
+            && status.contains("custody     0 items, 0 bytes; group load ")
     });
     node.stop();
     let printed = run_command(founder.dir.path(), &["status"]);
