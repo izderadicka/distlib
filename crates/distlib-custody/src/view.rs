@@ -1,6 +1,6 @@
 //! This node's custody, as of the last settled membership.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use distlib_core::{CustodyGroup, CustodyItem, ItemId, MemberId};
 use serde::Serialize;
@@ -41,7 +41,7 @@ pub(crate) struct CustodyView {
 impl CustodyView {
     /// Custody of every one of `items` under `group`: the whole pass.
     pub(crate) fn compute(group: CustodyGroup, me: MemberId, items: &[CustodyItem]) -> Self {
-        let mut mine = group.custody_of(me, items).into_iter().peekable();
+        let mine: HashSet<ItemId> = group.custody_of(me, items).into_iter().collect();
         let mut view = Self {
             group,
             me,
@@ -50,10 +50,8 @@ impl CustodyView {
             my_bytes: 0,
             demand_bytes: 0,
         };
-        // `custody_of` keeps the order it was given.
         for item in items {
-            let is_mine = mine.next_if_eq(&item.item).is_some();
-            view.insert(item, is_mine);
+            view.insert(item, mine.contains(&item.item));
         }
         view
     }

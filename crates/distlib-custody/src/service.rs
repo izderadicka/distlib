@@ -23,18 +23,17 @@ pub(crate) async fn run(
         mut events,
         mut replays,
     } = sources;
-    // `None` until the group is known. The first group seen is adopted at
-    // once: at a start, what the log already holds counts as settled.
-    let mut settling: Option<Settling<CustodyGroup>> = None;
+    let Some(mut settling) = first_group(&mut membership).await else {
+        tracing::debug!("the membership log is gone before a group was founded; custody stops");
+        return;
+    };
+    // Item events from before the group are in the first pass. That pass is
+    // the one after the read model's replay, which runs at every start once
+    // the group is known: a replay already finished still counts as changed.
+    events = events.resubscribe();
     let mut replays_open = true;
     loop {
-        if settling.is_none() {
-            settling = first_settled(&membership.borrow_and_update());
-            if let Some(first) = &settling {
-                whole_pass(&store, first.adopted().clone(), me, &view).await;
-            }
-        }
-        let deadline = settling.as_ref().and_then(Settling::deadline);
+        let deadline = settling.deadline();
         tokio::select! {
             changed = membership.changed() => {
                 if changed.is_err() {
@@ -42,12 +41,10 @@ pub(crate) async fn run(
                     return;
                 }
                 let group = custody_group(&membership.borrow_and_update());
-                if let (Some(settling), Some(group)) = (&mut settling, group) {
-                    settling.change(group, Instant::now());
-                }
+                settling.change(group, Instant::now());
             }
             () = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                if let Some(group) = settling.as_mut().and_then(|settling| settling.settle(Instant::now())) {
+                if let Some(group) = settling.settle(Instant::now()) {
                     tracing::info!("the membership has settled; recomputing custody");
                     whole_pass(&store, group.clone(), me, &view).await;
                 }
@@ -55,7 +52,7 @@ pub(crate) async fn run(
             replayed = replays.changed(), if replays_open => {
                 if replayed.is_err() {
                     replays_open = false;
-                } else if let Some(settling) = &settling {
+                } else {
                     whole_pass(&store, settling.adopted().clone(), me, &view).await;
                 }
             }
@@ -66,9 +63,7 @@ pub(crate) async fn run(
                 Ok(_) => {}
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "custody missed item events; recomputing");
-                    if let Some(settling) = &settling {
-                        whole_pass(&store, settling.adopted().clone(), me, &view).await;
-                    }
+                    whole_pass(&store, settling.adopted().clone(), me, &view).await;
                 }
                 Err(RecvError::Closed) => {
                     tracing::error!("the event bus is gone; custody stops");
@@ -79,28 +74,38 @@ pub(crate) async fn run(
     }
 }
 
-/// The group as it is now, taken as settled, with the group's settle periods.
-fn first_settled(membership: &MembershipState) -> Option<Settling<CustodyGroup>> {
-    let group = custody_group(membership)?;
-    let settings = membership.settings();
-    Some(Settling::new(
-        group,
-        Duration::from_secs(settings.settle_secs.into()),
-        Duration::from_secs(settings.max_settle_secs.into()),
-    ))
+/// Waits for the group to be founded, and takes the first group seen as
+/// settled: at a start, what the log already holds counts as settled. `None`
+/// if the log is gone first.
+async fn first_group(
+    membership: &mut watch::Receiver<MembershipState>,
+) -> Option<Settling<CustodyGroup>> {
+    loop {
+        {
+            let current = membership.borrow_and_update();
+            if current.group_id().is_some() {
+                let settings = current.settings();
+                return Some(Settling::new(
+                    custody_group(&current),
+                    Duration::from_secs(settings.settle_secs.into()),
+                    Duration::from_secs(settings.max_settle_secs.into()),
+                ));
+            }
+        }
+        membership.changed().await.ok()?;
+    }
 }
 
-/// The members and pledges custody is computed from, once there is a group.
-fn custody_group(membership: &MembershipState) -> Option<CustodyGroup> {
-    membership.group_id()?;
+/// The members and pledges custody is computed from.
+fn custody_group(membership: &MembershipState) -> CustodyGroup {
     let settings = membership.settings();
-    Some(CustodyGroup::new(
+    CustodyGroup::new(
         settings.replicas.get(),
         settings.weight_rule(),
         membership
             .members()
             .map(|member| (member.member_id, member.pledge_bytes)),
-    ))
+    )
 }
 
 /// Custody of every item, off the async workers: about two seconds a million
@@ -129,6 +134,7 @@ async fn whole_pass(
 
 /// One item added or changed: whether this node keeps it, at once.
 async fn follow_item(store: &Store, item_id: ItemId, view: &watch::Sender<Option<CustodyView>>) {
+    // Before the first pass, which will read it anyway.
     if view.borrow().is_none() {
         return;
     }
