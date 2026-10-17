@@ -56,10 +56,26 @@ impl CustodyView {
         view
     }
 
-    /// One item added or changed since the pass.
-    pub(crate) fn update(&mut self, item: &CustodyItem) {
+    /// One item added or changed since the pass. Answers whether this node
+    /// keeps it.
+    pub(crate) fn update(&mut self, item: &CustodyItem) -> bool {
         let is_mine = self.group.is_custodian(item, self.me);
         self.insert(item, is_mine);
+        is_mine
+    }
+
+    /// Whether this node keeps `item`.
+    pub(crate) fn is_mine(&self, item: ItemId) -> bool {
+        self.items.get(&item).is_some_and(|kept| kept.mine)
+    }
+
+    /// The items this node keeps.
+    pub(crate) fn my_items(&self) -> HashSet<ItemId> {
+        self.items
+            .iter()
+            .filter(|(_, kept)| kept.mine)
+            .map(|(item, _)| *item)
+            .collect()
     }
 
     pub(crate) fn custodians(&self, item: &CustodyItem) -> Vec<MemberId> {

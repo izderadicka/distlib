@@ -27,7 +27,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_core::{ContentHash, MemberId, NodeAddr};
+use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr};
 use distlib_net::{AddressBook, Blobs, blobs::partial_of};
 use iroh::{
     Endpoint, SecretKey,
@@ -409,4 +409,36 @@ async fn a_fetch_nobody_can_serve_reports_failure_not_success() {
         "nobody offered this content, so it is not here"
     );
     assert!(offsets.is_empty(), "nothing arrived: {offsets:?}");
+}
+
+/// What a reason keeps is listed back from its tags, and a release takes away
+/// that reason only.
+#[tokio::test]
+async fn a_released_reason_is_no_longer_listed_and_the_others_stay() {
+    let store = MemStore::new();
+    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    let blobs = Blobs::new(&store, &endpoint);
+    let item = ItemId::from_bytes([1; 32]);
+    let (first, second) = (
+        added(&store, b"first").await,
+        added(&store, b"second").await,
+    );
+    for hash in [first, second] {
+        blobs.keep(KeepReason::Custody, item, hash).await.unwrap();
+    }
+    blobs.keep(KeepReason::Cache, item, first).await.unwrap();
+
+    blobs
+        .release(KeepReason::Custody, item, first)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        blobs.kept(KeepReason::Custody).await.unwrap(),
+        [(item, second)]
+    );
+    assert_eq!(
+        blobs.kept(KeepReason::Cache).await.unwrap(),
+        [(item, first)]
+    );
 }

@@ -4,20 +4,26 @@
 //! Nothing here is stored: custody is a function of the log's members and
 //! pledges and the catalogue's items, computed again at every start.
 
+mod pins;
 mod service;
 mod settling;
 mod view;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use distlib_consensus::MembershipState;
-use distlib_core::{CustodyItem, Event, MemberId};
+use distlib_core::{CustodyItem, Event, ItemId, MemberId};
 use distlib_store::Store;
 use tokio::{
     sync::{broadcast, watch},
     task::JoinHandle,
 };
 
+pub use pins::{PinManager, PinSources};
+use service::Published;
 pub use view::CustodyStatus;
 use view::CustodyView;
 
@@ -39,10 +45,24 @@ pub struct Custody {
     inner: Arc<Inner>,
 }
 
+/// A change to which items this node keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CustodyChange {
+    /// A whole pass: read [`Custody::my_items`] again.
+    Recomputed,
+    /// One item added or changed, and whether this node keeps it.
+    Item { item: ItemId, mine: bool },
+}
+
+/// How many changes may wait for a slow listener before it has to read every
+/// item again.
+const CHANGES_WAITING: usize = 1024;
+
 #[derive(Debug)]
 struct Inner {
     /// `None` until the first pass after the group is known.
     view: watch::Receiver<Option<CustodyView>>,
+    changes: broadcast::Sender<CustodyChange>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -58,10 +78,16 @@ impl Custody {
     /// Starts following `me`'s custody.
     pub fn start(me: MemberId, sources: CustodySources) -> Self {
         let (view_tx, view) = watch::channel(None);
-        let task = tokio::spawn(service::run(me, sources, view_tx));
+        let (changes, _) = broadcast::channel(CHANGES_WAITING);
+        let published = Published {
+            view: view_tx,
+            changes: changes.clone(),
+        };
+        let task = tokio::spawn(service::run(me, sources, published));
         Self {
             inner: Arc::new(Inner {
                 view,
+                changes,
                 task: Mutex::new(Some(task)),
             }),
         }
@@ -75,6 +101,26 @@ impl Custody {
             .borrow()
             .as_ref()
             .map(|view| view.custodians(item))
+    }
+
+    /// The items this node keeps. `None` until custody has been computed.
+    pub(crate) fn my_items(&self) -> Option<HashSet<ItemId>> {
+        self.inner.view.borrow().as_ref().map(CustodyView::my_items)
+    }
+
+    /// Whether this node keeps `item`. `false` until custody has been
+    /// computed.
+    pub(crate) fn keeps(&self, item: ItemId) -> bool {
+        self.inner
+            .view
+            .borrow()
+            .as_ref()
+            .is_some_and(|view| view.is_mine(item))
+    }
+
+    /// Each change to which items this node keeps, from now on.
+    pub(crate) fn changes(&self) -> broadcast::Receiver<CustodyChange> {
+        self.inner.changes.subscribe()
     }
 
     /// This node's custody and the group's load. `None` until computed.

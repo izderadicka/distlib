@@ -23,7 +23,7 @@ use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
-use distlib_custody::{Custody, CustodySources};
+use distlib_custody::{Custody, CustodySources, PinManager, PinSources};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
@@ -58,6 +58,7 @@ pub struct Runtime {
     projection: Projection,
     /// Which items this node keeps for the group.
     custody: Custody,
+    pins: PinManager,
     /// The downloads this node runs, and the bus that it and every other
     /// producer publish to — what this node tells whoever is watching it.
     /// Made here, by the thing that assembles the producers, so that each is
@@ -149,14 +150,17 @@ impl Runtime {
             node.subscribe(),
             tasks.events().clone(),
         );
-        // After the projection, whose read model and events it follows.
-        let custody = Custody::start(
+        // After the projection, whose read model and events custody follows.
+        let (custody, pins) = start_custody(
             member_id(secret),
-            CustodySources {
-                membership: node.subscribe(),
-                store: store.clone(),
-                events: tasks.events().subscribe(),
-                replays: projection.replays(),
+            &CustodyInputs {
+                node: &node,
+                store: &store,
+                projection: &projection,
+                catalogue: &catalogue,
+                availability: &availability,
+                blobs: &media,
+                events: tasks.events(),
             },
         );
 
@@ -181,6 +185,7 @@ impl Runtime {
             search,
             projection,
             custody,
+            pins,
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
@@ -281,6 +286,7 @@ impl Runtime {
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
         self.projection.shutdown();
+        self.pins.shutdown();
         self.custody.shutdown();
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
@@ -372,6 +378,43 @@ async fn start_consensus(
 /// `protected` is the documents' half of the collection: every blob a
 /// catalogue entry references. A pass whose callback cannot answer is
 /// skipped, not run without it.
+/// What custody, and the pin manager keeping it, are computed from.
+struct CustodyInputs<'a> {
+    node: &'a MembershipNode,
+    store: &'a Store,
+    projection: &'a Projection,
+    catalogue: &'a Catalogue,
+    availability: &'a Availability,
+    blobs: &'a Blobs,
+    events: &'a broadcast::Sender<Event>,
+}
+
+/// Starts following `me`'s custody, and keeping it in the blob store.
+fn start_custody(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManager) {
+    let custody = Custody::start(
+        me,
+        CustodySources {
+            membership: inputs.node.subscribe(),
+            store: inputs.store.clone(),
+            events: inputs.events.subscribe(),
+            replays: inputs.projection.replays(),
+        },
+    );
+    let pins = PinManager::start(
+        me,
+        &custody,
+        PinSources {
+            membership: inputs.node.subscribe(),
+            store: inputs.store.clone(),
+            blobs: inputs.blobs.clone(),
+            availability: inputs.availability.clone(),
+            holdings: inputs.catalogue.holdings().clone(),
+            events: inputs.events.subscribe(),
+        },
+    );
+    (custody, pins)
+}
+
 async fn open_blobs(config: &Config, data_dir: &DataDir, protected: ProtectCb) -> Result<FsStore> {
     let root = data_dir.blobs_dir();
     // What `FsStore::load` does, with collection switched on.

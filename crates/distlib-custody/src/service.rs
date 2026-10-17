@@ -6,17 +6,16 @@ use distlib_consensus::MembershipState;
 use distlib_core::{CustodyGroup, Event, ItemId, MemberId};
 use distlib_store::Store;
 use tokio::{
-    sync::{broadcast::error::RecvError, watch},
+    sync::{
+        broadcast::{self, error::RecvError},
+        watch,
+    },
     time::{Instant, sleep_until},
 };
 
-use crate::{CustodySources, settling::Settling, view::CustodyView};
+use crate::{CustodyChange, CustodySources, settling::Settling, view::CustodyView};
 
-pub(crate) async fn run(
-    me: MemberId,
-    sources: CustodySources,
-    view: watch::Sender<Option<CustodyView>>,
-) {
+pub(crate) async fn run(me: MemberId, sources: CustodySources, published: Published) {
     let CustodySources {
         mut membership,
         store,
@@ -46,24 +45,24 @@ pub(crate) async fn run(
             () = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
                 if let Some(group) = settling.settle(Instant::now()) {
                     tracing::info!("the membership has settled; recomputing custody");
-                    whole_pass(&store, group.clone(), me, &view).await;
+                    whole_pass(&store, group.clone(), me, &published).await;
                 }
             }
             replayed = replays.changed(), if replays_open => {
                 if replayed.is_err() {
                     replays_open = false;
                 } else {
-                    whole_pass(&store, settling.adopted().clone(), me, &view).await;
+                    whole_pass(&store, settling.adopted().clone(), me, &published).await;
                 }
             }
             event = events.recv() => match event {
                 Ok(Event::ItemAdded { item_id } | Event::ItemChanged { item_id }) => {
-                    follow_item(&store, item_id, &view).await;
+                    follow_item(&store, item_id, &published).await;
                 }
                 Ok(_) => {}
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "custody missed item events; recomputing");
-                    whole_pass(&store, settling.adopted().clone(), me, &view).await;
+                    whole_pass(&store, settling.adopted().clone(), me, &published).await;
                 }
                 Err(RecvError::Closed) => {
                     tracing::error!("the event bus is gone; custody stops");
@@ -108,14 +107,15 @@ fn custody_group(membership: &MembershipState) -> CustodyGroup {
     )
 }
 
+/// What the task publishes: the view, and each change to this node's items.
+pub(crate) struct Published {
+    pub(crate) view: watch::Sender<Option<CustodyView>>,
+    pub(crate) changes: broadcast::Sender<CustodyChange>,
+}
+
 /// Custody of every item, off the async workers: about two seconds a million
 /// items on one core.
-async fn whole_pass(
-    store: &Store,
-    group: CustodyGroup,
-    me: MemberId,
-    view: &watch::Sender<Option<CustodyView>>,
-) {
+async fn whole_pass(store: &Store, group: CustodyGroup, me: MemberId, published: &Published) {
     let items = match store.custody_items().await {
         Ok(items) => items,
         Err(error) => {
@@ -126,25 +126,34 @@ async fn whole_pass(
     match tokio::task::spawn_blocking(move || CustodyView::compute(group, me, &items)).await {
         Ok(computed) => {
             tracing::info!(custody = ?computed.status(), "custody computed");
-            view.send_replace(Some(computed));
+            published.view.send_replace(Some(computed));
+            // Nobody listening is fine: whoever starts later reads the view.
+            let _ = published.changes.send(CustodyChange::Recomputed);
         }
         Err(error) => tracing::error!(%error, "the custody pass failed"),
     }
 }
 
 /// One item added or changed: whether this node keeps it, at once.
-async fn follow_item(store: &Store, item_id: ItemId, view: &watch::Sender<Option<CustodyView>>) {
+async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
     // Before the first pass, which will read it anyway.
-    if view.borrow().is_none() {
+    if published.view.borrow().is_none() {
         return;
     }
     match store.item(item_id).await {
         Ok(Some(stored)) => {
             let item = stored.custody_item();
-            view.send_modify(|view| {
+            let mut mine = false;
+            published.view.send_modify(|view| {
                 if let Some(view) = view {
-                    view.update(&item);
+                    mine = view.update(&item);
                 }
+            });
+            // Every time, not only when it changes: a file added to an item
+            // this node keeps is one more blob to keep.
+            let _ = published.changes.send(CustodyChange::Item {
+                item: item_id,
+                mine,
             });
         }
         Ok(None) => {}
