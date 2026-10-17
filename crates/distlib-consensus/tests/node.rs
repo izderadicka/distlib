@@ -13,8 +13,8 @@ use std::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{
-    ConsensusError, MemberRecord, MemberlogClient, MembershipEvent, ProposeError, SignedEvent,
-    Timestamp, node::NodeError,
+    ConsensusError, MemberRecord, MemberlogClient, MembershipEvent, MembershipState, ProposeError,
+    SignedEvent, Timestamp, node::NodeError,
 };
 use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AddressBook, Directory};
@@ -1659,6 +1659,97 @@ async fn a_follower_that_reaches_no_core_node_says_who_it_tried() {
         "names the core node it could not get to commit; got {error:?}"
     );
     follower.shutdown().await;
+}
+
+/// What a node reports as the membership, it already enforces: every member
+/// in it is let in. A test or a caller that connects the moment a member
+/// appears must not be refused as a stranger by a lagging allowlist.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_member_a_node_reports_is_one_it_admits() {
+    let one = SecretKey::generate();
+    let two = SecretKey::generate();
+    let (one_id, two_id) = (MemberId::from(one.public()), MemberId::from(two.public()));
+    let first = Peer::start(one, vec![two_id]).await;
+    let second = Peer::start(two, vec![one_id]).await;
+    first
+        .node
+        .init_group(
+            vec![
+                (first.record("first"), first.addr.clone()),
+                (second.record("second"), second.addr.clone()),
+            ],
+            Default::default(),
+            &first.secret,
+        )
+        .await
+        .unwrap();
+
+    let mut reported = second.node.subscribe();
+    let newcomers: Vec<MemberId> = (0..5)
+        .map(|_| MemberId::from(SecretKey::generate().public()))
+        .collect();
+    let admitting = async {
+        for (index, newcomer) in newcomers.iter().enumerate() {
+            first
+                .node
+                .propose(
+                    MembershipEvent::MemberAdded {
+                        member: MemberRecord {
+                            member_id: *newcomer,
+                            display_name: format!("newcomer-{index}"),
+                            pledge_bytes: 0,
+                        },
+                    },
+                    &first.secret,
+                )
+                .await
+                .unwrap();
+            assert!(
+                first.hooks.allowlist().is_allowed(newcomer),
+                "propose returned before its change was enforced"
+            );
+        }
+    };
+    let all_reported = |membership: &MembershipState| {
+        newcomers
+            .iter()
+            .all(|newcomer| membership.is_member(newcomer))
+    };
+    let admits_everyone_in = |membership: &MembershipState| {
+        for member in membership.members() {
+            assert!(
+                second.hooks.allowlist().is_allowed(&member.member_id),
+                "reported {} as a member before admitting them",
+                member.member_id.fmt_short()
+            );
+        }
+    };
+    // Read as it is now, as often as possible.
+    let polling = async {
+        loop {
+            let membership = second.node.membership();
+            admits_everyone_in(&membership);
+            if all_reported(&membership) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    // And as it is announced.
+    let watching = async {
+        while !all_reported(&reported.borrow()) {
+            reported.changed().await.unwrap();
+            admits_everyone_in(&reported.borrow_and_update());
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(admitting, polling, watching)
+    })
+    .await
+    .expect("every newcomer reaches the second node");
+
+    second.shutdown().await;
+    first.shutdown().await;
 }
 
 #[tokio::test]
