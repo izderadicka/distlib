@@ -80,7 +80,6 @@ impl PinManager {
             queue: VecDeque::new(),
             queued: HashSet::new(),
             fetching: None,
-            availability_changed_while_fetching: false,
             waiting: HashSet::new(),
             releasing: HashSet::new(),
         };
@@ -116,10 +115,7 @@ struct Pins {
     queue: VecDeque<ItemId>,
     queued: HashSet<ItemId>,
     /// The item being fetched now.
-    fetching: Option<ItemId>,
-    /// Whether availability changed while it was: a fetch that then fails is
-    /// asked again at once, not at the next change.
-    availability_changed_while_fetching: bool,
+    fetching: Option<InFlight>,
     /// Items whose fetch failed, asked for again when availability changes.
     waiting: HashSet<ItemId>,
     /// Items no longer this node's, kept until enough copies are elsewhere.
@@ -178,12 +174,14 @@ impl Pins {
                     }
                 },
                 Some(joined) = fetches.join_next() => {
-                    let item = self.fetching.take();
+                    let Some(in_flight) = self.fetching.take() else {
+                        continue;
+                    };
                     match joined {
-                        Ok(fetched) => self.fetched(fetched).await,
+                        Ok(fetched) => self.fetched(fetched, in_flight).await,
                         Err(error) => {
                             tracing::error!(%error, "a custody fetch failed");
-                            self.waiting.extend(item);
+                            self.waiting.insert(in_flight.item);
                         }
                     }
                 }
@@ -219,8 +217,14 @@ impl Pins {
     fn want(&mut self, item: ItemId) {
         self.releasing.remove(&item);
         self.waiting.remove(&item);
-        if self.fetching != Some(item) && self.queued.insert(item) {
-            self.queue.push_back(item);
+        match &mut self.fetching {
+            // A file may have been added after the fetch read the item.
+            Some(in_flight) if in_flight.item == item => in_flight.wanted_again = true,
+            _ => {
+                if self.queued.insert(item) {
+                    self.queue.push_back(item);
+                }
+            }
         }
     }
 
@@ -233,13 +237,16 @@ impl Pins {
             return;
         };
         self.queued.remove(&item);
-        self.fetching = Some(item);
-        self.availability_changed_while_fetching = false;
+        self.fetching = Some(InFlight {
+            item,
+            availability_changed: false,
+            wanted_again: false,
+        });
         let keeper = self.keeper.clone();
         fetches.spawn(async move { keeper.keep(item).await });
     }
 
-    async fn fetched(&mut self, fetched: Fetched) {
+    async fn fetched(&mut self, fetched: Fetched, in_flight: InFlight) {
         let Fetched { item, tagged, done } = fetched;
         if !tagged.is_empty() {
             self.tagged.entry(item).or_default().extend(tagged);
@@ -247,7 +254,7 @@ impl Pins {
         if !self.custody.keeps(item) {
             // Lost while it was being fetched.
             self.release_if_safe(item).await;
-        } else if !done && self.availability_changed_while_fetching {
+        } else if in_flight.wanted_again || (!done && in_flight.availability_changed) {
             self.want(item);
         } else if !done {
             self.waiting.insert(item);
@@ -257,7 +264,9 @@ impl Pins {
     /// A member came or went, or announced what it holds: a fetch that
     /// failed may now succeed, and an item may now have its copies elsewhere.
     async fn availability_changed(&mut self) {
-        self.availability_changed_while_fetching = self.fetching.is_some();
+        if let Some(in_flight) = &mut self.fetching {
+            in_flight.availability_changed = true;
+        }
         for item in std::mem::take(&mut self.waiting) {
             if self.custody.keeps(item) {
                 self.want(item);
@@ -273,7 +282,10 @@ impl Pins {
     /// cache — once its copies elsewhere make up for this one, if this node
     /// holds it.
     async fn release_if_safe(&mut self, item: ItemId) {
-        if self.fetching == Some(item) {
+        if self
+            .fetching
+            .is_some_and(|in_flight| in_flight.item == item)
+        {
             // Decided once the fetch is done.
             return;
         }
@@ -297,6 +309,17 @@ impl Pins {
             }
         }
     }
+}
+
+/// The item being fetched, and what happened while it was.
+#[derive(Debug, Clone, Copy)]
+struct InFlight {
+    item: ItemId,
+    /// A fetch that then fails is asked again at once, not at the next
+    /// change.
+    availability_changed: bool,
+    /// The item changed, so it is kept again however the fetch ends.
+    wanted_again: bool,
 }
 
 /// One item's fetch, as it ended.
