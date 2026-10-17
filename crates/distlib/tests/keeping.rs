@@ -6,67 +6,24 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{num::NonZeroU32, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use distlib::Runtime;
-use distlib_api::Api;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{Config, ContentHash, DataDir, ItemId, MemberId};
+use distlib_core::{ContentHash, DataDir, ItemId, MemberId};
 use iroh::SecretKey;
 use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, following, record, until_projected};
+use common::{
+    api, bound, collecting, config, download, following, record, until_a_pass_collects,
+    until_projected,
+};
 
 /// Long enough for in-process nodes to elect, replicate, reconcile, project
 /// and collect.
 const SOON: Duration = Duration::from_secs(60);
-
-/// A configuration that collects every second.
-fn collecting(mut config: Config) -> Config {
-    config.storage.gc_interval_secs = NonZeroU32::MIN;
-    config
-}
-
-/// Waits for `runtime` to collect a blob nothing keeps: a file imported and
-/// let go, as a refused `library.add` leaves one.
-async fn until_a_pass_collects(runtime: &Runtime, dir: &Path, marker: &str) {
-    let path = dir.join(marker);
-    std::fs::write(&path, marker).unwrap();
-    let hash = runtime.catalogue().add_file(&path).await.unwrap().hash;
-    tokio::time::timeout(SOON, async {
-        while runtime.blobs().has(hash).await.unwrap() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{marker} was never collected"));
-}
-
-/// Downloads all of `item` through `api`, waiting until the task finishes.
-async fn download(api: &Api, item: ItemId, dest: &Path) {
-    let started = api
-        .call(
-            "library.download",
-            Some(json!({ "item_id": item, "dest": dest })),
-        )
-        .await
-        .unwrap();
-    let task = json!({ "task_id": started["task_id"] });
-    tokio::time::timeout(SOON, async {
-        loop {
-            let state = api.call("library.task", Some(task.clone())).await.unwrap();
-            match state["state"].as_str() {
-                Some("running") => tokio::time::sleep(Duration::from_millis(50)).await,
-                Some("finished") => return,
-                _ => panic!("the download did not finish: {state}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-}
 
 /// The title `runtime` reads for `item`, which is missing if the content of
 /// its entry was collected: an item reads as what of it is here.

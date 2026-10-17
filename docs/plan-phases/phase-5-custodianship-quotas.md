@@ -8,7 +8,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
-5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b.** Four rounds of review on #133 shaped it;
+5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -469,7 +469,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Seventeen PRs — fourteen planned, 5a-3 and 5b-1 each split in two, and 5c-0 added in review. Each ends compiling,
+Eighteen PRs — fourteen planned, 5a-3, 5b-1 and 5b-2 each split in two, and 5c-0 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -507,7 +507,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (7 PRs)
+### 5b — keeping items (8 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -529,6 +529,16 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node made custodian fetches the item without anybody asking; losing custody, it
   keeps the item as cache; the queue fetches one-copy items first; the fetch rate holds within a
   tolerance and is raised to the group minimum; an item already cached is promoted without a fetch.
+  *Split in two:* **5b-2a** *(done; delta P5-11)* — the pin manager in `distlib-custody`: `custody/`
+  tags on every file of each item this node keeps, fetched one at a time in `library.download`'s
+  provider order, given up after 60 s without progress and asked again when availability changes;
+  an item already here is only tagged; a lost item falls into the cache once `replicas` online
+  members other than this node announce it. Its acceptance is the first, second and last points
+  above. **5b-2b** — the queue: `[custody] fetch_rate`, raised to `min_fetch_rate` with a warning
+  and enforced by pacing between blobs (a large file still arrives at full speed, then waits);
+  items with the fewest live copies first, reordered rather than restarted; at most a configured
+  number of fetches at once in total, ten by default, in the node's own config (Ivan: a cap per
+  providing peer can come later). Its acceptance is the other two points.
 
 - **5b-3 — the storage limit and the cache's eviction.** `[storage] limit_bytes`, last-used times,
   and eviction least recently used first whenever own + custody + cache is over the limit.

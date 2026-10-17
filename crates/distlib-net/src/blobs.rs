@@ -114,6 +114,49 @@ impl Blobs {
             })
     }
 
+    /// Stops keeping `hash`, one of `item`'s blobs, for `reason`. The blob
+    /// stays while another tag keeps it, and goes at the next garbage
+    /// collection when none does.
+    pub async fn release(&self, reason: KeepReason, item: ItemId, hash: ContentHash) -> Result<()> {
+        let tag = reason.tag(item, hash);
+        self.store
+            .tags()
+            .delete(&tag)
+            .await
+            .map(|_deleted| ())
+            .map_err(|source| NetError::Release {
+                tag,
+                source: Box::new(source),
+            })
+    }
+
+    /// Every item and blob kept for `reason`, whether its bytes are here yet
+    /// or not.
+    pub async fn kept(&self, reason: KeepReason) -> Result<Vec<(ItemId, ContentHash)>> {
+        let failed = |source: Box<dyn std::error::Error + Send + Sync>| NetError::ListKept {
+            prefix: reason.prefix(),
+            source,
+        };
+        let mut tags = self
+            .store
+            .tags()
+            .list_prefix(reason.prefix())
+            .await
+            .map_err(|source| failed(Box::new(source)))?;
+        let mut kept = Vec::new();
+        while let Some(tag) = tags.next().await {
+            let tag = tag.map_err(|source| failed(Box::new(source)))?;
+            match std::str::from_utf8(tag.name.as_ref())
+                .ok()
+                .and_then(|name| reason.parse(name))
+            {
+                Some(item_and_blob) => kept.push(item_and_blob),
+                None => tracing::warn!(tag = ?tag.name, "a tag that names no item and blob"),
+            }
+        }
+        Ok(kept)
+    }
+
     /// Fetches `hash` into the store this was built from, trying `providers`
     /// one at a time, **in the order given**. The caller knows who is online
     /// and who holds what; this does not, so it does not reorder them.

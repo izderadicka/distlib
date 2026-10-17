@@ -13,7 +13,10 @@
 pub mod process;
 
 use std::{
+    borrow::Borrow,
     net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU32,
+    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -21,8 +24,11 @@ use std::{
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::MemberRecord;
-use distlib_core::{Config, CoreMember, DataDir, ItemId, MemberId, NetConfig, NodeAddr};
+use distlib_core::{
+    Config, CoreMember, DataDir, GroupSettings, ItemId, MemberId, NetConfig, NodeAddr,
+};
 use iroh::SecretKey;
+use serde_json::json;
 
 /// Waits until a stopped runtime has let go of every database in `data_dir`.
 ///
@@ -118,7 +124,7 @@ pub fn bound(runtime: &Runtime) -> NodeAddr {
 }
 
 /// How long a test waits for a node to project an item it was sent.
-const PROJECTED_WITHIN: Duration = Duration::from_secs(60);
+const PROJECTED_WITHIN: Duration = SOON;
 
 /// Waits until this node's read model holds `item` with all `files` of its
 /// files — which is what `library.download` reads, so a download asked for
@@ -161,4 +167,83 @@ pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
     }
+}
+
+/// Long enough for in-process nodes to elect, replicate, reconcile, project,
+/// fetch and collect.
+const SOON: Duration = Duration::from_secs(60);
+
+/// A configuration that collects every second.
+pub fn collecting(mut config: Config) -> Config {
+    config.storage.gc_interval_secs = NonZeroU32::MIN;
+    config
+}
+
+/// Waits for `runtime` to collect a blob nothing keeps: a file imported and
+/// let go, as a refused `library.add` leaves one.
+pub async fn until_a_pass_collects(runtime: &Runtime, dir: &Path, marker: &str) {
+    let path = dir.join(marker);
+    std::fs::write(&path, marker).unwrap();
+    let hash = runtime.catalogue().add_file(&path).await.unwrap().hash;
+    tokio::time::timeout(SOON, async {
+        while runtime.blobs().has(hash).await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{marker} was never collected"));
+}
+
+/// Downloads all of `item` through `api`, waiting until the task finishes.
+pub async fn download(api: &Api, item: ItemId, dest: &Path) {
+    let started = api
+        .call(
+            "library.download",
+            Some(json!({ "item_id": item, "dest": dest })),
+        )
+        .await
+        .unwrap();
+    let task = json!({ "task_id": started["task_id"] });
+    tokio::time::timeout(SOON, async {
+        loop {
+            let state = api.call("library.task", Some(task.clone())).await.unwrap();
+            match state["state"].as_str() {
+                Some("running") => tokio::time::sleep(Duration::from_millis(50)).await,
+                Some("finished") => return,
+                _ => panic!("the download did not finish: {state}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Founds the group of `runtimes`, each member pledging what `pledges` says.
+pub async fn found<R: Borrow<Runtime>>(
+    runtimes: &[R],
+    founder: &SecretKey,
+    pledges: &[(MemberId, u64)],
+    settings: &GroupSettings,
+) {
+    let founders = runtimes
+        .iter()
+        .zip(pledges)
+        .map(|(runtime, (member_id, pledge_bytes))| {
+            let runtime = runtime.borrow();
+            (
+                MemberRecord {
+                    member_id: *member_id,
+                    display_name: member_id.to_string(),
+                    pledge_bytes: *pledge_bytes,
+                },
+                bound(runtime),
+            )
+        })
+        .collect();
+    runtimes[0]
+        .borrow()
+        .node()
+        .init_group(founders, settings.clone(), founder)
+        .await
+        .unwrap();
 }

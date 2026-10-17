@@ -26,11 +26,13 @@ use tokio::{sync::watch, time::Instant};
 
 use crate::error::{Result, SyncError};
 
+mod ask_order;
 mod heartbeat;
 mod holders;
 mod online;
 mod statement;
 
+pub use ask_order::ask_order;
 pub use heartbeat::{Availability, Sources, topic_for};
 
 /// The items every one of whose content files is complete in this node's

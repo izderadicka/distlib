@@ -10,7 +10,6 @@ use std::{collections::BTreeMap, num::NonZeroU8, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_consensus::MemberRecord;
 use distlib_core::{
     ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, FileRole, GroupSettings, Item,
     ItemId, MemberId,
@@ -20,7 +19,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, init_logging, until_released};
+use common::{api, config, found, init_logging, until_released};
 
 const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
@@ -106,34 +105,6 @@ async fn until_all_say(
         agreed.is_ok(),
         "{when}: the nodes never agreed within {SOON:?}\n  expected {expected:#?}\n  said {last:#?}"
     );
-}
-
-/// Founds the group of `runtimes`, each member pledging what `pledges` says.
-async fn found(
-    runtimes: &[Runtime],
-    founder: &SecretKey,
-    pledges: &[(MemberId, u64)],
-    settings: &GroupSettings,
-) {
-    let founders = runtimes
-        .iter()
-        .zip(pledges)
-        .map(|(runtime, (member_id, pledge_bytes))| {
-            (
-                MemberRecord {
-                    member_id: *member_id,
-                    display_name: member_id.to_string(),
-                    pledge_bytes: *pledge_bytes,
-                },
-                bound(runtime),
-            )
-        })
-        .collect();
-    runtimes[0]
-        .node()
-        .init_group(founders, settings.clone(), founder)
-        .await
-        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
