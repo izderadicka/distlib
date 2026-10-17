@@ -25,6 +25,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr,
     Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
+use distlib_custody::{Custody, CustodySources};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
@@ -73,6 +74,19 @@ fn availability(
         tasks.events().clone(),
     )
     .unwrap()
+}
+
+/// The custody `Api` reports. No projection runs here, so nothing replays.
+fn custody(node: &MembershipNode, store: &Store, tasks: &Tasks) -> Custody {
+    Custody::start(
+        node.id(),
+        CustodySources {
+            membership: node.subscribe(),
+            store: store.clone(),
+            events: tasks.events().subscribe(),
+            replays: tokio::sync::watch::channel(0).1,
+        },
+    )
 }
 
 fn init_logging() {
@@ -231,6 +245,7 @@ impl Harness {
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
+                custody: custody(&node, &store, &tasks),
             },
             SecretString::from(token.clone()),
         )
@@ -403,6 +418,7 @@ impl Harness {
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
+                custody: custody(&nodes[0], &store, &tasks),
             },
             SecretString::from(token.clone()),
         )

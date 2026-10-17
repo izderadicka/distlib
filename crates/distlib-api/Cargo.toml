@@ -19,6 +19,8 @@ slow-tests = []
 distlib-core = { workspace = true }
 distlib-consensus = { workspace = true }
 distlib-store = { workspace = true }
+# For `node.status`'s custody and `library.item`'s custodians.
+distlib-custody = { workspace = true }
 distlib-sync = { workspace = true }
 # For `library.download`: fetching a media blob from the members who might
 # hold it, and writing it out to a file. The whole of this crate's contact

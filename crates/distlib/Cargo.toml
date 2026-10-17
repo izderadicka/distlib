@@ -29,6 +29,7 @@ distlib-consensus = { workspace = true }
 distlib-api = { workspace = true }
 distlib-sync = { workspace = true }
 distlib-store = { workspace = true }
+distlib-custody = { workspace = true }
 serde_json = { workspace = true }
 # `distlib ui` is the one place the binary reads the API token out of its
 # wrapper, to print the signed-in link.

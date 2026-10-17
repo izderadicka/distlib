@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
 use distlib_consensus::MembershipNode;
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
+use distlib_custody::{Custody, CustodySources};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
@@ -55,6 +56,8 @@ pub struct Runtime {
     /// Held rather than detached: dropping it stops the task, so a runtime
     /// that goes away does not leave one writing to a database nobody reads.
     projection: Projection,
+    /// Which items this node keeps for the group.
+    custody: Custody,
     /// The downloads this node runs, and the bus that it and every other
     /// producer publish to — what this node tells whoever is watching it.
     /// Made here, by the thing that assembles the producers, so that each is
@@ -146,6 +149,16 @@ impl Runtime {
             node.subscribe(),
             tasks.events().clone(),
         );
+        // After the projection, whose read model and events it follows.
+        let custody = Custody::start(
+            member_id(secret),
+            CustodySources {
+                membership: node.subscribe(),
+                store: store.clone(),
+                events: tasks.events().subscribe(),
+                replays: projection.replays(),
+            },
+        );
 
         // Nothing is answered until here: the endpoint has been advertising
         // these ALPNs since it bound, and a peer arriving in the window
@@ -167,6 +180,7 @@ impl Runtime {
             store,
             search,
             projection,
+            custody,
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
@@ -208,6 +222,11 @@ impl Runtime {
     /// The task keeping the read model in step — `admin.reindex` drives it.
     pub fn projection(&self) -> &Projection {
         &self.projection
+    }
+
+    /// Which items this node keeps for the group.
+    pub fn custody(&self) -> &Custody {
+        &self.custody
     }
 
     /// The event bus: what the projection publishes into, and what the local
@@ -262,6 +281,7 @@ impl Runtime {
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
         self.projection.shutdown();
+        self.custody.shutdown();
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.

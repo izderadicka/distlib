@@ -35,7 +35,7 @@ pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
     RelayMode, StorageConfig,
 };
-pub use custody::{CustodyGroup, ItemCreators, WeightRule};
+pub use custody::{CustodyGroup, CustodyItem, WeightRule};
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
 pub use group_settings::GroupSettings;

@@ -8,7 +8,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
-5a-3a (#136), 5a-3b (#137); 5b-1a.** Four rounds of review on #133 shaped it;
+5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -515,10 +515,14 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** five in-process nodes agree on every item's custodians; a burst of membership
   changes inside `settle_secs` causes one recompute, and a group that never settles recomputes at
   `max_settle_secs`; the load factor matches a hand-computed one.
-  *Split in two:* **5b-1a** *(delta P5-8)* — every author of an item's file keys read from the
+  *Split in two:* **5b-1a** *(done in #138; delta P5-8)* — every author of an item's file keys read from the
   catalogue into the read model's `file_authors` table, shown as `added_by` by `library.item` and
-  `distlib item`; **5b-1b** — the custody service, in a new `distlib-custody` crate, with the
-  custodians in `library.item` and custody in `node.status`. The item page's custodians move to 5b-6.
+  `distlib item`; **5b-1b** *(done; deltas P5-9 and P5-10)* — the custody service, in a new
+  `distlib-custody` crate, with the custodians in `library.item` and `distlib item`, and this node's
+  custody and the load factor in `node.status` and `distlib status`. The membership at a start, or
+  the first group a new node learns, is taken as settled at once; a new or changed item is checked
+  at once; a replay of the read model, or a missed event, runs the whole pass again. An item's size
+  is all of its files. The item page's custodians move to 5b-6.
 
 - **5b-2 — the pin manager (D5, D7).** Custody tags set and released; a released item falls into the
   cache, and only once it has its copies elsewhere; fetches throttled and prioritized.

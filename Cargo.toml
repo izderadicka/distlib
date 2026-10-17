@@ -6,6 +6,7 @@ members = [
     "crates/distlib-consensus",
     "crates/distlib-sync",
     "crates/distlib-store",
+    "crates/distlib-custody",
     "crates/distlib-ui",
     "crates/distlib-api",
     "crates/distlib",
@@ -159,6 +160,7 @@ distlib-consensus = { path = "crates/distlib-consensus", default-features = fals
 distlib-api = { path = "crates/distlib-api", default-features = false }
 distlib-sync = { path = "crates/distlib-sync", default-features = false }
 distlib-store = { path = "crates/distlib-store" }
+distlib-custody = { path = "crates/distlib-custody" }
 distlib-ui = { path = "crates/distlib-ui" }
 
 [workspace.lints.rust]

@@ -1148,6 +1148,7 @@ dependencies = [
  "distlib-api",
  "distlib-consensus",
  "distlib-core",
+ "distlib-custody",
  "distlib-net",
  "distlib-store",
  "distlib-sync",
@@ -1172,6 +1173,7 @@ dependencies = [
  "data-encoding",
  "distlib-consensus",
  "distlib-core",
+ "distlib-custody",
  "distlib-net",
  "distlib-store",
  "distlib-sync",
@@ -1236,6 +1238,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.9.8",
+ "tracing",
+]
+
+[[package]]
+name = "distlib-custody"
+version = "0.1.0"
+dependencies = [
+ "distlib-consensus",
+ "distlib-core",
+ "distlib-store",
+ "iroh",
+ "serde",
+ "tokio",
  "tracing",
 ]
 

@@ -22,8 +22,8 @@
 use std::collections::BTreeMap;
 
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemId, ItemKind,
-    MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, FileRole, Item, ItemId,
+    ItemKind, MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_store::{BookmarkFilter, Store, StoredBookmark, StoredItem, StoredMember, StoredWish};
 use proptest::prelude::*;
@@ -266,6 +266,30 @@ proptest! {
             store.upsert_item(stored.clone()).await.expect("the item is written");
             let read = store.item(id).await.expect("the item is read");
             prop_assert_eq!(read, Some(stored));
+            Ok(())
+        })?;
+    }
+
+    /// Custody's narrow read of every item says what each whole item says.
+    #[test]
+    fn custody_items_are_what_each_stored_item_says(items in distinct_items(0..5)) {
+        runtime().block_on(async {
+            let store = empty().await;
+            for mut stored in items {
+                // Real sizes, so that a sum of them is exact.
+                for file in stored.item.files.values_mut() {
+                    file.size >>= 20;
+                }
+                store.upsert_item(stored).await.expect("the item is written");
+            }
+            let whole: Vec<CustodyItem> = store
+                .items()
+                .await
+                .expect("the items are read")
+                .iter()
+                .map(StoredItem::custody_item)
+                .collect();
+            prop_assert_eq!(store.custody_items().await.expect("read"), whole);
             Ok(())
         })?;
     }

@@ -125,6 +125,7 @@ impl ReindexHandle {
 pub struct Projection {
     task: JoinHandle<()>,
     reindex: ReindexHandle,
+    replays: watch::Receiver<u64>,
 }
 
 impl Drop for Projection {
@@ -148,11 +149,21 @@ impl Projection {
         events: broadcast::Sender<Event>,
     ) -> Self {
         let (reindex_tx, reindex_rx) = mpsc::channel(REINDEX_QUEUE);
-        let task = tokio::spawn(run(catalogue, store, index, membership, events, reindex_rx));
+        let (replays_tx, replays) = watch::channel(0);
+        let task = tokio::spawn(run(
+            catalogue, store, index, membership, events, reindex_rx, replays_tx,
+        ));
         Self {
             task,
             reindex: ReindexHandle(reindex_tx),
+            replays,
         }
+    }
+
+    /// How many replays have finished. A replay rewrites items without
+    /// publishing events, so whoever follows the items reads them all again.
+    pub fn replays(&self) -> watch::Receiver<u64> {
+        self.replays.clone()
     }
 
     /// Stops the task. Dropping this does the same.
@@ -189,6 +200,7 @@ async fn run(
     mut membership: watch::Receiver<MembershipState>,
     events: broadcast::Sender<Event>,
     mut reindex_rx: mpsc::Receiver<oneshot::Sender<()>>,
+    replays: watch::Sender<u64>,
 ) {
     // A node with no group yet — freshly started, not founded or joined —
     // waits here indefinitely, which `distlib run` warns about on its own. A
@@ -228,6 +240,7 @@ async fn run(
         store,
         index,
         members,
+        replays,
         items_waiting_for_content: BTreeSet::new(),
         items_with_bookmarks_waiting_for_content: BTreeSet::new(),
         wishes_waiting_for_content: BTreeSet::new(),
@@ -292,6 +305,8 @@ struct ReadModelWriter {
     index: SearchIndex,
     /// Whose ratings, reviews and bookmarks are projected (D9).
     members: BTreeSet<MemberId>,
+    /// Counts each finished [`Self::replay`].
+    replays: watch::Sender<u64>,
     /// Items last projected with an entry missing its content.
     items_waiting_for_content: BTreeSet<ItemId>,
     /// Items whose bookmarks were last projected with one missing its content.
@@ -492,6 +507,7 @@ impl ReadModelWriter {
         self.project_items(items).await;
         self.project_bookmarks(bookmarked_items).await;
         self.project_wishes(wishes).await;
+        self.replays.send_modify(|count| *count += 1);
     }
 }
 
