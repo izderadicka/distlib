@@ -24,7 +24,7 @@ pub(crate) async fn run(
         mut replays,
     } = sources;
     let Some(mut settling) = first_group(&mut membership).await else {
-        tracing::debug!("the membership log is gone before a group was founded; custody stops");
+        tracing::error!("the membership log is gone before a group was founded; custody stops");
         return;
     };
     // Item events from before the group are in the first pass. That pass is
@@ -37,7 +37,7 @@ pub(crate) async fn run(
         tokio::select! {
             changed = membership.changed() => {
                 if changed.is_err() {
-                    tracing::debug!("the membership log is gone; custody stops");
+                    tracing::error!("the membership log is gone; custody stops");
                     return;
                 }
                 let group = custody_group(&membership.borrow_and_update());
@@ -119,7 +119,7 @@ async fn whole_pass(
     let items = match store.custody_items().await {
         Ok(items) => items,
         Err(error) => {
-            tracing::warn!(%error, "could not read the items to compute custody");
+            tracing::error!(%error, "could not read the items to compute custody");
             return;
         }
     };
