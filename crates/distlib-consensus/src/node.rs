@@ -427,6 +427,9 @@ pub struct MembershipNode {
     /// alternative is an `Option` whose `None` arm is unreachable.
     sources: SharedSources,
     state_machine: StateMachineStore,
+    /// The membership as this node enforces it: published by the allowlist
+    /// task once the allowlist admits what it says.
+    enforced: watch::Receiver<MembershipState>,
     endpoint: Endpoint,
     /// Where members have said they can be reached.
     ///
@@ -619,12 +622,8 @@ impl MembershipNode {
         let (gossip, own_address) =
             spawn_join_topic(&role, swarm.clone(), &endpoint, &directory, &hints);
 
-        let allowlist_updates = tokio::spawn(follow_membership(
-            state_machine.clone(),
-            allowlist,
-            addresses,
-            hooks.clone(),
-        ));
+        let (allowlist_updates, enforced) =
+            enforce_membership(&state_machine, allowlist, addresses, hooks.clone());
         let evictions = tokio::spawn(hooks.evict_expelled());
 
         start_first_role(&role);
@@ -640,6 +639,7 @@ impl MembershipNode {
             seat,
             sources,
             state_machine,
+            enforced,
             endpoint,
             // Where members have said they can be reached; see
             // `distlib_net::Directory`.
@@ -707,18 +707,21 @@ impl MembershipNode {
         self.state_machine.core_addresses()
     }
 
-    /// The membership derived from the log so far.
+    /// The membership derived from the log so far, as this node enforces it.
+    ///
+    /// Behind the log by the moment it takes to rewrite the allowlist, so a
+    /// member this reports is one this node already admits.
     pub fn membership(&self) -> MembershipState {
-        self.state_machine.membership()
+        self.enforced.borrow().clone()
     }
 
-    /// Watches the membership, for whoever has to react to it changing.
+    /// Watches [`Self::membership`], for whoever has to react to it changing.
     ///
     /// A running node holds the database exclusively, so this is the only way
     /// anything outside the process can see the group: `distlib run` logs each
     /// change rather than leaving observers to poll a file they cannot open.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<MembershipState> {
-        self.state_machine.subscribe()
+        self.enforced.clone()
     }
 
     /// The Raft, for callers that need to inspect it.
@@ -934,7 +937,7 @@ impl MembershipNode {
     /// just refused the proposal for being stale. What failed is this node
     /// keeping up with it.
     async fn catch_up_to(&self, changed_at: u64) -> Result<()> {
-        let mut memberships = self.state_machine.subscribe();
+        let mut memberships = self.subscribe();
         let behind = || NodeError::BehindTheGroup { changed_at };
 
         tokio::time::timeout(LEADERSHIP_TIMEOUT, async {
@@ -1502,6 +1505,26 @@ async fn join_topic(
     );
 }
 
+/// Starts [`follow_membership`], and answers with the membership it enforces.
+fn enforce_membership(
+    state_machine: &StateMachineStore,
+    writer: AllowlistWriter,
+    addresses: AddressBook,
+    hooks: AllowlistHooks,
+) -> (JoinHandle<()>, watch::Receiver<MembershipState>) {
+    // Starts from what the log holds: until the router serves, nobody can
+    // connect to be refused.
+    let (enforced_tx, enforced) = watch::channel(state_machine.membership());
+    let task = tokio::spawn(follow_membership(
+        state_machine.clone(),
+        writer,
+        addresses,
+        hooks,
+        enforced_tx,
+    ));
+    (task, enforced)
+}
+
 /// Carries every membership change from the log to the allowlist.
 ///
 /// The one place where consensus and the transport meet. It runs until the
@@ -1511,6 +1534,7 @@ async fn follow_membership(
     writer: AllowlistWriter,
     addresses: AddressBook,
     hooks: AllowlistHooks,
+    enforced: watch::Sender<MembershipState>,
 ) {
     let mut memberships = state_machine.subscribe();
     // What this task last published, so it can tell a core node that has
@@ -1551,6 +1575,8 @@ async fn follow_membership(
             // which is precisely how they would replicate the founding entry.
             tracing::debug!("no group founded yet; leaving the bootstrap allowlist in place");
         }
+        // Only now: whoever reads the membership can rely on it being enforced.
+        enforced.send_replace(membership);
 
         if memberships.changed().await.is_err() {
             tracing::error!("membership channel closed");
