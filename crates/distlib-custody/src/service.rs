@@ -65,13 +65,13 @@ pub(crate) async fn run(
                 }
                 Ok(_) => {}
                 Err(RecvError::Lagged(missed)) => {
-                    tracing::debug!(missed, "custody missed item events; recomputing");
+                    tracing::warn!(missed, "custody missed item events; recomputing");
                     if let Some(settling) = &settling {
                         whole_pass(&store, settling.adopted().clone(), me, &view).await;
                     }
                 }
                 Err(RecvError::Closed) => {
-                    tracing::debug!("the event bus is gone; custody stops");
+                    tracing::error!("the event bus is gone; custody stops");
                     return;
                 }
             },
