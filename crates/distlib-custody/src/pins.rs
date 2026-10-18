@@ -102,6 +102,7 @@ impl PinManager {
             },
             custody: custody.clone(),
             pins: HashMap::new(),
+            next_turn: Turn::default(),
             max_fetches,
             counts: counts_sender,
         };
@@ -136,9 +137,10 @@ impl PinManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pin {
     /// Waiting its turn to be fetched: the items with the fewest live copies
-    /// go first, counted when a turn comes, so a queue is reordered as
-    /// copies come and go and a fetch under way is never restarted.
-    Queued,
+    /// go first, counted when a slot frees, so a queue is reordered as
+    /// copies come and go and a fetch under way is never restarted. Among
+    /// items with as many copies, the earliest `turn` goes first.
+    Queued { turn: Turn },
     /// Being fetched by `task`, and what happened meanwhile.
     Fetching {
         task: task::Id,
@@ -157,11 +159,26 @@ enum Pin {
     Releasing,
 }
 
+/// When an item joined the queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Turn(u64);
+
+impl Turn {
+    /// This turn, moving `self` on to the next one.
+    fn take(&mut self) -> Self {
+        let turn = *self;
+        self.0 += 1;
+        turn
+    }
+}
+
 /// The task's state: every item with `custody/` tags, or about to have them.
 struct Pins {
     keeper: Keeper,
     custody: Custody,
     pins: HashMap<ItemId, Pin>,
+    /// The turn the next item to join the queue gets.
+    next_turn: Turn,
     max_fetches: NonZeroUsize,
     counts: watch::Sender<PinCounts>,
 }
@@ -234,7 +251,7 @@ impl Pins {
             .values()
             .fold(PinCounts::default(), |mut counts, pin| {
                 match pin {
-                    Pin::Queued => counts.queued += 1,
+                    Pin::Queued { .. } => counts.queued += 1,
                     Pin::Fetching { .. } => counts.fetching += 1,
                     Pin::Failed => counts.failed += 1,
                     Pin::Kept => counts.kept += 1,
@@ -260,7 +277,7 @@ impl Pins {
             let needs_keeping = match self.pins.get(item) {
                 None | Some(Pin::Releasing) => true,
                 Some(Pin::Kept) => !self.keeper.holdings.holds(*item),
-                Some(Pin::Queued | Pin::Fetching { .. } | Pin::Failed) => false,
+                Some(Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed) => false,
             };
             if needs_keeping {
                 self.want(*item);
@@ -280,10 +297,14 @@ impl Pins {
     /// Queues `item` to be kept, or, if it is being fetched, to be fetched
     /// again once that ends.
     fn want(&mut self, item: ItemId) {
-        let pin = self.pins.entry(item).or_insert(Pin::Queued);
-        match pin {
-            Pin::Fetching { wanted_again, .. } => *wanted_again = true,
-            Pin::Queued | Pin::Failed | Pin::Kept | Pin::Releasing => *pin = Pin::Queued,
+        let pin = wanted(self.pins.get(&item).copied(), self.next_turn.take());
+        self.pins.insert(item, pin);
+    }
+
+    /// The state of an item joining the queue now, behind those already in.
+    fn queued(&mut self) -> Pin {
+        Pin::Queued {
+            turn: self.next_turn.take(),
         }
     }
 
@@ -317,29 +338,21 @@ impl Pins {
         }
     }
 
-    /// Up to `count` of the queued items, those with the fewest live copies:
-    /// an item down to one copy is fetched before one at two.
+    /// Up to `count` of the queued items, those with the fewest live copies
+    /// first.
     fn fewest_copies_first(&self, count: usize) -> Vec<ItemId> {
-        let queued: Vec<ItemId> = self
+        if !self
             .pins
-            .iter()
-            .filter(|(_, pin)| **pin == Pin::Queued)
-            .map(|(item, _)| *item)
-            .collect();
-        if queued.is_empty() {
-            return queued;
+            .values()
+            .any(|pin| matches!(pin, Pin::Queued { .. }))
+        {
+            return Vec::new();
         }
         // Cloned rather than borrowed: the holders' lock is taken per item.
         let online = self.keeper.availability.online().borrow().clone();
-        let mut queued: Vec<(usize, ItemId)> = queued
-            .into_iter()
-            .map(|item| (self.keeper.live_copies(item, &online), item))
-            .collect();
-        if queued.len() > count {
-            queued.select_nth_unstable(count);
-            queued.truncate(count);
-        }
-        queued.into_iter().map(|(_, item)| item).collect()
+        next_to_fetch(&self.pins, count, |item| {
+            self.keeper.live_copies(item, &online)
+        })
     }
 
     async fn fetched(&mut self, item: ItemId, kept: Result<(), KeepError>) {
@@ -359,7 +372,11 @@ impl Pins {
         let next = match kept {
             Ok(()) => {
                 tracing::debug!(%item, "kept for custody");
-                if wanted_again { Pin::Queued } else { Pin::Kept }
+                if wanted_again {
+                    self.queued()
+                } else {
+                    Pin::Kept
+                }
             }
             Err(error) => {
                 if error.is_unavailable() {
@@ -368,7 +385,7 @@ impl Pins {
                     tracing::error!(%item, %error, "could not keep an item for custody; trying again when availability changes");
                 }
                 if wanted_again || availability_changed {
-                    Pin::Queued
+                    self.queued()
                 } else {
                     Pin::Failed
                 }
@@ -398,9 +415,13 @@ impl Pins {
                     availability_changed,
                     ..
                 } => *availability_changed = true,
-                Pin::Failed => *pin = Pin::Queued,
+                Pin::Failed => {
+                    *pin = Pin::Queued {
+                        turn: self.next_turn.take(),
+                    };
+                }
                 Pin::Releasing => releasing.push(*item),
-                Pin::Queued | Pin::Kept => {}
+                Pin::Queued { .. } | Pin::Kept => {}
             }
         }
         for item in releasing {
@@ -426,6 +447,47 @@ impl Pins {
             }
         }
     }
+}
+
+/// What wanting an item makes of its `pin`: queued at `turn`, unless it is
+/// waiting already, which keeps its place, or being fetched, which is then
+/// fetched again.
+fn wanted(pin: Option<Pin>, turn: Turn) -> Pin {
+    match pin {
+        None | Some(Pin::Failed | Pin::Kept | Pin::Releasing) => Pin::Queued { turn },
+        Some(queued @ Pin::Queued { .. }) => queued,
+        Some(Pin::Fetching {
+            task,
+            availability_changed,
+            ..
+        }) => Pin::Fetching {
+            task,
+            wanted_again: true,
+            availability_changed,
+        },
+    }
+}
+
+/// Up to `count` of the queued items in `pins`: those with the fewest live
+/// copies as `live_copies` counts them, an item down to one copy before one
+/// at two, and among as many the earliest turn.
+fn next_to_fetch(
+    pins: &HashMap<ItemId, Pin>,
+    count: usize,
+    live_copies: impl Fn(ItemId) -> usize,
+) -> Vec<ItemId> {
+    let mut queued: Vec<((usize, Turn), ItemId)> = pins
+        .iter()
+        .filter_map(|(item, pin)| match pin {
+            Pin::Queued { turn } => Some(((live_copies(*item), *turn), *item)),
+            _ => None,
+        })
+        .collect();
+    if queued.len() > count {
+        queued.select_nth_unstable(count);
+        queued.truncate(count);
+    }
+    queued.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Why an item could not be kept.
@@ -548,5 +610,83 @@ async fn fetch_until_stalled(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn item(byte: u8) -> ItemId {
+        ItemId::from_content_hashes(&[[byte; 32]])
+    }
+
+    /// What `next_to_fetch` picks from `queued`, given as (item, live
+    /// copies, turn), as a set: those picked start together.
+    fn picked(queued: &[(ItemId, usize, u64)], count: usize) -> BTreeSet<ItemId> {
+        let pins = queued
+            .iter()
+            .map(|(item, _, turn)| (*item, Pin::Queued { turn: Turn(*turn) }))
+            .collect();
+        let copies = |wanted: ItemId| {
+            queued
+                .iter()
+                .find(|(item, _, _)| *item == wanted)
+                .map_or(0, |(_, copies, _)| *copies)
+        };
+        next_to_fetch(&pins, count, copies).into_iter().collect()
+    }
+
+    #[test]
+    fn fewer_copies_go_before_an_earlier_turn() {
+        let queued = [(item(1), 2, 0), (item(2), 1, 5)];
+        assert_eq!(picked(&queued, 1), BTreeSet::from([item(2)]));
+    }
+
+    #[test]
+    fn among_as_many_copies_the_earliest_turn_goes_first() {
+        // The latest turn goes to the lowest id, so an order by id would
+        // pick it.
+        let mut ids = [item(1), item(2), item(3)];
+        ids.sort();
+        let [lowest, middle, highest] = ids;
+        let queued = [(lowest, 1, 7), (highest, 1, 3), (middle, 1, 4)];
+        assert_eq!(picked(&queued, 2), BTreeSet::from([highest, middle]));
+    }
+
+    #[test]
+    fn no_more_than_asked_for_all_when_fewer_wait_and_only_the_queued() {
+        let queued = [(item(1), 0, 0), (item(2), 0, 1)];
+        assert_eq!(picked(&queued, 1).len(), 1);
+        assert_eq!(picked(&queued, 5), BTreeSet::from([item(1), item(2)]));
+        let pins = HashMap::from([(item(1), Pin::Kept), (item(2), Pin::Failed)]);
+        assert!(next_to_fetch(&pins, 5, |_| 0).is_empty());
+    }
+
+    #[test]
+    fn an_item_wanted_while_waiting_keeps_its_place() {
+        let waiting = Pin::Queued { turn: Turn(2) };
+        assert_eq!(wanted(Some(waiting), Turn(9)), waiting);
+    }
+
+    #[test]
+    fn an_item_new_kept_or_failed_joins_the_queue_at_the_turn_given() {
+        for pin in [
+            None,
+            Some(Pin::Kept),
+            Some(Pin::Failed),
+            Some(Pin::Releasing),
+        ] {
+            assert_eq!(wanted(pin, Turn(4)), Pin::Queued { turn: Turn(4) });
+        }
+    }
+
+    #[test]
+    fn each_turn_is_later_than_the_last() {
+        let mut next = Turn::default();
+        let first = next.take();
+        assert!(next.take() > first);
     }
 }
