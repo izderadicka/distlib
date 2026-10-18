@@ -18,7 +18,7 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
     TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::Custody;
+use distlib_custody::{Custody, PinCounts};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
@@ -27,6 +27,7 @@ use distlib_sync::{Availability, Catalogue, ImportedFile, SyncError, SyncState};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::{
     availability::Seen,
@@ -89,6 +90,8 @@ pub struct Api {
     pub uploads: Uploads,
     /// Which items this node keeps for the group, and each item's custodians.
     pub custody: Custody,
+    /// Where the items this node keeps stand: queued, fetched, kept.
+    pub pins: watch::Receiver<PinCounts>,
 }
 
 impl Api {
@@ -171,6 +174,7 @@ impl Api {
             "settings": membership.group_id().map(|_| membership.settings()),
             // Null until custody has been computed.
             "custody": self.custody.status(),
+            "pins": *self.pins.borrow(),
             "sync": sync_block(&self.catalogue.sync_status().borrow()),
         }))
     }

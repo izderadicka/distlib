@@ -162,6 +162,22 @@ impl Node {
         });
     }
 
+    /// Waits until `node.status` says `count` of its pins are in `state`.
+    async fn until_pins(&self, state: &str, count: u64) {
+        tokio::time::timeout(SOON, async {
+            while self.call("node.status", json!({})).await["pins"][state] != json!(count) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} never had {count} pins {state} within {SOON:?}",
+                self.id.fmt_short()
+            )
+        });
+    }
+
     /// Waits until it says it is custodian of `items` items.
     async fn until_custodian_of(&self, items: u64) {
         tokio::time::timeout(SOON, async {
@@ -348,8 +364,8 @@ async fn an_item_already_cached_is_kept_without_a_fetch() {
 /// else weighs enough to keep, and stops. The second member pledges, becomes
 /// its custodian and tags it, but cannot fetch it; pledging nothing, it lets
 /// go of the book at once, since it never held it. It pledges again and is
-/// restarted, still its custodian, with the tag but not the book. Once the
-/// founder is back, it fetches the book.
+/// restarted, still its custodian, with the tag but not the book, and its
+/// fetch fails. Once the founder is back, it fetches the book.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
     init_logging();
@@ -376,6 +392,9 @@ async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
     let (seconds_key, seconds_dir) = second.stop().await;
     let second = Node::start(seconds_key, &core, seconds_dir).await;
     second.until_custodian_of(1).await;
+    // Given up while nobody could serve it, so only the founder coming back
+    // asks for it again.
+    second.until_pins("failed", 1).await;
     let founder = Node::start(founders_key, &core, founders_dir).await;
     second
         .until_keeps(true, KeepReason::Custody, item, file)

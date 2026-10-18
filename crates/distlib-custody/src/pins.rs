@@ -15,6 +15,7 @@ use distlib_core::{ContentHash, Event, ItemId, KeepReason, MemberId};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Holdings, SyncError, availability::ask_order};
+use serde::Serialize;
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -49,10 +50,21 @@ pub struct PinSources {
     pub events: broadcast::Receiver<Event>,
 }
 
+/// How many items the pin manager has in each state, for `node.status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PinCounts {
+    pub queued: usize,
+    pub fetching: usize,
+    pub failed: usize,
+    pub kept: usize,
+    pub releasing: usize,
+}
+
 /// Keeps this node's custody in its blob store, in the background.
 #[derive(Debug)]
 pub struct PinManager {
     task: Mutex<Option<JoinHandle<()>>>,
+    counts: watch::Receiver<PinCounts>,
 }
 
 impl Drop for PinManager {
@@ -70,6 +82,7 @@ impl PinManager {
         sources: PinSources,
         max_fetches: NonZeroUsize,
     ) -> Self {
+        let (counts_sender, counts) = watch::channel(PinCounts::default());
         let PinSources {
             membership,
             store,
@@ -90,13 +103,20 @@ impl PinManager {
             custody: custody.clone(),
             pins: HashMap::new(),
             max_fetches,
+            counts: counts_sender,
         };
         // Subscribed here, before the task runs: a pass that finishes while
         // it starts is still heard.
         let changes = custody.changes();
         Self {
             task: Mutex::new(Some(tokio::spawn(pins.run(changes, events)))),
+            counts,
         }
+    }
+
+    /// How many items are in each state, kept up to date.
+    pub fn counts(&self) -> watch::Receiver<PinCounts> {
+        self.counts.clone()
     }
 
     /// Stops the task. Dropping this does the same.
@@ -143,6 +163,7 @@ struct Pins {
     custody: Custody,
     pins: HashMap<ItemId, Pin>,
     max_fetches: NonZeroUsize,
+    counts: watch::Sender<PinCounts>,
 }
 
 impl Pins {
@@ -167,6 +188,7 @@ impl Pins {
         let mut look_at_availability: Option<Instant> = None;
         loop {
             self.start_fetches(&mut fetches);
+            self.publish_counts();
             tokio::select! {
                 change = changes.recv() => match change {
                     Ok(CustodyChange::Recomputed) => self.read_custody_again().await,
@@ -204,6 +226,27 @@ impl Pins {
                 },
             }
         }
+    }
+
+    fn publish_counts(&self) {
+        let counts = self
+            .pins
+            .values()
+            .fold(PinCounts::default(), |mut counts, pin| {
+                match pin {
+                    Pin::Queued => counts.queued += 1,
+                    Pin::Fetching { .. } => counts.fetching += 1,
+                    Pin::Failed => counts.failed += 1,
+                    Pin::Kept => counts.kept += 1,
+                    Pin::Releasing => counts.releasing += 1,
+                }
+                counts
+            });
+        self.counts.send_if_modified(|published| {
+            let changed = *published != counts;
+            *published = counts;
+            changed
+        });
     }
 
     /// Every item this node keeps, against what it looks after: run after

@@ -25,7 +25,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr,
     Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, CustodySources};
+use distlib_custody::{Custody, CustodySources, PinCounts};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
@@ -246,6 +246,7 @@ impl Harness {
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&node, &store, &tasks),
+                pins: tokio::sync::watch::channel(PinCounts::default()).1,
             },
             SecretString::from(token.clone()),
         )
@@ -419,6 +420,7 @@ impl Harness {
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&nodes[0], &store, &tasks),
+                pins: tokio::sync::watch::channel(PinCounts::default()).1,
             },
             SecretString::from(token.clone()),
         )

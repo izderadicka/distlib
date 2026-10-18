@@ -22,7 +22,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub use pins::{PinManager, PinSources};
+pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
 pub use view::CustodyStatus;
 use view::CustodyView;

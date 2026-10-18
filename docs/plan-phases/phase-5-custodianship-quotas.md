@@ -546,7 +546,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   pacing, not byte-exact throttling). **The group's minimum is symmetric** (Ivan, review of
   #141): one group setting, `min_fetch_rate` renamed for both directions, below which neither a
   node's download nor its upload limit may be set; both limits are optional. Its acceptance is the
-  two remaining points, with the fetch rate as the download limit.
+  two remaining points, with the fetch rate as the download limit. `node.status` shows how many
+  items are in each pin state (review of #142).
   **5b-2c** — the upload limit: every blob this node serves, paced through iroh-blobs' provider
   throttle (`ThrottleMode::Intercept`) where `BlobsProtocol` is built, never below the group's
   minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a

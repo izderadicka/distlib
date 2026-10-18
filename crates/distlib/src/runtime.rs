@@ -240,6 +240,11 @@ impl Runtime {
         &self.custody
     }
 
+    /// What keeps this node's custody in its blob store.
+    pub fn pins(&self) -> &PinManager {
+        &self.pins
+    }
+
     /// The event bus: what the projection publishes into, and what the local
     /// API streams to its watchers.
     pub fn events(&self) -> &broadcast::Sender<Event> {
