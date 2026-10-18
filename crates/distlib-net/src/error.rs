@@ -115,6 +115,22 @@ pub enum NetError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// A tag could not be deleted, so the blob is still kept for that reason.
+    #[error("could not delete the tag {tag}")]
+    Release {
+        tag: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The tags for one reason could not be listed.
+    #[error("could not list the tags under {prefix}")]
+    ListKept {
+        prefix: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// A blob could not be written out to a file.
     ///
     /// Carries the target as well as the hash because every likely cause is
