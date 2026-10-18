@@ -45,7 +45,7 @@ export interface GroupSettings {
   max_settle_secs: number;
   emergency_after_secs: number;
   /** Bytes per second. */
-  min_fetch_rate: number;
+  min_transfer_rate: number;
   probes: boolean;
   probe_every_secs: number;
   failure_window_secs: number;

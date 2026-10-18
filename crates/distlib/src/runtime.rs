@@ -14,6 +14,7 @@
 //! would have bought nothing.
 
 use std::{
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -21,7 +22,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
-use distlib_consensus::MembershipNode;
+use distlib_consensus::{MembershipNode, MembershipState};
 use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
 use distlib_custody::{Custody, CustodySources, PinManager, PinSources};
 use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
@@ -32,7 +33,10 @@ use iroh_blobs::store::{
     GcConfig, ProtectCb,
     fs::{FsStore, options::Options},
 };
-use tokio::sync::broadcast;
+use tokio::{
+    sync::{broadcast, watch},
+    task::JoinHandle,
+};
 
 /// A node and the transport it is served on.
 ///
@@ -59,6 +63,9 @@ pub struct Runtime {
     /// Which items this node keeps for the group.
     custody: Custody,
     pins: PinManager,
+    /// Raises the download limit to the group's minimum once the group is
+    /// known; none without a limit.
+    download_floor: Option<JoinHandle<()>>,
     /// The downloads this node runs, and the bus that it and every other
     /// producer publish to — what this node tells whoever is watching it.
     /// Made here, by the thing that assembles the producers, so that each is
@@ -101,6 +108,8 @@ impl Runtime {
         // answers from, or a node would download a file and still not be a
         // provider of it.
         let media = Blobs::new(&blobs, &endpoint);
+        let download_floor =
+            limit_downloads(&media, config.transfer.max_download_rate, node.subscribe());
         let catalogue = Catalogue::start(
             transport.clone(),
             CatalogueStorage {
@@ -136,12 +145,7 @@ impl Runtime {
         // projection should be watching for changes before any peer can start
         // sending them — it replays the document either way, but a node that
         // subscribes late does more work than one that does not.
-        let store = Store::open(Some(data_dir.db_dir()))
-            .await
-            .with_context(|| format!("could not open {}", data_dir.db_dir().display()))?;
-        let search = SearchIndex::open(Some(data_dir.index_dir()))
-            .await
-            .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
+        let (store, search) = open_read_model(data_dir).await?;
         let uploads = open_uploads(config, data_dir).await?;
         let projection = Projection::start(
             catalogue.clone(),
@@ -161,6 +165,7 @@ impl Runtime {
                 availability: &availability,
                 blobs: &media,
                 events: tasks.events(),
+                max_fetches: config.transfer.max_fetches,
             },
         );
 
@@ -186,6 +191,7 @@ impl Runtime {
             projection,
             custody,
             pins,
+            download_floor,
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
@@ -288,6 +294,9 @@ impl Runtime {
         self.projection.shutdown();
         self.pins.shutdown();
         self.custody.shutdown();
+        if let Some(download_floor) = &self.download_floor {
+            download_floor.abort();
+        }
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.
@@ -387,6 +396,45 @@ struct CustodyInputs<'a> {
     availability: &'a Availability,
     blobs: &'a Blobs,
     events: &'a broadcast::Sender<Event>,
+    max_fetches: NonZeroUsize,
+}
+
+/// The read model and its search index, from where `data_dir` keeps them.
+async fn open_read_model(data_dir: &DataDir) -> Result<(Store, SearchIndex)> {
+    let store = Store::open(Some(data_dir.db_dir()))
+        .await
+        .with_context(|| format!("could not open {}", data_dir.db_dir().display()))?;
+    let search = SearchIndex::open(Some(data_dir.index_dir()))
+        .await
+        .with_context(|| format!("could not open {}", data_dir.index_dir().display()))?;
+    Ok((store, search))
+}
+
+/// Limits every download to `limit` bytes per second, raised to the group's
+/// `min_transfer_rate` once the group is known: until then its settings are
+/// only the defaults. They never change after founding, so the task ends
+/// there.
+fn limit_downloads(
+    blobs: &Blobs,
+    limit: Option<NonZeroU64>,
+    mut membership: watch::Receiver<MembershipState>,
+) -> Option<JoinHandle<()>> {
+    let limit = limit?;
+    blobs.limit_downloads(Some(limit));
+    let blobs = blobs.clone();
+    Some(tokio::spawn(async move {
+        let Ok(state) = membership
+            .wait_for(|state| state.group_id().is_some())
+            .await
+        else {
+            return;
+        };
+        let raised = state.settings().at_least_the_minimum(limit);
+        if raised != limit {
+            tracing::warn!(%limit, %raised, "max_download_rate is below the group's min_transfer_rate; raised to it");
+            blobs.limit_downloads(Some(raised));
+        }
+    }))
 }
 
 /// Starts following `me`'s custody, and keeping it in the blob store.
@@ -411,6 +459,7 @@ fn start_custody(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManag
             holdings: inputs.catalogue.holdings().clone(),
             events: inputs.events.subscribe(),
         },
+        inputs.max_fetches,
     );
     (custody, pins)
 }

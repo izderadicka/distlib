@@ -19,9 +19,9 @@ the time saved. A file under crates/distlib-ui/web/ is a UI file, and its
 `tests = ["src/OwnText.test.ts"]`.
 
 `find` has to occur exactly once. The mutated code runs only the tests named,
-stopping at the first failure. A mutation they do not catch is run against the
-whole suite before it is called a survivor, so naming too few tests only costs
-time. A test that hangs is stopped and counts as a failure. The file is put
+stopping at the first failure, and a mutation they do not catch is a
+survivor. With `--whole-suite`, for the end of a phase, a survivor is run
+against the whole suite first, so naming too few tests only costs time. A test that hangs is stopped and counts as a failure. The file is put
 back after each mutation, whatever happens.
 
 With `--every-block`, for an occasional thorough pass rather than every PR:
@@ -96,8 +96,8 @@ def first_error(output: str) -> str:
     return "\n".join(lines[max(start, 0) : start + 12])
 
 
-def check(mutation: dict) -> tuple[str, str]:
-    """Applies `mutation`, runs its tests and then, if they pass, all; puts the file back."""
+def check(mutation: dict, whole_suite: bool) -> tuple[str, str]:
+    """Applies `mutation`, runs its tests and then, if they pass and `whole_suite`, all; puts the file back."""
     path = ROOT / mutation["file"]
     original = path.read_text()
     found = original.count(mutation["find"])
@@ -107,7 +107,7 @@ def check(mutation: dict) -> tuple[str, str]:
     path.write_text(original.replace(mutation["find"], mutation["replace"]))
     try:
         outcome, detail = run(mutation["tests"])
-        if outcome == "passed":
+        if outcome == "passed" and whole_suite:
             outcome, detail = run(None)
             if outcome == "caught":
                 detail += " (only by the whole suite)"
@@ -219,6 +219,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("plan", type=Path)
     parser.add_argument("--every-block", nargs="?", const="master", metavar="base")
+    parser.add_argument("--whole-suite", action="store_true", help="run each survivor against the whole suite")
     arguments = parser.parse_args()
     plan = tomllib.loads(arguments.plan.read_text())
     if found := problems(plan):
@@ -239,7 +240,7 @@ def main() -> int:
     results = []
     for mutation in mutations:
         started = time.monotonic()
-        outcome, detail = check(mutation)
+        outcome, detail = check(mutation, arguments.whole_suite)
         results.append(outcome)
         took = f"{time.monotonic() - started:.0f}s"
         print(f"{outcome.upper():>12}  {mutation['name']} ({took})" + (f"\n{'':>14}{detail}" if detail else ""), flush=True)

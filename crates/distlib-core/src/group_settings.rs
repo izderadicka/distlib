@@ -36,9 +36,9 @@ pub struct GroupSettings {
     /// How long an item may have only one live copy before another member
     /// fetches an emergency copy.
     pub emergency_after_secs: u32,
-    /// The least a member may throttle its custody fetches to, in bytes per
-    /// second.
-    pub min_fetch_rate: u64,
+    /// The least a member may limit its downloads or its uploads to, in bytes
+    /// per second: the same for both, since one link carries both.
+    pub min_transfer_rate: u64,
     /// Whether members probe each other's custody.
     pub probes: bool,
     /// How often one member makes a probe.
@@ -58,7 +58,7 @@ impl Default for GroupSettings {
             settle_secs: HOUR,
             max_settle_secs: DAY,
             emergency_after_secs: DAY,
-            min_fetch_rate: 1_000_000,
+            min_transfer_rate: 1_000_000,
             probes: true,
             probe_every_secs: NonZeroU32::new(5 * 60).expect("five minutes is not zero"),
             failure_window_secs: 7 * DAY,
@@ -73,6 +73,12 @@ impl GroupSettings {
             cap_bytes: self.cap_bytes,
             step_bytes: self.weight_step_bytes.get(),
         }
+    }
+
+    /// A member's transfer limit, raised to the group's minimum: a member may
+    /// limit its link, not opt out of its share.
+    pub fn at_least_the_minimum(&self, limit: NonZeroU64) -> NonZeroU64 {
+        limit.max(NonZeroU64::new(self.min_transfer_rate).unwrap_or(NonZeroU64::MIN))
     }
 
     /// Refuses settings that contradict each other, naming what is wrong.
@@ -111,5 +117,16 @@ mod tests {
             ..GroupSettings::default()
         };
         assert!(settle_too_long.check().is_err());
+    }
+
+    #[test]
+    fn a_limit_below_the_minimum_is_raised_to_it_and_one_above_is_kept() {
+        let settings = GroupSettings {
+            min_transfer_rate: 1_000,
+            ..GroupSettings::default()
+        };
+        let rate = |bytes| NonZeroU64::new(bytes).expect("not zero");
+        assert_eq!(settings.at_least_the_minimum(rate(10)), rate(1_000));
+        assert_eq!(settings.at_least_the_minimum(rate(5_000)), rate(5_000));
     }
 }
