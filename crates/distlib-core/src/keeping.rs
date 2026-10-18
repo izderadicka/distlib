@@ -38,6 +38,11 @@ impl KeepReason {
         }
     }
 
+    /// What every tag for this reason and `item` starts with.
+    pub fn item_prefix(self, item: ItemId) -> String {
+        format!("{}{item}/", self.prefix())
+    }
+
     /// The item and blob a tag for this reason names; `None` for a tag that
     /// is not one.
     pub fn parse(self, tag: &str) -> Option<(ItemId, ContentHash)> {
@@ -76,6 +81,7 @@ mod tests {
         let item = ItemId::from_bytes([1; 32]);
         let blob = ContentHash::from_bytes([2; 32]);
         let tag = KeepReason::Custody.tag(item, blob);
+        assert!(tag.starts_with(&KeepReason::Custody.item_prefix(item)));
         assert_eq!(KeepReason::Custody.parse(&tag), Some((item, blob)));
         assert_eq!(KeepReason::Cache.parse(&tag), None, "another reason's tag");
         assert_eq!(KeepReason::Custody.parse("custody/not-an-item/x"), None);

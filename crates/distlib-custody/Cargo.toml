@@ -18,6 +18,7 @@ distlib-store = { workspace = true }
 distlib-net = { workspace = true }
 distlib-sync = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

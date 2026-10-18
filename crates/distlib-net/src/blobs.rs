@@ -133,14 +133,28 @@ impl Blobs {
     /// Every item and blob kept for `reason`, whether its bytes are here yet
     /// or not.
     pub async fn kept(&self, reason: KeepReason) -> Result<Vec<(ItemId, ContentHash)>> {
+        self.kept_under(reason, reason.prefix()).await
+    }
+
+    /// The blobs of `item` kept for `reason`.
+    pub async fn kept_for(&self, reason: KeepReason, item: ItemId) -> Result<Vec<ContentHash>> {
+        let kept = self.kept_under(reason, &reason.item_prefix(item)).await?;
+        Ok(kept.into_iter().map(|(_, blob)| blob).collect())
+    }
+
+    async fn kept_under(
+        &self,
+        reason: KeepReason,
+        prefix: &str,
+    ) -> Result<Vec<(ItemId, ContentHash)>> {
         let failed = |source: Box<dyn std::error::Error + Send + Sync>| NetError::ListKept {
-            prefix: reason.prefix(),
+            prefix: prefix.to_owned(),
             source,
         };
         let mut tags = self
             .store
             .tags()
-            .list_prefix(reason.prefix())
+            .list_prefix(prefix)
             .await
             .map_err(|source| failed(Box::new(source)))?;
         let mut kept = Vec::new();

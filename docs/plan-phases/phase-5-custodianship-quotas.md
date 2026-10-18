@@ -355,7 +355,8 @@ custodians come back nothing is recomputed: the extra copy simply ages out of th
 **D7 — The pin manager: a diff, and a throttled, prioritized queue.**
 
 - **The diff**: this node's custody (D1, after D4) against its `custody/` tags.
-- **The rate**: `[custody] fetch_rate` in the node's config, never below the group's
+- **The rate** *(changed in review of 5b-2a, P5-12: node-wide limits instead, below)*:
+  `[custody] fetch_rate` in the node's config, never below the group's
   `min_fetch_rate` — a lower value is raised to it, with a warning. A member cannot opt out of its
   share by throttling to nothing, and D10 shows one that falls behind.
 - **Recovery is prioritized**: fetches go in order of live copies ascending, so an item down to one
@@ -469,7 +470,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Eighteen PRs — fourteen planned, 5a-3, 5b-1 and 5b-2 each split in two, and 5c-0 added in review. Each ends compiling,
+Nineteen PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 in three, and 5c-0 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -507,7 +508,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (8 PRs)
+### 5b — keeping items (9 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -529,16 +530,26 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node made custodian fetches the item without anybody asking; losing custody, it
   keeps the item as cache; the queue fetches one-copy items first; the fetch rate holds within a
   tolerance and is raised to the group minimum; an item already cached is promoted without a fetch.
-  *Split in two:* **5b-2a** *(done; delta P5-11)* — the pin manager in `distlib-custody`: `custody/`
-  tags on every file of each item this node keeps, fetched one at a time in `library.download`'s
+  *Split in three:* **5b-2a** *(done; delta P5-11)* — the pin manager in `distlib-custody`: `custody/`
+  tags on every file of each item this node keeps, fetched up to ten at once in `library.download`'s
   provider order, given up after 60 s without progress and asked again when availability changes;
   an item already here is only tagged; a lost item falls into the cache once `replicas` online
   members other than this node announce it. Its acceptance is the first, second and last points
-  above. **5b-2b** — the queue: `[custody] fetch_rate`, raised to `min_fetch_rate` with a warning
-  and enforced by pacing between blobs (a large file still arrives at full speed, then waits);
-  items with the fewest live copies first, reordered rather than restarted; at most a configured
-  number of fetches at once in total, ten by default, in the node's own config (Ivan: a cap per
-  providing peer can come later). Its acceptance is the other two points.
+  above. The pin manager's state is one enum per item, and fetches run in a `JoinSet` up to a
+  fixed ten at once (review of #141).
+  **5b-2b** — the queue and the download limit: `max_fetches` in the node's config, ten by
+  default, replacing the fixed ten (Ivan: a cap per providing peer can come later); items with the
+  fewest live copies first, reordered rather than restarted; and **one node-wide download limit**
+  for every blob fetch, custody's and `library.download`'s, enforced in `distlib_net::Blobs` by
+  pacing on the downloader's progress stream, whose backpressure slows the transfer itself (Ivan:
+  pacing, not byte-exact throttling). **The group's minimum is symmetric** (Ivan, review of
+  #141): one group setting, `min_fetch_rate` renamed for both directions, below which neither a
+  node's download nor its upload limit may be set; both limits are optional. Its acceptance is the
+  two remaining points, with the fetch rate as the download limit.
+  **5b-2c** — the upload limit: every blob this node serves, paced through iroh-blobs' provider
+  throttle (`ThrottleMode::Intercept`) where `BlobsProtocol` is built, never below the group's
+  minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a
+  tolerance, to two downloaders at once together.
 
 - **5b-3 — the storage limit and the cache's eviction.** `[storage] limit_bytes`, last-used times,
   and eviction least recently used first whenever own + custody + cache is over the limit.

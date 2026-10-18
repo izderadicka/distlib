@@ -4,7 +4,7 @@
 //! `replicas` live copies elsewhere.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     sync::{Mutex, PoisonError},
     time::Duration,
 };
@@ -12,14 +12,15 @@ use std::{
 use distlib_consensus::MembershipState;
 use distlib_core::{ContentHash, Event, ItemId, KeepReason, MemberId};
 use distlib_net::{Blobs, NetError};
-use distlib_store::Store;
-use distlib_sync::{Availability, Holdings, availability::ask_order};
+use distlib_store::{Store, StoreError};
+use distlib_sync::{Availability, Holdings, SyncError, availability::ask_order};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
         watch,
     },
-    task::{JoinHandle, JoinSet},
+    task::{self, JoinHandle, JoinSet},
+    time::{Instant, sleep_until},
 };
 
 use crate::{Custody, CustodyChange};
@@ -27,6 +28,13 @@ use crate::{Custody, CustodyChange};
 /// How long a fetch may go without a byte arriving before it is given up,
 /// to be asked again when availability changes.
 const STALLED_AFTER: Duration = Duration::from_secs(60);
+
+/// How many items are fetched at once.
+const FETCHES_AT_ONCE: usize = 10;
+
+/// How long availability changes are gathered before they are acted on:
+/// each one is a look at every item, and a group's heartbeats bring many.
+const AVAILABILITY_GATHERED_FOR: Duration = Duration::from_secs(1);
 
 /// What the pin manager keeps items with, and decides from.
 pub struct PinSources {
@@ -76,12 +84,8 @@ impl PinManager {
                 holdings,
             },
             custody: custody.clone(),
-            tagged: HashMap::new(),
+            pins: HashMap::new(),
             queue: VecDeque::new(),
-            queued: HashSet::new(),
-            fetching: None,
-            waiting: HashSet::new(),
-            releasing: HashSet::new(),
         };
         // Subscribed here, before the task runs: a pass that finishes while
         // it starts is still heard.
@@ -104,22 +108,37 @@ impl PinManager {
     }
 }
 
-/// The task's state: what is tagged, and what is still to do.
+/// Where one item the pin manager looks after stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pin {
+    /// Waiting its turn to be fetched.
+    Queued,
+    /// Being fetched by `task`, and what happened meanwhile.
+    Fetching {
+        task: task::Id,
+        /// The item changed: it is fetched again however this fetch ends,
+        /// since a file may have been added after the fetch read it.
+        wanted_again: bool,
+        /// A fetch that then fails is asked again at once, not at the next
+        /// change.
+        availability_changed: bool,
+    },
+    /// Its fetch failed: asked again when availability changes.
+    Failed,
+    /// Tagged, and every file here.
+    Kept,
+    /// No longer this node's: kept until enough copies are elsewhere.
+    Releasing,
+}
+
+/// The task's state: every item with `custody/` tags, or about to have them.
 struct Pins {
     keeper: Keeper,
     custody: Custody,
-    /// The blobs each item's `custody/` tags keep, whether here yet or not.
-    tagged: HashMap<ItemId, BTreeSet<ContentHash>>,
-    /// Items to fetch, in the order they were wanted; `queued` is the same
-    /// set, to look up.
+    pins: HashMap<ItemId, Pin>,
+    /// The order of the `Queued` items. An item that left `Queued` meanwhile
+    /// is skipped when its turn comes.
     queue: VecDeque<ItemId>,
-    queued: HashSet<ItemId>,
-    /// The item being fetched now.
-    fetching: Option<InFlight>,
-    /// Items whose fetch failed, asked for again when availability changes.
-    waiting: HashSet<ItemId>,
-    /// Items no longer this node's, kept until enough copies are elsewhere.
-    releasing: HashSet<ItemId>,
 }
 
 impl Pins {
@@ -129,11 +148,9 @@ impl Pins {
         mut events: broadcast::Receiver<Event>,
     ) {
         match self.keeper.blobs.kept(KeepReason::Custody).await {
-            Ok(kept) => {
-                for (item, blob) in kept {
-                    self.tagged.entry(item).or_default().insert(blob);
-                }
-            }
+            Ok(kept) => self
+                .pins
+                .extend(kept.into_iter().map(|(item, _)| (item, Pin::Kept))),
             Err(error) => {
                 tracing::error!(%error, "could not read what this node keeps for custody; the pin manager stops");
                 return;
@@ -143,17 +160,14 @@ impl Pins {
         self.read_custody_again().await;
 
         let mut fetches = JoinSet::new();
+        let mut look_at_availability: Option<Instant> = None;
         loop {
-            self.start_next_fetch(&mut fetches);
+            self.start_fetches(&mut fetches);
             tokio::select! {
                 change = changes.recv() => match change {
                     Ok(CustodyChange::Recomputed) => self.read_custody_again().await,
                     Ok(CustodyChange::Item { item, mine: true }) => self.want(item),
-                    Ok(CustodyChange::Item { item, mine: false }) => {
-                        if self.tagged.contains_key(&item) {
-                            self.release_if_safe(item).await;
-                        }
-                    }
+                    Ok(CustodyChange::Item { item, mine: false }) => self.lose(item).await,
                     Err(RecvError::Lagged(missed)) => {
                         tracing::warn!(missed, "the pin manager missed custody changes; reading them all again");
                         self.read_custody_again().await;
@@ -165,7 +179,8 @@ impl Pins {
                 },
                 event = events.recv() => match event {
                     Ok(Event::AvailabilityChanged { .. }) | Err(RecvError::Lagged(_)) => {
-                        self.availability_changed().await;
+                        look_at_availability
+                            .get_or_insert_with(|| Instant::now() + AVAILABILITY_GATHERED_FOR);
                     }
                     Ok(_) => {}
                     Err(RecvError::Closed) => {
@@ -173,23 +188,21 @@ impl Pins {
                         return;
                     }
                 },
-                Some(joined) = fetches.join_next() => {
-                    let Some(in_flight) = self.fetching.take() else {
-                        continue;
-                    };
-                    match joined {
-                        Ok(fetched) => self.fetched(fetched, in_flight).await,
-                        Err(error) => {
-                            tracing::error!(%error, "a custody fetch failed");
-                            self.waiting.insert(in_flight.item);
-                        }
-                    }
+                () = sleep_until(look_at_availability.unwrap_or_else(Instant::now)),
+                    if look_at_availability.is_some() =>
+                {
+                    look_at_availability = None;
+                    self.availability_changed().await;
                 }
+                Some(joined) = fetches.join_next_with_id() => match joined {
+                    Ok((_, (item, kept))) => self.fetched(item, kept).await,
+                    Err(error) => self.fetch_panicked(&error),
+                },
             }
         }
     }
 
-    /// Every item this node keeps, against what it has tagged: run after
+    /// Every item this node keeps, against what it looks after: run after
     /// each whole pass. Nothing before custody's first pass, which would
     /// release everything.
     async fn read_custody_again(&mut self) {
@@ -197,138 +210,185 @@ impl Pins {
             return;
         };
         for item in &mine {
-            let kept = self.tagged.contains_key(item) && self.keeper.holdings.holds(*item);
-            if !kept {
+            let needs_keeping = match self.pins.get(item) {
+                None | Some(Pin::Releasing) => true,
+                Some(Pin::Kept) => !self.keeper.holdings.holds(*item),
+                Some(Pin::Queued | Pin::Fetching { .. } | Pin::Failed) => false,
+            };
+            if needs_keeping {
                 self.want(*item);
             }
         }
         let lost: Vec<ItemId> = self
-            .tagged
+            .pins
             .keys()
             .filter(|item| !mine.contains(item))
             .copied()
             .collect();
         for item in lost {
-            self.release_if_safe(item).await;
+            self.lose(item).await;
         }
     }
 
-    /// Queues `item` to be kept.
+    /// Queues `item` to be kept, or, if it is being fetched, to be fetched
+    /// again once that ends.
     fn want(&mut self, item: ItemId) {
-        self.releasing.remove(&item);
-        self.waiting.remove(&item);
-        match &mut self.fetching {
-            // A file may have been added after the fetch read the item.
-            Some(in_flight) if in_flight.item == item => in_flight.wanted_again = true,
-            _ => {
-                if self.queued.insert(item) {
+        match self.pins.entry(item) {
+            Entry::Occupied(mut pin) => match pin.get_mut() {
+                Pin::Fetching { wanted_again, .. } => *wanted_again = true,
+                Pin::Queued => {}
+                pin @ (Pin::Failed | Pin::Kept | Pin::Releasing) => {
+                    *pin = Pin::Queued;
                     self.queue.push_back(item);
                 }
+            },
+            Entry::Vacant(slot) => {
+                slot.insert(Pin::Queued);
+                self.queue.push_back(item);
             }
         }
     }
 
-    /// One fetch at a time.
-    fn start_next_fetch(&mut self, fetches: &mut JoinSet<Fetched>) {
-        if self.fetching.is_some() {
-            return;
+    /// `item` is no longer this node's. One being fetched is decided once
+    /// the fetch ends.
+    async fn lose(&mut self, item: ItemId) {
+        match self.pins.get(&item) {
+            None | Some(Pin::Fetching { .. }) => {}
+            Some(_) => self.release_if_safe(item).await,
         }
-        let Some(item) = self.queue.pop_front() else {
-            return;
-        };
-        self.queued.remove(&item);
-        self.fetching = Some(InFlight {
-            item,
-            availability_changed: false,
-            wanted_again: false,
-        });
-        let keeper = self.keeper.clone();
-        fetches.spawn(async move { keeper.keep(item).await });
     }
 
-    async fn fetched(&mut self, fetched: Fetched, in_flight: InFlight) {
-        let Fetched { item, tagged, done } = fetched;
-        if !tagged.is_empty() {
-            self.tagged.entry(item).or_default().extend(tagged);
+    fn start_fetches(&mut self, fetches: &mut JoinSet<(ItemId, Result<(), KeepError>)>) {
+        while fetches.len() < FETCHES_AT_ONCE {
+            let Some(item) = self.queue.pop_front() else {
+                return;
+            };
+            let Some(pin @ Pin::Queued) = self.pins.get_mut(&item) else {
+                continue;
+            };
+            let keeper = self.keeper.clone();
+            let task = fetches
+                .spawn(async move { (item, keeper.keep(item).await) })
+                .id();
+            *pin = Pin::Fetching {
+                task,
+                wanted_again: false,
+                availability_changed: false,
+            };
         }
+    }
+
+    async fn fetched(&mut self, item: ItemId, kept: Result<(), KeepError>) {
+        let Some(Pin::Fetching {
+            wanted_again,
+            availability_changed,
+            ..
+        }) = self.pins.get(&item).copied()
+        else {
+            return;
+        };
         if !self.custody.keeps(item) {
             // Lost while it was being fetched.
             self.release_if_safe(item).await;
-        } else if in_flight.wanted_again || (!done && in_flight.availability_changed) {
-            self.want(item);
-        } else if !done {
-            self.waiting.insert(item);
+            return;
+        }
+        let next = match kept {
+            Ok(()) => {
+                tracing::debug!(%item, "kept for custody");
+                if wanted_again { Pin::Queued } else { Pin::Kept }
+            }
+            Err(error) => {
+                if error.is_unavailable() {
+                    tracing::warn!(%item, %error, "could not fetch an item this node keeps; asking again when availability changes");
+                } else {
+                    tracing::error!(%item, %error, "could not keep an item for custody; trying again when availability changes");
+                }
+                if wanted_again || availability_changed {
+                    Pin::Queued
+                } else {
+                    Pin::Failed
+                }
+            }
+        };
+        if next == Pin::Queued {
+            self.queue.push_back(item);
+        }
+        self.pins.insert(item, next);
+    }
+
+    fn fetch_panicked(&mut self, error: &task::JoinError) {
+        tracing::error!(%error, "a custody fetch failed");
+        let failed = self
+            .pins
+            .values_mut()
+            .find(|pin| matches!(pin, Pin::Fetching { task, .. } if *task == error.id()));
+        if let Some(pin) = failed {
+            *pin = Pin::Failed;
         }
     }
 
     /// A member came or went, or announced what it holds: a fetch that
     /// failed may now succeed, and an item may now have its copies elsewhere.
     async fn availability_changed(&mut self) {
-        if let Some(in_flight) = &mut self.fetching {
-            in_flight.availability_changed = true;
-        }
-        for item in std::mem::take(&mut self.waiting) {
-            if self.custody.keeps(item) {
-                self.want(item);
+        let mut releasing = Vec::new();
+        for (item, pin) in &mut self.pins {
+            match pin {
+                Pin::Fetching {
+                    availability_changed,
+                    ..
+                } => *availability_changed = true,
+                Pin::Failed => {
+                    *pin = Pin::Queued;
+                    self.queue.push_back(*item);
+                }
+                Pin::Releasing => releasing.push(*item),
+                Pin::Queued | Pin::Kept => {}
             }
         }
-        let releasing: Vec<ItemId> = self.releasing.iter().copied().collect();
         for item in releasing {
             self.release_if_safe(item).await;
         }
     }
 
-    /// Lets go of `item`, which this node is no longer custodian of, into the
-    /// cache — once its copies elsewhere make up for this one, if this node
-    /// holds it.
+    /// Lets go of `item` into the cache, once its copies elsewhere make up
+    /// for this one, if this node holds it.
     async fn release_if_safe(&mut self, item: ItemId) {
-        if self
-            .fetching
-            .is_some_and(|in_flight| in_flight.item == item)
-        {
-            // Decided once the fetch is done.
-            return;
-        }
         if self.keeper.holdings.holds(item) && !self.keeper.enough_copies_elsewhere(item) {
-            self.releasing.insert(item);
+            self.pins.insert(item, Pin::Releasing);
             return;
         }
-        let Some(blobs) = self.tagged.remove(&item) else {
-            self.releasing.remove(&item);
-            return;
-        };
-        match self.keeper.release(item, &blobs).await {
+        match self.keeper.release(item).await {
             Ok(()) => {
-                self.releasing.remove(&item);
+                self.pins.remove(&item);
                 tracing::debug!(%item, "no longer custodian; kept as cache");
             }
             Err(error) => {
                 tracing::error!(%item, %error, "could not release an item into the cache; trying again when availability changes");
-                self.tagged.insert(item, blobs);
-                self.releasing.insert(item);
+                self.pins.insert(item, Pin::Releasing);
             }
         }
     }
 }
 
-/// The item being fetched, and what happened while it was.
-#[derive(Debug, Clone, Copy)]
-struct InFlight {
-    item: ItemId,
-    /// A fetch that then fails is asked again at once, not at the next
-    /// change.
-    availability_changed: bool,
-    /// The item changed, so it is kept again however the fetch ends.
-    wanted_again: bool,
+/// Why an item could not be kept.
+#[derive(Debug, thiserror::Error)]
+enum KeepError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Blobs(#[from] NetError),
+    #[error(transparent)]
+    Holdings(#[from] SyncError),
+    #[error("no byte arrived for {STALLED_AFTER:?}")]
+    Stalled,
 }
 
-/// One item's fetch, as it ended.
-struct Fetched {
-    item: ItemId,
-    /// The blobs tagged for custody on the way.
-    tagged: Vec<ContentHash>,
-    /// Whether every file is here.
-    done: bool,
+impl KeepError {
+    /// Whether nobody could serve it, which is ordinary while holders are
+    /// away, rather than something wrong here.
+    fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Stalled | Self::Blobs(NetError::Fetch { .. }))
+    }
 }
 
 /// What a fetch needs, cloned into its task.
@@ -345,49 +405,19 @@ struct Keeper {
 impl Keeper {
     /// Tags each of `item_id`'s files for custody and fetches the ones not
     /// here. A file already here, cached by a download say, is only tagged.
-    async fn keep(&self, item_id: ItemId) -> Fetched {
-        let mut fetched = Fetched {
-            item: item_id,
-            tagged: Vec::new(),
-            done: false,
-        };
-        let item = match self.store.item(item_id).await {
-            Ok(Some(stored)) => stored.item,
-            Ok(None) => {
-                fetched.done = true;
-                return fetched;
-            }
-            Err(error) => {
-                tracing::error!(item = %item_id, %error, "could not read an item to keep it");
-                return fetched;
-            }
+    async fn keep(&self, item_id: ItemId) -> Result<(), KeepError> {
+        let Some(stored) = self.store.item(item_id).await? else {
+            return Ok(());
         };
         let providers = self.providers(item_id);
-        for hash in item.files.keys().copied() {
-            if let Err(error) = self.blobs.keep(KeepReason::Custody, item_id, hash).await {
-                tracing::error!(item = %item_id, %error, "could not keep a file for custody");
-                return fetched;
-            }
-            fetched.tagged.push(hash);
-            match self.blobs.has(hash).await {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(item = %item_id, %error, "could not tell whether a file is here");
-                    return fetched;
-                }
-            }
-            if let Err(error) = fetch_until_stalled(&self.blobs, hash, providers.clone()).await {
-                tracing::warn!(item = %item_id, %hash, %error, "could not fetch a file this node keeps; asking again when availability changes");
-                return fetched;
+        for hash in stored.item.files.keys().copied() {
+            self.blobs.keep(KeepReason::Custody, item_id, hash).await?;
+            if !self.blobs.has(hash).await? {
+                fetch_until_stalled(&self.blobs, hash, providers.clone()).await?;
             }
         }
-        if let Err(error) = self.holdings.recheck(&item).await {
-            tracing::warn!(item = %item_id, %error, "could not work out whether this node now holds an item");
-        }
-        tracing::debug!(item = %item_id, "kept for custody");
-        fetched.done = true;
-        fetched
+        self.holdings.recheck(&stored.item).await?;
+        Ok(())
     }
 
     /// Every other member, in the order to ask them for `item`.
@@ -416,12 +446,12 @@ impl Keeper {
         copies >= usize::from(self.membership.borrow().settings().replicas.get())
     }
 
-    /// Moves `blobs` of `item` from custody to the cache: the cache's tag
-    /// first, so no collection in between finds them unkept.
-    async fn release(&self, item: ItemId, blobs: &BTreeSet<ContentHash>) -> Result<(), NetError> {
-        for hash in blobs {
-            self.blobs.keep(KeepReason::Cache, item, *hash).await?;
-            self.blobs.release(KeepReason::Custody, item, *hash).await?;
+    /// Moves `item`'s blobs from custody to the cache: the cache's tag first,
+    /// so no collection in between finds them unkept.
+    async fn release(&self, item: ItemId) -> Result<(), NetError> {
+        for hash in self.blobs.kept_for(KeepReason::Custody, item).await? {
+            self.blobs.keep(KeepReason::Cache, item, hash).await?;
+            self.blobs.release(KeepReason::Custody, item, hash).await?;
         }
         Ok(())
     }
@@ -434,7 +464,7 @@ async fn fetch_until_stalled(
     blobs: &Blobs,
     hash: ContentHash,
     providers: Vec<MemberId>,
-) -> Result<(), String> {
+) -> Result<(), KeepError> {
     let (progressed, mut progress) = watch::channel(());
     let fetch = blobs.fetch_with_progress(hash, providers, move |_offset| {
         progressed.send_replace(());
@@ -443,10 +473,10 @@ async fn fetch_until_stalled(
     loop {
         tokio::select! {
             biased;
-            fetched = &mut fetch => return fetched.map_err(|error| error.to_string()),
+            fetched = &mut fetch => return Ok(fetched?),
             moved = tokio::time::timeout(STALLED_AFTER, progress.changed()) => {
                 if moved.is_err() {
-                    return Err(format!("no progress for {STALLED_AFTER:?}"));
+                    return Err(KeepError::Stalled);
                 }
             }
         }

@@ -298,13 +298,14 @@ async fn an_item_already_cached_is_kept_without_a_fetch() {
 }
 
 /// **A custodian whose fetch failed asks again when a holder comes back, and
-/// its tags outlive a restart.** The founder adds a book nobody else weighs
-/// enough to keep, and stops. The second member pledges, becomes its
-/// custodian, and tags it, but cannot fetch it. Restarted, it pledges nothing
-/// and lets go of the book at once: it never held it. It pledges again, and
-/// once the founder is back it fetches the book.
+/// fetches what a restart left half kept.** The founder adds a book nobody
+/// else weighs enough to keep, and stops. The second member pledges, becomes
+/// its custodian and tags it, but cannot fetch it; pledging nothing, it lets
+/// go of the book at once, since it never held it. It pledges again and is
+/// restarted, still its custodian, with the tag but not the book. Once the
+/// founder is back, it fetches the book.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_fetch_is_asked_again_and_tags_outlive_a_restart() {
+async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
@@ -318,9 +319,6 @@ async fn a_failed_fetch_is_asked_again_and_tags_outlive_a_restart() {
         .await;
     second.until_tagged_for_custody(true, item, file).await;
     assert!(!second.runtime.blobs().has(file).await.unwrap());
-
-    let (seconds_key, seconds_dir) = second.stop().await;
-    let second = Node::start(seconds_key, &core, seconds_dir).await;
     second.call("group.pledge_set", json!({ "bytes": 0 })).await;
     second.until_custodian_of(0).await;
     second.until_tagged_for_custody(false, item, file).await;
@@ -328,6 +326,9 @@ async fn a_failed_fetch_is_asked_again_and_tags_outlive_a_restart() {
     second
         .call("group.pledge_set", json!({ "bytes": 100 * GB }))
         .await;
+    second.until_tagged_for_custody(true, item, file).await;
+    let (seconds_key, seconds_dir) = second.stop().await;
+    let second = Node::start(seconds_key, &core, seconds_dir).await;
     second.until_custodian_of(1).await;
     let founder = Node::start(founders_key, &core, founders_dir).await;
     second

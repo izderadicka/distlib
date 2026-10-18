@@ -442,3 +442,26 @@ async fn a_released_reason_is_no_longer_listed_and_the_others_stay() {
         [(item, first)]
     );
 }
+
+/// One item's tags are listed apart from another's.
+#[tokio::test]
+async fn what_is_kept_for_one_item_leaves_the_others_out() {
+    let store = MemStore::new();
+    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    let blobs = Blobs::new(&store, &endpoint);
+    let (one, other) = (ItemId::from_bytes([1; 32]), ItemId::from_bytes([2; 32]));
+    let (first, second) = (
+        added(&store, b"first").await,
+        added(&store, b"second").await,
+    );
+    blobs.keep(KeepReason::Custody, one, first).await.unwrap();
+    blobs
+        .keep(KeepReason::Custody, other, second)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        blobs.kept_for(KeepReason::Custody, one).await.unwrap(),
+        [first]
+    );
+}

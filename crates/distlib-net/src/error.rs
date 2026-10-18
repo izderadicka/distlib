@@ -126,7 +126,7 @@ pub enum NetError {
     /// The tags for one reason could not be listed.
     #[error("could not list the tags under {prefix}")]
     ListKept {
-        prefix: &'static str,
+        prefix: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
