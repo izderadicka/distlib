@@ -111,43 +111,57 @@ async fn until_all_say(
 async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
     init_logging();
     let dir = TempDir::new().unwrap();
-    let keys: Vec<SecretKey> = (0..5).map(|_| SecretKey::generate()).collect();
-    let ids: Vec<MemberId> = keys
-        .iter()
-        .map(|key| MemberId::from(key.public()))
-        .collect();
-    let group_config = config(&ids);
-    let mut runtimes = Vec::new();
-    for (index, key) in keys.iter().enumerate() {
-        let data_dir = DataDir::new(dir.path().join(index.to_string()));
-        runtimes.push(Runtime::start(key, &group_config, &data_dir).await.unwrap());
-    }
-
     let settings = GroupSettings {
         replicas: NonZeroU8::new(3).unwrap(),
         settle_secs: SETTLE.as_secs().try_into().unwrap(),
         max_settle_secs: 60,
         ..GroupSettings::default()
     };
-    let mut pledges: Vec<(MemberId, u64)> = ids
-        .iter()
-        .zip(1..)
-        .map(|(id, hundreds)| (*id, hundreds * 100 * GB))
-        .collect();
+    // Twelve items added by the first member and four by the second.
+    let creator_of = |seed: u8| usize::from(seed > 12);
+    // Keys for which the first member's pledge change below moves some
+    // custody: with keys drawn at random it may move none, and the test
+    // would then show nothing.
+    let (keys, ids, mut pledges, items) = loop {
+        let keys: Vec<SecretKey> = (0..5).map(|_| SecretKey::generate()).collect();
+        let ids: Vec<MemberId> = keys
+            .iter()
+            .map(|key| MemberId::from(key.public()))
+            .collect();
+        let pledges: Vec<(MemberId, u64)> = ids
+            .iter()
+            .zip(1..)
+            .map(|(id, hundreds)| (*id, hundreds * 100 * GB))
+            .collect();
+        let items: Vec<CustodyItem> = (1..=16_u8)
+            .map(|seed| CustodyItem {
+                item: an_item(seed, u64::from(seed) * GB).id,
+                creators: vec![ids[creator_of(seed)]],
+                size_bytes: u64::from(seed) * GB,
+            })
+            .collect();
+        let mut changed = pledges.clone();
+        changed[0].1 = settings.cap_bytes;
+        if expected(&settings, &pledges, &items) != expected(&settings, &changed, &items) {
+            break (keys, ids, pledges, items);
+        }
+    };
+    let group_config = config(&ids);
+    let mut runtimes = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let data_dir = DataDir::new(dir.path().join(index.to_string()));
+        runtimes.push(Runtime::start(key, &group_config, &data_dir).await.unwrap());
+    }
     found(&runtimes, &keys[0], &pledges, &settings).await;
 
-    // Twelve items added by the first member and four by the second.
-    let mut items = Vec::new();
     for seed in 1..=16_u8 {
-        let creator = usize::from(seed > 12);
-        let item = an_item(seed, u64::from(seed) * GB);
-        runtimes[creator].catalogue().ready().await;
-        runtimes[creator].catalogue().write(&item).await.unwrap();
-        items.push(CustodyItem {
-            item: item.id,
-            creators: vec![ids[creator]],
-            size_bytes: u64::from(seed) * GB,
-        });
+        let creator = &runtimes[creator_of(seed)];
+        creator.catalogue().ready().await;
+        creator
+            .catalogue()
+            .write(&an_item(seed, u64::from(seed) * GB))
+            .await
+            .unwrap();
     }
 
     let apis: Vec<(MemberId, Api)> = ids
@@ -170,7 +184,6 @@ async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
         .unwrap();
     pledges[0] = (*lightest, settings.cap_bytes);
     let after = expected(&settings, &pledges, &items);
-    assert_ne!(before, after, "the pledge change should move some custody");
     let (still, _) = said_by(lightest_api, &items).await;
     assert_eq!(
         still,
