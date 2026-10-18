@@ -277,13 +277,20 @@ impl Pins {
     /// Up to `count` of the queued items, those with the fewest live copies:
     /// an item down to one copy is fetched before one at two.
     fn fewest_copies_first(&self, count: usize) -> Vec<ItemId> {
-        let online = self.keeper.availability.online();
-        let online = online.borrow();
-        let mut queued: Vec<(usize, ItemId)> = self
+        let queued: Vec<ItemId> = self
             .pins
             .iter()
             .filter(|(_, pin)| **pin == Pin::Queued)
-            .map(|(item, _)| (self.keeper.live_copies(*item, &online), *item))
+            .map(|(item, _)| *item)
+            .collect();
+        if queued.is_empty() {
+            return queued;
+        }
+        // Cloned rather than borrowed: the holders' lock is taken per item.
+        let online = self.keeper.availability.online().borrow().clone();
+        let mut queued: Vec<(usize, ItemId)> = queued
+            .into_iter()
+            .map(|item| (self.keeper.live_copies(item, &online), item))
             .collect();
         if queued.len() > count {
             queued.select_nth_unstable(count);
