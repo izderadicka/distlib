@@ -8,7 +8,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
-5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b.** Four rounds of review on #133 shaped it;
+5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -548,7 +548,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   node's download nor its upload limit may be set; both limits are optional. Its acceptance is the
   two remaining points, with the fetch rate as the download limit. `node.status` shows how many
   items are in each pin state (review of #142).
-  **5b-2c** — the upload limit: every blob this node serves, paced through iroh-blobs' provider
+  **5b-2c** *(done; delta P5-14)* — the upload limit: every blob this node serves, paced through iroh-blobs' provider
   throttle (`ThrottleMode::Intercept`) where `BlobsProtocol` is built, never below the group's
   minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a
   tolerance, to two downloaders at once together.

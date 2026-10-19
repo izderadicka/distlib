@@ -204,6 +204,7 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         transfer: distlib_core::TransferConfig {
             max_fetches: 3.try_into().unwrap(),
             max_download_rate: Some(2_000_000.try_into().unwrap()),
+            max_upload_rate: Some(3_000_000.try_into().unwrap()),
         },
         group: Some(distlib_core::GroupSettings {
             replicas: 2.try_into().unwrap(),
@@ -231,12 +232,17 @@ fn a_starter_file_without_group_settings_shows_them_commented_out() {
         rendered.contains("# [group]\n# replicas = 3\n"),
         "{rendered}"
     );
-    assert!(rendered.contains("\n# max_download_rate = "), "{rendered}");
+    assert!(
+        rendered.contains("\n# max_download_rate = ")
+            && rendered.contains("\n# max_upload_rate = "),
+        "{rendered}"
+    );
     Jail::expect_with(move |jail| {
         jail.create_file(CONFIG, &rendered)?;
         let loaded = Config::load(Path::new(CONFIG)).unwrap();
         assert_eq!(loaded.group, None);
         assert_eq!(loaded.transfer.max_download_rate, None);
+        assert_eq!(loaded.transfer.max_upload_rate, None);
         Ok(())
     });
 }

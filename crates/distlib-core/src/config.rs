@@ -183,6 +183,12 @@ pub struct TransferConfig {
     /// download at once. Never below the group's `min_transfer_rate`: a lower
     /// value is raised to it. No limit when absent.
     pub max_download_rate: Option<NonZeroU64>,
+    /// The most this node serves, in bytes per second, to everyone it serves
+    /// at once. Never below the group's `min_transfer_rate`, the same as the
+    /// download limit. No limit when absent. A sustained rate, not a hard
+    /// cap: each request's first chunk, up to 16 KiB, goes out before the
+    /// limit applies, so many small requests at once can go over it.
+    pub max_upload_rate: Option<NonZeroU64>,
 }
 
 impl Default for TransferConfig {
@@ -190,6 +196,7 @@ impl Default for TransferConfig {
         Self {
             max_fetches: NonZeroUsize::new(10).expect("ten is not zero"),
             max_download_rate: None,
+            max_upload_rate: None,
         }
     }
 }
@@ -400,6 +407,12 @@ impl Config {
              # value is raised to. No limit when unset.\n\
              {max_download_rate}\n\
              \n\
+             # The most this node serves to the group, in bytes per second, to\n\
+             # everyone at once. Never below min_transfer_rate either. No limit\n\
+             # when unset. A sustained rate, not a hard cap: many small requests\n\
+             # at once can go over it.\n\
+             {max_upload_rate}\n\
+             \n\
              {group}",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
@@ -411,10 +424,8 @@ impl Config {
             beat_interval = self.availability.beat_interval_secs,
             gc_interval = self.storage.gc_interval_secs,
             max_fetches = self.transfer.max_fetches,
-            max_download_rate = match self.transfer.max_download_rate {
-                Some(rate) => format!("max_download_rate = {rate}"),
-                None => "# max_download_rate = 10000000".to_owned(),
-            },
+            max_download_rate = optional_rate("max_download_rate", self.transfer.max_download_rate),
+            max_upload_rate = optional_rate("max_upload_rate", self.transfer.max_upload_rate),
             group = group_section(self.group.as_ref()),
             core = self
                 .consensus
@@ -424,6 +435,14 @@ impl Config {
                 .collect::<Vec<_>>()
                 .join(", "),
         )
+    }
+}
+
+/// `key = rate`, or an example commented out when there is no rate.
+fn optional_rate(key: &str, rate: Option<NonZeroU64>) -> String {
+    match rate {
+        Some(rate) => format!("{key} = {rate}"),
+        None => format!("# {key} = 10000000"),
     }
 }
 
