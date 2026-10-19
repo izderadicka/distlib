@@ -509,7 +509,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (9 PRs)
+### 5b — keeping items (11 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -553,12 +553,21 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a
   tolerance, to two downloaders at once together.
 
-- **5b-3 — the storage limit and the cache's eviction.** `[storage] limit_bytes`, last-used times,
-  and eviction least recently used first whenever own + custody + cache is over the limit.
-  **Acceptance:** a node at its limit evicts the oldest cached item to take on a new custody or a new
-  download, never an own or custody item; the exported file is untouched; mandatory items alone over
-  the limit are reported, and an add that would grow them is refused; a pledge not below the limit
-  is refused.
+- **5b-3 — the storage limit and the cache's eviction** (3 PRs; delta P5-15). Custody over the
+  pledge comes later, in its own PR (Ivan).
+  **5b-3a** *(done; delta P5-15)* — `[storage] limit_bytes`, unset meaning no limit; own + custody +
+  cache counted from the blob store's tags, a blob kept for two reasons once under the stronger;
+  the bytes for each reason, the limit and whether own and custody alone are over it in
+  `node.status` and `distlib status`. **Acceptance:** an add that would grow own and custody past
+  the limit is refused, and one that grows nothing goes through even over it; a pledge not below
+  the limit is refused.
+  **5b-3b** — last-used times in the read model (all the cache equally old after `db/` is
+  deleted), eviction least recently used first before a custody fetch, a download or an add, and
+  distlib's own GC loop, a pass right after an eviction (C42). **Acceptance:** a node at its limit
+  evicts the oldest cached item to take on a new custody or a new download, never an own or
+  custody item; the exported file is untouched.
+  **5b-3c** — the Node page's storage: the limit and the bytes held as own, custody and cache.
+  **Acceptance:** Vitest for the view.
 
 - **5b-4 — the emergency copy (D6).**
   **Acceptance:** five nodes, `replicas = 3`, `emergency_after_secs` a few seconds at founding; an
@@ -574,7 +583,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   the pledge clears the warning; lowering it to below half the requirement is refused.
 
 - **5b-6 — keeping, in the UI.** The item page's custodians with their online state; the Node page's
-  pledge, requirement, storage limit, load factor, and bytes held as own, custody and cache.
+  pledge, requirement and load factor (its storage is 5b-3c's).
   **Acceptance:** Vitest per view; one e2e path from adding an item to seeing its custodians.
 
 ### 5c — checking custody (6 PRs)
@@ -653,7 +662,7 @@ Every open C-number appears here once.
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **5c-0**: never purge. |
-| **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3**, whose eviction relies on passes running: watch for it, and restart collection or report it in `node.status`. |
+| **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b**, whose eviction relies on passes running: watch for it, and restart collection or report it in `node.status`. |
 
 ---
 

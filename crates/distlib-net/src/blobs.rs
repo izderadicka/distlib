@@ -40,7 +40,7 @@ use std::{
     sync::Arc,
 };
 
-use distlib_core::{ContentHash, ItemId, KeepReason, MemberId};
+use distlib_core::{ContentHash, ItemId, KeepReason, KeptBlobs, MemberId};
 use futures_lite::StreamExt as _;
 use iroh::Endpoint;
 use iroh_blobs::{
@@ -105,16 +105,42 @@ impl Blobs {
     /// `an_exported_blob_is_a_copy_and_the_store_still_holds_it` is where that
     /// is pinned.
     pub async fn has(&self, hash: ContentHash) -> Result<bool> {
-        let status = self
-            .store
+        Ok(matches!(
+            self.status(hash).await?,
+            BlobStatus::Complete { .. }
+        ))
+    }
+
+    async fn status(&self, hash: ContentHash) -> Result<BlobStatus> {
+        self.store
             .blobs()
             .status(to_blobs(hash))
             .await
             .map_err(|source| NetError::Blob {
                 hash,
                 source: Box::new(source),
-            })?;
-        Ok(matches!(status, BlobStatus::Complete { .. }))
+            })
+    }
+
+    /// Every blob kept for any reason, once, with its size.
+    ///
+    /// **A blob being fetched counts at its whole size** once the store knows
+    /// it, the space it is about to take; one tagged before any of it arrived
+    /// counts nothing yet.
+    pub async fn kept_blobs(&self) -> Result<KeptBlobs> {
+        let mut kept = KeptBlobs::default();
+        for reason in KeepReason::ALL {
+            for (_, blob) in self.kept(reason).await? {
+                let bytes = match self.status(blob).await? {
+                    BlobStatus::Complete { size } | BlobStatus::Partial { size: Some(size) } => {
+                        size
+                    }
+                    BlobStatus::Partial { size: None } | BlobStatus::NotFound => 0,
+                };
+                kept.add(reason, blob, bytes);
+            }
+        }
+        Ok(kept)
     }
 
     /// Keeps `hash`, one of `item`'s blobs, for `reason`, until that reason

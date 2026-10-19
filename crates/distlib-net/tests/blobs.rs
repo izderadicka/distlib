@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr};
+use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr, StorageUse};
 use distlib_net::{
     AddressBook, Blobs, BytePacer,
     blobs::{paced_serving, partial_of},
@@ -596,5 +596,37 @@ async fn what_is_kept_for_one_item_leaves_the_others_out() {
     assert_eq!(
         blobs.kept_for(KeepReason::Custody, one).await.unwrap(),
         [first]
+    );
+}
+
+/// What is kept is counted by blob, under the strongest reason it is kept
+/// for, and a blob tagged before any of it arrived counts nothing.
+#[tokio::test]
+async fn each_kept_blob_counts_once_under_its_strongest_reason() {
+    let store = MemStore::new();
+    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    let blobs = Blobs::new(&store, &endpoint);
+    let (one, other) = (ItemId::from_bytes([1; 32]), ItemId::from_bytes([2; 32]));
+    let (first, second) = (
+        added(&store, b"first").await,
+        added(&store, b"second").await,
+    );
+    let absent = ContentHash::from_bytes([9; 32]);
+    blobs.keep(KeepReason::Own, one, first).await.unwrap();
+    blobs.keep(KeepReason::Cache, other, first).await.unwrap();
+    blobs.keep(KeepReason::Custody, one, second).await.unwrap();
+    blobs
+        .keep(KeepReason::Custody, other, second)
+        .await
+        .unwrap();
+    blobs.keep(KeepReason::Cache, other, absent).await.unwrap();
+
+    assert_eq!(
+        blobs.kept_blobs().await.unwrap().usage(),
+        StorageUse {
+            own_bytes: 5,
+            custody_bytes: 6,
+            cache_bytes: 0,
+        }
     );
 }

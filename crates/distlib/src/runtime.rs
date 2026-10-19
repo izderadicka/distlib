@@ -77,6 +77,8 @@ pub struct Runtime {
     downloads: PathBuf,
     /// What the web UI uploads, held for `library.add`.
     uploads: Uploads,
+    /// `[storage] limit_bytes`: the most the blobs this node keeps may take.
+    storage_limit: Option<NonZeroU64>,
     router: Router,
 }
 
@@ -177,12 +179,7 @@ impl Runtime {
         // between gets no handler. That window is as short as the node's own
         // startup and is why `alpns` exists at all rather than being derived
         // from the handlers.
-        let protocols = node
-            .protocols()
-            .into_iter()
-            .chain(catalogue.protocols())
-            .collect();
-        let router = distlib_net::serve(endpoint, protocols);
+        let router = serve_protocols(endpoint, &node, &catalogue);
 
         Ok(Self {
             node,
@@ -199,6 +196,7 @@ impl Runtime {
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
             uploads,
+            storage_limit: config.storage.limit_bytes,
             router,
         })
     }
@@ -246,6 +244,11 @@ impl Runtime {
     /// What keeps this node's custody in its blob store.
     pub fn pins(&self) -> &PinManager {
         &self.pins
+    }
+
+    /// The most the blobs this node keeps may take; no limit when `None`.
+    pub fn storage_limit(&self) -> Option<NonZeroU64> {
+        self.storage_limit
     }
 
     /// The event bus: what the projection publishes into, and what the local
@@ -405,6 +408,16 @@ struct CustodyInputs<'a> {
     blobs: &'a Blobs,
     events: &'a broadcast::Sender<Event>,
     max_fetches: NonZeroUsize,
+}
+
+/// Answers every protocol this node speaks: consensus's and the catalogue's.
+fn serve_protocols(endpoint: Endpoint, node: &MembershipNode, catalogue: &Catalogue) -> Router {
+    let protocols = node
+        .protocols()
+        .into_iter()
+        .chain(catalogue.protocols())
+        .collect();
+    distlib_net::serve(endpoint, protocols)
 }
 
 /// The read model and its search index, from where `data_dir` keeps them.

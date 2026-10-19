@@ -7,6 +7,7 @@
 use std::{
     cmp::Reverse,
     collections::BTreeMap,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -92,13 +93,16 @@ pub struct Api {
     pub custody: Custody,
     /// Where the items this node keeps stand: queued, fetched, kept.
     pub pins: watch::Receiver<PinCounts>,
+    /// `[storage] limit_bytes`: what own and custody may not grow past; no
+    /// limit when `None`.
+    pub storage_limit: Option<NonZeroU64>,
 }
 
 impl Api {
     /// Dispatches one call.
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
         match method {
-            "node.status" => self.status(),
+            "node.status" => self.status().await,
             "group.members" => self.members(),
             "group.propose_add" => self.propose_add(parse(params)?).await,
             "group.propose_expel" => self.propose_expel(parse(params)?).await,
@@ -130,7 +134,8 @@ impl Api {
     }
 
     /// `node.status` — who this node is and where it stands in its group.
-    fn status(&self) -> Result<Value, Error> {
+    async fn status(&self) -> Result<Value, Error> {
+        let storage = self.storage().await?;
         let membership = self.node.membership();
         let me = self.node.id();
 
@@ -175,7 +180,23 @@ impl Api {
             // Null until custody has been computed.
             "custody": self.custody.status(),
             "pins": *self.pins.borrow(),
+            "storage": storage,
             "sync": sync_block(&self.catalogue.sync_status().borrow()),
+        }))
+    }
+
+    /// The bytes this node keeps, by reason, against its storage limit.
+    async fn storage(&self) -> Result<Value, Error> {
+        let usage = self.blobs.kept_blobs().await.map_err(net_error)?.usage();
+        Ok(json!({
+            "limit_bytes": self.storage_limit,
+            "own_bytes": usage.own_bytes,
+            "custody_bytes": usage.custody_bytes,
+            "cache_bytes": usage.cache_bytes,
+            // Own and custody alone over the limit: nothing left to evict.
+            "mandatory_over_limit": self
+                .storage_limit
+                .is_some_and(|limit| usage.mandatory_bytes() > limit.get()),
         }))
     }
 
@@ -403,6 +424,15 @@ impl Api {
     /// a pledge may only be set by the member it belongs to, so accepting one
     /// would only produce proposals the group refuses.
     async fn pledge_set(&self, params: PledgeSet) -> Result<Value, Error> {
+        // The space for own items and the cache is what the limit leaves.
+        if let Some(limit) = self.storage_limit
+            && params.bytes >= limit.get()
+        {
+            return Err(Error::invalid_params(format!(
+                "a pledge of {} bytes is not below this node's storage limit of {limit} bytes",
+                params.bytes
+            )));
+        }
         self.propose(MembershipEvent::PledgeChanged {
             member: self.node.id(),
             pledge_bytes: params.bytes,
@@ -815,6 +845,7 @@ impl Api {
         let (item, imported) = self
             .item_from_files(files_or_uploads(&params.files, &uploaded)?)
             .await?;
+        self.check_room_for(&item).await?;
         let id = item.id;
         let answer = match self.catalogue.item(id).await.map_err(sync_error)? {
             Some(existing) => self.add_missing_files(item, &existing).await?,
@@ -828,6 +859,26 @@ impl Api {
                 .map_err(net_error)?;
         }
         Ok(answer)
+    }
+
+    /// Refuses `item` when keeping its files as own would grow own and custody
+    /// past the storage limit. An add that grows them by nothing goes through,
+    /// even when they are over it already.
+    async fn check_room_for(&self, item: &Item) -> Result<(), Error> {
+        let Some(limit) = self.storage_limit else {
+            return Ok(());
+        };
+        let kept = self.blobs.kept_blobs().await.map_err(net_error)?;
+        let growth =
+            kept.mandatory_growth(item.files.iter().map(|(hash, file)| (*hash, file.size)));
+        let mandatory = kept.usage().mandatory_bytes() + growth;
+        if growth > 0 && mandatory > limit.get() {
+            return Err(Error::failed(format!(
+                "adding these files would keep {mandatory} bytes this node cannot free, own and \
+                 custody, over its storage limit of {limit} bytes"
+            )));
+        }
+        Ok(())
     }
 
     /// Takes the uploads named: their paths, and the guards that delete them

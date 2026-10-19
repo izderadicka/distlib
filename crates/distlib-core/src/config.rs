@@ -163,12 +163,18 @@ pub struct StorageConfig {
     /// Seconds between garbage collection passes, which delete every blob
     /// nothing keeps any more. Never zero, which would collect without pause.
     pub gc_interval_secs: NonZeroU32,
+    /// The most disk space, in bytes, the blobs this node keeps may take: what
+    /// it added, what it keeps for the group's custody and its cache, each
+    /// blob counted once. Never shared with the group, and must be above this
+    /// node's pledge. No limit when absent.
+    pub limit_bytes: Option<NonZeroU64>,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             gc_interval_secs: NonZeroU32::new(60 * 60).expect("an hour is not zero"),
+            limit_bytes: None,
         }
     }
 }
@@ -398,6 +404,11 @@ impl Config {
              # more. What you added, and what you downloaded, is kept.\n\
              gc_interval_secs = {gc_interval}\n\
              \n\
+             # The most disk space, in bytes, distlib may use on this machine:\n\
+             # what you added, what you keep for the group and the cache, each\n\
+             # blob counted once. Must be above your pledge. No limit when unset.\n\
+             {limit_bytes}\n\
+             \n\
              [transfer]\n\
              # How many items this node fetches at once for the group's custody.\n\
              max_fetches = {max_fetches}\n\
@@ -423,9 +434,16 @@ impl Config {
             download_dir = self.library.download_dir.display(),
             beat_interval = self.availability.beat_interval_secs,
             gc_interval = self.storage.gc_interval_secs,
+            limit_bytes =
+                optional_setting("limit_bytes", self.storage.limit_bytes, 100_000_000_000),
             max_fetches = self.transfer.max_fetches,
-            max_download_rate = optional_rate("max_download_rate", self.transfer.max_download_rate),
-            max_upload_rate = optional_rate("max_upload_rate", self.transfer.max_upload_rate),
+            max_download_rate = optional_setting(
+                "max_download_rate",
+                self.transfer.max_download_rate,
+                10_000_000
+            ),
+            max_upload_rate =
+                optional_setting("max_upload_rate", self.transfer.max_upload_rate, 10_000_000),
             group = group_section(self.group.as_ref()),
             core = self
                 .consensus
@@ -438,11 +456,11 @@ impl Config {
     }
 }
 
-/// `key = rate`, or an example commented out when there is no rate.
-fn optional_rate(key: &str, rate: Option<NonZeroU64>) -> String {
-    match rate {
-        Some(rate) => format!("{key} = {rate}"),
-        None => format!("# {key} = 10000000"),
+/// `key = value`, or `example` commented out when there is no value.
+fn optional_setting(key: &str, value: Option<NonZeroU64>, example: u64) -> String {
+    match value {
+        Some(value) => format!("{key} = {value}"),
+        None => format!("# {key} = {example}"),
     }
 }
 
