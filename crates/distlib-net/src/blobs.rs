@@ -36,6 +36,7 @@
 //! of, in either direction.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -50,8 +51,14 @@ use iroh_blobs::{
         blobs::BlobStatus,
         downloader::{DownloadProgressItem, Downloader},
     },
-    provider::events::{EventMask, EventSender, ProviderMessage, ThrottleMode},
+    provider::events::{
+        EventMask, EventSender, ProviderMessage, RequestMode, RequestReceived, Throttle,
+        ThrottleMode,
+    },
+    store::IROH_BLOCK_SIZE,
 };
+
+use tokio::sync::mpsc;
 
 use crate::{
     error::{NetError, Result},
@@ -338,31 +345,141 @@ impl Blobs {
     }
 }
 
-/// How many chunks waiting to be paced the serving side queues before
-/// iroh-blobs waits to ask about the next one.
-const CHUNKS_WAITING: usize = 64;
+/// How many asks the serving side queues before iroh-blobs waits to make the
+/// next one.
+const ASKS_WAITING: usize = 64;
+
+/// The most a request is sent before iroh-blobs first asks about a chunk:
+/// one chunk group, the store's block.
+const FIRST_CHUNK: u64 = IROH_BLOCK_SIZE.bytes() as u64;
 
 /// Provider events for `BlobsProtocol` that pace every blob this node serves
-/// through `pacer`: iroh-blobs asks before it sends each chunk, and waits for
-/// the answer, so everyone served at once shares the one rate. The task
+/// through `pacer`, so everyone served at once shares the one rate.
+///
+/// **iroh-blobs asks about a chunk once it has sent it**, and waits for the
+/// answer before the next. So each request's first chunk is paid for when the
+/// request arrives, before anything is sent, and taken off what the request's
+/// first ask says; every byte after waits for those before it. The task
 /// answering ends once the protocol, and with it these events, is dropped.
-pub fn paced_serving(pacer: Arc<BytePacer>) -> EventSender {
+pub fn paced_serving(pacer: Arc<BytePacer>, store: &Store) -> EventSender {
     let mask = EventMask {
+        get: RequestMode::Intercept,
+        get_many: RequestMode::Intercept,
         throttle: ThrottleMode::Intercept,
         ..EventMask::DEFAULT
     };
-    let (events, mut asked) = EventSender::channel(CHUNKS_WAITING, mask);
-    tokio::spawn(async move {
+    let (events, asked) = EventSender::channel(ASKS_WAITING, mask);
+    let serving = ServingPace {
+        pacer,
+        store: store.clone(),
+        prepaid: Prepaid::default(),
+    };
+    tokio::spawn(serving.answer(asked));
+    events
+}
+
+/// What paces serving, and what each request's first chunk was paid ahead.
+struct ServingPace {
+    pacer: Arc<BytePacer>,
+    store: Store,
+    prepaid: Prepaid,
+}
+
+impl ServingPace {
+    async fn answer(mut self, mut asked: mpsc::Receiver<ProviderMessage>) {
         while let Some(message) = asked.recv().await {
-            // The only kind the mask asks for.
-            if let ProviderMessage::Throttle(chunk) = message {
-                pacer.pace(chunk.inner.size).await;
-                // A requester gone meanwhile has nothing to be told.
-                let _ = chunk.tx.send(Ok(())).await;
+            match message {
+                ProviderMessage::GetRequestReceived(get) => {
+                    let RequestReceived {
+                        connection_id,
+                        request_id,
+                        ref request,
+                    } = get.inner;
+                    self.prepay(connection_id, request_id, request.hash).await;
+                    // A requester gone meanwhile has nothing to be told.
+                    let _ = get.tx.send(Ok(())).await;
+                }
+                ProviderMessage::GetManyRequestReceived(get_many) => {
+                    let RequestReceived {
+                        connection_id,
+                        request_id,
+                        ref request,
+                    } = get_many.inner;
+                    if let Some(first) = request.hashes.first() {
+                        self.prepay(connection_id, request_id, *first).await;
+                    }
+                    let _ = get_many.tx.send(Ok(())).await;
+                }
+                ProviderMessage::Throttle(chunk) => {
+                    let Throttle {
+                        connection_id,
+                        request_id,
+                        size,
+                    } = chunk.inner;
+                    let owed = self.prepaid.owed(connection_id, request_id, size);
+                    self.pacer.pace(owed).await;
+                    let _ = chunk.tx.send(Ok(())).await;
+                }
+                // A request that never sent a chunk leaves its prepayment
+                // until its connection goes.
+                ProviderMessage::ConnectionClosed(closed) => {
+                    self.prepaid.connection_closed(closed.inner.connection_id);
+                }
+                // The mask asks for nothing else.
+                _ => {}
             }
         }
-    });
-    events
+    }
+
+    /// Pays for the first chunk a request for `hash` will be sent, before it
+    /// is.
+    async fn prepay(&mut self, connection_id: u64, request_id: u64, hash: Hash) {
+        // A store that cannot say fails the request too: nothing is sent.
+        let first_chunk = self
+            .store
+            .blobs()
+            .status(hash)
+            .await
+            .map_or(0, |status| first_chunk_of(&status));
+        if first_chunk > 0 {
+            self.pacer.pace(first_chunk).await;
+            self.prepaid.paid(connection_id, request_id, first_chunk);
+        }
+    }
+}
+
+/// How much of a blob in `status` is in the first chunk a request for all of
+/// it is sent: as much as the store has, up to [`FIRST_CHUNK`].
+fn first_chunk_of(status: &BlobStatus) -> u64 {
+    match *status {
+        BlobStatus::Complete { size } | BlobStatus::Partial { size: Some(size) } => {
+            size.min(FIRST_CHUNK)
+        }
+        BlobStatus::NotFound | BlobStatus::Partial { size: None } => 0,
+    }
+}
+
+/// What each request's first chunk was paid ahead, by connection and
+/// request, until the request's first ask.
+#[derive(Debug, Default)]
+struct Prepaid(HashMap<(u64, u64), u64>);
+
+impl Prepaid {
+    fn paid(&mut self, connection_id: u64, request_id: u64, bytes: u64) {
+        self.0.insert((connection_id, request_id), bytes);
+    }
+
+    /// What a chunk of `size` the request was sent still owes: all of it but
+    /// what its first ask finds paid ahead.
+    fn owed(&mut self, connection_id: u64, request_id: u64, size: u64) -> u64 {
+        let prepaid = self.0.remove(&(connection_id, request_id)).unwrap_or(0);
+        size.saturating_sub(prepaid)
+    }
+
+    fn connection_closed(&mut self, closed: u64) {
+        self.0
+            .retain(|(connection_id, _), _| *connection_id != closed);
+    }
 }
 
 /// Where [`Blobs::export`] writes `target` before it is complete: beside it,
@@ -379,4 +496,46 @@ pub fn partial_of(target: &Path) -> PathBuf {
 /// hash, and the conversion is the raw bytes.
 fn to_blobs(hash: ContentHash) -> Hash {
     Hash::from_bytes(*hash.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_chunk_is_the_blob_up_to_one_chunk_and_nothing_when_not_here() {
+        let complete = |size| BlobStatus::Complete { size };
+        assert_eq!(first_chunk_of(&complete(10_000)), 10_000);
+        assert_eq!(first_chunk_of(&complete(1_000_000)), FIRST_CHUNK);
+        assert_eq!(first_chunk_of(&BlobStatus::Partial { size: Some(5) }), 5);
+        assert_eq!(first_chunk_of(&BlobStatus::Partial { size: None }), 0);
+        assert_eq!(first_chunk_of(&BlobStatus::NotFound), 0);
+    }
+
+    #[test]
+    fn a_requests_first_ask_owes_what_was_not_paid_ahead_and_the_next_owes_all() {
+        let mut prepaid = Prepaid::default();
+        prepaid.paid(1, 7, 16_384);
+        assert_eq!(prepaid.owed(1, 7, 16_384), 0);
+        assert_eq!(prepaid.owed(1, 7, 16_384), 16_384);
+    }
+
+    #[test]
+    fn a_prepayment_counts_for_its_own_request_only() {
+        let mut prepaid = Prepaid::default();
+        prepaid.paid(1, 7, 10_000);
+        assert_eq!(prepaid.owed(1, 8, 10_000), 10_000);
+        assert_eq!(prepaid.owed(2, 7, 10_000), 10_000);
+        assert_eq!(prepaid.owed(1, 7, 16_384), 6_384);
+    }
+
+    #[test]
+    fn a_closed_connection_takes_its_prepayments_with_it() {
+        let mut prepaid = Prepaid::default();
+        prepaid.paid(1, 7, 10_000);
+        prepaid.paid(2, 7, 10_000);
+        prepaid.connection_closed(1);
+        assert_eq!(prepaid.owed(1, 7, 10_000), 10_000);
+        assert_eq!(prepaid.owed(2, 7, 10_000), 0);
+    }
 }

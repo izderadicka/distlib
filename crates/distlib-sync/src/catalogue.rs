@@ -327,7 +327,10 @@ impl Catalogue {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                blobs: BlobsProtocol::new(&blobs, upload_pacer.map(paced_serving)),
+                blobs: BlobsProtocol::new(
+                    &blobs,
+                    upload_pacer.map(|pacer| paced_serving(pacer, &blobs)),
+                ),
                 holdings: Holdings::new(blobs),
                 docs,
                 author: author_id,
