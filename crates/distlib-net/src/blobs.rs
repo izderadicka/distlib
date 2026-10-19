@@ -20,9 +20,10 @@
 //! half: asking a chosen set of members for a hash, independent of whatever
 //! iroh-docs itself is doing.
 //!
-//! **[`paced_serving`] is the one piece of serving here** (5b-2c): the
+//! **[`serving_events`] is the one piece of serving here** (5b-2c, 5b-3b): the
 //! provider events `Catalogue` hands the `BlobsProtocol` it registers, which
-//! pace what this node serves the way [`BytePacer`] paces its fetches.
+//! tell which blobs are served and pace them the way [`BytePacer`] paces its
+//! fetches.
 //!
 //! **2b-3 widened this from fetching to fetching and exporting**, which is a
 //! charter worth stating rather than leaving to be inferred from the method
@@ -50,8 +51,9 @@ use iroh_blobs::{
         blobs::BlobStatus,
         downloader::{DownloadProgressItem, Downloader},
     },
-    provider::events::{EventMask, EventSender, ProviderMessage, ThrottleMode},
+    provider::events::{EventMask, EventSender, ProviderMessage, RequestMode, ThrottleMode},
 };
+use tokio::sync::mpsc;
 
 use crate::{
     error::{NetError, Result},
@@ -364,17 +366,26 @@ impl Blobs {
     }
 }
 
-/// How many asks about chunks the serving side queues before iroh-blobs
-/// waits to make the next one.
-const CHUNKS_WAITING: usize = 64;
+/// How many asks about chunks and requests the serving side queues before
+/// iroh-blobs waits to make the next one.
+const ASKS_WAITING: usize = 64;
 
-/// Provider events for `BlobsProtocol` that pace every blob this node serves
-/// through `pacer`, so everyone served at once shares the one rate. The task
-/// answering ends once the protocol, and with it these events, is dropped.
+/// How many served blobs wait to be recorded before more are dropped.
+const SERVED_WAITING: usize = 1024;
+
+/// Provider events for `BlobsProtocol`: every blob this node is asked for, on
+/// the receiver, and every blob it serves paced through `pacer`, if there is
+/// one, so everyone served at once shares the one rate. The task answering
+/// ends once the protocol, and with it these events, is dropped.
 ///
-/// **A sustained rate, not a hard cap.** iroh-blobs asks about a chunk (about
-/// 16 KiB of payload) after it has sent it, and waits for the answer before
-/// sending the next. So:
+/// **What is served is told, not waited on.** A blob asked for while the
+/// receiver is full is dropped from it rather than holding up serving. One
+/// task answers both, so with a limit, a request can wait behind the chunks
+/// queued before it.
+///
+/// **The pace is a sustained rate, not a hard cap.** iroh-blobs asks about a
+/// chunk (about 16 KiB of payload) after it has sent it, and waits for the
+/// answer before sending the next. So:
 /// - each request's first chunk goes out before the pacer is asked, and
 ///   requests at once make a burst that grows with how many there are;
 /// - a stream of small requests, a blob of one chunk each, can go over the
@@ -384,23 +395,40 @@ const CHUNKS_WAITING: usize = 64;
 ///
 /// For media, a large blob per request, the excess is under one chunk in
 /// each, so the rate holds within a few percent.
-pub fn paced_serving(pacer: Arc<BytePacer>) -> EventSender {
+pub fn serving_events(pacer: Option<Arc<BytePacer>>) -> (EventSender, mpsc::Receiver<ContentHash>) {
     let mask = EventMask {
-        throttle: ThrottleMode::Intercept,
+        get: RequestMode::Notify,
+        throttle: if pacer.is_some() {
+            ThrottleMode::Intercept
+        } else {
+            ThrottleMode::None
+        },
         ..EventMask::DEFAULT
     };
-    let (events, mut asked) = EventSender::channel(CHUNKS_WAITING, mask);
+    let (events, mut asked) = EventSender::channel(ASKS_WAITING, mask);
+    let (served, served_blobs) = mpsc::channel(SERVED_WAITING);
     tokio::spawn(async move {
         while let Some(message) = asked.recv().await {
-            // The only kind the mask asks for.
-            if let ProviderMessage::Throttle(chunk) = message {
-                pacer.pace(chunk.inner.size).await;
-                // A requester gone meanwhile has nothing to be told.
-                let _ = chunk.tx.send(Ok(())).await;
+            match message {
+                ProviderMessage::GetRequestReceivedNotify(request) => {
+                    // Full or closed: a use not recorded is harmless.
+                    let _ = served.try_send(ContentHash::from_bytes(
+                        *request.inner.request.hash.as_bytes(),
+                    ));
+                }
+                ProviderMessage::Throttle(chunk) => {
+                    if let Some(pacer) = &pacer {
+                        pacer.pace(chunk.inner.size).await;
+                    }
+                    // A requester gone meanwhile has nothing to be told.
+                    let _ = chunk.tx.send(Ok(())).await;
+                }
+                // The mask asks for no others.
+                _ => {}
             }
         }
     });
-    events
+    (events, served_blobs)
 }
 
 /// Where [`Blobs::export`] writes `target` before it is complete: beside it,

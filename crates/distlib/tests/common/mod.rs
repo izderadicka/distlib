@@ -168,6 +168,7 @@ pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         custody: runtime.custody().clone(),
         pins: runtime.pins().counts(),
         storage_limit: runtime.storage_limit(),
+        collections: runtime.collections(),
     }
 }
 

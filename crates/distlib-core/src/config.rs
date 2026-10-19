@@ -173,7 +173,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            gc_interval_secs: NonZeroU32::new(60 * 60).expect("an hour is not zero"),
+            gc_interval_secs: NonZeroU32::new(10 * 60).expect("ten minutes is not zero"),
             limit_bytes: None,
         }
     }

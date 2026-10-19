@@ -96,6 +96,8 @@ pub struct Api {
     /// `[storage] limit_bytes`: what own and custody may not grow past; no
     /// limit when `None`.
     pub storage_limit: Option<NonZeroU64>,
+    /// When the last garbage collection pass began; `None` before the first.
+    pub collections: watch::Receiver<Option<SystemTime>>,
 }
 
 impl Api {
@@ -197,6 +199,7 @@ impl Api {
             "mandatory_over_limit": self
                 .storage_limit
                 .is_some_and(|limit| usage.mandatory_bytes() > limit.get()),
+            "last_collection_at": self.collections.borrow().map(micros_since_epoch),
         }))
     }
 
@@ -1006,6 +1009,10 @@ impl Api {
             .item;
         let wanted = files_to_download(params.item_id, item.files, params.file)?;
         let targets = targets_in(&dest, wanted).await?;
+        self.store
+            .mark_used(params.item_id, SystemTime::now())
+            .await
+            .map_err(query_error)?;
 
         let bytes = targets.iter().map(|target| target.record.size).sum();
         let task = self.tasks.start_download(

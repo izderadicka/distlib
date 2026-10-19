@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroUsize,
     sync::{Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use distlib_consensus::MembershipState;
@@ -577,12 +577,14 @@ impl Keeper {
     }
 
     /// Moves `item`'s blobs from custody to the cache: the cache's tag first,
-    /// so no collection in between finds them unkept.
-    async fn release(&self, item: ItemId) -> Result<(), NetError> {
+    /// so no collection in between finds them unkept. Arriving in the cache
+    /// counts as a use, so it is not the first to go.
+    async fn release(&self, item: ItemId) -> Result<(), KeepError> {
         for hash in self.blobs.kept_for(KeepReason::Custody, item).await? {
             self.blobs.keep(KeepReason::Cache, item, hash).await?;
             self.blobs.release(KeepReason::Custody, item, hash).await?;
         }
+        self.store.mark_used(item, SystemTime::now()).await?;
         Ok(())
     }
 }
