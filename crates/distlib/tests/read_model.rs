@@ -32,7 +32,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, init_logging, record};
+use common::{api, bound, config, init_logging, record, until_released};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// then for the projection behind that to catch up.
@@ -187,6 +187,7 @@ async fn a_restarted_node_holds_what_a_node_that_never_restarted_holds() {
     // Down, and something happens while he is down.
     bob.shutdown().await;
     drop(bob);
+    until_released(&DataDir::new(dir.path().join("bob"))).await;
     alice
         .catalogue()
         .write(&an_item(3, "Children of Dune"))
@@ -258,6 +259,7 @@ async fn a_read_model_that_was_lost_is_rebuilt_from_the_document() {
 
     bob.shutdown().await;
     drop(bob);
+    until_released(&DataDir::new(dir.path().join("bob"))).await;
 
     let bobs_dir = DataDir::new(dir.path().join("bob"));
     assert!(bobs_dir.db_dir().exists(), "bob had a read model to delete");
@@ -298,6 +300,7 @@ async fn an_item_whose_content_the_sweep_fetched_is_projected_whole() {
 
     bob.shutdown().await;
     drop(bob);
+    until_released(&DataDir::new(dir.path().join("bob"))).await;
     let bobs_dir = DataDir::new(dir.path().join("bob"));
     std::fs::remove_dir_all(bobs_dir.db_dir()).unwrap();
     std::fs::remove_dir_all(bobs_dir.blobs_dir()).unwrap();
@@ -361,6 +364,7 @@ async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
 
     bob.shutdown().await;
     drop(bob);
+    until_released(&DataDir::new(dir.path().join("bob"))).await;
 
     let bobs_dir = DataDir::new(dir.path().join("bob"));
     assert!(

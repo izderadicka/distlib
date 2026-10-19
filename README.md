@@ -453,6 +453,12 @@ online — every 60 seconds unless set, stretched in groups of more than fifty, 
 most 20 minutes. Its peers count it offline after three missed beats, and at once
 when it stops cleanly.
 
+`[transfer] max_fetches` is how many items the node fetches at once for the group's
+custody, ten unless set. `[transfer] max_download_rate` limits all of its downloads
+together, in bytes per second; unset, there is no limit. A limit below the group's
+`min_transfer_rate` is raised to it, so a member can slow its link but not opt out
+of its share.
+
 **A node can tell the group about at most ten million items it holds.** What it
 holds goes out as a list of item ids, and peers refuse a list longer than that
 (320 MB). A node holding more is still online, but its peers cannot count it as

@@ -1,16 +1,23 @@
 //! 5b-2a's acceptance: a custodian keeps an item without anybody asking, and
 //! lets go of it into the cache only once its copies elsewhere make up for
-//! this one; an item already cached is kept without a fetch.
+//! this one; an item already cached is kept without a fetch. 5b-2b's: the
+//! items with the fewest copies are fetched first, at a download limit raised
+//! to the group's minimum.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{num::NonZeroU8, path::Path, time::Duration};
+use std::{
+    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use distlib::Runtime;
 use distlib_core::{
     ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason, MemberId,
+    TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -24,6 +31,10 @@ use common::{
 
 const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
+/// The size of a book, unless a test needs a larger one.
+const BOOK: usize = 1_000_000;
+/// The group's minimum, low enough that a limited fetch takes seconds.
+const MIN_TRANSFER_RATE: u64 = 500_000;
 
 /// Two copies of everything, and a membership that settles in two seconds.
 fn settings() -> GroupSettings {
@@ -31,6 +42,7 @@ fn settings() -> GroupSettings {
         replicas: NonZeroU8::new(2).unwrap(),
         settle_secs: 2,
         max_settle_secs: 60,
+        min_transfer_rate: MIN_TRANSFER_RATE,
         ..GroupSettings::default()
     }
 }
@@ -46,9 +58,18 @@ struct Node {
 
 impl Node {
     async fn start(key: SecretKey, core: &[MemberId], dir: DataDir) -> Self {
-        let runtime = Runtime::start(&key, &collecting(config(core)), &dir)
-            .await
-            .unwrap();
+        Self::start_with(key, core, dir, TransferConfig::default()).await
+    }
+
+    async fn start_with(
+        key: SecretKey,
+        core: &[MemberId],
+        dir: DataDir,
+        transfer: TransferConfig,
+    ) -> Self {
+        let mut config = collecting(config(core));
+        config.transfer = transfer;
+        let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
         Self {
             runtime,
             id: key.public().into(),
@@ -141,6 +162,22 @@ impl Node {
         });
     }
 
+    /// Waits until `node.status` says `count` of its pins are in `state`.
+    async fn until_pins(&self, state: &str, count: u64) {
+        tokio::time::timeout(SOON, async {
+            while self.call("node.status", json!({})).await["pins"][state] != json!(count) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} never had {count} pins {state} within {SOON:?}",
+                self.id.fmt_short()
+            )
+        });
+    }
+
     /// Waits until it says it is custodian of `items` items.
     async fn until_custodian_of(&self, items: u64) {
         tokio::time::timeout(SOON, async {
@@ -160,11 +197,27 @@ impl Node {
 
 /// Three nodes, collecting every second, founded with `pledges`.
 async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> (Node, Node, Node) {
+    three_nodes_with(dir, pledges, TransferConfig::default()).await
+}
+
+/// [`three_nodes`], the second of them transferring as `seconds_transfer`
+/// says.
+async fn three_nodes_with(
+    dir: &Path,
+    pledges: [u64; 3],
+    seconds_transfer: TransferConfig,
+) -> (Node, Node, Node) {
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
     for (index, key) in keys.into_iter().enumerate() {
-        nodes.push(Node::start(key, &ids, DataDir::new(dir.join(index.to_string()))).await);
+        let transfer = if index == 1 {
+            seconds_transfer.clone()
+        } else {
+            TransferConfig::default()
+        };
+        let dir = DataDir::new(dir.join(index.to_string()));
+        nodes.push(Node::start_with(key, &ids, dir, transfer).await);
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
     let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
@@ -175,17 +228,19 @@ async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> (Node, Node, Node) {
     (first, second, third)
 }
 
-/// Adds a book through `node`: its item and its one file.
-async fn add_a_book(node: &Node, dir: &Path) -> (ItemId, ContentHash) {
+/// Adds a book of about `size` bytes through `node`: its item and its one
+/// file.
+async fn add_a_book(node: &Node, dir: &Path, title: &str, size: usize) -> (ItemId, ContentHash) {
     node.runtime.catalogue().ready().await;
     // Large enough to be a file in the store rather than a row in its
     // database, which is how media is kept.
-    let book = dir.join("dune.epub");
-    std::fs::write(&book, b"the spice must flow\n".repeat(50_000)).unwrap();
+    let book = dir.join(format!("{title}.epub"));
+    let line = format!("{title}\n");
+    std::fs::write(&book, line.repeat(size / line.len())).unwrap();
     let added = node
         .call(
             "library.add",
-            json!({ "kind": "ebook", "files": [&book], "title": "Dune" }),
+            json!({ "kind": "ebook", "files": [&book], "title": title }),
         )
         .await;
     let item: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
@@ -195,10 +250,10 @@ async fn add_a_book(node: &Node, dir: &Path) -> (ItemId, ContentHash) {
 
 /// **A custodian fetches unasked, and lets go only once the item has its
 /// copies elsewhere.** The founder adds a book; of the two others, custody
-/// ranks one first, and it fetches the book. It then pledges nothing while
-/// the other is stopped: custody moves to the stopped one, and the first keeps
-/// the book, since the founder's is then the only other copy, and still after
-/// a restart. Once the other is back and holds it, the first lets it fall into
+/// ranks one first, and it fetches the book. The other downloads it too, and
+/// stops; the first then pledges nothing. Custody moves to the stopped one,
+/// and the first keeps the book, since the founder's is then the only other
+/// copy online, and still after a restart. Once the other is back and holds it, the first lets it fall into
 /// the cache, which a collection pass leaves alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
@@ -206,7 +261,7 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     let dir = TempDir::new().unwrap();
     let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
     let core = [founder.id, second.id, third.id];
-    let (item, file) = add_a_book(&founder, dir.path()).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
 
     let group = CustodyGroup::new(
         2,
@@ -228,6 +283,13 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
         .await;
     // The founder's copy counted, so one copy elsewhere is what it waits on.
     custodian.until_it_sees(founder.id, item).await;
+    // The other downloads the book, so that once it stops it is a holder
+    // that is not online, which counts for nothing.
+    until_projected(&other.runtime, item, 1, "the other member").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&other.runtime, &other.key), item, &dest).await;
+    custodian.until_it_sees(other.id, item).await;
 
     // The other is stopped, then the custodian pledges nothing.
     let (others_key, others_dir) = other.stop().await;
@@ -239,7 +301,7 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         custodian.keeps(KeepReason::Custody, item, file).await,
-        "let go of the book while the founder's was the only other copy"
+        "let go of the book while the founder's was the only other copy online"
     );
     // Restarted while it waits: only its tags say there is something to
     // let go of.
@@ -276,7 +338,7 @@ async fn an_item_already_cached_is_kept_without_a_fetch() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
-    let (item, file) = add_a_book(&founder, dir.path()).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
 
     until_projected(&second.runtime, item, 1, "the second member").await;
     let dest = dir.path().join("downloads");
@@ -302,15 +364,15 @@ async fn an_item_already_cached_is_kept_without_a_fetch() {
 /// else weighs enough to keep, and stops. The second member pledges, becomes
 /// its custodian and tags it, but cannot fetch it; pledging nothing, it lets
 /// go of the book at once, since it never held it. It pledges again and is
-/// restarted, still its custodian, with the tag but not the book. Once the
-/// founder is back, it fetches the book.
+/// restarted, still its custodian, with the tag but not the book, and its
+/// fetch fails. Once the founder is back, it fetches the book.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
     let core = [founder.id, second.id, third.id];
-    let (item, file) = add_a_book(&founder, dir.path()).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
     until_projected(&second.runtime, item, 1, "the second member").await;
     let (founders_key, founders_dir) = founder.stop().await;
 
@@ -330,10 +392,93 @@ async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
     let (seconds_key, seconds_dir) = second.stop().await;
     let second = Node::start(seconds_key, &core, seconds_dir).await;
     second.until_custodian_of(1).await;
+    // Given up while nobody could serve it, so only the founder coming back
+    // asks for it again.
+    second.until_pins("failed", 1).await;
     let founder = Node::start(founders_key, &core, founders_dir).await;
     second
         .until_keeps(true, KeepReason::Custody, item, file)
         .await;
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// **The items with the fewest copies are fetched first, at no less than the
+/// group's minimum.** The second member is custodian of everything, and
+/// fetches one item at a time at a limit below the group's minimum. While it
+/// fetches a large book, the founder adds two more: first one the third
+/// member downloads, so it has two copies, then one only the founder holds.
+/// The second member fetches the one with one copy next. The large book took
+/// about its size over the group's minimum, not over the lower limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
+    // Twenty seconds at the minimum: the third member's copy may take ten to
+    // be heard of, since a change waits for the heartbeat's floor.
+    const LARGE: usize = 10_000_000;
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let one_at_a_time_below_the_minimum = TransferConfig {
+        max_fetches: NonZeroUsize::MIN,
+        max_download_rate: NonZeroU64::new(MIN_TRANSFER_RATE / 5),
+    };
+    let (founder, second, third) = three_nodes_with(
+        dir.path(),
+        [100 * GB, 100 * GB, 0],
+        one_at_a_time_below_the_minimum,
+    )
+    .await;
+
+    let started = Instant::now();
+    let (large, large_file) = add_a_book(&founder, dir.path(), "Dune", LARGE).await;
+    let (copied, copied_file) = add_a_book(&founder, dir.path(), "Emma", BOOK).await;
+    until_projected(&third.runtime, copied, 1, "the third member").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&third.runtime, &third.key), copied, &dest).await;
+    second.until_it_sees(third.id, copied).await;
+    let (single, single_file) = add_a_book(&founder, dir.path(), "Ulysses", BOOK).await;
+    second.until_custodian_of(3).await;
+    assert!(
+        !second.keeps(KeepReason::Custody, large, large_file).await,
+        "the large book was fetched before the others were queued, so the order shows nothing"
+    );
+
+    // Watched from here on, so a book fetched beside the large one, rather
+    // than after it, is seen first too.
+    let mut large_took = None;
+    let fetched_next = tokio::time::timeout(SOON, async {
+        loop {
+            if large_took.is_none() && second.keeps(KeepReason::Custody, large, large_file).await {
+                large_took = Some(started.elapsed());
+            }
+            if second.keeps(KeepReason::Custody, copied, copied_file).await {
+                return copied;
+            }
+            if second.keeps(KeepReason::Custody, single, single_file).await {
+                return single;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("neither small book was fetched");
+    assert_eq!(
+        fetched_next, single,
+        "the book with two copies was fetched before the one with one"
+    );
+    assert!(
+        large_took.is_some(),
+        "a small book was fetched before the large one was done, past max_fetches"
+    );
+
+    let took = large_took.unwrap();
+    let at_the_minimum = Duration::from_secs_f64(LARGE as f64 / MIN_TRANSFER_RATE as f64);
+    assert!(
+        took >= at_the_minimum.mul_f64(0.85) && took <= at_the_minimum * 3,
+        "the large book took {took:?}, about {at_the_minimum:?} at the group's minimum"
+    );
 
     for node in [founder, second, third] {
         node.stop().await;

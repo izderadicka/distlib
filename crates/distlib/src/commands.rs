@@ -194,6 +194,7 @@ async fn start_local_api(
         downloads: runtime.downloads().to_path_buf(),
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
+        pins: runtime.pins().counts(),
     };
     Ok(Some(serve_api(paths, config, api).await?))
 }
@@ -1369,6 +1370,7 @@ fn print_live_status(live: &Value) {
     }
     print_settings(&live["settings"]);
     print_custody(&live["custody"]);
+    print_pins(&live["pins"]);
     println!("node        running");
 }
 
@@ -1812,6 +1814,20 @@ fn print_custody(custody: &Value) {
         "custody     {} items, {} bytes; group load {load}",
         custody["items"], custody["bytes"]
     );
+}
+
+/// Where the items this node keeps stand, once there are any.
+fn print_pins(pins: &Value) {
+    let count = |state: &str| pins[state].as_u64().unwrap_or(0);
+    let states = ["kept", "fetching", "queued", "failed", "releasing"];
+    if states.iter().all(|state| count(state) == 0) {
+        return;
+    }
+    let counts: Vec<String> = states
+        .iter()
+        .map(|state| format!("{} {state}", count(state)))
+        .collect();
+    println!("pins        {}", counts.join(", "));
 }
 
 /// One member, named if they have a name.

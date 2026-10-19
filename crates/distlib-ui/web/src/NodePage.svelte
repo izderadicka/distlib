@@ -98,8 +98,8 @@
         <dd>after {duration(settings.settle_secs)} without a change, {duration(settings.max_settle_secs)} at most</dd>
         <dt>Emergency copy</dt>
         <dd>after {duration(settings.emergency_after_secs)} with one copy left</dd>
-        <dt>Minimum fetch rate</dt>
-        <dd>{bytes(settings.min_fetch_rate)}/s</dd>
+        <dt>Minimum transfer rate</dt>
+        <dd>{bytes(settings.min_transfer_rate)}/s</dd>
         <dt>Probes</dt>
         <dd>{settings.probes ? `every ${duration(settings.probe_every_secs)}` : "off"}</dd>
         <dt>Probe failures count for</dt>

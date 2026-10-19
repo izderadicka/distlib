@@ -24,7 +24,8 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    time::Duration,
+    num::NonZeroU64,
+    time::{Duration, Instant},
 };
 
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr};
@@ -65,6 +66,98 @@ async fn endpoint(secret: SecretKey, alpns: Vec<Vec<u8>>) -> Endpoint {
         .bind()
         .await
         .unwrap()
+}
+
+/// A node serving `store`: its member id, its address and the router to shut
+/// down.
+async fn serving(store: &MemStore) -> (MemberId, NodeAddr, Router) {
+    let secret = SecretKey::generate();
+    let id = MemberId::from(secret.public());
+    let endpoint = endpoint(secret, vec![iroh_blobs::ALPN.to_vec()]).await;
+    let router = Router::builder(endpoint.clone())
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(store, None))
+        .spawn();
+    let socket = endpoint
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .expect("a bound endpoint reports a socket");
+    (id, NodeAddr::default().with_direct(socket), router)
+}
+
+/// `size` bytes that are not all the same, added to `store`.
+async fn added_bytes(store: &MemStore, size: u64, seed: u64) -> ContentHash {
+    let bytes: Vec<u8> = (0..size).map(|n| ((n + seed) % 251) as u8).collect();
+    let hash = store.add_bytes(bytes).await.unwrap().hash;
+    ContentHash::from_bytes(*hash.as_bytes())
+}
+
+/// A fetcher of what `provider` at `addr` serves, limited to `rate` bytes
+/// per second.
+async fn limited_fetcher(provider: MemberId, addr: &NodeAddr, rate: u64) -> Blobs {
+    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    AddressBook::install(&endpoint)
+        .unwrap()
+        .learn(provider, addr);
+    let blobs = Blobs::new(&MemStore::new(), &endpoint);
+    blobs.limit_downloads(NonZeroU64::new(rate));
+    blobs
+}
+
+/// The least a limited fetch of `bytes` at `rate` may take: its size over the
+/// rate, less a margin for the pacer's burst and what the connection buffers.
+/// No upper bound is checked beyond a generous one, since a busy machine is
+/// slow without the limit being wrong.
+fn assert_paced(took: Duration, bytes: u64, rate: u64) {
+    let expected = Duration::from_secs_f64(bytes as f64 / rate as f64);
+    assert!(
+        took >= expected.mul_f64(0.85) && took <= expected * 3,
+        "{bytes} bytes at {rate} bytes/s took {took:?}, expected about {expected:?}"
+    );
+}
+
+/// 5b-2b's acceptance: a download limit holds within a tolerance.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_limited_fetch_takes_its_size_over_the_rate() {
+    const RATE: u64 = 1_000_000;
+    const SIZE: u64 = 3_000_000;
+    let a_store = MemStore::new();
+    let (a_id, a_addr, a_router) = serving(&a_store).await;
+    let hash = added_bytes(&a_store, SIZE, 0).await;
+    let blobs = limited_fetcher(a_id, &a_addr, RATE).await;
+
+    let started = Instant::now();
+    blobs.fetch(hash, vec![a_id]).await.unwrap();
+
+    assert_paced(started.elapsed(), SIZE, RATE);
+    let _ = a_router.shutdown().await;
+}
+
+/// The limit is the node's: two fetches at once share it.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn two_limited_fetches_at_once_share_the_rate() {
+    const RATE: u64 = 1_000_000;
+    const SIZE: u64 = 1_500_000;
+    let a_store = MemStore::new();
+    let (a_id, a_addr, a_router) = serving(&a_store).await;
+    let first = added_bytes(&a_store, SIZE, 0).await;
+    let second = added_bytes(&a_store, SIZE, 1).await;
+    let blobs = limited_fetcher(a_id, &a_addr, RATE).await;
+    // A clone, the way the pin manager and `library.download` each hold one.
+    let clone = blobs.clone();
+
+    let started = Instant::now();
+    let (first, second) = tokio::join!(
+        blobs.fetch(first, vec![a_id]),
+        clone.fetch(second, vec![a_id])
+    );
+    first.unwrap();
+    second.unwrap();
+
+    assert_paced(started.elapsed(), 2 * SIZE, RATE);
+    let _ = a_router.shutdown().await;
 }
 
 #[tokio::test]

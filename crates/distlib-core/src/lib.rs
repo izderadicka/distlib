@@ -33,7 +33,7 @@ pub use community::{
 };
 pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
-    RelayMode, StorageConfig,
+    RelayMode, StorageConfig, TransferConfig,
 };
 pub use custody::{CustodyGroup, CustodyItem, WeightRule};
 pub use error::CoreError;

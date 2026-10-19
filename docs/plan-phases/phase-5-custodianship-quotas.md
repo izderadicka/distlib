@@ -8,7 +8,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 ## Context
 
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
-5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a.** Four rounds of review on #133 shaped it;
+5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -297,7 +297,7 @@ pending_expiry        u64    default 128       (C9)
 settle_secs           u32    default 1 h       (D4)
 max_settle_secs       u32    default 1 day     (D4)
 emergency_after_secs  u32    default 1 day     (D6)
-min_fetch_rate        u64    default 1 MB/s    (D7)
+min_transfer_rate     u64    default 1 MB/s    (D7, P5-12)
 probes                bool   default on        (D11)
 probe_every_secs      u32    default 5 min     (D11)
 failure_window_secs   u32    default 7 days    (D12)
@@ -360,8 +360,9 @@ custodians come back nothing is recomputed: the extra copy simply ages out of th
   `min_fetch_rate` — a lower value is raised to it, with a warning. A member cannot opt out of its
   share by throttling to nothing, and D10 shows one that falls behind.
 - **Recovery is prioritized**: fetches go in order of live copies ascending, so an item down to one
-  copy goes before one at two (§5.5's mitigation 4). At most two at a time from one providing peer;
-  the queue is reordered, not restarted, when counts change.
+  copy goes before one at two (§5.5's mitigation 4). At most two at a time from one providing peer
+  *(changed in review of 5b-2a, P5-12: a cap on fetches at once in total)*; the queue is reordered,
+  not restarted, when counts change.
 - **An item already in the cache is promoted, not fetched.**
 
 **D8 — The quota rule.** §5.5 of [`distlib-plan.md`](../distlib-plan.md) says "required pledge ≥
@@ -461,7 +462,7 @@ The design is agreed; these numbers are guesses until something is measured:
 - **Q6 — `emergency_after_secs`** (D6): a day.
 - **Q7 — the probe rate and split** (D11): one probe per node every five minutes, three in four
   random. At 1,000 members that is about 290,000 probes a day across the group, each a 1 KiB chunk.
-- **Q8 — `min_fetch_rate`** (D7): 1 MB/s is about 86 GB a day — enough for a newcomer's share in a
+- **Q8 — `min_transfer_rate`** (D7, P5-12; was `min_fetch_rate`): 1 MB/s is about 86 GB a day — enough for a newcomer's share in a
   modest group, slow for a large one. A measurement of a real rebalance will set it.
 - **Q9 — "far under-pledged"** (D8): a requirement more than twice the pledge. With the defaults, a
   member pledging 100 GB adds up to 50 GB freely, is warned up to 100 GB, and is refused beyond.
@@ -537,7 +538,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   members other than this node announce it. Its acceptance is the first, second and last points
   above. The pin manager's state is one enum per item, and fetches run in a `JoinSet` up to a
   fixed ten at once (review of #141).
-  **5b-2b** — the queue and the download limit: `max_fetches` in the node's config, ten by
+  **5b-2b** *(done; delta P5-13)* — the queue and the download limit: `max_fetches` in the node's config, ten by
   default, replacing the fixed ten (Ivan: a cap per providing peer can come later); items with the
   fewest live copies first, reordered rather than restarted; and **one node-wide download limit**
   for every blob fetch, custody's and `library.download`'s, enforced in `distlib_net::Blobs` by
@@ -545,7 +546,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   pacing, not byte-exact throttling). **The group's minimum is symmetric** (Ivan, review of
   #141): one group setting, `min_fetch_rate` renamed for both directions, below which neither a
   node's download nor its upload limit may be set; both limits are optional. Its acceptance is the
-  two remaining points, with the fetch rate as the download limit.
+  two remaining points, with the fetch rate as the download limit. `node.status` shows how many
+  items are in each pin state (review of #142).
   **5b-2c** — the upload limit: every blob this node serves, paced through iroh-blobs' provider
   throttle (`ThrottleMode::Intercept`) where `BlobsProtocol` is built, never below the group's
   minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a

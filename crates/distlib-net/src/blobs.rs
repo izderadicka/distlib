@@ -31,7 +31,11 @@
 //! it for that reason; this crate owns it as the thing media moves in and out
 //! of, in either direction.
 
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId};
 use futures_lite::StreamExt as _;
@@ -45,7 +49,10 @@ use iroh_blobs::{
     },
 };
 
-use crate::error::{NetError, Result};
+use crate::{
+    error::{NetError, Result},
+    pacer::BytePacer,
+};
 
 /// A handle for moving media in and out of a local blob store: fetching what
 /// is not here from members who have it, and writing what is here to a file.
@@ -57,6 +64,9 @@ use crate::error::{NetError, Result};
 pub struct Blobs {
     store: Store,
     downloader: Downloader,
+    /// Every fetch through any clone of this paces here, so the limit is
+    /// this node's, not each fetch's.
+    download_pacer: Arc<BytePacer>,
 }
 
 impl Blobs {
@@ -65,7 +75,14 @@ impl Blobs {
         Self {
             store: store.clone(),
             downloader: store.downloader(endpoint),
+            download_pacer: Arc::new(BytePacer::new(None)),
         }
+    }
+
+    /// Limits every fetch from now on to `rate` bytes per second, all of
+    /// them together; `None` lifts the limit.
+    pub fn limit_downloads(&self, rate: Option<NonZeroU64>) {
+        self.download_pacer.set_rate(rate);
     }
 
     /// Whether this store already holds all of `hash`.
@@ -233,9 +250,19 @@ impl Blobs {
             .stream()
             .await
             .map_err(|source| failed(Box::new(source)))?;
+        let mut last_offset = 0;
         while let Some(item) = items.next().await {
             match item {
-                DownloadProgressItem::Progress(offset) => progress(offset),
+                // Paced by not reading on: the downloader waits for this
+                // stream before it reads the next chunk off the connection.
+                DownloadProgressItem::Progress(offset) => {
+                    progress(offset);
+                    // An offset that went back is the next provider starting
+                    // again, with all of its bytes new.
+                    let arrived = offset.checked_sub(last_offset).unwrap_or(offset);
+                    last_offset = offset;
+                    self.download_pacer.pace(arrived).await;
+                }
                 DownloadProgressItem::Error(source) => return Err(failed(source.into())),
                 // Only sent when a request is split across providers, and
                 // `download` never splits one: for a single raw blob this arm

@@ -9,7 +9,7 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 
@@ -53,6 +53,7 @@ pub struct Config {
     pub library: LibraryConfig,
     pub availability: AvailabilityConfig,
     pub storage: StorageConfig,
+    pub transfer: TransferConfig,
     /// The settings of a group this node founds, written into the founding
     /// entry. Read only by `distlib run --found-group`; the defaults when
     /// absent.
@@ -168,6 +169,27 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             gc_interval_secs: NonZeroU32::new(60 * 60).expect("an hour is not zero"),
+        }
+    }
+}
+
+/// How much this node moves over the network at once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransferConfig {
+    /// How many items custody fetches at once.
+    pub max_fetches: NonZeroUsize,
+    /// The most this node downloads, in bytes per second, across every
+    /// download at once. Never below the group's `min_transfer_rate`: a lower
+    /// value is raised to it. No limit when absent.
+    pub max_download_rate: Option<NonZeroU64>,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            max_fetches: NonZeroUsize::new(10).expect("ten is not zero"),
+            max_download_rate: None,
         }
     }
 }
@@ -369,6 +391,15 @@ impl Config {
              # more. What you added, and what you downloaded, is kept.\n\
              gc_interval_secs = {gc_interval}\n\
              \n\
+             [transfer]\n\
+             # How many items this node fetches at once for the group's custody.\n\
+             max_fetches = {max_fetches}\n\
+             \n\
+             # The most this node downloads, in bytes per second, all downloads\n\
+             # together. Never below the group's min_transfer_rate, which a lower\n\
+             # value is raised to. No limit when unset.\n\
+             {max_download_rate}\n\
+             \n\
              {group}",
             bind = self.net.bind_addr_v4,
             relay_mode = self.net.relay_mode.as_str(),
@@ -379,6 +410,11 @@ impl Config {
             download_dir = self.library.download_dir.display(),
             beat_interval = self.availability.beat_interval_secs,
             gc_interval = self.storage.gc_interval_secs,
+            max_fetches = self.transfer.max_fetches,
+            max_download_rate = match self.transfer.max_download_rate {
+                Some(rate) => format!("max_download_rate = {rate}"),
+                None => "# max_download_rate = 10000000".to_owned(),
+            },
             group = group_section(self.group.as_ref()),
             core = self
                 .consensus
@@ -407,7 +443,7 @@ fn group_section(group: Option<&GroupSettings>) -> String {
         settle_secs,
         max_settle_secs,
         emergency_after_secs,
-        min_fetch_rate,
+        min_transfer_rate,
         probes,
         probe_every_secs,
         failure_window_secs,
@@ -421,7 +457,7 @@ fn group_section(group: Option<&GroupSettings>) -> String {
         format!("settle_secs = {settle_secs}"),
         format!("max_settle_secs = {max_settle_secs}"),
         format!("emergency_after_secs = {emergency_after_secs}"),
-        format!("min_fetch_rate = {min_fetch_rate}"),
+        format!("min_transfer_rate = {min_transfer_rate}"),
         format!("probes = {probes}"),
         format!("probe_every_secs = {probe_every_secs}"),
         format!("failure_window_secs = {failure_window_secs}"),
