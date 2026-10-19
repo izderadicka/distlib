@@ -137,6 +137,7 @@ fn a_group_founded_from_the_config_keeps_its_settings_when_the_config_changes() 
         status.contains("node        running")
             && status.contains("replicas = 2")
             && status.contains("custody     0 items, 0 bytes; group load ")
+            && status.contains("storage     0 own, 0 custody, 0 cache bytes; no limit")
     });
     node.stop();
     let printed = run_command(founder.dir.path(), &["status"]);

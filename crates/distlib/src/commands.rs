@@ -195,6 +195,7 @@ async fn start_local_api(
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
         pins: runtime.pins().counts(),
+        storage_limit: runtime.storage_limit(),
     };
     Ok(Some(serve_api(paths, config, api).await?))
 }
@@ -1371,6 +1372,7 @@ fn print_live_status(live: &Value) {
     print_settings(&live["settings"]);
     print_custody(&live["custody"]);
     print_pins(&live["pins"]);
+    print_storage(&live["storage"]);
     println!("node        running");
 }
 
@@ -1828,6 +1830,22 @@ fn print_pins(pins: &Value) {
         .map(|state| format!("{} {state}", count(state)))
         .collect();
     println!("pins        {}", counts.join(", "));
+}
+
+/// The bytes this node keeps, by reason, and its limit if it has one.
+fn print_storage(storage: &Value) {
+    let limit = storage["limit_bytes"]
+        .as_u64()
+        .map_or_else(|| "no limit".to_owned(), |limit| format!("limit {limit}"));
+    let over = if storage["mandatory_over_limit"].as_bool().unwrap_or(false) {
+        " — own and custody alone are over the limit"
+    } else {
+        ""
+    };
+    println!(
+        "storage     {} own, {} custody, {} cache bytes; {limit}{over}",
+        storage["own_bytes"], storage["custody_bytes"], storage["cache_bytes"]
+    );
 }
 
 /// One member, named if they have a name.

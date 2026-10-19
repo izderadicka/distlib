@@ -200,6 +200,7 @@ fn the_starter_file_reloads_as_what_it_came_from() {
         },
         storage: distlib_core::StorageConfig {
             gc_interval_secs: 19.try_into().unwrap(),
+            limit_bytes: Some(50_000_000_000.try_into().unwrap()),
         },
         transfer: distlib_core::TransferConfig {
             max_fetches: 3.try_into().unwrap(),
@@ -234,7 +235,8 @@ fn a_starter_file_without_group_settings_shows_them_commented_out() {
     );
     assert!(
         rendered.contains("\n# max_download_rate = ")
-            && rendered.contains("\n# max_upload_rate = "),
+            && rendered.contains("\n# max_upload_rate = ")
+            && rendered.contains("\n# limit_bytes = "),
         "{rendered}"
     );
     Jail::expect_with(move |jail| {
@@ -243,6 +245,7 @@ fn a_starter_file_without_group_settings_shows_them_commented_out() {
         assert_eq!(loaded.group, None);
         assert_eq!(loaded.transfer.max_download_rate, None);
         assert_eq!(loaded.transfer.max_upload_rate, None);
+        assert_eq!(loaded.storage.limit_bytes, None);
         Ok(())
     });
 }

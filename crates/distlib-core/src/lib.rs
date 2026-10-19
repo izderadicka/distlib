@@ -40,6 +40,6 @@ pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
 pub use group_settings::GroupSettings;
 pub use id::{ContentHash, GroupId, ItemId, MemberId, RawMemberId};
-pub use keeping::KeepReason;
+pub use keeping::{KeepReason, KeptBlobs, StorageUse};
 pub use paths::DataDir;
 pub use ticket::Ticket;

@@ -248,6 +248,7 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&node, &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
+                storage_limit: None,
             },
             SecretString::from(token.clone()),
         )
@@ -423,6 +424,7 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&nodes[0], &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
+                storage_limit: None,
             },
             SecretString::from(token.clone()),
         )
