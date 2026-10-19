@@ -412,17 +412,20 @@ async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
 }
 
 /// **The items with the fewest copies are fetched first, at no less than the
-/// group's minimum.** The second member is custodian of everything, and
-/// fetches one item at a time at a limit below the group's minimum. While it
-/// fetches a large book, the founder adds two more: first one the third
-/// member downloads, so it has two copies, then one only the founder holds.
-/// The second member fetches the one with one copy next. The large book took
+/// group's minimum.** The founder adds two books, and the third member
+/// downloads one of them, so it has two copies and the other one. Once the
+/// second member has seen every copy, it pledges and becomes custodian of
+/// both at once; it fetches one item at a time, at a limit below the group's
+/// minimum. It fetches the book with one copy first, and the other takes
 /// about its size over the group's minimum, not over the lower limit.
+///
+/// Both books are queued by the same pass, so the order is the copies' alone.
+/// A fetch that fails is normal, and is asked again, so nothing here waits on
+/// one fetch holding the slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
-    // Twenty seconds at the minimum: the third member's copy may take ten to
-    // be heard of, since a change waits for the heartbeat's floor.
-    const LARGE: usize = 10_000_000;
+    // Four seconds at the group's minimum.
+    const SIZE: usize = 2_000_000;
     init_logging();
     let dir = TempDir::new().unwrap();
     let one_at_a_time_below_the_minimum = TransferConfig {
@@ -432,7 +435,7 @@ async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
     };
     let (founder, second, third) = three_nodes_with(
         dir.path(),
-        [100 * GB, 100 * GB, 0],
+        [100 * GB, 0, 0],
         [
             TransferConfig::default(),
             one_at_a_time_below_the_minimum,
@@ -441,50 +444,38 @@ async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
     )
     .await;
 
-    let started = Instant::now();
-    let (large, large_file) = add_a_book(&founder, dir.path(), "Dune", LARGE).await;
-    let (copied, copied_file) = add_a_book(&founder, dir.path(), "Emma", BOOK).await;
+    let (copied, copied_file) = add_a_book(&founder, dir.path(), "Emma", SIZE).await;
+    let (single, single_file) = add_a_book(&founder, dir.path(), "Ulysses", SIZE).await;
     until_projected(&third.runtime, copied, 1, "the third member").await;
     let dest = dir.path().join("downloads");
     std::fs::create_dir_all(&dest).unwrap();
     download(&api(&third.runtime, &third.key), copied, &dest).await;
-    second.until_it_sees(third.id, copied).await;
-    let (single, single_file) = add_a_book(&founder, dir.path(), "Ulysses", BOOK).await;
-    second.until_custodian_of(3).await;
-    assert!(
-        !second.keeps(KeepReason::Custody, large, large_file).await,
-        "the large book was fetched before the others were queued, so the order shows nothing"
-    );
+    for (holder, book) in [
+        (third.id, copied),
+        (founder.id, copied),
+        (founder.id, single),
+    ] {
+        second.until_it_sees(holder, book).await;
+    }
 
-    // Watched from here on, so a book fetched beside the large one, rather
-    // than after it, is seen first too.
-    let mut large_took = None;
-    let fetched_next = tokio::time::timeout(SOON, async {
-        loop {
-            if large_took.is_none() && second.keeps(KeepReason::Custody, large, large_file).await {
-                large_took = Some(started.elapsed());
-            }
-            if second.keeps(KeepReason::Custody, copied, copied_file).await {
-                return copied;
-            }
-            if second.keeps(KeepReason::Custody, single, single_file).await {
-                return single;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("neither small book was fetched");
-    assert_eq!(
-        fetched_next, single,
+    second
+        .call("group.pledge_set", json!({ "bytes": 100 * GB }))
+        .await;
+    // One at a time: one book fetched, the other waiting its turn.
+    second.until_pins("fetching", 1).await;
+    second.until_pins("queued", 1).await;
+    second
+        .until_keeps(true, KeepReason::Custody, single, single_file)
+        .await;
+    let single_kept = Instant::now();
+    assert!(
+        !second.keeps(KeepReason::Custody, copied, copied_file).await,
         "the book with two copies was fetched before the one with one"
     );
-    assert!(
-        large_took.is_some(),
-        "a small book was fetched before the large one was done, past max_fetches"
-    );
-
-    assert_about_the_minimum(large_took.unwrap(), LARGE, "the large book");
+    second
+        .until_keeps(true, KeepReason::Custody, copied, copied_file)
+        .await;
+    assert_about_the_minimum(single_kept.elapsed(), SIZE, "the book with two copies");
 
     for node in [founder, second, third] {
         node.stop().await;
