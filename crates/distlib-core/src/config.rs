@@ -185,7 +185,9 @@ pub struct TransferConfig {
     pub max_download_rate: Option<NonZeroU64>,
     /// The most this node serves, in bytes per second, to everyone it serves
     /// at once. Never below the group's `min_transfer_rate`, the same as the
-    /// download limit. No limit when absent.
+    /// download limit. No limit when absent. A sustained rate, not a hard
+    /// cap: each request's first chunk, up to 16 KiB, goes out before the
+    /// limit applies, so many small requests at once can go over it.
     pub max_upload_rate: Option<NonZeroU64>,
 }
 
@@ -407,7 +409,8 @@ impl Config {
              \n\
              # The most this node serves to the group, in bytes per second, to\n\
              # everyone at once. Never below min_transfer_rate either. No limit\n\
-             # when unset.\n\
+             # when unset. A sustained rate, not a hard cap: many small requests\n\
+             # at once can go over it.\n\
              {max_upload_rate}\n\
              \n\
              {group}",

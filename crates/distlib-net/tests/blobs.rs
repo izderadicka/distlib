@@ -83,8 +83,7 @@ async fn serving_at(store: &MemStore, rate: Option<u64>) -> (MemberId, NodeAddr,
     let secret = SecretKey::generate();
     let id = MemberId::from(secret.public());
     let endpoint = endpoint(secret, vec![iroh_blobs::ALPN.to_vec()]).await;
-    let events =
-        rate.map(|rate| paced_serving(Arc::new(BytePacer::new(NonZeroU64::new(rate))), store));
+    let events = rate.map(|rate| paced_serving(Arc::new(BytePacer::new(NonZeroU64::new(rate)))));
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(store, events))
         .spawn();
@@ -198,53 +197,6 @@ async fn a_limited_provider_serves_two_downloaders_at_its_rate_together() {
     from_second.unwrap();
 
     assert_paced(started.elapsed(), 2 * SIZE, RATE);
-    let _ = a_router.shutdown().await;
-}
-
-/// Review of #143: iroh-blobs asks about a chunk only once it has sent it,
-/// so a blob of one chunk would go out unpaced but for what is paid when its
-/// request arrives. The bytes of many short requests at once arrive at the
-/// rate too.
-#[cfg(feature = "slow-tests")]
-#[tokio::test]
-async fn many_short_requests_at_once_are_served_at_the_rate_too() {
-    const RATE: u64 = 200_000;
-    const BLOBS: u64 = 40;
-    // Under one chunk group, 16 KiB: all of each is in its first chunk.
-    const SIZE: u64 = 10_000;
-    let a_store = MemStore::new();
-    let (a_id, a_addr, a_router) = serving_at(&a_store, Some(RATE)).await;
-    let mut hashes = Vec::new();
-    for seed in 0..BLOBS {
-        hashes.push(added_bytes(&a_store, SIZE, seed).await);
-    }
-    let blobs = fetcher(a_id, &a_addr).await;
-
-    // Timed by when the bytes arrive, not by when a fetch ends: a provider
-    // closes a stream only once its last chunk is paced, after the bytes
-    // went.
-    let started = Instant::now();
-    let mut fetches = tokio::task::JoinSet::new();
-    for hash in hashes {
-        let blobs = blobs.clone();
-        fetches.spawn(async move {
-            let mut arrived = None;
-            blobs
-                .fetch_with_progress(hash, vec![a_id], |offset| {
-                    if offset >= SIZE {
-                        arrived.get_or_insert_with(Instant::now);
-                    }
-                })
-                .await
-                .map(|()| arrived.expect("a fetch that succeeded got every byte"))
-        });
-    }
-    let mut last_arrived = started;
-    while let Some(fetched) = fetches.join_next().await {
-        last_arrived = last_arrived.max(fetched.unwrap().unwrap());
-    }
-
-    assert_paced(last_arrived - started, BLOBS * SIZE, RATE);
     let _ = a_router.shutdown().await;
 }
 

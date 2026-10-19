@@ -459,6 +459,13 @@ together, and `max_upload_rate` everything it serves to the group, both in bytes
 per second; unset, there is no limit. A limit below the group's `min_transfer_rate`
 is raised to it, so a member can slow its link but not opt out of its share.
 
+Both are sustained rates, not hard caps. They count only file bytes, not protocol
+or network overhead. Downloads are held back after bytes arrive, so a little more
+than the limit can be in flight at any moment. Uploads are held back after each
+chunk (about 16 KiB) is sent, so each request's first chunk goes out before the
+limit applies: many small requests at once can go over it, while a large file is
+served within a few percent of the limit.
+
 **A node can tell the group about at most ten million items it holds.** What it
 holds goes out as a list of item ids, and peers refuse a list longer than that
 (320 MB). A node holding more is still online, but its peers cannot count it as
