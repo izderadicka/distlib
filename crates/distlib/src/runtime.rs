@@ -23,9 +23,11 @@ use std::{
 use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
 use distlib_consensus::{MembershipNode, MembershipState};
-use distlib_core::{Config, DataDir, Event, MemberId, NodeAddr, identity::member_id};
+use distlib_core::{
+    Config, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
+};
 use distlib_custody::{Custody, CustodySources, PinManager, PinSources};
-use distlib_net::{AllowlistHooks, Blobs, Transport, allowlist, build_endpoint};
+use distlib_net::{AllowlistHooks, Blobs, BytePacer, Transport, allowlist, build_endpoint};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
@@ -63,9 +65,9 @@ pub struct Runtime {
     /// Which items this node keeps for the group.
     custody: Custody,
     pins: PinManager,
-    /// Raises the download limit to the group's minimum once the group is
-    /// known; none without a limit.
-    download_floor: Option<JoinHandle<()>>,
+    /// Sets the transfer limits once the group is known, each raised to the
+    /// group's minimum; none without a limit.
+    transfer_limits: Option<JoinHandle<()>>,
     /// The downloads this node runs, and the bus that it and every other
     /// producer publish to — what this node tells whoever is watching it.
     /// Made here, by the thing that assembles the producers, so that each is
@@ -108,14 +110,15 @@ impl Runtime {
         // answers from, or a node would download a file and still not be a
         // provider of it.
         let media = Blobs::new(&blobs, &endpoint);
-        let download_floor =
-            limit_downloads(&media, config.transfer.max_download_rate, node.subscribe());
+        let (upload_pacer, transfer_limits) =
+            limit_transfers(&config.transfer, &media, node.subscribe());
         let catalogue = Catalogue::start(
             transport.clone(),
             CatalogueStorage {
                 blobs: (*blobs).clone(),
                 documents: Some(data_dir.docs_dir()),
                 protect: Some(protect),
+                upload_pacer,
             },
             secret,
             node.subscribe(),
@@ -191,7 +194,7 @@ impl Runtime {
             projection,
             custody,
             pins,
-            download_floor,
+            transfer_limits,
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
@@ -299,8 +302,8 @@ impl Runtime {
         self.projection.shutdown();
         self.pins.shutdown();
         self.custody.shutdown();
-        if let Some(download_floor) = &self.download_floor {
-            download_floor.abort();
+        if let Some(transfer_limits) = &self.transfer_limits {
+            transfer_limits.abort();
         }
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
@@ -415,18 +418,50 @@ async fn open_read_model(data_dir: &DataDir) -> Result<(Store, SearchIndex)> {
     Ok((store, search))
 }
 
-/// Limits every download to `limit` bytes per second, raised to the group's
-/// `min_transfer_rate` once the group is known: until then its settings are
-/// only the defaults. They never change after founding, so the task ends
-/// there.
-fn limit_downloads(
-    blobs: &Blobs,
-    limit: Option<NonZeroU64>,
+/// One of `[transfer]`'s limits, and the pacer that holds this node to it.
+struct TransferLimit {
+    key: &'static str,
+    limit: NonZeroU64,
+    pacer: Arc<BytePacer>,
+}
+
+/// Paces this node's downloads and uploads to `transfer`'s limits. Returns
+/// the pacer for what the catalogue serves, and the task that sets the
+/// limits.
+fn limit_transfers(
+    transfer: &TransferConfig,
+    media: &Blobs,
+    membership: watch::Receiver<MembershipState>,
+) -> (Option<Arc<BytePacer>>, Option<JoinHandle<()>>) {
+    let download = transfer.max_download_rate.map(|limit| TransferLimit {
+        key: "max_download_rate",
+        limit,
+        pacer: Arc::clone(media.download_pacer()),
+    });
+    let upload = transfer.max_upload_rate.map(|limit| TransferLimit {
+        key: "max_upload_rate",
+        limit,
+        pacer: Arc::new(BytePacer::new(None)),
+    });
+    let upload_pacer = upload.as_ref().map(|upload| Arc::clone(&upload.pacer));
+    let limits = [download, upload].into_iter().flatten().collect();
+    (
+        upload_pacer,
+        set_once_the_group_is_known(limits, membership),
+    )
+}
+
+/// Sets each of `limits`, raised to the group's `min_transfer_rate`, once the
+/// group is known: until then its settings are only the defaults, and a node
+/// moves no media before it knows its group. They never change after
+/// founding, so the task ends there. None without a limit.
+fn set_once_the_group_is_known(
+    limits: Vec<TransferLimit>,
     mut membership: watch::Receiver<MembershipState>,
 ) -> Option<JoinHandle<()>> {
-    let limit = limit?;
-    blobs.limit_downloads(Some(limit));
-    let blobs = blobs.clone();
+    if limits.is_empty() {
+        return None;
+    }
     Some(tokio::spawn(async move {
         let Ok(state) = membership
             .wait_for(|state| state.group_id().is_some())
@@ -434,10 +469,12 @@ fn limit_downloads(
         else {
             return;
         };
-        let raised = state.settings().at_least_the_minimum(limit);
-        if raised != limit {
-            tracing::warn!(%limit, %raised, "max_download_rate is below the group's min_transfer_rate; raised to it");
-            blobs.limit_downloads(Some(raised));
+        for TransferLimit { key, limit, pacer } in limits {
+            let raised = state.settings().at_least_the_minimum(limit);
+            if raised != limit {
+                tracing::warn!(key, %limit, %raised, "a transfer limit is below the group's min_transfer_rate; raised to it");
+            }
+            pacer.set_rate(Some(raised));
         }
     }))
 }

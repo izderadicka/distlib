@@ -20,6 +20,10 @@
 //! half: asking a chosen set of members for a hash, independent of whatever
 //! iroh-docs itself is doing.
 //!
+//! **[`paced_serving`] is the one piece of serving here** (5b-2c): the
+//! provider events `Catalogue` hands the `BlobsProtocol` it registers, which
+//! pace what this node serves the way [`BytePacer`] paces its fetches.
+//!
 //! **2b-3 widened this from fetching to fetching and exporting**, which is a
 //! charter worth stating rather than leaving to be inferred from the method
 //! list. `library.download` is fetch-then-write-to-a-file, and splitting the
@@ -32,7 +36,6 @@
 //! of, in either direction.
 
 use std::{
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -47,6 +50,7 @@ use iroh_blobs::{
         blobs::BlobStatus,
         downloader::{DownloadProgressItem, Downloader},
     },
+    provider::events::{EventMask, EventSender, ProviderMessage, ThrottleMode},
 };
 
 use crate::{
@@ -79,10 +83,10 @@ impl Blobs {
         }
     }
 
-    /// Limits every fetch from now on to `rate` bytes per second, all of
-    /// them together; `None` lifts the limit.
-    pub fn limit_downloads(&self, rate: Option<NonZeroU64>) {
-        self.download_pacer.set_rate(rate);
+    /// What every fetch paces through, all of them together: its rate is
+    /// this node's download limit.
+    pub fn download_pacer(&self) -> &Arc<BytePacer> {
+        &self.download_pacer
     }
 
     /// Whether this store already holds all of `hash`.
@@ -332,6 +336,33 @@ impl Blobs {
         }
         copied
     }
+}
+
+/// How many chunks waiting to be paced the serving side queues before
+/// iroh-blobs waits to ask about the next one.
+const CHUNKS_WAITING: usize = 64;
+
+/// Provider events for `BlobsProtocol` that pace every blob this node serves
+/// through `pacer`: iroh-blobs asks before it sends each chunk, and waits for
+/// the answer, so everyone served at once shares the one rate. The task
+/// answering ends once the protocol, and with it these events, is dropped.
+pub fn paced_serving(pacer: Arc<BytePacer>) -> EventSender {
+    let mask = EventMask {
+        throttle: ThrottleMode::Intercept,
+        ..EventMask::DEFAULT
+    };
+    let (events, mut asked) = EventSender::channel(CHUNKS_WAITING, mask);
+    tokio::spawn(async move {
+        while let Some(message) = asked.recv().await {
+            // The only kind the mask asks for.
+            if let ProviderMessage::Throttle(chunk) = message {
+                pacer.pace(chunk.inner.size).await;
+                // A requester gone meanwhile has nothing to be told.
+                let _ = chunk.tx.send(Ok(())).await;
+            }
+        }
+    });
+    events
 }
 
 /// Where [`Blobs::export`] writes `target` before it is complete: beside it,

@@ -2,7 +2,8 @@
 //! lets go of it into the cache only once its copies elsewhere make up for
 //! this one; an item already cached is kept without a fetch. 5b-2b's: the
 //! items with the fewest copies are fetched first, at a download limit raised
-//! to the group's minimum.
+//! to the group's minimum. 5b-2c's: what a node serves is limited, the limit
+//! raised to the group's minimum too.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -197,25 +198,19 @@ impl Node {
 
 /// Three nodes, collecting every second, founded with `pledges`.
 async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> (Node, Node, Node) {
-    three_nodes_with(dir, pledges, TransferConfig::default()).await
+    three_nodes_with(dir, pledges, Default::default()).await
 }
 
-/// [`three_nodes`], the second of them transferring as `seconds_transfer`
-/// says.
+/// [`three_nodes`], each transferring as its entry in `transfers` says.
 async fn three_nodes_with(
     dir: &Path,
     pledges: [u64; 3],
-    seconds_transfer: TransferConfig,
+    transfers: [TransferConfig; 3],
 ) -> (Node, Node, Node) {
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
-    for (index, key) in keys.into_iter().enumerate() {
-        let transfer = if index == 1 {
-            seconds_transfer.clone()
-        } else {
-            TransferConfig::default()
-        };
+    for (index, (key, transfer)) in keys.into_iter().zip(transfers).enumerate() {
         let dir = DataDir::new(dir.join(index.to_string()));
         nodes.push(Node::start_with(key, &ids, dir, transfer).await);
     }
@@ -226,6 +221,17 @@ async fn three_nodes_with(
     let second = nodes.pop().unwrap();
     let first = nodes.pop().unwrap();
     (first, second, third)
+}
+
+/// Checks that `took` is about `size` bytes over the group's minimum: not
+/// less, so a limit held, and not over three times, so it was raised to the
+/// minimum rather than left lower.
+fn assert_about_the_minimum(took: Duration, size: usize, what: &str) {
+    let at_the_minimum = Duration::from_secs_f64(size as f64 / MIN_TRANSFER_RATE as f64);
+    assert!(
+        took >= at_the_minimum.mul_f64(0.85) && took <= at_the_minimum * 3,
+        "{what} took {took:?}, about {at_the_minimum:?} at the group's minimum"
+    );
 }
 
 /// Adds a book of about `size` bytes through `node`: its item and its one
@@ -422,11 +428,16 @@ async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
     let one_at_a_time_below_the_minimum = TransferConfig {
         max_fetches: NonZeroUsize::MIN,
         max_download_rate: NonZeroU64::new(MIN_TRANSFER_RATE / 5),
+        ..TransferConfig::default()
     };
     let (founder, second, third) = three_nodes_with(
         dir.path(),
         [100 * GB, 100 * GB, 0],
-        one_at_a_time_below_the_minimum,
+        [
+            TransferConfig::default(),
+            one_at_a_time_below_the_minimum,
+            TransferConfig::default(),
+        ],
     )
     .await;
 
@@ -473,12 +484,44 @@ async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
         "a small book was fetched before the large one was done, past max_fetches"
     );
 
-    let took = large_took.unwrap();
-    let at_the_minimum = Duration::from_secs_f64(LARGE as f64 / MIN_TRANSFER_RATE as f64);
-    assert!(
-        took >= at_the_minimum.mul_f64(0.85) && took <= at_the_minimum * 3,
-        "the large book took {took:?}, about {at_the_minimum:?} at the group's minimum"
-    );
+    assert_about_the_minimum(large_took.unwrap(), LARGE, "the large book");
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// **What a node serves is limited, to no less than the group's minimum.**
+/// The founder serves at a limit below the group's minimum. The second member,
+/// custodian of everything, fetches the founder's book unasked, and it takes
+/// about its size over the group's minimum, not over the founder's lower
+/// limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_node_serves_is_limited_to_no_less_than_the_groups_minimum() {
+    const LARGE: usize = 5_000_000;
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let serving_below_the_minimum = TransferConfig {
+        max_upload_rate: NonZeroU64::new(MIN_TRANSFER_RATE / 5),
+        ..TransferConfig::default()
+    };
+    let (founder, second, third) = three_nodes_with(
+        dir.path(),
+        [100 * GB, 100 * GB, 0],
+        [
+            serving_below_the_minimum,
+            TransferConfig::default(),
+            TransferConfig::default(),
+        ],
+    )
+    .await;
+
+    let started = Instant::now();
+    let (book, file) = add_a_book(&founder, dir.path(), "Dune", LARGE).await;
+    second
+        .until_keeps(true, KeepReason::Custody, book, file)
+        .await;
+    assert_about_the_minimum(started.elapsed(), LARGE, "the book");
 
     for node in [founder, second, third] {
         node.stop().await;

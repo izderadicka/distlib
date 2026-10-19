@@ -455,9 +455,9 @@ when it stops cleanly.
 
 `[transfer] max_fetches` is how many items the node fetches at once for the group's
 custody, ten unless set. `[transfer] max_download_rate` limits all of its downloads
-together, in bytes per second; unset, there is no limit. A limit below the group's
-`min_transfer_rate` is raised to it, so a member can slow its link but not opt out
-of its share.
+together, and `max_upload_rate` everything it serves to the group, both in bytes
+per second; unset, there is no limit. A limit below the group's `min_transfer_rate`
+is raised to it, so a member can slow its link but not opt out of its share.
 
 **A node can tell the group about at most ten million items it holds.** What it
 holds goes out as a list of item ids, and peers refuse a list longer than that
