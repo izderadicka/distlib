@@ -1,8 +1,9 @@
 <script lang="ts">
   // This node and its group, read-only (D8), kept current by the event
   // stream: the page loads when it opens, and again on every `resync` —
-  // which each connection starts with — on `membership.changed`, and on
-  // `sync.status`, for each member's place in the catalogue's swarm.
+  // which each connection starts with — on `membership.changed`, on
+  // `sync.status`, for each member's place in the catalogue's swarm, and on
+  // an item added or a download finished, which change what is kept.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
@@ -35,11 +36,18 @@
   }
 
   const reload = reloader(load);
+  const RELOADED_ON = new Set([
+    "resync",
+    "membership.changed",
+    "sync.status",
+    "catalogue.item_added",
+    "download.finished",
+  ]);
 
   // Listening before the first load, so nothing said while it runs is missed.
   onMount(() => {
     const stop = listen((event) => {
-      if (event.type === "resync" || event.type === "membership.changed" || event.type === "sync.status") {
+      if (RELOADED_ON.has(event.type)) {
         reload();
       }
     });
@@ -109,6 +117,29 @@
       </dl>
     </section>
   {/if}
+
+  {@const storage = status.storage}
+  <section>
+    <h2>Storage</h2>
+    <dl>
+      <dt>Limit</dt>
+      <dd>{storage.limit_bytes === null ? "none" : bytes(storage.limit_bytes)}</dd>
+      <dt>Added here</dt>
+      <dd>{bytes(storage.own_bytes)}</dd>
+      <dt>Kept for the group</dt>
+      <dd>{bytes(storage.custody_bytes)}</dd>
+      <dt>Cache</dt>
+      <dd>{bytes(storage.cache_bytes)}</dd>
+    </dl>
+    {#if storage.mandatory_over_limit}
+      <p class="failure">
+        What was added here and what is kept for the group are over the limit on their own. Raise
+        the limit, or lower this node's pledge.
+      </p>
+    {:else if storage.limit_bytes !== null}
+      <p class="hint">When there is no room, the cache goes first, what was used longest ago first.</p>
+    {/if}
+  </section>
 
   <section>
     <h2>Members <span class="count">{members.length}</span></h2>

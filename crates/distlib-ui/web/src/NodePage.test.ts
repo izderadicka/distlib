@@ -42,6 +42,14 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 1,
   settings: SETTINGS,
+  storage: {
+    limit_bytes: 500_000_000_000,
+    own_bytes: 1_500_000_000,
+    custody_bytes: 120_000_000_000,
+    cache_bytes: 7_000_000,
+    mandatory_over_limit: false,
+    last_collection_at: null,
+  },
   sync: { neighbours: [], last_sync: [] },
 };
 
@@ -88,6 +96,17 @@ function wholly(tag: string, text: string) {
   return (_: string, element: Element | null) =>
     element?.tagName.toLowerCase() === tag &&
     element.textContent?.replace(/\s+/g, " ").trim() === text;
+}
+
+/** What the section headed `heading` says, term by term. */
+function described(heading: string): Record<string, string | null | undefined> {
+  const section = screen.getByRole("heading", { name: heading }).closest("section");
+  return Object.fromEntries(
+    [...(section?.querySelectorAll("dt") ?? [])].map((term) => [
+      term.textContent,
+      term.nextElementSibling?.textContent,
+    ]),
+  );
 }
 
 describe("the node page", () => {
@@ -183,6 +202,54 @@ describe("the node page", () => {
     expect(times).toEqual([FINISHED_AT, FINISHED_AT]);
   });
 
+  it("shows what this node keeps, against its storage limit", async () => {
+    open();
+
+    await screen.findByText("Storage");
+    expect(described("Storage")).toEqual({
+      Limit: "500 GB",
+      "Added here": "1.5 GB",
+      "Kept for the group": "120 GB",
+      Cache: "7 MB",
+    });
+    expect(screen.getByText(/the cache goes first/)).toBeTruthy();
+    expect(screen.queryByText(/over the limit on their own/)).toBeNull();
+  });
+
+  it("says when there is no storage limit", async () => {
+    answer = { ...answer, status: { ...STATUS, storage: { ...STATUS.storage, limit_bytes: null } } };
+    open();
+
+    await screen.findByText("Storage");
+    expect(described("Storage").Limit).toBe("none");
+    expect(screen.queryByText(/the cache goes first/)).toBeNull();
+  });
+
+  it("warns when what is added and kept for the group is over the limit alone", async () => {
+    answer = {
+      ...answer,
+      status: { ...STATUS, storage: { ...STATUS.storage, mandatory_over_limit: true } },
+    };
+    open();
+
+    await screen.findByText(/over the limit on their own/);
+    expect(screen.queryByText(/the cache goes first/)).toBeNull();
+  });
+
+  it.each([
+    { type: "catalogue.item_added", item_id: "x" },
+    { type: "download.finished", task_id: 1, item_id: "x" },
+  ])("loads again on $type, which changes what is kept", async (event) => {
+    const { events } = open();
+    await screen.findByText("Storage");
+    expect(described("Storage").Cache).toBe("7 MB");
+
+    answer = { ...answer, status: { ...STATUS, storage: { ...STATUS.storage, cache_bytes: 9_000_000 } } };
+    events.tell(event);
+
+    await waitFor(() => expect(described("Storage").Cache).toBe("9 MB"));
+  });
+
   it("loads again when the catalogue's swarm changes", async () => {
     const { events } = open();
     await screen.findByText("carol");
@@ -214,12 +281,12 @@ describe("the node page", () => {
     await screen.findByText("dave");
   });
 
-  it("does not load again for news that is not about the membership", async () => {
+  it("does not load again for news that changes nothing it shows", async () => {
     const { events } = open();
     await screen.findByText("carol");
     const asked = vi.mocked(call).mock.calls.length;
 
-    events.tell({ type: "catalogue.item_added", item_id: "x" });
+    events.tell({ type: "bookmark.changed", item_id: "x" });
 
     expect(call).toHaveBeenCalledTimes(asked);
   });
