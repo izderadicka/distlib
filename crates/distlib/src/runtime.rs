@@ -602,7 +602,8 @@ impl StorageUpkeep {
 
 /// Logs an error, once, when no collection pass begins for twice `interval`.
 /// iroh-blobs stops collecting after a pass fails, and only a restart starts
-/// it again (C42).
+/// it again (C42). Stopped before the blob store closes, so the store letting
+/// go of its collection callback while this runs is an error too.
 async fn report_stopped_collection(
     mut collections: watch::Receiver<Option<SystemTime>>,
     interval: Duration,
@@ -610,6 +611,9 @@ async fn report_stopped_collection(
     let overdue_after = interval * 2;
     while let Ok(began) = tokio::time::timeout(overdue_after, collections.changed()).await {
         if began.is_err() {
+            tracing::error!(
+                "the blob store let go of garbage collection; collection is no longer watched"
+            );
             return;
         }
     }
@@ -620,12 +624,15 @@ async fn report_stopped_collection(
 }
 
 /// Records each blob in `served` as a use of the items it is a file of.
+/// Stopped before the blob store closes, so `served` ending while this runs
+/// is an error.
 async fn record_served(store: Store, mut served: mpsc::Receiver<ContentHash>) {
     while let Some(blob) = served.recv().await {
         if let Err(error) = store.mark_used_by_blob(blob, SystemTime::now()).await {
             tracing::warn!(%blob, %error, "could not record that a blob was served");
         }
     }
+    tracing::error!("serving stopped telling what it serves; serving no longer counts as a use");
 }
 
 /// Where the web UI's uploads wait for `library.add`.
