@@ -8,6 +8,7 @@ use std::{num::NonZeroU64, path::Path, time::Duration};
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_core::{Config, DataDir, MemberId};
+use distlib_custody::Storage;
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -88,7 +89,12 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
     // The limit lowered under what is kept already: the same file again
     // grows nothing, so it goes through, and the status says it is over.
     let lowered = Api {
-        storage_limit: NonZeroU64::new(500),
+        storage: Storage::new(
+            NonZeroU64::new(500),
+            runtime.blobs().clone(),
+            runtime.store().clone(),
+            runtime.catalogue().holdings().clone(),
+        ),
         ..api
     };
     let again = add_a_file(&lowered, dir.path(), 1, 600).await.unwrap();

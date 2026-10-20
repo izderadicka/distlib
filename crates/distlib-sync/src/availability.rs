@@ -104,6 +104,19 @@ impl Holdings {
         Ok(held)
     }
 
+    /// Records that `item` is no longer held: its blobs are let go of, and
+    /// go at the next collection.
+    pub fn forget(&self, item: ItemId) {
+        let removed = self
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&item);
+        if removed {
+            self.changed.send_replace(Instant::now());
+        }
+    }
+
     /// Whether this node holds `item`, as last worked out.
     pub fn holds(&self, item: ItemId) -> bool {
         self.held
@@ -165,5 +178,13 @@ mod tests {
         assert!(holdings.recheck(&item).await.unwrap());
         assert!(!changes.has_changed().unwrap(), "held still: none");
         assert_eq!(holdings.held(), HashSet::from([item.id]));
+
+        // Forgotten while its bytes are still here, as an eviction leaves it.
+        holdings.forget(item.id);
+        assert!(!holdings.holds(item.id));
+        assert!(changes.has_changed().unwrap(), "forgotten: a change");
+        changes.borrow_and_update();
+        holdings.forget(item.id);
+        assert!(!changes.has_changed().unwrap(), "forgotten again: none");
     }
 }
