@@ -27,7 +27,7 @@ use tokio::{
 
 use crate::{
     Custody, CustodyChange,
-    storage::{IfShort, Room, Storage, StorageError},
+    storage::{Room, Storage, StorageError},
 };
 
 /// How long a fetch may go without a byte arriving before it is given up,
@@ -555,7 +555,7 @@ impl Keeper {
         }
         let room = self
             .storage
-            .make_room(item_id, files.iter().copied(), IfShort::EvictAnyway)
+            .make_room(item_id, files.iter().copied())
             .await?;
         if let Room::Short(short_by) = room {
             tracing::warn!(item = %item_id, short_by, "kept for custody over the storage limit, with the whole cache evicted");

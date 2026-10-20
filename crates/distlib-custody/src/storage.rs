@@ -28,21 +28,11 @@ struct Inner {
     making_room: Mutex<()>,
 }
 
-/// What to do when even the whole cache is not room enough.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IfShort {
-    /// Evict nothing: what wanted the room is refused, and the cache stays.
-    KeepTheCache,
-    /// Evict all that can go: what wanted the room is kept anyway.
-    EvictAnyway,
-}
-
 /// Whether what is about to be kept fits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Room {
     Made,
-    /// Over the limit by this many bytes, with what [`IfShort`] allowed
-    /// evicted.
+    /// Over the limit by this many bytes, with all that could go evicted.
     Short(u64),
 }
 
@@ -77,12 +67,13 @@ impl Storage {
 
     /// Evicts cached items, least recently used first, until `files` of
     /// `item` fit under the limit alongside everything kept. Never `item`
-    /// itself, nor anything kept as own or custody.
+    /// itself, nor anything kept as own or custody. When even that is not
+    /// enough, all that can go is evicted anyway: whoever wanted the room is
+    /// likely to want it again.
     pub async fn make_room(
         &self,
         item: ItemId,
         files: impl IntoIterator<Item = (ContentHash, u64)>,
-        if_short: IfShort,
     ) -> Result<Room, StorageError> {
         let Some(limit) = self.inner.limit else {
             return Ok(Room::Made);
@@ -93,9 +84,6 @@ impl Storage {
         let plan = kept.evictions(item, kept.uncounted_bytes(files), limit.get(), |item| {
             last_used.get(&item).copied()
         });
-        if plan.short_by > 0 && if_short == IfShort::KeepTheCache {
-            return Ok(Room::Short(plan.short_by));
-        }
         for evicted in plan.items {
             self.evict(evicted).await?;
         }

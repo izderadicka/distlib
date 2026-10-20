@@ -18,7 +18,7 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
     TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, IfShort, PinCounts, Room, Storage, StorageError};
+use distlib_custody::{Custody, PinCounts, Room, Storage, StorageError};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
@@ -887,15 +887,14 @@ impl Api {
     }
 
     /// Evicts what is cached to bring everything kept back under the limit,
-    /// now that `imported` is kept as own. The add has happened by now, so a
-    /// failure is logged rather than answered.
+    /// now that `imported` is kept as own. An add that would take own and
+    /// custody past the limit was refused before it was written
+    /// ([`Self::check_room_for`]), so this is short only when they were over
+    /// it already. The add has happened by now, so a failure is logged rather
+    /// than answered.
     async fn make_room_for_add(&self, item_id: ItemId, imported: &[ImportedFile]) {
         let files = imported.iter().map(|file| (file.hash, file.size));
-        match self
-            .storage
-            .make_room(item_id, files, IfShort::EvictAnyway)
-            .await
-        {
+        match self.storage.make_room(item_id, files).await {
             Ok(Room::Made) => {}
             Ok(Room::Short(short_by)) => {
                 tracing::warn!(item = %item_id, short_by, "over the storage limit with the whole cache evicted");
@@ -1064,8 +1063,9 @@ impl Api {
     }
 
     /// Makes room for the files of `targets` not at their destination yet,
-    /// and refuses the download, evicting nothing, when even the whole cache
-    /// is not room enough.
+    /// and refuses the download when even the whole cache is not room
+    /// enough. The cache is evicted all the same, so asking again after
+    /// freeing some space finds it free.
     async fn make_room_for_download(
         &self,
         item_id: ItemId,
@@ -1077,7 +1077,7 @@ impl Api {
             .map(|target| (target.hash, target.record.size));
         let room = self
             .storage
-            .make_room(item_id, files, IfShort::KeepTheCache)
+            .make_room(item_id, files)
             .await
             .map_err(storage_error)?;
         if let Room::Short(short_by) = room {

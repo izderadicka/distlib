@@ -557,11 +557,11 @@ async fn over_the_limit(node: &Node) -> bool {
 }
 
 /// **A download makes room by evicting the cache, oldest first**, never what
-/// the node added, and the file it exported stays. One that would not fit
-/// even with the whole cache gone is refused, and evicts nothing. An add
-/// makes room too.
+/// the node added, and the file it exported stays. An add makes room too.
+/// One that would not fit even with the whole cache gone is refused, the
+/// cache evicted all the same, since it is likely to be asked for again.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refused() {
+async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refused_after_evicting() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let (founder, second, _third) = three_nodes_with(
@@ -619,6 +619,12 @@ async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refuse
         "the exported file is the user's"
     );
 
+    // An add makes room the same way.
+    let (added, added_file) = add_a_book(&second, dir.path(), "Added", BOOK).await;
+    assert!(second.keeps(KeepReason::Own, added, added_file).await);
+    assert!(!second.keeps(KeepReason::Cache, newer, newer_file).await);
+    assert!(second.keeps(KeepReason::Cache, newest, newest_file).await);
+
     let refused = api
         .call(
             "library.download",
@@ -629,15 +635,10 @@ async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refuse
         .to_string();
     assert!(refused.contains("no room for this download"), "{refused}");
     assert!(
-        second.keeps(KeepReason::Cache, newer, newer_file).await,
-        "a refused download evicted the cache"
+        !second.keeps(KeepReason::Cache, newest, newest_file).await,
+        "refused, with the cache kept for a download that will be asked for again"
     );
-
-    // An add makes room the same way.
-    let (added, added_file) = add_a_book(&second, dir.path(), "Added", BOOK).await;
     assert!(second.keeps(KeepReason::Own, added, added_file).await);
-    assert!(!second.keeps(KeepReason::Cache, newer, newer_file).await);
-    assert!(second.keeps(KeepReason::Cache, newest, newest_file).await);
 }
 
 /// The title of a book [`add_a_book`] would add through `founder` of which
