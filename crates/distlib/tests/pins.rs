@@ -553,7 +553,8 @@ async fn over_the_limit(node: &Node) -> bool {
 
 /// **A download makes room by evicting the cache, oldest first**, never what
 /// the node added, and the file it exported stays. One that would not fit
-/// even with the whole cache gone is refused, and evicts nothing.
+/// even with the whole cache gone is refused, and evicts nothing. An add
+/// makes room too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refused() {
     init_logging();
@@ -626,6 +627,12 @@ async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refuse
         second.keeps(KeepReason::Cache, newer, newer_file).await,
         "a refused download evicted the cache"
     );
+
+    // An add makes room the same way.
+    let (added, added_file) = add_a_book(&second, dir.path(), "Added", BOOK).await;
+    assert!(second.keeps(KeepReason::Own, added, added_file).await);
+    assert!(!second.keeps(KeepReason::Cache, newer, newer_file).await);
+    assert!(second.keeps(KeepReason::Cache, newest, newest_file).await);
 }
 
 /// The title of a book [`add_a_book`] would add through `founder` of which
