@@ -24,7 +24,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, record};
+use common::{api, bound, config, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -132,6 +132,72 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
     .expect(
         "both nodes converge on one item with one file, with no coordination between the two calls",
     );
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// A node adding files the catalogue already has writes nothing, so no
+/// projection pass rechecks the item: the add itself makes it held, once its
+/// own tags are set (5b-3b-2: held means complete and kept).
+#[tokio::test]
+async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
+    let dir = TempDir::new().unwrap();
+    let alice_key = SecretKey::generate();
+    let bob_key = SecretKey::generate();
+    let alice_id = MemberId::from(alice_key.public());
+    let bob_id = MemberId::from(bob_key.public());
+    let group_config = config(&[alice_id, bob_id]);
+    let alice = Runtime::start(
+        &alice_key,
+        &group_config,
+        &DataDir::new(dir.path().join("alice")),
+    )
+    .await
+    .unwrap();
+    let bob = Runtime::start(
+        &bob_key,
+        &group_config,
+        &DataDir::new(dir.path().join("bob")),
+    )
+    .await
+    .unwrap();
+    alice
+        .node()
+        .init_group(
+            vec![
+                (record(alice_id, "alice"), bound(&alice)),
+                (record(bob_id, "bob"), bound(&bob)),
+            ],
+            Default::default(),
+            &alice_key,
+        )
+        .await
+        .unwrap();
+    alice.catalogue().ready().await;
+    bob.catalogue().ready().await;
+    let book = dir.path().join("dune.epub");
+    std::fs::write(&book, b"the same book, on both disks").unwrap();
+    let params = json!({ "kind": "ebook", "files": [&book], "title": "Dune" });
+
+    let added = api(&alice, &alice_key)
+        .call("library.add", Some(params.clone()))
+        .await
+        .unwrap();
+    let item_id: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    until_projected(&bob, item_id, 1, "bob").await;
+    assert!(
+        !bob.catalogue().holdings().holds(item_id),
+        "bob has only the record"
+    );
+
+    let again = api(&bob, &bob_key)
+        .call("library.add", Some(params))
+        .await
+        .unwrap();
+
+    assert_eq!(again["created"], false);
+    assert!(bob.catalogue().holdings().holds(item_id));
 
     alice.shutdown().await;
     bob.shutdown().await;

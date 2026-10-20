@@ -195,7 +195,7 @@ async fn start_local_api(
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
         pins: runtime.pins().counts(),
-        storage_limit: runtime.storage_limit(),
+        storage: runtime.storage().clone(),
         collections: runtime.collections(),
     };
     Ok(Some(serve_api(paths, config, api).await?))

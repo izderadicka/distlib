@@ -7,6 +7,7 @@
 mod pins;
 mod service;
 mod settling;
+mod storage;
 mod view;
 
 use std::{
@@ -24,6 +25,7 @@ use tokio::{
 
 pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
+pub use storage::{IfShort, Room, Storage, StorageError};
 pub use view::CustodyStatus;
 use view::CustodyView;
 

@@ -7,7 +7,6 @@
 use std::{
     cmp::Reverse,
     collections::BTreeMap,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,7 +18,7 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
     TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, PinCounts};
+use distlib_custody::{Custody, IfShort, PinCounts, Room, Storage, StorageError};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
@@ -93,9 +92,8 @@ pub struct Api {
     pub custody: Custody,
     /// Where the items this node keeps stand: queued, fetched, kept.
     pub pins: watch::Receiver<PinCounts>,
-    /// `[storage] limit_bytes`: what own and custody may not grow past; no
-    /// limit when `None`.
-    pub storage_limit: Option<NonZeroU64>,
+    /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
+    pub storage: Storage,
     /// When the last garbage collection pass began; `None` before the first.
     pub collections: watch::Receiver<Option<SystemTime>>,
 }
@@ -191,13 +189,14 @@ impl Api {
     async fn storage(&self) -> Result<Value, Error> {
         let usage = self.blobs.kept_blobs().await.map_err(net_error)?.usage();
         Ok(json!({
-            "limit_bytes": self.storage_limit,
+            "limit_bytes": self.storage.limit(),
             "own_bytes": usage.own_bytes,
             "custody_bytes": usage.custody_bytes,
             "cache_bytes": usage.cache_bytes,
             // Own and custody alone over the limit: nothing left to evict.
             "mandatory_over_limit": self
-                .storage_limit
+                .storage
+                .limit()
                 .is_some_and(|limit| usage.mandatory_bytes() > limit.get()),
             "last_collection_at": self.collections.borrow().map(micros_since_epoch),
         }))
@@ -428,7 +427,7 @@ impl Api {
     /// would only produce proposals the group refuses.
     async fn pledge_set(&self, params: PledgeSet) -> Result<Value, Error> {
         // The space for own items and the cache is what the limit leaves.
-        if let Some(limit) = self.storage_limit
+        if let Some(limit) = self.storage.limit()
             && params.bytes >= limit.get()
         {
             return Err(Error::invalid_params(format!(
@@ -861,6 +860,9 @@ impl Api {
                 .await
                 .map_err(net_error)?;
         }
+        // The projection rechecked it before these tags, when it was not kept.
+        self.recheck_holdings(id).await;
+        self.make_room_for_add(id, &imported).await;
         Ok(answer)
     }
 
@@ -868,7 +870,7 @@ impl Api {
     /// past the storage limit. An add that grows them by nothing goes through,
     /// even when they are over it already.
     async fn check_room_for(&self, item: &Item) -> Result<(), Error> {
-        let Some(limit) = self.storage_limit else {
+        let Some(limit) = self.storage.limit() else {
             return Ok(());
         };
         let kept = self.blobs.kept_blobs().await.map_err(net_error)?;
@@ -882,6 +884,26 @@ impl Api {
             )));
         }
         Ok(())
+    }
+
+    /// Evicts what is cached to bring everything kept back under the limit,
+    /// now that `imported` is kept as own. The add has happened by now, so a
+    /// failure is logged rather than answered.
+    async fn make_room_for_add(&self, item_id: ItemId, imported: &[ImportedFile]) {
+        let files = imported.iter().map(|file| (file.hash, file.size));
+        match self
+            .storage
+            .make_room(item_id, files, IfShort::EvictAnyway)
+            .await
+        {
+            Ok(Room::Made) => {}
+            Ok(Room::Short(short_by)) => {
+                tracing::warn!(item = %item_id, short_by, "over the storage limit with the whole cache evicted");
+            }
+            Err(error) => {
+                tracing::error!(item = %item_id, %error, "added, but could not make room for it; this node may stay over its storage limit");
+            }
+        }
     }
 
     /// Takes the uploads named: their paths, and the guards that delete them
@@ -1013,6 +1035,8 @@ impl Api {
             .mark_used(params.item_id, SystemTime::now())
             .await
             .map_err(query_error)?;
+        self.make_room_for_download(params.item_id, &targets)
+            .await?;
 
         let bytes = targets.iter().map(|target| target.record.size).sum();
         let task = self.tasks.start_download(
@@ -1037,6 +1061,32 @@ impl Api {
         let providers = self.providers_of(&params.item_id);
         self.finish_download_in_background(params.item_id, targets, providers, task);
         Ok(answer)
+    }
+
+    /// Makes room for the files of `targets` not at their destination yet,
+    /// and refuses the download, evicting nothing, when even the whole cache
+    /// is not room enough.
+    async fn make_room_for_download(
+        &self,
+        item_id: ItemId,
+        targets: &[Target],
+    ) -> Result<(), Error> {
+        let files = targets
+            .iter()
+            .filter(|target| !target.in_place)
+            .map(|target| (target.hash, target.record.size));
+        let room = self
+            .storage
+            .make_room(item_id, files, IfShort::KeepTheCache)
+            .await
+            .map_err(storage_error)?;
+        if let Room::Short(short_by) = room {
+            return Err(Error::failed(format!(
+                "no room for this download: it would take this node {short_by} bytes over its \
+                 storage limit even with the whole cache evicted"
+            )));
+        }
+        Ok(())
     }
 
     /// Where a download writes: the directory named, which has to exist
@@ -1699,6 +1749,10 @@ fn sync_error(error: SyncError) -> Error {
 /// have made — an item that is not here, a destination that is not a
 /// directory — are both refused before [`Blobs`] is touched at all.
 fn net_error(error: NetError) -> Error {
+    Error::failed(error.to_string())
+}
+
+fn storage_error(error: StorageError) -> Error {
     Error::failed(error.to_string())
 }
 

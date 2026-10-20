@@ -20,7 +20,8 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{FileRole, Item, ItemId};
+use distlib_core::{FileRole, Item, ItemId, KeepReason};
+use futures_lite::stream::StreamExt as _;
 use iroh_blobs::{Hash, api::Store as BlobStore, api::proto::BlobStatus};
 use tokio::{sync::watch, time::Instant};
 
@@ -63,10 +64,15 @@ impl Holdings {
 
     /// Works out again whether `item` is held, and records the answer.
     ///
-    /// Held means **every `role: content` file is complete here** — covers and
-    /// other roles do not count, as they do not count towards an item's
-    /// identity. An item with no content file yet is one still arriving, and
-    /// is not held.
+    /// Held means **every `role: content` file is complete here and kept for
+    /// the item** — covers and other roles do not count, as they do not count
+    /// towards an item's identity. An item with no content file yet is one
+    /// still arriving, and is not held.
+    ///
+    /// **Kept, not only here**: a file whose tags are released, an evicted
+    /// item's, stays complete until the next collection deletes it, and is
+    /// not held meanwhile. A file kept only by another item's tag counts as
+    /// not held either, which under-claims rather than over-claims.
     pub async fn recheck(&self, item: &Item) -> Result<bool> {
         // Collected first: an iterator of closures held across the await
         // below would make this future not `Send`.
@@ -76,8 +82,9 @@ impl Holdings {
             .filter(|(_, record)| record.role == FileRole::Content)
             .map(|(hash, _)| Hash::from_bytes(*hash.as_bytes()))
             .collect();
-        let mut held = !content.is_empty();
-        for hash in content {
+        let kept = self.kept_for(item.id).await?;
+        let mut held = !content.is_empty() && content.iter().all(|hash| kept.contains(hash));
+        for hash in content.into_iter().take_while(|_| held) {
             let status = self
                 .blobs
                 .blobs()
@@ -102,6 +109,37 @@ impl Holdings {
             self.changed.send_replace(Instant::now());
         }
         Ok(held)
+    }
+
+    /// The blobs some tag keeps for `item`, whatever the reason.
+    async fn kept_for(&self, item: ItemId) -> Result<HashSet<Hash>> {
+        const DOING: &str = "listed what is kept for an item";
+        let mut kept = HashSet::new();
+        for reason in KeepReason::ALL {
+            let mut tags = self
+                .blobs
+                .tags()
+                .list_prefix(reason.item_prefix(item))
+                .await
+                .map_err(SyncError::content(DOING))?;
+            while let Some(tag) = tags.next().await {
+                kept.insert(tag.map_err(SyncError::content(DOING))?.hash);
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Records that `item` is no longer held: its blobs are let go of, and
+    /// go at the next collection.
+    pub fn forget(&self, item: ItemId) {
+        let removed = self
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&item);
+        if removed {
+            self.changed.send_replace(Instant::now());
+        }
     }
 
     /// Whether this node holds `item`, as last worked out.
@@ -137,7 +175,8 @@ mod tests {
     use super::*;
 
     /// The heartbeat beats on a change, so a recheck that finds what was
-    /// known — every item of a replay — must not look like one.
+    /// known — every item of a replay — must not look like one. Held is
+    /// complete and kept.
     #[tokio::test]
     async fn only_a_change_to_the_set_is_signalled() {
         let store = MemStore::new();
@@ -159,11 +198,27 @@ mod tests {
             },
         );
 
+        assert!(
+            !holdings.recheck(&item).await.unwrap(),
+            "complete, but kept by nothing"
+        );
+        assert!(!changes.has_changed().unwrap(), "not held, as before: none");
+        let tag = KeepReason::Cache.tag(item.id, *item.files.keys().next().unwrap());
+        store.tags().set(tag, content).await.unwrap();
+
         assert!(holdings.recheck(&item).await.unwrap());
         assert!(changes.has_changed().unwrap(), "held: a change");
         changes.borrow_and_update();
         assert!(holdings.recheck(&item).await.unwrap());
         assert!(!changes.has_changed().unwrap(), "held still: none");
         assert_eq!(holdings.held(), HashSet::from([item.id]));
+
+        // Forgotten while its bytes are still here, as an eviction leaves it.
+        holdings.forget(item.id);
+        assert!(!holdings.holds(item.id));
+        assert!(changes.has_changed().unwrap(), "forgotten: a change");
+        changes.borrow_and_update();
+        holdings.forget(item.id);
+        assert!(!changes.has_changed().unwrap(), "forgotten again: none");
     }
 }

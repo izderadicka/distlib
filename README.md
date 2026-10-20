@@ -459,6 +459,10 @@ downloads, each file counted once. It is never shared with the group; unset, the
 is no limit. The pledge must be below it, the rest being room for what the node adds
 and its cache. An add that would take what was added and what is kept for custody
 past the limit is refused. `distlib status` shows the bytes kept for each reason.
+When a download, a custody fetch or an add needs room, the downloads used longest
+ago are evicted from the store first; never what you added or keep for the group,
+and never the files a download wrote out. A download that would not fit even then
+is refused.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If

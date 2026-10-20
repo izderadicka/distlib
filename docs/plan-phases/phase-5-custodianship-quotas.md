@@ -553,7 +553,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   minimum. **Acceptance:** a node limited to a rate serves a large file at that rate within a
   tolerance, to two downloaders at once together.
 
-- **5b-3 — the storage limit and the cache's eviction** (3 PRs; delta P5-15). Custody over the
+- **5b-3 — the storage limit and the cache's eviction** (4 PRs; deltas P5-15 to P5-17). Custody over the
   pledge comes later, in its own PR (Ivan).
   **5b-3a** *(done; delta P5-15)* — `[storage] limit_bytes`, unset meaning no limit; own + custody +
   cache counted from the blob store's tags, a blob kept for two reasons once under the stronger;
@@ -561,11 +561,11 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   `node.status` and `distlib status`. **Acceptance:** an add that would grow own and custody past
   the limit is refused, and one that grows nothing goes through even over it; a pledge not below
   the limit is refused.
-  **5b-3b** — in two (delta P5-16). **5b-3b-1** *(done)* — last-used times in the read model
+  **5b-3b** *(done)* — in two (delta P5-16). **5b-3b-1** *(done)* — last-used times in the read model
   (all the cache equally old after `db/` is deleted), stamped by a download, a release into the
   cache and a blob served; collection every ten minutes by default, its last pass in
   `node.status`, an error logged when passes stop (C42; distlib cannot run its own pass on
-  iroh-blobs 0.103.1). **5b-3b-2** — eviction least recently used first before a custody fetch, a
+  iroh-blobs 0.103.1). **5b-3b-2** *(done; delta P5-17)* — eviction least recently used first before a custody fetch, a
   download or an add; a download refused when the whole cache is not enough, a custody fetch
   made anyway; holdings no longer announce what was evicted. **Acceptance:** a node at its limit
   evicts the oldest cached item to take on a new custody or a new download, never an own or

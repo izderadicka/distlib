@@ -26,7 +26,7 @@ use distlib_consensus::{MembershipNode, MembershipState};
 use distlib_core::{
     Config, ContentHash, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
 };
-use distlib_custody::{Custody, CustodySources, PinManager, PinSources};
+use distlib_custody::{Custody, CustodySources, PinManager, PinSources, Storage};
 use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
 };
@@ -82,8 +82,8 @@ pub struct Runtime {
     downloads: PathBuf,
     /// What the web UI uploads, held for `library.add`.
     uploads: Uploads,
-    /// `[storage] limit_bytes`: the most the blobs this node keeps may take.
-    storage_limit: Option<NonZeroU64>,
+    /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
+    storage: Storage,
     router: Router,
 }
 
@@ -103,7 +103,6 @@ impl Runtime {
         // (a test, an embedder) has no reason to have created it first.
         data_dir.create()?;
         let (transport, node) = start_consensus(secret, config, data_dir).await?;
-        let endpoint = transport.endpoint.clone();
 
         // Content, and the catalogue that refers to it. The store comes first
         // because iroh-docs cannot be built without one: an entry's value is a
@@ -116,7 +115,7 @@ impl Runtime {
         // land it in the very store `Catalogue::protocols`' `BlobsProtocol`
         // answers from, or a node would download a file and still not be a
         // provider of it.
-        let media = Blobs::new(&blobs, &endpoint);
+        let media = Blobs::new(&blobs, &transport.endpoint);
         let (upload_pacer, transfer_limits) =
             limit_transfers(&config.transfer, &media, node.subscribe());
         let (serving_events, served) = serving_events(upload_pacer);
@@ -167,7 +166,7 @@ impl Runtime {
             tasks.events().clone(),
         );
         // After the projection, whose read model and events custody follows.
-        let (custody, pins) = start_custody(
+        let (custody, pins, storage) = start_keeping(
             member_id(secret),
             &CustodyInputs {
                 node: &node,
@@ -177,6 +176,7 @@ impl Runtime {
                 availability: &availability,
                 blobs: &media,
                 events: tasks.events(),
+                storage_limit: config.storage.limit_bytes,
                 max_fetches: config.transfer.max_fetches,
             },
         );
@@ -186,7 +186,7 @@ impl Runtime {
         // between gets no handler. That window is as short as the node's own
         // startup and is why `alpns` exists at all rather than being derived
         // from the handlers.
-        let router = serve_protocols(endpoint, &node, &catalogue);
+        let router = serve_protocols(transport.endpoint.clone(), &node, &catalogue);
 
         Ok(Self {
             node,
@@ -205,7 +205,7 @@ impl Runtime {
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
             uploads,
-            storage_limit: config.storage.limit_bytes,
+            storage,
             router,
         })
     }
@@ -260,9 +260,9 @@ impl Runtime {
         self.collections.clone()
     }
 
-    /// The most the blobs this node keeps may take; no limit when `None`.
-    pub fn storage_limit(&self) -> Option<NonZeroU64> {
-        self.storage_limit
+    /// The storage limit, and the cache's eviction to stay within it.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
     }
 
     /// The event bus: what the projection publishes into, and what the local
@@ -423,6 +423,7 @@ struct CustodyInputs<'a> {
     availability: &'a Availability,
     blobs: &'a Blobs,
     events: &'a broadcast::Sender<Event>,
+    storage_limit: Option<NonZeroU64>,
     max_fetches: NonZeroUsize,
 }
 
@@ -508,8 +509,15 @@ fn set_once_the_group_is_known(
     }))
 }
 
-/// Starts following `me`'s custody, and keeping it in the blob store.
-fn start_custody(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManager) {
+/// Starts following `me`'s custody, and keeping it in the blob store within
+/// the storage limit.
+fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManager, Storage) {
+    let storage = Storage::new(
+        inputs.storage_limit,
+        inputs.blobs.clone(),
+        inputs.store.clone(),
+        inputs.catalogue.holdings().clone(),
+    );
     let custody = Custody::start(
         me,
         CustodySources {
@@ -529,10 +537,11 @@ fn start_custody(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManag
             availability: inputs.availability.clone(),
             holdings: inputs.catalogue.holdings().clone(),
             events: inputs.events.subscribe(),
+            storage: storage.clone(),
         },
         inputs.max_fetches,
     );
-    (custody, pins)
+    (custody, pins, storage)
 }
 
 async fn open_blobs(

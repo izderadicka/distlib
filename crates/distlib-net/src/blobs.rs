@@ -124,7 +124,8 @@ impl Blobs {
             })
     }
 
-    /// Every blob kept for any reason, once, with its size.
+    /// Every blob kept for any reason, with its size and the tags that keep
+    /// it.
     ///
     /// **A blob being fetched counts at its whole size** once the store knows
     /// it, the space it is about to take; one tagged before any of it arrived
@@ -132,14 +133,14 @@ impl Blobs {
     pub async fn kept_blobs(&self) -> Result<KeptBlobs> {
         let mut kept = KeptBlobs::default();
         for reason in KeepReason::ALL {
-            for (_, blob) in self.kept(reason).await? {
+            for (item, blob) in self.kept(reason).await? {
                 let bytes = match self.status(blob).await? {
                     BlobStatus::Complete { size } | BlobStatus::Partial { size: Some(size) } => {
                         size
                     }
                     BlobStatus::Partial { size: None } | BlobStatus::NotFound => 0,
                 };
-                kept.add(reason, blob, bytes);
+                kept.add(reason, item, blob, bytes);
             }
         }
         Ok(kept)

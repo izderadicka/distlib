@@ -25,7 +25,10 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 
-use crate::{Custody, CustodyChange};
+use crate::{
+    Custody, CustodyChange,
+    storage::{IfShort, Room, Storage, StorageError},
+};
 
 /// How long a fetch may go without a byte arriving before it is given up,
 /// to be asked again when availability changes.
@@ -48,6 +51,8 @@ pub struct PinSources {
     pub holdings: Holdings,
     /// Where availability changes are announced.
     pub events: broadcast::Receiver<Event>,
+    /// Where room is made for what custody fetches.
+    pub storage: Storage,
 }
 
 /// How many items the pin manager has in each state, for `node.status`.
@@ -90,6 +95,7 @@ impl PinManager {
             availability,
             holdings,
             events,
+            storage,
         } = sources;
         let pins = Pins {
             keeper: Keeper {
@@ -99,6 +105,7 @@ impl PinManager {
                 blobs,
                 availability,
                 holdings,
+                storage,
             },
             custody: custody.clone(),
             pins: HashMap::new(),
@@ -499,6 +506,8 @@ enum KeepError {
     Blobs(#[from] NetError),
     #[error(transparent)]
     Holdings(#[from] SyncError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     #[error("no byte arrived for {STALLED_AFTER:?}")]
     Stalled,
 }
@@ -520,18 +529,39 @@ struct Keeper {
     blobs: Blobs,
     availability: Availability,
     holdings: Holdings,
+    storage: Storage,
 }
 
 impl Keeper {
-    /// Tags each of `item_id`'s files for custody and fetches the ones not
-    /// here. A file already here, cached by a download say, is only tagged.
+    /// Tags each of `item_id`'s files for custody, makes room for them, and
+    /// fetches the ones not here. A file already here, cached by a download
+    /// say, is only tagged.
+    ///
+    /// Tagged before room is made, so a cached copy is kept by custody before
+    /// anything is let go of. Fetched even when the whole cache is not room
+    /// enough: custody is kept whatever the limit.
     async fn keep(&self, item_id: ItemId) -> Result<(), KeepError> {
         let Some(stored) = self.store.item(item_id).await? else {
             return Ok(());
         };
+        let files: Vec<(ContentHash, u64)> = stored
+            .item
+            .files
+            .iter()
+            .map(|(hash, file)| (*hash, file.size))
+            .collect();
+        for (hash, _) in &files {
+            self.blobs.keep(KeepReason::Custody, item_id, *hash).await?;
+        }
+        let room = self
+            .storage
+            .make_room(item_id, files.iter().copied(), IfShort::EvictAnyway)
+            .await?;
+        if let Room::Short(short_by) = room {
+            tracing::warn!(item = %item_id, short_by, "kept for custody over the storage limit, with the whole cache evicted");
+        }
         let providers = self.providers(item_id);
-        for hash in stored.item.files.keys().copied() {
-            self.blobs.keep(KeepReason::Custody, item_id, hash).await?;
+        for (hash, _) in files {
             if !self.blobs.has(hash).await? {
                 fetch_until_stalled(&self.blobs, hash, providers.clone()).await?;
             }

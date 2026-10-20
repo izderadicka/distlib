@@ -3,14 +3,16 @@
 //! this one; an item already cached is kept without a fetch. 5b-2b's: the
 //! items with the fewest copies are fetched first, at a download limit raised
 //! to the group's minimum. 5b-2c's: what a node serves is limited, the limit
-//! raised to the group's minimum too.
+//! raised to the group's minimum too. 5b-3b-2's: a node at its storage
+//! limit evicts the oldest cached item to take on a new download or a new
+//! custody, never an own or custody item, and leaves the exported file be.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     time::{Duration, Instant, SystemTime},
 };
@@ -48,6 +50,15 @@ fn settings() -> GroupSettings {
     }
 }
 
+/// How one of the test's nodes differs from the defaults.
+#[derive(Default)]
+struct Tuning {
+    transfer: TransferConfig,
+    storage_limit: Option<NonZeroU64>,
+    /// In place of a collection every second.
+    gc_interval_secs: Option<NonZeroU32>,
+}
+
 /// One of the test's nodes: every node is a core node, so two of three still
 /// commit while one is stopped.
 struct Node {
@@ -59,17 +70,16 @@ struct Node {
 
 impl Node {
     async fn start(key: SecretKey, core: &[MemberId], dir: DataDir) -> Self {
-        Self::start_with(key, core, dir, TransferConfig::default()).await
+        Self::start_with(key, core, dir, Tuning::default()).await
     }
 
-    async fn start_with(
-        key: SecretKey,
-        core: &[MemberId],
-        dir: DataDir,
-        transfer: TransferConfig,
-    ) -> Self {
+    async fn start_with(key: SecretKey, core: &[MemberId], dir: DataDir, tuning: Tuning) -> Self {
         let mut config = collecting(config(core));
-        config.transfer = transfer;
+        config.transfer = tuning.transfer;
+        config.storage.limit_bytes = tuning.storage_limit;
+        if let Some(interval) = tuning.gc_interval_secs {
+            config.storage.gc_interval_secs = interval;
+        }
         let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
         Self {
             runtime,
@@ -201,18 +211,18 @@ async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> (Node, Node, Node) {
     three_nodes_with(dir, pledges, Default::default()).await
 }
 
-/// [`three_nodes`], each transferring as its entry in `transfers` says.
+/// [`three_nodes`], each tuned as its entry in `tunings` says.
 async fn three_nodes_with(
     dir: &Path,
     pledges: [u64; 3],
-    transfers: [TransferConfig; 3],
+    tunings: [Tuning; 3],
 ) -> (Node, Node, Node) {
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
-    for (index, (key, transfer)) in keys.into_iter().zip(transfers).enumerate() {
+    for (index, (key, tuning)) in keys.into_iter().zip(tunings).enumerate() {
         let dir = DataDir::new(dir.join(index.to_string()));
-        nodes.push(Node::start_with(key, &ids, dir, transfer).await);
+        nodes.push(Node::start_with(key, &ids, dir, tuning).await);
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
     let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
@@ -234,6 +244,12 @@ fn assert_about_the_minimum(took: Duration, size: usize, what: &str) {
     );
 }
 
+/// What [`add_a_book`] writes for `title`: about `size` bytes.
+fn book_text(title: &str, size: usize) -> String {
+    let line = format!("{title}\n");
+    line.repeat(size / line.len())
+}
+
 /// Adds a book of about `size` bytes through `node`: its item and its one
 /// file.
 async fn add_a_book(node: &Node, dir: &Path, title: &str, size: usize) -> (ItemId, ContentHash) {
@@ -241,8 +257,7 @@ async fn add_a_book(node: &Node, dir: &Path, title: &str, size: usize) -> (ItemI
     // Large enough to be a file in the store rather than a row in its
     // database, which is how media is kept.
     let book = dir.join(format!("{title}.epub"));
-    let line = format!("{title}\n");
-    std::fs::write(&book, line.repeat(size / line.len())).unwrap();
+    std::fs::write(&book, book_text(title, size)).unwrap();
     let added = node
         .call(
             "library.add",
@@ -447,9 +462,12 @@ async fn the_fewest_copies_go_first_at_no_less_than_the_groups_minimum() {
         dir.path(),
         [100 * GB, 0, 0],
         [
-            TransferConfig::default(),
-            one_at_a_time_below_the_minimum,
-            TransferConfig::default(),
+            Tuning::default(),
+            Tuning {
+                transfer: one_at_a_time_below_the_minimum,
+                ..Tuning::default()
+            },
+            Tuning::default(),
         ],
     )
     .await;
@@ -510,9 +528,12 @@ async fn what_a_node_serves_is_limited_to_no_less_than_the_groups_minimum() {
         dir.path(),
         [100 * GB, 100 * GB, 0],
         [
-            serving_below_the_minimum,
-            TransferConfig::default(),
-            TransferConfig::default(),
+            Tuning {
+                transfer: serving_below_the_minimum,
+                ..Tuning::default()
+            },
+            Tuning::default(),
+            Tuning::default(),
         ],
     )
     .await;
@@ -527,4 +548,208 @@ async fn what_a_node_serves_is_limited_to_no_less_than_the_groups_minimum() {
     for node in [founder, second, third] {
         node.stop().await;
     }
+}
+
+/// Whether `node`'s storage status says own and custody alone are over its
+/// limit.
+async fn over_the_limit(node: &Node) -> bool {
+    node.call("node.status", json!({})).await["storage"]["mandatory_over_limit"] == json!(true)
+}
+
+/// **A download makes room by evicting the cache, oldest first**, never what
+/// the node added, and the file it exported stays. One that would not fit
+/// even with the whole cache gone is refused, and evicts nothing. An add
+/// makes room too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refused() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, _third) = three_nodes_with(
+        dir.path(),
+        [0; 3],
+        [
+            Tuning::default(),
+            Tuning {
+                storage_limit: NonZeroU64::new(3 * BOOK as u64 + BOOK as u64 / 2),
+                ..Tuning::default()
+            },
+            Tuning::default(),
+        ],
+    )
+    .await;
+    let (own, own_file) = add_a_book(&second, dir.path(), "Own", BOOK).await;
+    let mut books = Vec::new();
+    for title in ["Oldest", "Newer", "Newest"] {
+        books.push(add_a_book(&founder, dir.path(), title, BOOK).await);
+    }
+    let (too_large, _) = add_a_book(&founder, dir.path(), "Too large", 3 * BOOK).await;
+    let [
+        (oldest, oldest_file),
+        (newer, newer_file),
+        (newest, newest_file),
+    ] = books[..]
+    else {
+        unreachable!("three books were added")
+    };
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    let api = api(&second.runtime, &second.key);
+    for item in [oldest, newer, too_large] {
+        until_projected(&second.runtime, item, 1, "the second member").await;
+    }
+    download(&api, oldest, &dest).await;
+    download(&api, newer, &dest).await;
+    until_projected(&second.runtime, newest, 1, "the second member").await;
+
+    download(&api, newest, &dest).await;
+
+    assert!(
+        !second.keeps(KeepReason::Cache, oldest, oldest_file).await,
+        "the oldest stayed cached"
+    );
+    assert!(!second.runtime.catalogue().holdings().holds(oldest));
+    assert!(second.keeps(KeepReason::Cache, newer, newer_file).await);
+    assert!(second.keeps(KeepReason::Cache, newest, newest_file).await);
+    assert!(second.keeps(KeepReason::Own, own, own_file).await);
+    until_a_pass_collects(&second.runtime, dir.path(), "after-the-eviction").await;
+    assert!(!second.runtime.blobs().has(oldest_file).await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(dest.join("Oldest.epub")).unwrap(),
+        book_text("Oldest", BOOK),
+        "the exported file is the user's"
+    );
+
+    let refused = api
+        .call(
+            "library.download",
+            Some(json!({ "item_id": too_large, "dest": &dest })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("no room for this download"), "{refused}");
+    assert!(
+        second.keeps(KeepReason::Cache, newer, newer_file).await,
+        "a refused download evicted the cache"
+    );
+
+    // An add makes room the same way.
+    let (added, added_file) = add_a_book(&second, dir.path(), "Added", BOOK).await;
+    assert!(second.keeps(KeepReason::Own, added, added_file).await);
+    assert!(!second.keeps(KeepReason::Cache, newer, newer_file).await);
+    assert!(second.keeps(KeepReason::Cache, newest, newest_file).await);
+}
+
+/// The title of a book [`add_a_book`] would add through `founder` of which
+/// `custodian` is ranked custodian, from titles `prefix` 0, 1, 2 and on, and
+/// the item it would be.
+fn a_title_kept_by(
+    custodian: MemberId,
+    founder: MemberId,
+    group: &CustodyGroup,
+    prefix: &str,
+) -> (String, ItemId) {
+    (0..)
+        .map(|number| {
+            let title = format!("{prefix} {number}");
+            let hash = iroh_blobs::Hash::new(book_text(&title, BOOK));
+            (title, ItemId::from_content_hashes(&[*hash.as_bytes()]))
+        })
+        .find(|(_, item)| {
+            let ranked = CustodyItem {
+                item: *item,
+                creators: vec![founder],
+                size_bytes: 0,
+            };
+            group.custodians(&ranked)[0] == custodian
+        })
+        .expect("some title is ranked to each member")
+}
+
+/// **Custody makes room by evicting the cache**, and is fetched anyway when
+/// even the whole cache is not room enough. An evicted item rechecked
+/// before collection deletes it is not held.
+#[tokio::test(flavor = "multi_thread")]
+async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes_with(
+        dir.path(),
+        [100 * GB; 3],
+        [
+            Tuning::default(),
+            Tuning {
+                storage_limit: NonZeroU64::new(BOOK as u64 + BOOK as u64 / 2),
+                // So what it evicts is still here when it is rechecked.
+                gc_interval_secs: NonZeroU32::new(3600),
+                ..Tuning::default()
+            },
+            Tuning::default(),
+        ],
+    )
+    .await;
+    let group = CustodyGroup::new(
+        2,
+        settings().weight_rule(),
+        [founder.id, second.id, third.id]
+            .iter()
+            .map(|id| (*id, 100 * GB)),
+    );
+    let add_one_kept_by = async |custodian: &Node, prefix: &str| {
+        let (title, ranked) = a_title_kept_by(custodian.id, founder.id, &group, prefix);
+        let added = add_a_book(&founder, dir.path(), &title, BOOK).await;
+        assert_eq!(added.0, ranked, "the item ranked is the item added");
+        added
+    };
+
+    // The second caches a book the third keeps for the group.
+    let (cached, cached_file) = add_one_kept_by(&third, "Cached").await;
+    third
+        .until_keeps(true, KeepReason::Custody, cached, cached_file)
+        .await;
+    until_projected(&second.runtime, cached, 1, "the second member").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&second.runtime, &second.key), cached, &dest).await;
+    assert!(second.keeps(KeepReason::Cache, cached, cached_file).await);
+
+    // Its first custody needs the cached book's room.
+    let (kept, kept_file) = add_one_kept_by(&second, "Kept").await;
+    second
+        .until_keeps(true, KeepReason::Custody, kept, kept_file)
+        .await;
+    assert!(!second.keeps(KeepReason::Cache, cached, cached_file).await);
+    assert!(!second.runtime.catalogue().holdings().holds(cached));
+    assert!(!over_the_limit(&second).await);
+
+    // Rated, so the projection rechecks it while its bytes are still here:
+    // released, it is not held.
+    second
+        .call("community.rate", json!({ "item_id": cached, "rating": 3 }))
+        .await;
+    tokio::time::timeout(SOON, async {
+        let store = second.runtime.store();
+        while !store
+            .item(cached)
+            .await
+            .unwrap()
+            .is_some_and(|stored| stored.ratings.contains_key(&second.id))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the rating was projected");
+    assert!(second.runtime.blobs().has(cached_file).await.unwrap());
+    assert!(
+        !second.runtime.catalogue().holdings().holds(cached),
+        "announced as held again once rechecked"
+    );
+
+    // Its second has no room to be made, and is kept anyway.
+    let (over, over_file) = add_one_kept_by(&second, "Over").await;
+    second
+        .until_keeps(true, KeepReason::Custody, over, over_file)
+        .await;
+    assert!(over_the_limit(&second).await);
 }

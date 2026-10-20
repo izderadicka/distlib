@@ -25,7 +25,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr,
     Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, CustodySources, PinCounts};
+use distlib_custody::{Custody, CustodySources, PinCounts, Storage};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
@@ -239,7 +239,7 @@ impl Harness {
                 net: distlib_core::NetConfig::default(),
                 reindex_handle,
                 catalogue: catalogue.clone(),
-                blobs,
+                blobs: blobs.clone(),
                 store: store.clone(),
                 search: search.clone(),
                 availability,
@@ -248,7 +248,12 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&node, &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
-                storage_limit: None,
+                storage: Storage::new(
+                    None,
+                    blobs.clone(),
+                    store.clone(),
+                    catalogue.holdings().clone(),
+                ),
                 collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
@@ -408,6 +413,7 @@ impl Harness {
         let search = SearchIndex::open(None).await.unwrap();
         let catalogue = catalogue.expect("node 0 built one above");
         let token = "0123456789abcdef".repeat(4);
+        let blobs = blobs.expect("node 0 built one above");
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -416,7 +422,7 @@ impl Harness {
                 net: distlib_core::NetConfig::default(),
                 reindex_handle: no_reindex(),
                 catalogue: catalogue.clone(),
-                blobs: blobs.expect("node 0 built one above"),
+                blobs: blobs.clone(),
                 store: store.clone(),
                 search: search.clone(),
                 availability: heartbeat.expect("node 0 built one above"),
@@ -425,7 +431,12 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody: custody(&nodes[0], &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
-                storage_limit: None,
+                storage: Storage::new(
+                    None,
+                    blobs.clone(),
+                    store.clone(),
+                    catalogue.holdings().clone(),
+                ),
                 collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
