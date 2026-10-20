@@ -12,7 +12,7 @@
 use std::{
     num::{NonZeroU8, NonZeroU64, NonZeroUsize},
     path::Path,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use distlib::Runtime;
@@ -316,6 +316,7 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     custodian.until_custodian_of(0).await;
 
     // The other is back and keeps the book: now it may go, into the cache.
+    let before_the_release = SystemTime::now();
     let other = Node::start(others_key, &core, others_dir).await;
     other
         .until_keeps(true, KeepReason::Custody, item, file)
@@ -324,6 +325,15 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
         .until_keeps(false, KeepReason::Custody, item, file)
         .await;
     assert!(custodian.keeps(KeepReason::Cache, item, file).await);
+    // Stamped once the tags have moved, so waited for.
+    tokio::time::timeout(SOON, async {
+        let store = custodian.runtime.store();
+        while store.last_used().await.unwrap().get(&item) < Some(&before_the_release) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("arriving in the cache is a use of it");
     until_a_pass_collects(&custodian.runtime, dir.path(), "after-the-release").await;
     assert!(
         custodian.runtime.blobs().has(file).await.unwrap(),

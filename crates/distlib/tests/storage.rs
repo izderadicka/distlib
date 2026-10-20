@@ -3,17 +3,17 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{num::NonZeroU64, path::Path};
+use std::{num::NonZeroU64, path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_core::{DataDir, MemberId};
+use distlib_core::{Config, DataDir, MemberId};
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, record};
+use common::{api, bound, collecting, config, record};
 
 /// A group of one, founded, with its catalogue open and `limit` bytes of
 /// storage.
@@ -22,7 +22,13 @@ async fn founded_alone(dir: &Path, limit: u64) -> (Runtime, Api) {
     let id = MemberId::from(key.public());
     let mut solo_config = config(&[id]);
     solo_config.storage.limit_bytes = NonZeroU64::new(limit);
-    let runtime = Runtime::start(&key, &solo_config, &DataDir::new(dir.join("solo")))
+    founded_alone_with(dir, &key, &solo_config).await
+}
+
+/// [`founded_alone`] as `solo_config` says, by `key`.
+async fn founded_alone_with(dir: &Path, key: &SecretKey, solo_config: &Config) -> (Runtime, Api) {
+    let id = MemberId::from(key.public());
+    let runtime = Runtime::start(key, solo_config, &DataDir::new(dir.join("solo")))
         .await
         .unwrap();
     runtime
@@ -30,12 +36,12 @@ async fn founded_alone(dir: &Path, limit: u64) -> (Runtime, Api) {
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
             Default::default(),
-            &key,
+            key,
         )
         .await
         .unwrap();
     runtime.catalogue().ready().await;
-    let api = api(&runtime, &key);
+    let api = api(&runtime, key);
     (runtime, api)
 }
 
@@ -71,6 +77,7 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
             "custody_bytes": 0,
             "cache_bytes": 0,
             "mandatory_over_limit": false,
+            "last_collection_at": null,
         })
     );
 
@@ -106,6 +113,29 @@ async fn a_pledge_not_below_the_storage_limit_is_refused() {
     api.call("group.pledge_set", Some(json!({ "bytes": 999 })))
         .await
         .unwrap();
+
+    runtime.shutdown().await;
+}
+
+/// When the last collection pass began is in the status, once one has.
+#[tokio::test]
+async fn the_last_collection_pass_is_reported() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let (runtime, api) = founded_alone_with(
+        dir.path(),
+        &key,
+        &collecting(config(&[key.public().into()])),
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while storage(&api).await["last_collection_at"].is_null() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a pass every second began");
 
     runtime.shutdown().await;
 }

@@ -17,17 +17,19 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
 use distlib_consensus::{MembershipNode, MembershipState};
 use distlib_core::{
-    Config, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
+    Config, ContentHash, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
 };
 use distlib_custody::{Custody, CustodySources, PinManager, PinSources};
-use distlib_net::{AllowlistHooks, Blobs, BytePacer, Transport, allowlist, build_endpoint};
+use distlib_net::{
+    AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
+};
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
@@ -36,7 +38,7 @@ use iroh_blobs::store::{
     fs::{FsStore, options::Options},
 };
 use tokio::{
-    sync::{broadcast, watch},
+    sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
 
@@ -68,6 +70,9 @@ pub struct Runtime {
     /// Sets the transfer limits once the group is known, each raised to the
     /// group's minimum; none without a limit.
     transfer_limits: Option<JoinHandle<()>>,
+    /// When the last garbage collection pass began; `None` before the first.
+    collections: watch::Receiver<Option<SystemTime>>,
+    upkeep: StorageUpkeep,
     /// The downloads this node runs, and the bus that it and every other
     /// producer publish to — what this node tells whoever is watching it.
     /// Made here, by the thing that assembles the producers, so that each is
@@ -105,7 +110,7 @@ impl Runtime {
         // blob. Both are handed the transport the node already has — one
         // endpoint, one gossip, whatever the process grows next.
         let (protect, protected_by_documents) = ProtectCallbackHandler::new();
-        let blobs = open_blobs(config, data_dir, protected_by_documents).await?;
+        let (blobs, collections) = open_blobs(config, data_dir, protected_by_documents).await?;
         // One store, two users of it, and the sharing is the point rather
         // than an economy: `library.download` fetching a media blob has to
         // land it in the very store `Catalogue::protocols`' `BlobsProtocol`
@@ -114,13 +119,14 @@ impl Runtime {
         let media = Blobs::new(&blobs, &endpoint);
         let (upload_pacer, transfer_limits) =
             limit_transfers(&config.transfer, &media, node.subscribe());
+        let (serving_events, served) = serving_events(upload_pacer);
         let catalogue = Catalogue::start(
             transport.clone(),
             CatalogueStorage {
                 blobs: (*blobs).clone(),
                 documents: Some(data_dir.docs_dir()),
                 protect: Some(protect),
-                upload_pacer,
+                serving_events: Some(serving_events),
             },
             secret,
             node.subscribe(),
@@ -151,6 +157,7 @@ impl Runtime {
         // sending them — it replays the document either way, but a node that
         // subscribes late does more work than one that does not.
         let (store, search) = open_read_model(data_dir).await?;
+        let upkeep = StorageUpkeep::start(&store, served, &collections, gc_interval(config));
         let uploads = open_uploads(config, data_dir).await?;
         let projection = Projection::start(
             catalogue.clone(),
@@ -192,6 +199,8 @@ impl Runtime {
             custody,
             pins,
             transfer_limits,
+            collections,
+            upkeep,
             tasks,
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
@@ -244,6 +253,11 @@ impl Runtime {
     /// What keeps this node's custody in its blob store.
     pub fn pins(&self) -> &PinManager {
         &self.pins
+    }
+
+    /// When the last garbage collection pass began; `None` before the first.
+    pub fn collections(&self) -> watch::Receiver<Option<SystemTime>> {
+        self.collections.clone()
     }
 
     /// The most the blobs this node keeps may take; no limit when `None`.
@@ -308,6 +322,8 @@ impl Runtime {
         if let Some(transfer_limits) = &self.transfer_limits {
             transfer_limits.abort();
         }
+        // Before the router closes the blob store, which stops collection.
+        self.upkeep.stop();
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.
@@ -519,17 +535,104 @@ fn start_custody(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManag
     (custody, pins)
 }
 
-async fn open_blobs(config: &Config, data_dir: &DataDir, protected: ProtectCb) -> Result<FsStore> {
+async fn open_blobs(
+    config: &Config,
+    data_dir: &DataDir,
+    protected: ProtectCb,
+) -> Result<(FsStore, watch::Receiver<Option<SystemTime>>)> {
     let root = data_dir.blobs_dir();
+    let (protected, collections) = stamp_each_collection(protected);
     // What `FsStore::load` does, with collection switched on.
     let mut options = Options::new(&root);
     options.gc = Some(GcConfig {
-        interval: Duration::from_secs(u64::from(config.storage.gc_interval_secs.get())),
+        interval: gc_interval(config),
         add_protected: Some(protected),
     });
-    FsStore::load_with_opts(root.join("blobs.db"), options)
+    let store = FsStore::load_with_opts(root.join("blobs.db"), options)
         .await
-        .with_context(|| format!("could not open {}", root.display()))
+        .with_context(|| format!("could not open {}", root.display()))?;
+    Ok((store, collections))
+}
+
+/// `[storage] gc_interval_secs`.
+fn gc_interval(config: &Config) -> Duration {
+    Duration::from_secs(u64::from(config.storage.gc_interval_secs.get()))
+}
+
+/// `protected`, stamping the time on the receiver each time a collection pass
+/// asks it what to keep, at the start of the pass.
+fn stamp_each_collection(protected: ProtectCb) -> (ProtectCb, watch::Receiver<Option<SystemTime>>) {
+    let (stamp, collections) = watch::channel(None);
+    let stamped: ProtectCb = Arc::new(move |live| {
+        stamp.send_replace(Some(SystemTime::now()));
+        protected(live)
+    });
+    (stamped, collections)
+}
+
+/// The tasks that look after the blob store while the node runs.
+struct StorageUpkeep {
+    /// Records when this node serves an item, as a use of it.
+    served_recorder: JoinHandle<()>,
+    /// Reports garbage collection once it stops (C42).
+    collection_watch: JoinHandle<()>,
+}
+
+impl StorageUpkeep {
+    fn start(
+        store: &Store,
+        served: mpsc::Receiver<ContentHash>,
+        collections: &watch::Receiver<Option<SystemTime>>,
+        gc_interval: Duration,
+    ) -> Self {
+        Self {
+            served_recorder: tokio::spawn(record_served(store.clone(), served)),
+            collection_watch: tokio::spawn(report_stopped_collection(
+                collections.clone(),
+                gc_interval,
+            )),
+        }
+    }
+
+    fn stop(&self) {
+        self.served_recorder.abort();
+        self.collection_watch.abort();
+    }
+}
+
+/// Logs an error, once, when no collection pass begins for twice `interval`.
+/// iroh-blobs stops collecting after a pass fails, and only a restart starts
+/// it again (C42). Stopped before the blob store closes, so the store letting
+/// go of its collection callback while this runs is an error too.
+async fn report_stopped_collection(
+    mut collections: watch::Receiver<Option<SystemTime>>,
+    interval: Duration,
+) {
+    let overdue_after = interval * 2;
+    while let Ok(began) = tokio::time::timeout(overdue_after, collections.changed()).await {
+        if began.is_err() {
+            tracing::error!(
+                "the blob store let go of garbage collection; collection is no longer watched"
+            );
+            return;
+        }
+    }
+    tracing::error!(
+        ?overdue_after,
+        "garbage collection has stopped, so nothing released is deleted; restart the node to start it again"
+    );
+}
+
+/// Records each blob in `served` as a use of the items it is a file of.
+/// Stopped before the blob store closes, so `served` ending while this runs
+/// is an error.
+async fn record_served(store: Store, mut served: mpsc::Receiver<ContentHash>) {
+    while let Some(blob) = served.recv().await {
+        if let Err(error) = store.mark_used_by_blob(blob, SystemTime::now()).await {
+            tracing::warn!(%blob, %error, "could not record that a blob was served");
+        }
+    }
+    tracing::error!("serving stopped telling what it serves; serving no longer counts as a use");
 }
 
 /// Where the web UI's uploads wait for `library.add`.
@@ -556,4 +659,54 @@ fn core_group(config: &Config) -> Vec<(MemberId, NodeAddr)> {
         .iter()
         .map(|member| (member.member, member.addr()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use std::collections::HashSet;
+
+    use iroh_blobs::{Hash, store::ProtectOutcome};
+
+    use super::*;
+
+    /// A pass's start is stamped, and what the documents protect still is.
+    #[tokio::test]
+    async fn each_collection_pass_is_stamped_and_still_asks_the_documents() {
+        let referenced = Hash::from_bytes([7; 32]);
+        let documents: ProtectCb = Arc::new(move |live| {
+            live.insert(referenced);
+            Box::pin(async { ProtectOutcome::Continue })
+        });
+        let (protected, collections) = stamp_each_collection(documents);
+        assert_eq!(*collections.borrow(), None);
+
+        let mut live = HashSet::new();
+        let outcome = protected(&mut live).await;
+
+        assert!(matches!(outcome, ProtectOutcome::Continue));
+        assert_eq!(live, HashSet::from([referenced]));
+        assert!(collections.borrow().is_some());
+    }
+
+    /// Passes on time are quiet; none for two intervals is reported.
+    #[tokio::test(start_paused = true)]
+    async fn collection_is_reported_stopped_after_two_intervals_without_a_pass() {
+        let interval = Duration::from_secs(60);
+        let (stamp, collections) = watch::channel(None);
+        let watching = tokio::spawn(report_stopped_collection(collections, interval));
+        for _ in 0..5 {
+            tokio::time::sleep(interval).await;
+            stamp.send_replace(Some(SystemTime::now()));
+        }
+        tokio::time::sleep(interval * 2 - Duration::from_secs(1)).await;
+        assert!(
+            !watching.is_finished(),
+            "reported while passes were on time"
+        );
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(watching.is_finished(), "never reported");
+    }
 }

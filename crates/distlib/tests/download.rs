@@ -299,6 +299,15 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
         json!("network"),
         "bob did not have these bytes, so they came over the network"
     );
+    // 5b-3b: a download is a use of the item, and so is serving it.
+    assert!(bob.store().last_used().await.unwrap().contains_key(&item));
+    tokio::time::timeout(SOON, async {
+        while !alice.store().last_used().await.unwrap().contains_key(&item) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("alice served the book, which is a use of it");
     assert_eq!(
         std::fs::read(bobs_dest.join("dune.epub")).unwrap(),
         bytes,

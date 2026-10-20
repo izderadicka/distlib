@@ -460,6 +460,11 @@ is no limit. The pledge must be below it, the rest being room for what the node 
 and its cache. An add that would take what was added and what is kept for custody
 past the limit is refused. `distlib status` shows the bytes kept for each reason.
 
+`[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
+disk, every ten minutes unless set. `node.status` says when the last pass began. If
+passes stop, which iroh-blobs does after one fails, an error is logged after two
+intervals without one; only a restart starts them again.
+
 `[transfer] max_fetches` is how many items the node fetches at once for the group's
 custody, ten unless set. `[transfer] max_download_rate` limits all of its downloads
 together, and `max_upload_rate` everything it serves to the group, both in bytes

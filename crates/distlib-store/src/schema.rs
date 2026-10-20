@@ -20,15 +20,16 @@
 /// search index's fields in `index.rs`.
 ///
 /// **Bump it with any change to either**, in the PR that makes the change.
-/// Everything in the read model is derived from the document and replayed in
-/// full at every start (C7), so a read model of another version is not
-/// migrated: it is thrown away and the replay that runs anyway refills it. A
-/// phase-3 read model has no version at all, which reads as 0.
+/// Everything in the read model but `last_used` is derived from the document
+/// and replayed in full at every start (C7), so a read model of another
+/// version is not migrated: it is thrown away and the replay that runs anyway
+/// refills it. `last_used` is lost with it, which leaves the cache equally old.
+/// A phase-3 read model has no version at all, which reads as 0.
 ///
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 6;
+pub const READ_MODEL_VERSION: u32 = 7;
 
 /// Run on every connection, before anything else.
 ///
@@ -142,5 +143,14 @@ CREATE TABLE IF NOT EXISTS members (
     display_name TEXT    NOT NULL,
     pledge_bytes INTEGER NOT NULL,
     is_core      INTEGER NOT NULL
+) STRICT;
+
+-- When this node last used each item: downloaded it, served it, or moved it
+-- into its cache, in milliseconds since the Unix epoch. This node's own, not
+-- derived from the document, so no replay writes it. No reference to `items`,
+-- whose replay would cascade into it.
+CREATE TABLE IF NOT EXISTS last_used (
+    item    TEXT    PRIMARY KEY,
+    used_at INTEGER NOT NULL
 ) STRICT;
 ";

@@ -30,7 +30,7 @@ use distlib_core::{
     Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
     MemberId, Rating, Review, Wish, WishId,
 };
-use distlib_net::{BytePacer, Directory, Protocols, Transport, blobs::paced_serving};
+use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
 use iroh_blobs::{
@@ -39,6 +39,7 @@ use iroh_blobs::{
     api::TempTag,
     api::downloader::{Downloader, Shuffled},
     api::proto::BlobStatus,
+    provider::events::EventSender,
 };
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
@@ -197,9 +198,9 @@ pub struct CatalogueStorage {
     /// the documents protect every blob they reference. `None` for a store
     /// that never collects.
     pub protect: Option<ProtectCallbackHandler>,
-    /// What every blob this node serves is paced through, its rate this
-    /// node's upload limit. `None` serves without a limit.
-    pub upload_pacer: Option<Arc<BytePacer>>,
+    /// The provider events every blob this node serves goes through: see
+    /// `distlib_net::blobs::serving_events`. `None` serves without any.
+    pub serving_events: Option<EventSender>,
 }
 
 /// The catalogue subsystem: the document, the stores under it, and the task
@@ -254,7 +255,7 @@ impl Catalogue {
             blobs,
             documents,
             protect,
-            upload_pacer,
+            serving_events,
         } = storage;
         let replicas = match &documents {
             Some(dir) => {
@@ -327,7 +328,7 @@ impl Catalogue {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                blobs: BlobsProtocol::new(&blobs, upload_pacer.map(paced_serving)),
+                blobs: BlobsProtocol::new(&blobs, serving_events),
                 holdings: Holdings::new(blobs),
                 docs,
                 author: author_id,

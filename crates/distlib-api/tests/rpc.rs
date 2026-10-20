@@ -198,7 +198,7 @@ impl Harness {
                 blobs: (*media).clone(),
                 documents: None,
                 protect: None,
-                upload_pacer: None,
+                serving_events: None,
             },
             &secret,
             node.subscribe(),
@@ -249,6 +249,7 @@ impl Harness {
                 custody: custody(&node, &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage_limit: None,
+                collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
         )
@@ -352,7 +353,7 @@ impl Harness {
                         blobs: (*media).clone(),
                         documents: None,
                         protect: None,
-                        upload_pacer: None,
+                        serving_events: None,
                     },
                     secret,
                     node.subscribe(),
@@ -425,6 +426,7 @@ impl Harness {
                 custody: custody(&nodes[0], &store, &tasks),
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage_limit: None,
+                collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
         )

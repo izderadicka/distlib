@@ -19,7 +19,10 @@
 
 #![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, FileRole, Item, ItemId,
@@ -743,6 +746,7 @@ async fn a_store_of_another_version_is_started_afresh() {
             "file_authors",
             "item_files",
             "items",
+            "last_used",
             "members",
             "ratings",
             "reviews",
@@ -754,4 +758,72 @@ async fn a_store_of_another_version_is_started_afresh() {
         .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
         .expect("the rows are counted");
     assert_eq!(left, 1, "only the row written since, not the one left over");
+}
+
+/// An item with one content file, `blob`, as the projection would write it.
+fn with_file(id: ItemId, blob: ContentHash) -> StoredItem {
+    let file = FileRecord {
+        role: FileRole::Content,
+        format: "epub".to_owned(),
+        size: 10,
+        filename: "book.epub".to_owned(),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    StoredItem {
+        item: Item {
+            files: BTreeMap::from([(blob, file)]),
+            ..Item::new(id)
+        },
+        ratings: BTreeMap::new(),
+        reviews: BTreeMap::new(),
+        last_modified: 1,
+        file_authors: Default::default(),
+    }
+}
+
+/// When an item was last used is stamped by item or by any of its blobs, a
+/// later stamp replacing an earlier one, and a replay of the item keeps it.
+#[tokio::test]
+async fn an_items_last_use_is_stamped_by_item_or_by_blob() {
+    let store = empty().await;
+    let (one, other, unused) = (
+        ItemId::from_bytes([1; 32]),
+        ItemId::from_bytes([2; 32]),
+        ItemId::from_bytes([3; 32]),
+    );
+    let shared = ContentHash::from_bytes([9; 32]);
+    for id in [one, other] {
+        store
+            .upsert_item(with_file(id, shared))
+            .await
+            .expect("written");
+    }
+    store
+        .upsert_item(with_file(unused, ContentHash::from_bytes([8; 32])))
+        .await
+        .expect("written");
+    let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+
+    store.mark_used(one, at(100)).await.expect("written");
+    assert_eq!(
+        store.last_used().await.expect("read"),
+        BTreeMap::from([(one, at(100))])
+    );
+
+    store
+        .mark_used_by_blob(shared, at(200))
+        .await
+        .expect("written");
+    store
+        .upsert_item(with_file(one, shared))
+        .await
+        .expect("written");
+    assert_eq!(
+        store.last_used().await.expect("read"),
+        BTreeMap::from([(one, at(200)), (other, at(200))]),
+        "every item of the blob, the later stamp, kept through a replay"
+    );
 }

@@ -509,7 +509,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (11 PRs)
+### 5b — keeping items (12 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -561,9 +561,13 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   `node.status` and `distlib status`. **Acceptance:** an add that would grow own and custody past
   the limit is refused, and one that grows nothing goes through even over it; a pledge not below
   the limit is refused.
-  **5b-3b** — last-used times in the read model (all the cache equally old after `db/` is
-  deleted), eviction least recently used first before a custody fetch, a download or an add, and
-  distlib's own GC loop, a pass right after an eviction (C42). **Acceptance:** a node at its limit
+  **5b-3b** — in two (delta P5-16). **5b-3b-1** *(done)* — last-used times in the read model
+  (all the cache equally old after `db/` is deleted), stamped by a download, a release into the
+  cache and a blob served; collection every ten minutes by default, its last pass in
+  `node.status`, an error logged when passes stop (C42; distlib cannot run its own pass on
+  iroh-blobs 0.103.1). **5b-3b-2** — eviction least recently used first before a custody fetch, a
+  download or an add; a download refused when the whole cache is not enough, a custody fetch
+  made anyway; holdings no longer announce what was evicted. **Acceptance:** a node at its limit
   evicts the oldest cached item to take on a new custody or a new download, never an own or
   custody item; the exported file is untouched.
   **5b-3c** — the Node page's storage: the limit and the bytes held as own, custody and cache.
@@ -662,7 +666,7 @@ Every open C-number appears here once.
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **5c-0**: never purge. |
-| **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b**, whose eviction relies on passes running: watch for it, and restart collection or report it in `node.status`. |
+| **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 
 ---
 

@@ -32,7 +32,7 @@ use std::{
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr, StorageUse};
 use distlib_net::{
     AddressBook, Blobs, BytePacer,
-    blobs::{paced_serving, partial_of},
+    blobs::{partial_of, serving_events},
 };
 use iroh::{
     Endpoint, SecretKey,
@@ -43,6 +43,7 @@ use iroh_blobs::{
     BlobsProtocol,
     store::{fs::FsStore, mem::MemStore},
 };
+use tokio::sync::mpsc;
 
 /// Puts bytes in a store and says what the catalogue would call them.
 ///
@@ -80,19 +81,29 @@ async fn serving(store: &MemStore) -> (MemberId, NodeAddr, Router) {
 
 /// [`serving`], every blob paced to `rate` bytes per second if given.
 async fn serving_at(store: &MemStore, rate: Option<u64>) -> (MemberId, NodeAddr, Router) {
+    let pacer = rate.map(|rate| Arc::new(BytePacer::new(NonZeroU64::new(rate))));
+    let (id, addr, router, _served) = serving_with(store, pacer).await;
+    (id, addr, router)
+}
+
+/// [`serving_at`] with [`serving_events`], and what they say is served.
+async fn serving_with(
+    store: &MemStore,
+    pacer: Option<Arc<BytePacer>>,
+) -> (MemberId, NodeAddr, Router, mpsc::Receiver<ContentHash>) {
     let secret = SecretKey::generate();
     let id = MemberId::from(secret.public());
     let endpoint = endpoint(secret, vec![iroh_blobs::ALPN.to_vec()]).await;
-    let events = rate.map(|rate| paced_serving(Arc::new(BytePacer::new(NonZeroU64::new(rate)))));
+    let (events, served) = serving_events(pacer);
     let router = Router::builder(endpoint.clone())
-        .accept(iroh_blobs::ALPN, BlobsProtocol::new(store, events))
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(store, Some(events)))
         .spawn();
     let socket = endpoint
         .bound_sockets()
         .into_iter()
         .next()
         .expect("a bound endpoint reports a socket");
-    (id, NodeAddr::default().with_direct(socket), router)
+    (id, NodeAddr::default().with_direct(socket), router, served)
 }
 
 /// `size` bytes that are not all the same, added to `store`.
@@ -629,4 +640,21 @@ async fn each_kept_blob_counts_once_under_its_strongest_reason() {
             cache_bytes: 0,
         }
     );
+}
+
+/// A blob this node serves is told, so its items count as used.
+#[tokio::test]
+async fn a_served_blob_is_told() {
+    let store = MemStore::new();
+    let hash = added(&store, b"a book someone wants").await;
+    let (id, addr, router, mut served) = serving_with(&store, None).await;
+
+    fetcher(id, &addr)
+        .await
+        .fetch(hash, vec![id])
+        .await
+        .unwrap();
+
+    assert_eq!(served.recv().await, Some(hash));
+    let _ = router.shutdown().await;
 }

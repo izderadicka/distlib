@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use distlib_core::{
@@ -139,7 +140,8 @@ pub struct StoredMember {
 ///
 /// Cheap to clone, and every clone is the same database: one connection behind
 /// a lock rather than a pool. SQLite takes a write lock over the whole file
-/// anyway and the only writer is the projection task, so a pool would buy
+/// anyway, and the projection task is the writer that matters (the others
+/// only stamp `last_used`), so a pool would buy
 /// concurrent *reads* at the cost of a second path that can create the schema.
 /// When 2a-4's queries make that a measurement rather than a guess, this is the
 /// one type that has to change.
@@ -373,6 +375,49 @@ impl Store {
                 ])?;
             }
             Ok(())
+        })
+        .await
+    }
+
+    /// Records that this node used `item` at `at`.
+    pub async fn mark_used(&self, item: ItemId, at: SystemTime) -> Result<()> {
+        self.write("told an item was used", move |tx| {
+            tx.execute(
+                "INSERT INTO last_used (item, used_at) VALUES (?1, ?2) \
+                 ON CONFLICT (item) DO UPDATE SET used_at = excluded.used_at",
+                params![item.to_string(), millis_since_epoch(at)],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    /// Records that this node used every item `blob` is a file of at `at`.
+    pub async fn mark_used_by_blob(&self, blob: ContentHash, at: SystemTime) -> Result<()> {
+        self.write("told a blob was used", move |tx| {
+            tx.execute(
+                "INSERT INTO last_used (item, used_at) \
+                 SELECT item, ?2 FROM item_files WHERE blob = ?1 \
+                 ON CONFLICT (item) DO UPDATE SET used_at = excluded.used_at",
+                params![blob.to_string(), millis_since_epoch(at)],
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    /// When this node last used each item it has used.
+    pub async fn last_used(&self) -> Result<BTreeMap<ItemId, SystemTime>> {
+        self.read(|conn| {
+            conn.prepare("SELECT item, used_at FROM last_used")?
+                .query_map([], |row| {
+                    let millis: u64 = row.get(1)?;
+                    Ok((
+                        identifier(row, 0, "item")?,
+                        UNIX_EPOCH + Duration::from_millis(millis),
+                    ))
+                })?
+                .collect()
         })
         .await
     }
@@ -935,6 +980,15 @@ fn like_anywhere(text: &str) -> String {
         .replace('%', r"\%")
         .replace('_', r"\_");
     format!("%{escaped}%")
+}
+
+/// `at` as `last_used` stores it; a time before the epoch as the epoch.
+fn millis_since_epoch(at: SystemTime) -> u64 {
+    let millis = at
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 /// Reads one of the catalogue's identifiers back out of a text column.

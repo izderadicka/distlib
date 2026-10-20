@@ -101,7 +101,7 @@ impl Node {
             blobs: (*blobs).clone(),
             documents,
             protect: None,
-            upload_pacer: None,
+            serving_events: None,
         };
         let catalogue = Catalogue::start(transport, storage, &secret, membership)
             .await
