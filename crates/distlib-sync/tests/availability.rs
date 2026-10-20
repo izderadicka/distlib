@@ -23,7 +23,7 @@ use std::{
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
     ContentHash, Event as NodeEvent, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId,
-    MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
+    KeepReason, MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
     availability::{DELTA_MAX, decode_base},
 };
 use distlib_net::Transport;
@@ -171,10 +171,19 @@ impl Node {
             .unwrap();
     }
 
-    /// Makes item `n` held here, its one content file in the store, and
-    /// returns its id.
+    /// Makes item `n` held here, its one content file in the store and kept
+    /// as its own, and returns its id.
     async fn holds(&self, n: u16) -> ItemId {
-        let item = item(n, self.content(n).await);
+        let content = self.content(n).await;
+        let item = item(n, content);
+        self.blobs
+            .tags()
+            .set(
+                KeepReason::Own.tag(item.id, content),
+                iroh_blobs::Hash::from_bytes(*content.as_bytes()),
+            )
+            .await
+            .unwrap();
         assert!(self.holdings.recheck(&item).await.unwrap());
         item.id
     }

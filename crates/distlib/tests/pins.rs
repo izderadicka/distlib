@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     time::{Duration, Instant, SystemTime},
 };
@@ -55,6 +55,8 @@ fn settings() -> GroupSettings {
 struct Tuning {
     transfer: TransferConfig,
     storage_limit: Option<NonZeroU64>,
+    /// In place of a collection every second.
+    gc_interval_secs: Option<NonZeroU32>,
 }
 
 /// One of the test's nodes: every node is a core node, so two of three still
@@ -75,6 +77,9 @@ impl Node {
         let mut config = collecting(config(core));
         config.transfer = tuning.transfer;
         config.storage.limit_bytes = tuning.storage_limit;
+        if let Some(interval) = tuning.gc_interval_secs {
+            config.storage.gc_interval_secs = interval;
+        }
         let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
         Self {
             runtime,
@@ -662,7 +667,8 @@ fn a_title_kept_by(
 }
 
 /// **Custody makes room by evicting the cache**, and is fetched anyway when
-/// even the whole cache is not room enough.
+/// even the whole cache is not room enough. An evicted item rechecked
+/// before collection deletes it is not held.
 #[tokio::test(flavor = "multi_thread")]
 async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
     init_logging();
@@ -674,6 +680,8 @@ async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
             Tuning::default(),
             Tuning {
                 storage_limit: NonZeroU64::new(BOOK as u64 + BOOK as u64 / 2),
+                // So what it evicts is still here when it is rechecked.
+                gc_interval_secs: NonZeroU32::new(3600),
                 ..Tuning::default()
             },
             Tuning::default(),
@@ -713,6 +721,30 @@ async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
     assert!(!second.keeps(KeepReason::Cache, cached, cached_file).await);
     assert!(!second.runtime.catalogue().holdings().holds(cached));
     assert!(!over_the_limit(&second).await);
+
+    // Rated, so the projection rechecks it while its bytes are still here:
+    // released, it is not held.
+    second
+        .call("community.rate", json!({ "item_id": cached, "rating": 3 }))
+        .await;
+    tokio::time::timeout(SOON, async {
+        let store = second.runtime.store();
+        while !store
+            .item(cached)
+            .await
+            .unwrap()
+            .is_some_and(|stored| stored.ratings.contains_key(&second.id))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the rating was projected");
+    assert!(second.runtime.blobs().has(cached_file).await.unwrap());
+    assert!(
+        !second.runtime.catalogue().holdings().holds(cached),
+        "announced as held again once rechecked"
+    );
 
     // Its second has no room to be made, and is kept anyway.
     let (over, over_file) = add_one_kept_by(&second, "Over").await;

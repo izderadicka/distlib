@@ -860,6 +860,8 @@ impl Api {
                 .await
                 .map_err(net_error)?;
         }
+        // The projection rechecked it before these tags, when it was not kept.
+        self.recheck_holdings(id).await;
         self.make_room_for_add(id, &imported).await;
         Ok(answer)
     }
