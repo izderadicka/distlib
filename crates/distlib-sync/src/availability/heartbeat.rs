@@ -189,6 +189,12 @@ impl Availability {
         lock(&self.inner.holders).holders(item).to_vec()
     }
 
+    /// Every item exactly one member of `online` is known to hold, with that
+    /// member.
+    pub fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
+        lock(&self.inner.holders).sole_holders(online)
+    }
+
     /// Whether what `member` holds is known: until its base list has arrived,
     /// it is unknown rather than "holds nothing" (D5).
     pub fn knows_holdings_of(&self, member: &MemberId) -> bool {

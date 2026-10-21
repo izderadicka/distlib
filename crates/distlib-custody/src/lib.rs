@@ -4,6 +4,7 @@
 //! Nothing here is stored: custody is a function of the log's members and
 //! pledges and the catalogue's items, computed again at every start.
 
+mod emergency;
 mod pins;
 mod service;
 mod settling;
