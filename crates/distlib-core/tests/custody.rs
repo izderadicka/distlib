@@ -153,6 +153,28 @@ proptest! {
     }
 
     #[test]
+    fn the_emergency_copy_goes_to_the_next_in_score_order_that_may_keep_it(
+        pledges in pledges(),
+    ) {
+        let group = group(&pledges);
+        // One slot more, and two: the same order, a member further.
+        let one_more = CustodyGroup::new(REPLICAS + 1, RULE, pledges.iter().copied());
+        let two_more = CustodyGroup::new(REPLICAS + 2, RULE, pledges.iter().copied());
+        let members: Vec<MemberId> = pledges.iter().map(|(member, _)| *member).collect();
+        for item in items(50, &members) {
+            let custodians = group.custodians(&item);
+            let first = group.first_after_custodians(&item, |_| true);
+            prop_assert_eq!(first, one_more.custodians(&item).get(custodians.len()).copied());
+            let second = group.first_after_custodians(&item, |member| Some(member) != first);
+            prop_assert_eq!(second, two_more.custodians(&item).get(custodians.len() + 1).copied());
+            if let Some(first) = first {
+                prop_assert!(!custodians.contains(&first));
+                prop_assert!(!item.creators.contains(&first));
+            }
+        }
+    }
+
+    #[test]
     fn a_pledge_changed_within_one_step_or_above_the_cap_weighs_the_same(
         pledge in 0..2_000_u64,
         change in 0..10_u64,

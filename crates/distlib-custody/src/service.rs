@@ -96,7 +96,7 @@ async fn first_group(
 }
 
 /// The members and pledges custody is computed from.
-fn custody_group(membership: &MembershipState) -> CustodyGroup {
+pub(crate) fn custody_group(membership: &MembershipState) -> CustodyGroup {
     let settings = membership.settings();
     CustodyGroup::new(
         settings.replicas.get(),
