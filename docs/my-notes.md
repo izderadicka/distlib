@@ -182,3 +182,7 @@ Some pub functions are used only for tests -  we should limit them with `#cfg(te
 ## Clean termination
 
 Now we are extensively using task abort. Though it may work (at least agent said so), it does not feel clean -  cancellation token from tokio utils could be better I think.
+
+## Determining items with only one copy
+
+Not sure if detection if done efficiently  -  I think we have two loops/tasks where number of copies and custody is checked - now completely independent - one for node custody and one for emergency copies -   both have similar logic -   I think they can be combined and made more effective
