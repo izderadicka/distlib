@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use tokio::time::Instant;
 
 mod common;
-use common::{api, bound, config, init_logging, record, until_projected};
+use common::{api, bound, config, group_settings, init_logging, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -42,7 +42,7 @@ async fn a_group<const N: usize>(dir: &Path, keys: [&SecretKey; N]) -> [Runtime;
         .collect();
     runtimes[0]
         .node()
-        .init_group(founders, Default::default(), keys[0])
+        .init_group(founders, group_settings(), keys[0])
         .await
         .unwrap();
     for runtime in &runtimes {

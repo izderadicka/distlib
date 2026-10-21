@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, collecting, config, record};
+use common::{PLEDGE, api, bound, collecting, config, group_settings, record};
 
 /// A group of one, founded, with its catalogue open and `limit` bytes of
 /// storage.
@@ -36,7 +36,7 @@ async fn founded_alone_with(dir: &Path, key: &SecretKey, solo_config: &Config) -
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             key,
         )
         .await
@@ -108,15 +108,19 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
 #[tokio::test]
 async fn a_pledge_not_below_the_storage_limit_is_refused() {
     let dir = TempDir::new().unwrap();
-    let (runtime, api) = founded_alone(dir.path(), 1_000).await;
+    let limit = 2 * PLEDGE;
+    let (runtime, api) = founded_alone(dir.path(), limit).await;
 
     let refused = api
-        .call("group.pledge_set", Some(json!({ "bytes": 1_000 })))
+        .call("group.pledge_set", Some(json!({ "bytes": limit })))
         .await
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("storage limit of 1000 bytes"), "{refused}");
-    api.call("group.pledge_set", Some(json!({ "bytes": 999 })))
+    assert!(
+        refused.contains(&format!("storage limit of {limit} bytes")),
+        "{refused}"
+    );
+    api.call("group.pledge_set", Some(json!({ "bytes": limit - 1 })))
         .await
         .unwrap();
 

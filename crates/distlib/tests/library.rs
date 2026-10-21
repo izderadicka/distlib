@@ -24,7 +24,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, record, until_projected};
+use common::{api, bound, config, group_settings, record, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -69,7 +69,7 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -169,7 +169,7 @@ async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -231,7 +231,7 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contri
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             &key,
         )
         .await
@@ -352,7 +352,7 @@ async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fi
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             &key,
         )
         .await
@@ -434,7 +434,7 @@ async fn adding_two_different_files_under_one_name_is_refused() {
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             &key,
         )
         .await
@@ -506,7 +506,7 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -609,7 +609,7 @@ async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             &key,
         )
         .await

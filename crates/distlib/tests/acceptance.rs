@@ -139,6 +139,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
     );
 
     // *Node A adds 3 ebooks.*
+    alice.pledge();
     let books = alice.dir.path().join("books");
     std::fs::create_dir_all(&books).unwrap();
     for (filename, title) in LIBRARY {
@@ -297,6 +298,7 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
     alice.agree_on(&[(alice.id.clone(), alice.port)]);
     let mut alice_node = alice.run(true);
     alice_node.wait_for("members=1");
+    alice.pledge();
 
     let book = alice.dir.path().join("dune.epub");
     std::fs::write(&book, b"Dune, in full").unwrap();

@@ -27,6 +27,9 @@ use common::{Peer, pending_on, until, wait_for};
 #[cfg(feature = "slow-tests")]
 use common::{PATIENTLY, until_upto, wait_for_upto};
 
+/// A pledge the group's minimum allows.
+const PLEDGE: u64 = 500_000_000_000;
+
 /// The endpoint's ALPN list and the router's handlers are two declarations of
 /// the same fact, and only one of them can be derived from the other.
 ///
@@ -742,14 +745,15 @@ async fn a_core_node_the_log_demotes_stands_down_and_starts_following() {
         .propose(
             MembershipEvent::PledgeChanged {
                 member: peers[2].id,
-                pledge_bytes: 42,
+                pledge_bytes: PLEDGE,
             },
             &peers[2].secret,
         )
         .await
         .unwrap();
     wait_for(&peers[0], "the demoted node's pledge to commit", |m| {
-        m.member(&peers[2].id).is_some_and(|r| r.pledge_bytes == 42)
+        m.member(&peers[2].id)
+            .is_some_and(|r| r.pledge_bytes == PLEDGE)
     })
     .await;
 
@@ -1588,7 +1592,7 @@ async fn a_follower_proposes_through_a_core_node() {
         .propose(
             MembershipEvent::PledgeChanged {
                 member: follower.id,
-                pledge_bytes: 4096,
+                pledge_bytes: PLEDGE,
             },
             &follower.secret,
         )
@@ -1598,7 +1602,7 @@ async fn a_follower_proposes_through_a_core_node() {
     wait_for(&founder, "the follower's pledge to commit", |membership| {
         membership
             .member(&follower.id)
-            .is_some_and(|record| record.pledge_bytes == 4096)
+            .is_some_and(|record| record.pledge_bytes == PLEDGE)
     })
     .await;
 
@@ -1617,7 +1621,7 @@ async fn a_follower_hears_a_refusal_as_a_refusal() {
         .propose(
             MembershipEvent::PledgeChanged {
                 member: founder.id,
-                pledge_bytes: 4096,
+                pledge_bytes: PLEDGE,
             },
             &follower.secret,
         )
@@ -1644,7 +1648,7 @@ async fn a_follower_that_reaches_no_core_node_says_who_it_tried() {
         .propose(
             MembershipEvent::PledgeChanged {
                 member: follower.id,
-                pledge_bytes: 4096,
+                pledge_bytes: PLEDGE,
             },
             &follower.secret,
         )
@@ -1829,7 +1833,7 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
     // Handed on, and committed.
     let pledge = MembershipEvent::PledgeChanged {
         member: member.id,
-        pledge_bytes: 4096,
+        pledge_bytes: PLEDGE,
     };
     client_of(&member)
         .propose(second.id, &second.addr, signed_by(&member, pledge))
@@ -1838,14 +1842,14 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
     wait_for(&first, "the member's pledge to commit", |membership| {
         membership
             .member(&member.id)
-            .is_some_and(|record| record.pledge_bytes == 4096)
+            .is_some_and(|record| record.pledge_bytes == PLEDGE)
     })
     .await;
 
     // The leader's verdict comes back as a verdict.
     let not_own = MembershipEvent::PledgeChanged {
         member: first.id,
-        pledge_bytes: 1,
+        pledge_bytes: PLEDGE,
     };
     let refused = client_of(&member)
         .propose(second.id, &second.addr, signed_by(&member, not_own))
@@ -1862,7 +1866,7 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
     // A core node's proposal is not handed on.
     let own = MembershipEvent::PledgeChanged {
         member: first.id,
-        pledge_bytes: 1,
+        pledge_bytes: PLEDGE,
     };
     let not_committed = client_of(&first)
         .propose(second.id, &second.addr, signed_by(&first, own))

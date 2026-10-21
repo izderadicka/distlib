@@ -38,7 +38,9 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 mod common;
-use common::{api, bound, config, following, record, until_projected, until_released};
+use common::{
+    api, bound, config, following, group_settings, record, until_projected, until_released,
+};
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
 /// project.
@@ -199,7 +201,7 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
         .node()
         .init_group(
             vec![(record(alice_id, "alice"), bound(&alice))],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -814,7 +816,7 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
         .node()
         .init_group(
             vec![(record(id, "solo"), bound(&runtime))],
-            Default::default(),
+            group_settings(),
             &key,
         )
         .await

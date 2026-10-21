@@ -108,11 +108,25 @@ pub fn config(core: &[MemberId]) -> Config {
     config
 }
 
+/// What a test's founder pledges: below the default weight step, so it weighs
+/// nothing and is custodian of nothing it did not add, yet meets
+/// [`group_settings`]'s minimum, so it may add.
+pub const PLEDGE: u64 = 1_000_000_000;
+
+/// The settings a test group is founded with: the defaults, with a minimum
+/// pledge that [`PLEDGE`] meets.
+pub fn group_settings() -> GroupSettings {
+    GroupSettings {
+        min_pledge_bytes: PLEDGE,
+        ..GroupSettings::default()
+    }
+}
+
 pub fn record(id: MemberId, name: &str) -> MemberRecord {
     MemberRecord {
         member_id: id,
         display_name: name.to_owned(),
-        pledge_bytes: 0,
+        pledge_bytes: PLEDGE,
     }
 }
 

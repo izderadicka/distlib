@@ -13,6 +13,9 @@ use iroh::SecretKey;
 #[cfg(feature = "slow-tests")]
 use proptest::prelude::*;
 
+/// A pledge the group's minimum allows.
+const PLEDGE: u64 = 500_000_000_000;
+
 /// A member we can sign as.
 struct Signer {
     secret: SecretKey,
@@ -1561,7 +1564,7 @@ fn a_change_that_takes_effect_at_once_is_not_refused_as_a_duplicate() {
 /// approvals and is about nothing: they apply at once, move the index, and
 /// cannot conflict with or clear what is waiting.
 fn advance_to(state: &mut MembershipState, who: &Signer, upto: u64) {
-    let mut pledge = 0;
+    let mut pledge = state.settings().min_pledge_bytes;
     while state.changed_at() < upto {
         pledge += 1;
         propose(
@@ -1691,12 +1694,12 @@ fn a_pledge_change_updates_the_record() {
         &alice,
         MembershipEvent::PledgeChanged {
             member: alice.id,
-            pledge_bytes: 42,
+            pledge_bytes: PLEDGE,
         },
     )
     .unwrap();
 
-    assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, 42);
+    assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, PLEDGE);
 }
 
 #[test]
@@ -1736,6 +1739,27 @@ fn a_member_cannot_set_another_members_pledge() {
         0,
         "the refused event must leave the record alone"
     );
+}
+
+#[test]
+fn a_pledge_below_the_groups_minimum_is_refused() {
+    let (mut state, alice) = founded();
+    let minimum = state.settings().min_pledge_bytes;
+    let pledge = |pledge_bytes| MembershipEvent::PledgeChanged {
+        member: alice.id,
+        pledge_bytes,
+    };
+
+    assert_eq!(
+        propose(&mut state, &alice, pledge(minimum - 1)),
+        Err(ConsensusError::PledgeBelowMinimum {
+            pledge_bytes: minimum - 1,
+            min_pledge_bytes: minimum,
+        })
+    );
+    assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, 0);
+    propose(&mut state, &alice, pledge(minimum)).unwrap();
+    assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, minimum);
 }
 
 #[test]

@@ -15,8 +15,8 @@ use std::{
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
-    ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, Rating, ResolvedWish, Review, Series,
-    TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
+    ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
+    Review, Series, TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_custody::{Custody, PinCounts, Room, Storage, StorageError};
 use distlib_net::{Blobs, NetError};
@@ -103,7 +103,7 @@ impl Api {
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
         match method {
             "node.status" => self.status().await,
-            "group.members" => self.members(),
+            "group.members" => self.members().await,
             "group.propose_add" => self.propose_add(parse(params)?).await,
             "group.propose_expel" => self.propose_expel(parse(params)?).await,
             "group.propose_core" => self.propose_core(parse(params)?).await,
@@ -229,15 +229,19 @@ impl Api {
     }
 
     /// `group.members` — the membership as this node has it.
-    fn members(&self) -> Result<Value, Error> {
+    async fn members(&self) -> Result<Value, Error> {
+        let added = self.store.added_bytes().await.map_err(query_error)?;
         let membership = self.node.membership();
+        let settings = membership.settings();
         let members: Vec<Value> = membership
             .members()
             .map(|record| {
+                let added = added.get(&record.member_id).copied().unwrap_or(0);
                 json!({
                     "member": record.member_id,
                     "name": record.display_name,
                     "pledge_bytes": record.pledge_bytes,
+                    "required_pledge_bytes": settings.required_pledge(added),
                     "core": membership.is_core(&record.member_id),
                 })
             })
@@ -425,6 +429,9 @@ impl Api {
     /// No member parameter, and that is the rule rather than a simplification:
     /// a pledge may only be set by the member it belongs to, so accepting one
     /// would only produce proposals the group refuses.
+    ///
+    /// Refused when what this node added requires more than twice the
+    /// pledge (D8); one below the group's minimum, by the log.
     async fn pledge_set(&self, params: PledgeSet) -> Result<Value, Error> {
         // The space for own items and the cache is what the limit leaves.
         if let Some(limit) = self.storage.limit()
@@ -435,11 +442,38 @@ impl Api {
                 params.bytes
             )));
         }
-        self.propose(MembershipEvent::PledgeChanged {
-            member: self.node.id(),
+        let requirement = Requirement {
             pledge_bytes: params.bytes,
+            ..self.requirement(0).await?
+        };
+        if requirement.standing() == PledgeStanding::FarUnder {
+            return Err(Error::invalid_params(requirement.far_under("this pledge")));
+        }
+        let mut answer = self
+            .propose(MembershipEvent::PledgeChanged {
+                member: self.node.id(),
+                pledge_bytes: params.bytes,
+            })
+            .await?;
+        answer["under_pledged"] = requirement.under_pledged();
+        Ok(answer)
+    }
+
+    /// This node's pledge, and what it would be required to pledge with
+    /// `more_bytes` of content added (D8).
+    async fn requirement(&self, more_bytes: u64) -> Result<Requirement, Error> {
+        let me = self.node.id();
+        let added = self.store.added_bytes().await.map_err(query_error)?;
+        let added = added.get(&me).copied().unwrap_or(0);
+        let membership = self.node.membership();
+        Ok(Requirement {
+            pledge_bytes: membership
+                .member(&me)
+                .map_or(0, |record| record.pledge_bytes),
+            required_pledge_bytes: membership
+                .settings()
+                .required_pledge(added.saturating_add(more_bytes)),
         })
-        .await
     }
 
     /// `admin.reindex` — rebuilds the read model from the document, the same
@@ -849,10 +883,27 @@ impl Api {
             .await?;
         self.check_room_for(&item).await?;
         let id = item.id;
-        let answer = match self.catalogue.item(id).await.map_err(sync_error)? {
+        let existing = self.catalogue.item(id).await.map_err(sync_error)?;
+        // Only the files the item lacks get a file key by this member.
+        let growth: u64 = item
+            .files
+            .iter()
+            .filter(|(hash, _)| {
+                existing
+                    .as_ref()
+                    .is_none_or(|existing| !existing.files.contains_key(hash))
+            })
+            .map(|(_, file)| file.size)
+            .fold(0, u64::saturating_add);
+        let requirement = self.requirement(growth).await?;
+        if growth > 0 && requirement.standing() == PledgeStanding::FarUnder {
+            return Err(Error::failed(requirement.far_under("adding these files")));
+        }
+        let mut answer = match existing {
             Some(existing) => self.add_missing_files(item, &existing).await?,
             None => self.write_new_item(item, params).await?,
         };
+        answer["under_pledged"] = requirement.under_pledged();
         // After the write, so a refused or failed add leaves nothing kept.
         for file in &imported {
             self.blobs
@@ -1566,6 +1617,39 @@ fn ratings_summary(ratings: &BTreeMap<MemberId, Rating>, me: MemberId) -> Value 
         });
     let average = (count > 0).then(|| f64::from(total) / f64::from(count));
     json!({ "average": average, "count": count, "mine": ratings.get(&me) })
+}
+
+/// A pledge against what it is required to be (D8).
+#[derive(Debug, Clone, Copy)]
+struct Requirement {
+    pledge_bytes: u64,
+    required_pledge_bytes: u64,
+}
+
+impl Requirement {
+    fn standing(self) -> PledgeStanding {
+        PledgeStanding::of(self.pledge_bytes, self.required_pledge_bytes)
+    }
+
+    /// Why `what` is refused.
+    fn far_under(self, what: &str) -> String {
+        format!(
+            "{what} would require a pledge of {} bytes, more than twice the pledge of {} bytes",
+            self.required_pledge_bytes, self.pledge_bytes
+        )
+    }
+
+    /// The warning for an answer: the pledge and what it should be, or null
+    /// when it is enough.
+    fn under_pledged(self) -> Value {
+        match self.standing() {
+            PledgeStanding::Enough => Value::Null,
+            PledgeStanding::Under | PledgeStanding::FarUnder => json!({
+                "pledge_bytes": self.pledge_bytes,
+                "required_pledge_bytes": self.required_pledge_bytes,
+            }),
+        }
+    }
 }
 
 /// A malformed query is the caller's mistake; anything else out of
