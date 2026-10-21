@@ -142,6 +142,26 @@ impl CustodyGroup {
         }
     }
 
+    /// The first member after `item`'s custodians, in score order, that
+    /// `eligible` admits: who keeps the emergency copy of an item down to its
+    /// last copy (D6). Only a member with a weight, never a creator.
+    pub fn first_after_custodians(
+        &self,
+        item: &CustodyItem,
+        eligible: impl Fn(MemberId) -> bool,
+    ) -> Option<MemberId> {
+        let mut ranked: Vec<Ranked> = self
+            .candidates(item)
+            .map(|(member, weight)| Ranked::new(&self.key, item.item, member, weight))
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+        ranked
+            .into_iter()
+            .skip(self.slots(item))
+            .map(|ranked| ranked.member)
+            .find(|member| eligible(*member))
+    }
+
     /// What keeping `item` asks of the group's pledges: its size once per
     /// custodian slot (D9).
     pub fn demand_bytes(&self, item: &CustodyItem) -> u64 {

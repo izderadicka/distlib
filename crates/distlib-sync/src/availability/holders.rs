@@ -11,7 +11,7 @@
 //! change is undone before the new one is applied — which needs only the
 //! previous change, not a copy of the base.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use distlib_core::{ContentHash, Holdings, ItemId, MemberId};
 
@@ -177,6 +177,21 @@ impl Holders {
         self.index.holders(item)
     }
 
+    /// Every item exactly one member of `online` holds, with that member.
+    pub(super) fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
+        self.index
+            .0
+            .iter()
+            .filter_map(|(item, members)| {
+                let mut online_holders = members.iter().filter(|member| online.contains(member));
+                match (online_holders.next(), online_holders.next()) {
+                    (Some(holder), None) => Some((*item, *holder)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Whether what `member` holds is known: heard from, its base in, and its
     /// statement adding up.
     pub(super) fn is_known(&self, member: &MemberId) -> bool {
@@ -339,6 +354,26 @@ mod tests {
         (0..10)
             .filter(|n| holders.holders(&item(*n)).contains(&bob))
             .collect()
+    }
+
+    /// An item is solely held when one online member holds it, whoever else
+    /// offline does.
+    #[test]
+    fn only_items_one_online_member_holds_are_solely_held() {
+        let (bob, carol, dave) = (member(), member(), member());
+        let mut holders = Holders::default();
+        holders.heard(bob, &stated(None, 3, &[1, 2, 3], &[]));
+        holders.heard(carol, &stated(None, 2, &[2, 3], &[]));
+        holders.heard(dave, &stated(None, 1, &[3], &[]));
+        let online = BTreeSet::from([bob, carol]);
+
+        let mut sole = holders.sole_holders(&online);
+        sole.sort_unstable();
+        assert_eq!(sole, [(item(1), bob)], "2 has two online, 3 too");
+        assert_eq!(
+            holders.sole_holders(&BTreeSet::from([dave])),
+            [(item(3), dave)]
+        );
     }
 
     /// Only news is news: the same statement again changes nothing a page

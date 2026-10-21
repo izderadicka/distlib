@@ -110,6 +110,16 @@ impl Node {
         blobs.kept(reason).await.unwrap().contains(&(item, file)) && blobs.has(file).await.unwrap()
     }
 
+    /// Whether it has a last-used time for `item`.
+    async fn counts_as_used(&self, item: ItemId) -> bool {
+        self.runtime
+            .store()
+            .last_used()
+            .await
+            .unwrap()
+            .contains_key(&item)
+    }
+
     /// Waits until it keeps `file` of `item` for `reason`, or no longer does.
     async fn until_keeps(&self, keeps: bool, reason: KeepReason, item: ItemId, file: ContentHash) {
         tokio::time::timeout(SOON, async {
@@ -217,7 +227,22 @@ async fn three_nodes_with(
     pledges: [u64; 3],
     tunings: [Tuning; 3],
 ) -> (Node, Node, Node) {
-    let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
+    let mut nodes = founded(dir, &pledges, tunings, &settings()).await;
+    let third = nodes.pop().unwrap();
+    let second = nodes.pop().unwrap();
+    let first = nodes.pop().unwrap();
+    (first, second, third)
+}
+
+/// A node for each of `pledges`, collecting every second, tuned as its entry
+/// in `tunings` says, founded with `settings`; the founder first.
+async fn founded(
+    dir: &Path,
+    pledges: &[u64],
+    tunings: impl IntoIterator<Item = Tuning>,
+    settings: &GroupSettings,
+) -> Vec<Node> {
+    let keys: Vec<SecretKey> = pledges.iter().map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
     for (index, (key, tuning)) in keys.into_iter().zip(tunings).enumerate() {
@@ -225,12 +250,9 @@ async fn three_nodes_with(
         nodes.push(Node::start_with(key, &ids, dir, tuning).await);
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
-    found(&runtimes, &nodes[0].key, &pledges, &settings()).await;
-    let third = nodes.pop().unwrap();
-    let second = nodes.pop().unwrap();
-    let first = nodes.pop().unwrap();
-    (first, second, third)
+    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges.iter().copied()).collect();
+    found(&runtimes, &nodes[0].key, &pledges, settings).await;
+    nodes
 }
 
 /// Checks that `took` is about `size` bytes over the group's minimum: not
@@ -753,4 +775,107 @@ async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
         .until_keeps(true, KeepReason::Custody, over, over_file)
         .await;
     assert!(over_the_limit(&second).await);
+}
+
+/// Node `index` of `nodes`, running.
+fn node(nodes: &[Option<Node>], index: usize) -> &Node {
+    nodes[index].as_ref().expect("a node running")
+}
+
+/// The delay before an emergency copy, in the test below.
+const EMERGENCY_AFTER: Duration = Duration::from_secs(10);
+
+/// D6's acceptance. Five nodes, `replicas = 3`: the founder's copy and two
+/// custodians'. One custodian stopped leaves two copies, and nothing is
+/// fetched; both stopped, and one back within the delay, nothing either.
+/// Stopped again for longer, the next member in score order after the
+/// custodians keeps an emergency copy, and nobody else does.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        replicas: NonZeroU8::new(3).unwrap(),
+        emergency_after_secs: u32::try_from(EMERGENCY_AFTER.as_secs()).unwrap(),
+        ..settings()
+    };
+    let mut nodes: Vec<Option<Node>> = founded(
+        dir.path(),
+        &[100 * GB; 5],
+        (0..5).map(|_| Tuning::default()),
+        &settings,
+    )
+    .await
+    .into_iter()
+    .map(Some)
+    .collect();
+    let core: Vec<MemberId> = nodes.iter().map(|node| node.as_ref().unwrap().id).collect();
+    let (item, file) = add_a_book(node(&nodes, 0), dir.path(), "Dune", BOOK).await;
+    let ranked = CustodyItem {
+        item,
+        creators: vec![core[0]],
+        size_bytes: 0,
+    };
+    let group = CustodyGroup::new(
+        3,
+        settings.weight_rule(),
+        core.iter().map(|id| (*id, 100 * GB)),
+    );
+    let index_of = |id: MemberId| core.iter().position(|member| *member == id).unwrap();
+    let custodians: Vec<usize> = group
+        .custodians(&ranked)
+        .into_iter()
+        .map(index_of)
+        .collect();
+    let copier = index_of(
+        group
+            .first_after_custodians(&ranked, |_| true)
+            .expect("two members are left after the custodians"),
+    );
+    let bystander = (1..5)
+        .find(|index| !custodians.contains(index) && *index != copier)
+        .unwrap();
+    for custodian in &custodians {
+        node(&nodes, *custodian)
+            .until_keeps(true, KeepReason::Custody, item, file)
+            .await;
+    }
+    // One custodian of three away: two copies, so nobody copies.
+    let _first_away = nodes[custodians[0]].take().unwrap().stop().await;
+    tokio::time::sleep(EMERGENCY_AFTER + Duration::from_secs(3)).await;
+    for index in [copier, bystander] {
+        assert!(
+            !node(&nodes, index)
+                .keeps(KeepReason::Cache, item, file)
+                .await,
+            "member {index} copied a book that was never alone"
+        );
+    }
+
+    // The other away too, for longer than the delay: the next in score
+    // order copies, counted as used. A holder back within the delay is
+    // `AloneItems`'s test: a restarted node's holdings take as long to reach
+    // the others.
+    let _second_away = nodes[custodians[1]].take().unwrap().stop().await;
+    node(&nodes, copier)
+        .until_keeps(true, KeepReason::Cache, item, file)
+        .await;
+    assert!(
+        node(&nodes, copier).counts_as_used(item).await,
+        "an emergency copy is counted as used"
+    );
+    // Long enough for a copy the bystander began alongside to land.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !node(&nodes, bystander)
+            .keeps(KeepReason::Cache, item, file)
+            .await
+    );
+
+    // The founder away too: the copier's copy is the last, so the next
+    // after it copies.
+    let _founder_away = nodes[0].take().unwrap().stop().await;
+    node(&nodes, bystander)
+        .until_keeps(true, KeepReason::Cache, item, file)
+        .await;
 }

@@ -576,7 +576,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   no event of its own and shows at the next reload. The last collection pass is in `node.status`
   only. **Acceptance:** Vitest for the view.
 
-- **5b-4 — the emergency copy (D6).**
+- **5b-4 — the emergency copy (D6).** *(done; delta P5-18)* A second task of the pin manager, fetching
+  as cache whatever the limit; only members with a pledge copy.
   **Acceptance:** five nodes, `replicas = 3`, `emergency_after_secs` a few seconds at founding; an
   item's holders stopped down to one, the next member in score order fetches an emergency copy after
   the delay; one custodian stopped of three causes no fetch; a holder back within the delay causes

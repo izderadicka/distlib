@@ -27,6 +27,7 @@ use tokio::{
 
 use crate::{
     Custody, CustodyChange,
+    emergency::Emergency,
     storage::{Room, Storage, StorageError},
 };
 
@@ -36,7 +37,7 @@ const STALLED_AFTER: Duration = Duration::from_secs(60);
 
 /// How long availability changes are gathered before they are acted on:
 /// each one is a look at every item, and a group's heartbeats bring many.
-const AVAILABILITY_GATHERED_FOR: Duration = Duration::from_secs(1);
+pub(crate) const AVAILABILITY_GATHERED_FOR: Duration = Duration::from_secs(1);
 
 /// What the pin manager keeps items with, and decides from.
 pub struct PinSources {
@@ -65,10 +66,12 @@ pub struct PinCounts {
     pub releasing: usize,
 }
 
-/// Keeps this node's custody in its blob store, in the background.
+/// Keeps this node's custody in its blob store, and the emergency copies of
+/// items down to their last copy (D6), in the background.
 #[derive(Debug)]
 pub struct PinManager {
-    task: Mutex<Option<JoinHandle<()>>>,
+    /// Custody's task and the emergency copies'.
+    tasks: Mutex<Vec<JoinHandle<()>>>,
     counts: watch::Receiver<PinCounts>,
 }
 
@@ -80,7 +83,8 @@ impl Drop for PinManager {
 
 impl PinManager {
     /// Starts keeping `me`'s custody, as `custody` computes it, fetching up
-    /// to `max_fetches` items at once.
+    /// to `max_fetches` items at once, and the emergency copies that are
+    /// `me`'s to make.
     pub fn start(
         me: MemberId,
         custody: &Custody,
@@ -97,16 +101,19 @@ impl PinManager {
             events,
             storage,
         } = sources;
+        let keeper = Keeper {
+            me,
+            membership,
+            store,
+            blobs,
+            availability,
+            holdings,
+            storage,
+        };
+        let emergency = Emergency::new(keeper.clone());
+        let emergency_events = events.resubscribe();
         let pins = Pins {
-            keeper: Keeper {
-                me,
-                membership,
-                store,
-                blobs,
-                availability,
-                holdings,
-                storage,
-            },
+            keeper,
             custody: custody.clone(),
             pins: HashMap::new(),
             next_turn: Turn::default(),
@@ -117,7 +124,10 @@ impl PinManager {
         // it starts is still heard.
         let changes = custody.changes();
         Self {
-            task: Mutex::new(Some(tokio::spawn(pins.run(changes, events)))),
+            tasks: Mutex::new(vec![
+                tokio::spawn(pins.run(changes, events)),
+                tokio::spawn(emergency.run(emergency_events)),
+            ]),
             counts,
         }
     }
@@ -127,14 +137,10 @@ impl PinManager {
         self.counts.clone()
     }
 
-    /// Stops the task. Dropping this does the same.
+    /// Stops the tasks. Dropping this does the same.
     pub fn shutdown(&self) {
-        let task = self
-            .task
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        for task in tasks {
             task.abort();
         }
     }
@@ -332,7 +338,7 @@ impl Pins {
         for item in self.fewest_copies_first(free) {
             let keeper = self.keeper.clone();
             let task = fetches
-                .spawn(async move { (item, keeper.keep(item).await) })
+                .spawn(async move { (item, keeper.keep(item, KeepReason::Custody).await) })
                 .id();
             self.pins.insert(
                 item,
@@ -499,7 +505,7 @@ fn next_to_fetch(
 
 /// Why an item could not be kept.
 #[derive(Debug, thiserror::Error)]
-enum KeepError {
+pub(crate) enum KeepError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -522,25 +528,25 @@ impl KeepError {
 
 /// What a fetch needs, cloned into its task.
 #[derive(Clone)]
-struct Keeper {
-    me: MemberId,
-    membership: watch::Receiver<MembershipState>,
-    store: Store,
+pub(crate) struct Keeper {
+    pub(crate) me: MemberId,
+    pub(crate) membership: watch::Receiver<MembershipState>,
+    pub(crate) store: Store,
     blobs: Blobs,
-    availability: Availability,
-    holdings: Holdings,
+    pub(crate) availability: Availability,
+    pub(crate) holdings: Holdings,
     storage: Storage,
 }
 
 impl Keeper {
-    /// Tags each of `item_id`'s files for custody, makes room for them, and
+    /// Tags each of `item_id`'s files for `reason`, makes room for them, and
     /// fetches the ones not here. A file already here, cached by a download
     /// say, is only tagged.
     ///
-    /// Tagged before room is made, so a cached copy is kept by custody before
-    /// anything is let go of. Fetched even when the whole cache is not room
-    /// enough: custody is kept whatever the limit.
-    async fn keep(&self, item_id: ItemId) -> Result<(), KeepError> {
+    /// Tagged before room is made, so a cached copy is kept for `reason`
+    /// before anything is let go of. Fetched even when the whole cache is not
+    /// room enough: custody and an emergency copy are kept whatever the limit.
+    pub(crate) async fn keep(&self, item_id: ItemId, reason: KeepReason) -> Result<(), KeepError> {
         let Some(stored) = self.store.item(item_id).await? else {
             return Ok(());
         };
@@ -551,14 +557,14 @@ impl Keeper {
             .map(|(hash, file)| (*hash, file.size))
             .collect();
         for (hash, _) in &files {
-            self.blobs.keep(KeepReason::Custody, item_id, *hash).await?;
+            self.blobs.keep(reason, item_id, *hash).await?;
         }
         let room = self
             .storage
             .make_room(item_id, files.iter().copied())
             .await?;
         if let Room::Short(short_by) = room {
-            tracing::warn!(item = %item_id, short_by, "kept for custody over the storage limit, with the whole cache evicted");
+            tracing::warn!(item = %item_id, ?reason, short_by, "kept over the storage limit, with the whole cache evicted");
         }
         let providers = self.providers(item_id);
         for (hash, _) in files {
