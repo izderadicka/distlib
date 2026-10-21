@@ -25,6 +25,14 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 0,
   settings: null,
+  storage: {
+    limit_bytes: null,
+    own_bytes: 0,
+    custody_bytes: 0,
+    cache_bytes: 0,
+    mandatory_over_limit: false,
+    last_collection_at: null,
+  },
   sync: { neighbours: [], last_sync: [] },
 };
 const MEMBERS: Members = { group: null, changed_at: 1, members: [] };

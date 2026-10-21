@@ -24,12 +24,30 @@ export interface NodeStatus {
   pending: number;
   /** What the group decided when it was founded; `null` before there is one. */
   settings: GroupSettings | null;
+  /** What this node keeps, against its storage limit. */
+  storage: Storage;
   /** The catalogue's swarm, as this node sees it. */
   sync: {
     /** The members this node is a catalogue gossip neighbour of. */
     neighbours: string[];
     last_sync: LastSync[];
   };
+}
+
+/** The bytes a node keeps, each blob once under the strongest reason. */
+export interface Storage {
+  /** `[storage] limit_bytes`; `null` for no limit. */
+  limit_bytes: number | null;
+  /** What this node added. */
+  own_bytes: number;
+  /** What it keeps for the group's custody. */
+  custody_bytes: number;
+  /** What it downloaded or kept after custody, evicted when space is short. */
+  cache_bytes: number;
+  /** Own and custody alone over the limit: nothing left to evict. */
+  mandatory_over_limit: boolean;
+  /** When the last garbage collection pass began, in microseconds since the epoch. */
+  last_collection_at: number | null;
 }
 
 /** A group's settings, fixed when it was founded. */

@@ -570,8 +570,11 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   made anyway; holdings no longer announce what was evicted. **Acceptance:** a node at its limit
   evicts the oldest cached item to take on a new custody or a new download, never an own or
   custody item; the exported file is untouched.
-  **5b-3c** — the Node page's storage: the limit and the bytes held as own, custody and cache.
-  **Acceptance:** Vitest for the view.
+  **5b-3c** *(done)* — the Node page's storage: the limit and the bytes held as own, custody and
+  cache, and a warning when own and custody alone are over the limit. The page also reloads on
+  `catalogue.item_added` and `download.finished`, which change what is kept; a custody fetch has
+  no event of its own and shows at the next reload. The last collection pass is in `node.status`
+  only. **Acceptance:** Vitest for the view.
 
 - **5b-4 — the emergency copy (D6).**
   **Acceptance:** five nodes, `replicas = 3`, `emergency_after_secs` a few seconds at founding; an
