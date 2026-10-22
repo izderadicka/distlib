@@ -15,6 +15,7 @@ fn a_node_with_a_book(alice: &Friend) -> (Running, String) {
     alice.agree_on(&[(alice.id.clone(), alice.port)]);
     let mut node = alice.run(true);
     node.wait_for("members=1");
+    alice.pledge();
 
     let book = alice.dir.path().join("hordubal.epub");
     std::fs::write(&book, "Hordubal, in full\n").unwrap();

@@ -509,7 +509,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a group founded with `replicas = 2` reports it on every node, followers included; a
   group founded without settings reports the defaults.
 
-### 5b — keeping items (12 PRs)
+### 5b — keeping items (13 PRs)
 
 - **5b-1 — this node's custody, settled (D1, D4, D9).** Recomputed in the background once membership
   has settled; `library.item` and the item page show an item's custodians; `node.status` shows this
@@ -583,15 +583,25 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   the delay; one custodian stopped of three causes no fetch; a holder back within the delay causes
   none.
 
-- **5b-5 — the quota rule (D8).** `added_bytes` (from 5b-1a's `file_authors` table) and `required_pledge`, the
-  warnings and refusals in `library.add` and `group.pledge_set`, and the requirement in the members
-  list.
-  **Acceptance:** at `replicas = 3`, a member with a 100 GB pledge adding files totalling 60 GB is
-  warned and told 120 GB, and the add goes through; adding 110 GB is refused, told 220 GB; raising
-  the pledge clears the warning; lowering it to below half the requirement is refused.
+- **5b-5 — the minimum pledge and the quota rule (D8)**, split in two (Ivan; delta P5-19):
+  - **5b-5a — the quota rule, and the minimum as a floor.** *(done; delta P5-19)* `added_bytes`
+    (from 5b-1a's `file_authors` table) and `required_pledge`, the warnings and refusals in
+    `library.add` and `group.pledge_set` and in the CLI, the requirement in `group.members`; a
+    pledge below `min_pledge_bytes` refused by the log.
+    **Acceptance:** at `replicas = 3`, a member with a 100 GB pledge adding files totalling 60 GB is
+    warned and told 120 GB, and the add goes through; adding 110 GB is refused, told 220 GB;
+    raising the pledge clears the warning; lowering it to below half the requirement is refused.
+  - **5b-5b — no downloads without the minimum pledge.** `library.download` refuses while this
+    node pledges less than `min_pledge_bytes`, naming the pledge needed; and a node refuses to
+    serve an item's content files to a member pledging less, per get request, so the catalogue's
+    entries and the availability base lists still reach it.
+    **Acceptance:** a member at pledge 0 is refused a download with the pledge needed; one that
+    skips its own check (a test requester) is refused the content by every serving node, and still
+    syncs the catalogue; pledging the minimum lets both through.
 
 - **5b-6 — keeping, in the UI.** The item page's custodians with their online state; the Node page's
-  pledge, requirement and load factor (its storage is 5b-3c's).
+  pledge, requirement and load factor (its storage is 5b-3c's); D8's warning on the add page and
+  each member's requirement in the members list (from 5b-5a's API).
   **Acceptance:** Vitest per view; one e2e path from adding an item to seeing its custodians.
 
 ### 5c — checking custody (6 PRs)

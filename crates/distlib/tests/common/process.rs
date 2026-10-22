@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use distlib_core::GroupSettings;
 use tempfile::TempDir;
 
 /// Long enough for three processes to start, elect and replicate; short enough
@@ -97,6 +98,13 @@ impl Friend {
             api_port,
             id,
         }
+    }
+
+    /// Pledges the default group minimum through the CLI, as a founder has
+    /// to before it adds.
+    pub fn pledge(&self) {
+        let minimum = GroupSettings::default().min_pledge_bytes.to_string();
+        run_command(self.dir.path(), &["pledge", &minimum]);
     }
 
     /// Writes the founding core group — the same list for everyone.

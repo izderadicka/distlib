@@ -12,6 +12,11 @@ const GB: u64 = 1_000_000_000;
 const HOUR: u32 = 60 * 60;
 const DAY: u32 = 24 * HOUR;
 
+/// How many times its pledge a member's requirement may be before adds and
+/// pledge changes that would get it there are refused (D8). A constant until a
+/// group needs another (Q9).
+const FAR_UNDER_FACTOR: u64 = 2;
+
 /// The group's settings. In a founder's config as `[group]`, read only when
 /// founding; after that the log's copy is the one that counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +28,7 @@ pub struct GroupSettings {
     pub cap_bytes: u64,
     /// Weights move in steps of this, so a small pledge edit moves nothing.
     pub weight_step_bytes: NonZeroU64,
-    /// The least a member may pledge.
+    /// The least a member may pledge, and the least it is required to.
     pub min_pledge_bytes: u64,
     /// How many changes to the membership a proposal waits for its approvals
     /// before it is dropped. Counted in changes, not time: a quiet group keeps
@@ -81,6 +86,15 @@ impl GroupSettings {
         limit.max(NonZeroU64::new(self.min_transfer_rate).unwrap_or(NonZeroU64::MIN))
     }
 
+    /// What a member that added `added_bytes` of content has to pledge (D8):
+    /// the other `replicas − 1` copies of what it added, and never less than
+    /// the minimum.
+    pub fn required_pledge(&self, added_bytes: u64) -> u64 {
+        added_bytes
+            .saturating_mul(u64::from(self.replicas.get()) - 1)
+            .max(self.min_pledge_bytes)
+    }
+
     /// Refuses settings that contradict each other, naming what is wrong.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.weight_step_bytes.get() > self.cap_bytes {
@@ -92,6 +106,29 @@ impl GroupSettings {
             return Err("settle_secs is longer than max_settle_secs");
         }
         Ok(())
+    }
+}
+
+/// How a member's pledge stands against what it is required to pledge (D8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PledgeStanding {
+    Enough,
+    /// Below the requirement: warned, not refused.
+    Under,
+    /// The requirement more than [`FAR_UNDER_FACTOR`] times the pledge: an
+    /// add or a pledge change that gets here is refused.
+    FarUnder,
+}
+
+impl PledgeStanding {
+    pub fn of(pledge_bytes: u64, required_bytes: u64) -> Self {
+        if required_bytes > pledge_bytes.saturating_mul(FAR_UNDER_FACTOR) {
+            Self::FarUnder
+        } else if required_bytes > pledge_bytes {
+            Self::Under
+        } else {
+            Self::Enough
+        }
     }
 }
 
@@ -117,6 +154,35 @@ mod tests {
             ..GroupSettings::default()
         };
         assert!(settle_too_long.check().is_err());
+    }
+
+    #[test]
+    fn the_requirement_is_the_other_copies_of_what_was_added_and_at_least_the_minimum() {
+        let settings = GroupSettings {
+            min_pledge_bytes: 100,
+            ..GroupSettings::default()
+        };
+        assert_eq!(settings.required_pledge(0), 100);
+        assert_eq!(settings.required_pledge(60), 120);
+        let five_copies = GroupSettings {
+            replicas: NonZeroU8::new(5).expect("five is not zero"),
+            ..settings
+        };
+        assert_eq!(five_copies.required_pledge(60), 240);
+        assert_eq!(five_copies.required_pledge(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn a_pledge_is_under_below_its_requirement_and_far_under_below_half() {
+        assert_eq!(PledgeStanding::of(100, 100), PledgeStanding::Enough);
+        assert_eq!(PledgeStanding::of(100, 101), PledgeStanding::Under);
+        assert_eq!(PledgeStanding::of(100, 200), PledgeStanding::Under);
+        assert_eq!(PledgeStanding::of(100, 201), PledgeStanding::FarUnder);
+        assert_eq!(PledgeStanding::of(0, 1), PledgeStanding::FarUnder);
+        assert_eq!(
+            PledgeStanding::of(u64::MAX, u64::MAX),
+            PledgeStanding::Enough
+        );
     }
 
     #[test]

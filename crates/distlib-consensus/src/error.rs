@@ -69,6 +69,15 @@ pub enum ConsensusError {
         member: MemberId,
     },
 
+    /// A pledge below the group's minimum.
+    #[error(
+        "a pledge of {pledge_bytes} bytes is below the group's minimum of {min_pledge_bytes} bytes"
+    )]
+    PledgeBelowMinimum {
+        pledge_bytes: u64,
+        min_pledge_bytes: u64,
+    },
+
     /// A non-core member tried to change the voter set.
     #[error("{proposer} is not a core member and cannot change the core group")]
     NotCoreMember { proposer: MemberId },

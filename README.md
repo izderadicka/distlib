@@ -239,6 +239,12 @@ chooses auditability over ceremony, and the proposer is recorded in the log eith
 way. `distlib expel <id> --reason "..."` is the other direction, and
 `distlib pledge <bytes>` sets what *this* node commits to storing.
 
+Every member joins, and every founder founds, with a pledge of nothing, and has to
+pledge at least the group's `min_pledge_bytes` (100 GB by default) before it adds
+anything. What it adds raises what it has to pledge to `replicas − 1` times the
+content it added: below that an add or a pledge is warned, and one that would leave
+it requiring more than twice its pledge is refused.
+
 Whoever you admit does not need to be in `[consensus] core`. A node listed there
 votes on the log; every other member **follows** it — holding the same log, deriving
 the same allowlist, but fetching it from the core nodes rather than voting. Nothing
@@ -325,7 +331,7 @@ them hold for every protocol added later.
 | `distlib approve <proposal>` | Approve a pending change. |
 | `distlib withdraw <proposal>` | Take back a change you proposed. |
 | `distlib core set <member>` / `core remove <member>` | Change the core group: who votes, and where they are. |
-| `distlib pledge <bytes>` | Set this node's storage pledge. Only ever this node's, and below its storage limit if it has one. |
+| `distlib pledge <bytes>` | Set this node's storage pledge. Only ever this node's, at least the group's minimum, and below its storage limit if it has one. |
 | `distlib ticket` | Print a join ticket for somebody who has been admitted. |
 | `distlib join <ticket>` | Join a group from a ticket: writes its core nodes into this node's config. |
 | `distlib ui [--base-url]` | Print the link that opens this node's web UI, signed in. |
@@ -364,16 +370,16 @@ curl -s http://127.0.0.1:11280/rpc \
 | Method | |
 |---|---|
 | `node.status` | Identity, group, whether this node votes, Raft state, current leader; the bytes it keeps as own, custody and cache against its storage limit. |
-| `group.members` | The membership as this node's log has it. |
+| `group.members` | The membership as this node's log has it, with each member's pledge and what it is required to pledge. |
 | `group.propose_add` | `{member, name?}` — admit a member. |
 | `group.propose_expel` | `{member, reason}` — remove one. |
 | `group.propose_core` | Move a core node, or add or drop one. |
 | `group.pending` / `group.approve` / `group.withdraw` | Changes waiting for approvals, and acting on them. |
-| `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. |
+| `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. Refused below the group's minimum or below half of what this node is required to pledge; `under_pledged` says so when it is below that requirement. |
 | `group.ticket` | A join ticket for this group. |
 | `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |
 | `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`), `reviews` and `bookmarks`. |
-| `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. Refused when it would take own and custody past the storage limit. |
+| `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. Refused when it would take own and custody past the storage limit, or require more than twice this node's pledge; `under_pledged` warns when it requires more than the pledge. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
 | `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |

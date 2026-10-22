@@ -22,8 +22,8 @@ use distlib_api::{
 };
 use distlib_consensus::{MemberRecord, MembershipNode};
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, Item, ItemId, MemberId, NOTE_MAX_BYTES, NodeAddr,
-    Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
+    NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_custody::{Custody, CustodySources, PinCounts, Storage};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
@@ -46,6 +46,19 @@ use iroh::{
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+/// What the harness's founders pledge: below the default weight step, so they
+/// weigh nothing, yet the minimum of [`settings`], so they may add.
+const PLEDGE: u64 = 1_000_000_000;
+
+/// The settings the harness founds with: the defaults, with [`PLEDGE`] as the
+/// minimum pledge.
+fn settings() -> GroupSettings {
+    GroupSettings {
+        min_pledge_bytes: PLEDGE,
+        ..GroupSettings::default()
+    }
+}
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
 ///
@@ -218,11 +231,11 @@ impl Harness {
                 MemberRecord {
                     member_id: id,
                     display_name: "founder".to_owned(),
-                    pledge_bytes: 0,
+                    pledge_bytes: PLEDGE,
                 },
                 addr,
             )],
-            Default::default(),
+            settings(),
             &secret,
         )
         .await
@@ -389,14 +402,14 @@ impl Harness {
                     MemberRecord {
                         member_id: *id,
                         display_name: format!("founder-{index}"),
-                        pledge_bytes: 0,
+                        pledge_bytes: PLEDGE,
                     },
                     addr.clone(),
                 )
             })
             .collect();
         nodes[0]
-            .init_group(founders, Default::default(), &secrets[0])
+            .init_group(founders, settings(), &secrets[0])
             .await
             .unwrap();
         for node in &nodes {
@@ -1449,12 +1462,12 @@ async fn a_pledge_is_set_for_this_node_and_no_other() {
     let harness = Harness::start().await;
 
     harness
-        .call("group.pledge_set", json!({ "bytes": 4096 }))
+        .call("group.pledge_set", json!({ "bytes": 2 * PLEDGE }))
         .await;
 
     let listed = harness.call("group.members", Value::Null).await;
     let members = listed["members"].as_array().unwrap();
-    assert_eq!(members[0]["pledge_bytes"], json!(4096));
+    assert_eq!(members[0]["pledge_bytes"], json!(2 * PLEDGE));
 
     // There is no member parameter to abuse: a pledge belongs to its owner, so
     // the method takes the node's own id and nothing else.

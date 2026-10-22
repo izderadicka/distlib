@@ -55,7 +55,10 @@ export class Node {
       `${net}\n${api}\n[consensus]\ncore = [\n  { member = "${id}", addrs = ["127.0.0.1:${ports.transport}"] },\n]\n`,
     );
     try {
-      return new Node(dir, ports, id, await run(dir, ["run", "--found-group"]));
+      const node = new Node(dir, ports, id, await run(dir, ["run", "--found-group"]));
+      // A member pledges before it adds: the group's default minimum.
+      distlib(dir, "pledge", "100000000000");
+      return node;
     } catch (error) {
       rmSync(dir, { recursive: true, force: true });
       throw error;

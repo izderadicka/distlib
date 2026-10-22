@@ -297,6 +297,37 @@ proptest! {
         })?;
     }
 
+    /// What each member added is the size of each content file whose key it
+    /// wrote.
+    #[test]
+    fn added_bytes_are_the_content_files_each_member_wrote(
+        items in distinct_items(0..5),
+        authors in proptest::collection::vec(member(), 1..3),
+    ) {
+        runtime().block_on(async {
+            let store = empty().await;
+            let mut expected: BTreeMap<MemberId, u64> = BTreeMap::new();
+            for mut stored in items {
+                stored.file_authors = stored
+                    .item
+                    .files
+                    .iter_mut()
+                    .zip(authors.iter().cycle())
+                    .map(|((hash, file), author)| {
+                        file.size >>= 20;
+                        if file.role == FileRole::Content {
+                            *expected.entry(*author).or_default() += file.size;
+                        }
+                        (*hash, [*author].into())
+                    })
+                    .collect();
+                store.upsert_item(stored).await.expect("the item is written");
+            }
+            prop_assert_eq!(store.added_bytes().await.expect("read"), expected);
+            Ok(())
+        })?;
+    }
+
     /// §10: replaying N times leaves what replaying once leaves.
     #[test]
     fn projecting_an_item_again_changes_nothing(stored in stored(), times in 2usize..5) {

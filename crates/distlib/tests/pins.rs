@@ -46,6 +46,8 @@ fn settings() -> GroupSettings {
         settle_secs: 2,
         max_settle_secs: 60,
         min_transfer_rate: MIN_TRANSFER_RATE,
+        // So a member may pledge nothing again, and give up its custody.
+        min_pledge_bytes: 0,
         ..GroupSettings::default()
     }
 }
@@ -586,9 +588,10 @@ async fn over_the_limit(node: &Node) -> bool {
 async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refused_after_evicting() {
     init_logging();
     let dir = TempDir::new().unwrap();
+    // Below the weight step: each may add, and none is a custodian.
     let (founder, second, _third) = three_nodes_with(
         dir.path(),
-        [0; 3],
+        [GB; 3],
         [
             Tuning::default(),
             Tuning {

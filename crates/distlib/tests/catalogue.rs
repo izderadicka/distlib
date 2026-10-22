@@ -33,7 +33,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, following, init_logging, record, until_projected};
+use common::{
+    api, bound, config, following, group_settings, init_logging, record, until_projected,
+};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -74,7 +76,7 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
                 (record(alice_id, "alice"), bound(&alice)),
                 (record(bob_id, "bob"), bound(&bob)),
             ],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -192,7 +194,7 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
         .node()
         .init_group(
             vec![(record(alice_id, "alice"), bound(&alice))],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
@@ -1604,7 +1606,7 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
         .node()
         .init_group(
             vec![(record(alice_id, "alice"), bound(&alice))],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await

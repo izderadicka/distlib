@@ -248,7 +248,8 @@ impl MembershipState {
     ///
     /// * a pledge is a promise about the proposer's *own* storage, and §5.5
     ///   makes custodian assignment depend on it, so letting anyone rewrite
-    ///   anyone else's would let one member move everybody's data;
+    ///   anyone else's would let one member move everybody's data; and it is
+    ///   never below the group's minimum (phase 5's D8);
     /// * the core group is the set of Raft voters, and a non-voter rewriting it
     ///   could remove every voter but themselves;
     /// * an approval *is* §4.4 step 2, so only a core node casts one.
@@ -258,6 +259,14 @@ impl MembershipState {
                 Err(ConsensusError::PledgeNotOwn {
                     proposer,
                     member: *member,
+                })
+            }
+            MembershipEvent::PledgeChanged { pledge_bytes, .. }
+                if *pledge_bytes < self.settings.min_pledge_bytes =>
+            {
+                Err(ConsensusError::PledgeBelowMinimum {
+                    pledge_bytes: *pledge_bytes,
+                    min_pledge_bytes: self.settings.min_pledge_bytes,
                 })
             }
             MembershipEvent::CoreGroupChanged { .. } if !self.core.contains_key(&proposer) => {

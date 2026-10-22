@@ -471,6 +471,28 @@ impl Store {
         .await
     }
 
+    /// The content each member added (phase 5's D8): the sizes of the
+    /// content files whose file key it wrote, per file key, so a file in two
+    /// items counts twice. Members that added nothing are left out.
+    pub async fn added_bytes(&self) -> Result<BTreeMap<MemberId, u64>> {
+        self.read(|conn| {
+            // `TOTAL`, as in `custody_items`: one absurd size must not fail it.
+            let mut statement = conn.prepare(
+                "SELECT file_authors.member, TOTAL(item_files.size) FROM file_authors \
+                 JOIN item_files ON item_files.item = file_authors.item \
+                 AND item_files.blob = file_authors.blob \
+                 WHERE item_files.role = 'content' GROUP BY file_authors.member",
+            )?;
+            let added = statement
+                .query_map([], |row| {
+                    Ok((identifier(row, 0, "member")?, row.get::<_, f64>(1)? as u64))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(added)
+        })
+        .await
+    }
+
     /// One item's own fields, `files`, `ratings` and `reviews` always empty.
     ///
     /// [`Store::item`] minus the queries that read an item's details — its

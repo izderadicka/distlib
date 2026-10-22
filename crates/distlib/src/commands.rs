@@ -630,9 +630,27 @@ fn where_it_is(addr: &NodeAddr) -> String {
 
 /// `distlib pledge`
 pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
-    ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
+    let answer = ask(paths, "group.pledge_set", json!({ "bytes": bytes })).await?;
     println!("pledged     {bytes} bytes");
+    print_under_pledged(&answer["under_pledged"]);
     Ok(())
+}
+
+/// The warning an add or a pledge answers with when this node pledges less
+/// than what it added requires (phase 5's D8); nothing when it is enough.
+fn print_under_pledged(under_pledged: &Value) {
+    if let Some(warning) = under_pledged_warning(under_pledged) {
+        println!("{warning}");
+    }
+}
+
+fn under_pledged_warning(under_pledged: &Value) -> Option<String> {
+    let pledge = under_pledged["pledge_bytes"].as_u64()?;
+    let required = under_pledged["required_pledge_bytes"].as_u64()?;
+    Some(format!(
+        "WARNING     under-pledged: this node pledges {pledge} bytes, and what it added \
+         requires {required}; raise it with `distlib pledge {required}`"
+    ))
 }
 
 /// `distlib admin reindex`
@@ -1075,6 +1093,7 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
             println!("            contributed {contributed} file(s) it was missing");
         }
     }
+    print_under_pledged(&answer["under_pledged"]);
     Ok(())
 }
 
@@ -1909,6 +1928,16 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_under_pledged_answer_warns_with_the_pledge_needed_and_an_enough_one_does_not() {
+        let warning =
+            under_pledged_warning(&json!({ "pledge_bytes": 100, "required_pledge_bytes": 120 }))
+                .expect("an under-pledged answer warns");
+        assert!(warning.contains("pledges 100 bytes"), "{warning}");
+        assert!(warning.contains("`distlib pledge 120`"), "{warning}");
+        assert_eq!(under_pledged_warning(&Value::Null), None);
+    }
 
     #[test]
     fn a_page_url_is_somewhere_a_browser_can_go() {

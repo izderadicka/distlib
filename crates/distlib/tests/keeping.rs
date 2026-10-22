@@ -17,8 +17,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, collecting, config, download, following, record, until_a_pass_collects,
-    until_projected,
+    api, bound, collecting, config, download, following, group_settings, record,
+    until_a_pass_collects, until_projected,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile, project
@@ -50,7 +50,7 @@ async fn alice_and_bob_collecting(dir: &Path) -> (Runtime, SecretKey, Runtime, S
         .node()
         .init_group(
             vec![(record(alice_id, "alice"), bound(&alice))],
-            Default::default(),
+            group_settings(),
             &alice_key,
         )
         .await
