@@ -1,6 +1,6 @@
 //! The quota rule (5b-5a, D8): what a member added requires it to pledge,
 //! warned below that and refused below half of it, and never a pledge below
-//! the group's minimum.
+//! the group's minimum; and nothing downloaded below that minimum (5b-5b).
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
@@ -15,12 +15,20 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config};
+use common::{api, bound, config, download, found, until_projected};
 
 const SOON: Duration = Duration::from_secs(30);
 
-/// A group of one at `replicas` 3 with a minimum pledge of 10 bytes, its
-/// founder pledging `pledge_bytes`.
+/// The settings these tests found with: `replicas` 3, a minimum pledge of 10
+/// bytes.
+fn settings() -> GroupSettings {
+    GroupSettings {
+        min_pledge_bytes: 10,
+        ..GroupSettings::default()
+    }
+}
+
+/// A group of one, its founder pledging `pledge_bytes`.
 async fn founded_alone(dir: &Path, pledge_bytes: u64) -> (Runtime, Api) {
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -32,13 +40,9 @@ async fn founded_alone(dir: &Path, pledge_bytes: u64) -> (Runtime, Api) {
         display_name: "solo".to_owned(),
         pledge_bytes,
     };
-    let settings = GroupSettings {
-        min_pledge_bytes: 10,
-        ..GroupSettings::default()
-    };
     runtime
         .node()
-        .init_group(vec![(founder, bound(&runtime))], settings, &key)
+        .init_group(vec![(founder, bound(&runtime))], settings(), &key)
         .await
         .unwrap();
     runtime.catalogue().ready().await;
@@ -142,4 +146,64 @@ async fn adding_the_same_files_again_requires_nothing_more() {
     );
 
     runtime.shutdown().await;
+}
+
+/// 5b-5b's acceptance: a member below the minimum pledge syncs the catalogue
+/// but is refused a download, and refused the content by the member serving
+/// it even when it skips its own check; pledging the minimum lets both
+/// through.
+#[tokio::test]
+async fn a_member_below_the_minimum_pledge_browses_but_takes_no_content() {
+    let dir = TempDir::new().unwrap();
+    let keys = [SecretKey::generate(), SecretKey::generate()];
+    let ids = keys.each_ref().map(|key| MemberId::from(key.public()));
+    let mut runtimes = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let data_dir = DataDir::new(dir.path().join(format!("node-{index}")));
+        runtimes.push(Runtime::start(key, &config(&ids), &data_dir).await.unwrap());
+    }
+    found(
+        &runtimes,
+        &keys[0],
+        &[(ids[0], 100), (ids[1], 0)],
+        &settings(),
+    )
+    .await;
+    let [founder, member] = [0, 1].map(|index| api(&runtimes[index], &keys[index]));
+    runtimes[0].catalogue().ready().await;
+    let added = add_a_file(&founder, dir.path(), 1, 20).await.unwrap();
+    let item = serde_json::from_value(added["item_id"].clone()).unwrap();
+    until_projected(&runtimes[0], item, 1, "the founder").await;
+    let stored = runtimes[0].store().item(item).await.unwrap().unwrap();
+    let file = *stored.item.files.keys().next().unwrap();
+
+    until_projected(&runtimes[1], item, 1, "the member at pledge 0").await;
+    let refused = member
+        .call("library.download", Some(json!({ "item_id": item })))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("a pledge of at least 10 bytes"),
+        "{refused}"
+    );
+    let blobs = runtimes[1].blobs();
+    assert!(blobs.fetch(file, vec![ids[0]]).await.is_err());
+
+    pledge(&member, 10).await.unwrap();
+    tokio::time::timeout(SOON, async {
+        while !runtimes[0].node().membership().pledges_the_minimum(&ids[1]) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the founder learns of the pledge");
+    blobs.fetch(file, vec![ids[0]]).await.unwrap();
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&member, item, &dest).await;
+
+    for runtime in runtimes {
+        runtime.shutdown().await;
+    }
 }

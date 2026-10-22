@@ -37,6 +37,7 @@
 //! of, in either direction.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -51,7 +52,10 @@ use iroh_blobs::{
         blobs::BlobStatus,
         downloader::{DownloadProgressItem, Downloader},
     },
-    provider::events::{EventMask, EventSender, ProviderMessage, RequestMode, ThrottleMode},
+    provider::events::{
+        AbortReason, ConnectMode, EventMask, EventResult, EventSender, ProviderMessage,
+        RequestMode, ThrottleMode,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -374,15 +378,30 @@ const ASKS_WAITING: usize = 64;
 /// How many served blobs wait to be recorded before more are dropped.
 const SERVED_WAITING: usize = 1024;
 
-/// Provider events for `BlobsProtocol`: every blob this node is asked for, on
-/// the receiver, and every blob it serves paced through `pacer`, if there is
-/// one, so everyone served at once shares the one rate. The task answering
-/// ends once the protocol, and with it these events, is dropped.
+/// Whether a member may be sent a blob, asked of every request this node
+/// serves.
+pub trait ServingGate: Send + Sync + 'static {
+    fn may_serve(
+        &self,
+        requester: MemberId,
+        hash: ContentHash,
+    ) -> impl Future<Output = bool> + Send;
+}
+
+/// Provider events for `BlobsProtocol`: every request judged by `gate`, every
+/// blob served told on the receiver, and every blob served paced through
+/// `pacer`, if there is one, so everyone served at once shares the one rate.
+/// The task answering ends once the protocol, and with it these events, is
+/// dropped.
 ///
-/// **What is served is told, not waited on.** A blob asked for while the
+/// **A request is judged by who sent it**: the member each connection is
+/// from, as it connected, and refused whole unless `gate` allows each of its
+/// blobs.
+///
+/// **What is served is told, not waited on.** A blob served while the
 /// receiver is full is dropped from it rather than holding up serving. One
-/// task answers both, so with a limit, a request can wait behind the chunks
-/// queued before it.
+/// task answers all of it, so a request can wait behind the gate's answer to
+/// the one before, and with a limit, behind the chunks queued before it.
 ///
 /// **The pace is a sustained rate, not a hard cap.** iroh-blobs asks about a
 /// chunk (about 16 KiB of payload) after it has sent it, and waits for the
@@ -396,9 +415,14 @@ const SERVED_WAITING: usize = 1024;
 ///
 /// For media, a large blob per request, the excess is under one chunk in
 /// each, so the rate holds within a few percent.
-pub fn serving_events(pacer: Option<Arc<BytePacer>>) -> (EventSender, mpsc::Receiver<ContentHash>) {
+pub fn serving_events(
+    pacer: Option<Arc<BytePacer>>,
+    gate: impl ServingGate,
+) -> (EventSender, mpsc::Receiver<ContentHash>) {
     let mask = EventMask {
-        get: RequestMode::Notify,
+        connected: ConnectMode::Notify,
+        get: RequestMode::Intercept,
+        get_many: RequestMode::Intercept,
         throttle: if pacer.is_some() {
             ThrottleMode::Intercept
         } else {
@@ -409,19 +433,41 @@ pub fn serving_events(pacer: Option<Arc<BytePacer>>) -> (EventSender, mpsc::Rece
     let (events, mut asked) = EventSender::channel(ASKS_WAITING, mask);
     let (served, served_blobs) = mpsc::channel(SERVED_WAITING);
     tokio::spawn(async move {
+        let mut requesters: HashMap<u64, MemberId> = HashMap::new();
         while let Some(message) = asked.recv().await {
             match message {
-                ProviderMessage::GetRequestReceivedNotify(request) => {
-                    // Full or closed: a use not recorded is harmless.
-                    let _ = served.try_send(ContentHash::from_bytes(
-                        *request.inner.request.hash.as_bytes(),
-                    ));
+                ProviderMessage::ClientConnectedNotify(connected) => {
+                    if let Some(endpoint) = connected.inner.endpoint_id {
+                        requesters.insert(connected.inner.connection_id, endpoint.into());
+                    }
+                }
+                ProviderMessage::ConnectionClosed(closed) => {
+                    requesters.remove(&closed.inner.connection_id);
+                }
+                ProviderMessage::GetRequestReceived(request) => {
+                    let requester = requesters.get(&request.inner.connection_id).copied();
+                    let hashes = [from_blobs(request.inner.request.hash)];
+                    let judged = judge(&gate, requester, &hashes, &served).await;
+                    // A requester gone meanwhile has nothing to be told.
+                    let _ = request.tx.send(judged).await;
+                }
+                ProviderMessage::GetManyRequestReceived(request) => {
+                    let requester = requesters.get(&request.inner.connection_id).copied();
+                    let hashes: Vec<ContentHash> = request
+                        .inner
+                        .request
+                        .hashes
+                        .iter()
+                        .copied()
+                        .map(from_blobs)
+                        .collect();
+                    let judged = judge(&gate, requester, &hashes, &served).await;
+                    let _ = request.tx.send(judged).await;
                 }
                 ProviderMessage::Throttle(chunk) => {
                     if let Some(pacer) = &pacer {
                         pacer.pace(chunk.inner.size).await;
                     }
-                    // A requester gone meanwhile has nothing to be told.
                     let _ = chunk.tx.send(Ok(())).await;
                 }
                 // The mask asks for no others.
@@ -430,6 +476,31 @@ pub fn serving_events(pacer: Option<Arc<BytePacer>>) -> (EventSender, mpsc::Rece
         }
     });
     (events, served_blobs)
+}
+
+/// Allows a request for `hashes` only if `gate` allows `requester` each of
+/// them, telling `served` of each one then. Refused when the requester is
+/// not known, which a connection always tells first.
+async fn judge(
+    gate: &impl ServingGate,
+    requester: Option<MemberId>,
+    hashes: &[ContentHash],
+    served: &mpsc::Sender<ContentHash>,
+) -> EventResult {
+    let Some(requester) = requester else {
+        return Err(AbortReason::Permission);
+    };
+    for hash in hashes {
+        if !gate.may_serve(requester, *hash).await {
+            tracing::debug!(requester = %requester.fmt_short(), %hash, "refused a blob to a member who may not have it");
+            return Err(AbortReason::Permission);
+        }
+    }
+    for hash in hashes {
+        // Full or closed: a use not recorded is harmless.
+        let _ = served.try_send(*hash);
+    }
+    Ok(())
 }
 
 /// Where [`Blobs::export`] writes `target` before it is complete: beside it,
@@ -446,4 +517,8 @@ pub fn partial_of(target: &Path) -> PathBuf {
 /// hash, and the conversion is the raw bytes.
 fn to_blobs(hash: ContentHash) -> Hash {
     Hash::from_bytes(*hash.as_bytes())
+}
+
+fn from_blobs(hash: Hash) -> ContentHash {
+    ContentHash::from_bytes(*hash.as_bytes())
 }

@@ -39,7 +39,8 @@ use tokio::sync::broadcast;
 
 mod common;
 use common::{
-    api, bound, config, following, group_settings, record, until_projected, until_released,
+    api, bound, config, following, group_settings, init_logging, record, until_projected,
+    until_released,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
@@ -182,6 +183,7 @@ fn dest(dir: &Path, who: &str) -> std::path::PathBuf {
 /// to be necessary.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());

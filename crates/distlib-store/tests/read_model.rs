@@ -858,3 +858,41 @@ async fn an_items_last_use_is_stamped_by_item_or_by_blob() {
         "every item of the blob, the later stamp, kept through a replay"
     );
 }
+
+/// Only an item's content files are content: its cover is not, nor a blob
+/// no item names.
+#[tokio::test]
+async fn a_content_file_is_told_apart_from_a_cover_and_from_a_stranger() {
+    let store = empty().await;
+    let [content, cover, stranger] = [1, 2, 3].map(|seed| ContentHash::from_bytes([seed; 32]));
+    let file = |role, filename: &str| FileRecord {
+        role,
+        format: "epub".to_owned(),
+        size: 1024,
+        filename: filename.to_owned(),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    store
+        .upsert_item(StoredItem {
+            item: Item {
+                files: BTreeMap::from([
+                    (content, file(FileRole::Content, "dune.epub")),
+                    (cover, file(FileRole::Cover, "cover.jpg")),
+                ]),
+                ..Item::new(ItemId::from_bytes([7; 32]))
+            },
+            ratings: Default::default(),
+            reviews: Default::default(),
+            last_modified: 0,
+            file_authors: Default::default(),
+        })
+        .await
+        .expect("the item is written");
+
+    assert!(store.is_content_file(content).await.expect("read"));
+    assert!(!store.is_content_file(cover).await.expect("read"));
+    assert!(!store.is_content_file(stranger).await.expect("read"));
+}

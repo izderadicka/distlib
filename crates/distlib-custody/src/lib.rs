@@ -7,6 +7,7 @@
 mod emergency;
 mod pins;
 mod service;
+mod serving;
 mod settling;
 mod storage;
 mod view;
@@ -26,6 +27,7 @@ use tokio::{
 
 pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
+pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
 pub use view::CustodyStatus;
 use view::CustodyView;

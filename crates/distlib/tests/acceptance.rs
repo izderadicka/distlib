@@ -183,7 +183,8 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
 
     until_files_are_projected(bob.dir.path(), &dune);
 
-    // *Downloads a file.*
+    // *Downloads a file*, once it pledges, as a member has to first.
+    bob.pledge();
     let bobs_books = bob.dir.path().join("downloads");
     std::fs::create_dir_all(&bobs_books).unwrap();
     let downloaded = run_command(

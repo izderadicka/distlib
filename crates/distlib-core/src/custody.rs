@@ -20,15 +20,20 @@ const PARALLEL_FROM: usize = 1024;
 
 /// How a pledge becomes a weight (D3): capped, so no one member attracts most
 /// of the items, and rounded down to a step, so a small edit moves nothing.
+/// Nothing below the minimum, so no custodian is refused its content (5b-5b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeightRule {
     pub cap_bytes: u64,
     pub step_bytes: u64,
+    pub min_bytes: u64,
 }
 
 impl WeightRule {
     /// The weight of a member pledging `pledge_bytes`.
     pub fn weight(&self, pledge_bytes: u64) -> u64 {
+        if pledge_bytes < self.min_bytes {
+            return 0;
+        }
         let capped = pledge_bytes.min(self.cap_bytes);
         match self.step_bytes {
             0 => capped,

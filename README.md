@@ -241,7 +241,8 @@ way. `distlib expel <id> --reason "..."` is the other direction, and
 
 Every member joins, and every founder founds, with a pledge of nothing, and has to
 pledge at least the group's `min_pledge_bytes` (100 GB by default) before it adds
-anything. What it adds raises what it has to pledge to `replicas − 1` times the
+or downloads anything: until then it can browse the catalogue, and every member
+refuses to send it an item's files. What it adds raises what it has to pledge to `replicas − 1` times the
 content it added: below that an add or a pledge is warned, and one that would leave
 it requiring more than twice its pledge is refused.
 
@@ -381,7 +382,7 @@ curl -s http://127.0.0.1:11280/rpc \
 | `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`), `reviews` and `bookmarks`. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. Refused when it would take own and custody past the storage limit, or require more than twice this node's pledge; `under_pledged` warns when it requires more than the pledge. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
-| `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. |
+| `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. Refused while this node pledges less than the group's minimum. |
 | `community.rate` / `community.review` | `{item_id, rating}` / `{item_id, review}` — rate (1–5) or review an item as this node's member; `null` clears it. |
 | `community.bookmark` / `community.bookmark_delete` | `{item_id, bookmark_id?, position, note?}` / `{item_id, bookmark_id}` — leave a bookmark, edit one of yours (it keeps when it was made), or delete one. |
 | `community.wish_create` / `community.wish_list` | `{title, kind?, authors?, description?}` / `{status?}` — wish for something; list every wish, newest first, with its `creator`, `status`, `fulfilled_by` (each member's `item_id`, and its `title` once this node has the item) and `comments`. |

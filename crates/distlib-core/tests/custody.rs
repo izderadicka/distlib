@@ -12,6 +12,7 @@ use proptest::prelude::*;
 const RULE: WeightRule = WeightRule {
     cap_bytes: 1_000,
     step_bytes: 10,
+    min_bytes: 0,
 };
 const REPLICAS: u8 = 3;
 
@@ -204,6 +205,18 @@ fn a_member_weighing_nothing_is_custodian_of_nothing() {
         assert!(group.custody_of(weightless, &all).is_empty());
         assert!(all.iter().all(|item| !group.is_custodian(item, weightless)));
     }
+}
+
+/// A pledge below the minimum weighs nothing even where it is over a step, and
+/// one at the minimum weighs its step.
+#[test]
+fn a_pledge_below_the_minimum_weighs_nothing() {
+    let rule = WeightRule {
+        min_bytes: 25,
+        ..RULE
+    };
+    assert_eq!(rule.weight(24), 0);
+    assert_eq!(rule.weight(25), 20);
 }
 
 /// Over many items a member's share of the custodian slots follows its share
