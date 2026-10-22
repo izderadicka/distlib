@@ -77,6 +77,7 @@ impl GroupSettings {
         WeightRule {
             cap_bytes: self.cap_bytes,
             step_bytes: self.weight_step_bytes.get(),
+            min_bytes: self.min_pledge_bytes,
         }
     }
 

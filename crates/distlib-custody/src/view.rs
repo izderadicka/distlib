@@ -144,6 +144,7 @@ mod tests {
         let rule = WeightRule {
             cap_bytes: 1_000,
             step_bytes: 1,
+            min_bytes: 0,
         };
         let group = CustodyGroup::new(3, rule, [(me, 500), (other, 500)]);
         (group, me, other)
