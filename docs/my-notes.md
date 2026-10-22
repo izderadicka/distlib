@@ -186,3 +186,6 @@ Now we are extensively using task abort. Though it may work (at least agent said
 ## Determining items with only one copy
 
 Not sure if detection if done efficiently  -  I think we have two loops/tasks where number of copies and custody is checked - now completely independent - one for node custody and one for emergency copies -   both have similar logic -   I think they can be combined and made more effective
+
+## Content files concept 
+The whole content files concept is bit overkill for this solution.  Sounds nice, but doubt how it can be really used.  Just bring complexity to code.
