@@ -493,6 +493,18 @@ impl Store {
         .await
     }
 
+    /// Whether `blob` is a content file of any item.
+    pub async fn is_content_file(&self, blob: ContentHash) -> Result<bool> {
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM item_files WHERE blob = ?1 AND role = 'content')",
+                params![blob.to_string()],
+                |row| row.get(0),
+            )
+        })
+        .await
+    }
+
     /// One item's own fields, `files`, `ratings` and `reviews` always empty.
     ///
     /// [`Store::item`] minus the queries that read an item's details — its

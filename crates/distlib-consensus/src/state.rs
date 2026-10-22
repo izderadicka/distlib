@@ -611,6 +611,14 @@ impl MembershipState {
         self.members.get(member)
     }
 
+    /// Whether `member` is one and pledges at least the group's minimum: what
+    /// it takes to download, and to be sent an item's content (phase 5's
+    /// 5b-5b).
+    pub fn pledges_the_minimum(&self, member: &MemberId) -> bool {
+        self.member(member)
+            .is_some_and(|record| record.pledge_bytes >= self.settings.min_pledge_bytes)
+    }
+
     /// Every member, ordered by id.
     pub fn members(&self) -> impl Iterator<Item = &MemberRecord> + '_ {
         self.members.values()

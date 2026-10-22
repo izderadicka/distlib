@@ -591,7 +591,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
     **Acceptance:** at `replicas = 3`, a member with a 100 GB pledge adding files totalling 60 GB is
     warned and told 120 GB, and the add goes through; adding 110 GB is refused, told 220 GB;
     raising the pledge clears the warning; lowering it to below half the requirement is refused.
-  - **5b-5b — no downloads without the minimum pledge.** `library.download` refuses while this
+  - **5b-5b — no downloads without the minimum pledge.** *(done; delta P5-20)* `library.download` refuses while this
     node pledges less than `min_pledge_bytes`, naming the pledge needed; and a node refuses to
     serve an item's content files to a member pledging less, per get request, so the catalogue's
     entries and the availability base lists still reach it.

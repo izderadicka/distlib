@@ -1069,6 +1069,14 @@ impl Api {
     /// Nothing is overwritten, and a failed download leaves the files it
     /// finished: asking again fetches only what is missing.
     async fn download(&self, params: Download) -> Result<Value, Error> {
+        // The members serving it would refuse its content anyway (5b-5b).
+        let membership = self.node.membership();
+        if !membership.pledges_the_minimum(&self.node.id()) {
+            return Err(Error::failed(format!(
+                "downloading needs a pledge of at least {} bytes, the group's minimum; pledge first",
+                membership.settings().min_pledge_bytes
+            )));
+        }
         let dest = self.download_destination(params.dest)?;
         // An item the read model does not have yet is one this node has not
         // synced, so "no such item" is the truth about this node.

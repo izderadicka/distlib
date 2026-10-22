@@ -26,16 +26,19 @@ use distlib_consensus::{MembershipNode, MembershipState};
 use distlib_core::{
     Config, ContentHash, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
 };
-use distlib_custody::{Custody, CustodySources, PinManager, PinSources, Storage};
+use distlib_custody::{Custody, CustodySources, PinManager, PinSources, PledgedOnly, Storage};
 use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
 };
 use distlib_store::{Projection, SearchIndex, Store};
 use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
-use iroh_blobs::store::{
-    GcConfig, ProtectCb,
-    fs::{FsStore, options::Options},
+use iroh_blobs::{
+    provider::events::EventSender,
+    store::{
+        GcConfig, ProtectCb,
+        fs::{FsStore, options::Options},
+    },
 };
 use tokio::{
     sync::{broadcast, mpsc, watch},
@@ -118,7 +121,9 @@ impl Runtime {
         let media = Blobs::new(&blobs, &transport.endpoint);
         let (upload_pacer, transfer_limits) =
             limit_transfers(&config.transfer, &media, node.subscribe());
-        let (serving_events, served) = serving_events(upload_pacer);
+        // The read model before the catalogue it derives from: serving asks it.
+        let (store, search) = open_read_model(data_dir).await?;
+        let (serving_events, served) = serving_pledged_members(upload_pacer, &node, &store);
         let catalogue = Catalogue::start(
             transport.clone(),
             CatalogueStorage {
@@ -150,12 +155,9 @@ impl Runtime {
         )
         .context("could not start the heartbeat")?;
 
-        // The read model, and the task that fills it. After the catalogue
-        // because it is derived from it, and before the router because the
-        // projection should be watching for changes before any peer can start
-        // sending them — it replays the document either way, but a node that
-        // subscribes late does more work than one that does not.
-        let (store, search) = open_read_model(data_dir).await?;
+        // What fills the read model: after the catalogue, and before the
+        // router so it watches before any peer sends changes — it replays the
+        // document either way, but subscribing late is more work.
         let upkeep = StorageUpkeep::start(&store, served, &collections, gc_interval(config));
         let uploads = open_uploads(config, data_dir).await?;
         let projection = Projection::start(
@@ -425,6 +427,16 @@ struct CustodyInputs<'a> {
     events: &'a broadcast::Sender<Event>,
     storage_limit: Option<NonZeroU64>,
     max_fetches: NonZeroUsize,
+}
+
+/// The blobs protocol's events: each request judged by the requester's pledge
+/// (phase 5's 5b-5b), each blob served paced by `pacer` and told.
+fn serving_pledged_members(
+    pacer: Option<Arc<BytePacer>>,
+    node: &MembershipNode,
+    store: &Store,
+) -> (EventSender, mpsc::Receiver<ContentHash>) {
+    serving_events(pacer, PledgedOnly::new(node.subscribe(), store.clone()))
 }
 
 /// Answers every protocol this node speaks: consensus's and the catalogue's.

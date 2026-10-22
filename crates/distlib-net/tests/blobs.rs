@@ -32,15 +32,16 @@ use std::{
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr, StorageUse};
 use distlib_net::{
     AddressBook, Blobs, BytePacer,
-    blobs::{partial_of, serving_events},
+    blobs::{ServingGate, partial_of, serving_events},
 };
 use iroh::{
-    Endpoint, SecretKey,
+    Endpoint, PublicKey, SecretKey,
     endpoint::{RelayMode, presets},
     protocol::Router,
 };
 use iroh_blobs::{
     BlobsProtocol,
+    protocol::{ChunkRanges, GetManyRequest},
     store::{fs::FsStore, mem::MemStore},
 };
 use tokio::sync::mpsc;
@@ -86,15 +87,45 @@ async fn serving_at(store: &MemStore, rate: Option<u64>) -> (MemberId, NodeAddr,
     (id, addr, router)
 }
 
+/// Serves every member everything.
+struct Everyone;
+
+impl ServingGate for Everyone {
+    async fn may_serve(&self, _requester: MemberId, _hash: ContentHash) -> bool {
+        true
+    }
+}
+
+/// Serves everything but `hash` to `member`.
+struct AllBut {
+    member: MemberId,
+    hash: ContentHash,
+}
+
+impl ServingGate for AllBut {
+    async fn may_serve(&self, requester: MemberId, hash: ContentHash) -> bool {
+        (requester, hash) != (self.member, self.hash)
+    }
+}
+
 /// [`serving_at`] with [`serving_events`], and what they say is served.
 async fn serving_with(
     store: &MemStore,
     pacer: Option<Arc<BytePacer>>,
 ) -> (MemberId, NodeAddr, Router, mpsc::Receiver<ContentHash>) {
+    serving_judged_by(store, pacer, Everyone).await
+}
+
+/// [`serving_with`], each request judged by `gate`.
+async fn serving_judged_by(
+    store: &MemStore,
+    pacer: Option<Arc<BytePacer>>,
+    gate: impl ServingGate,
+) -> (MemberId, NodeAddr, Router, mpsc::Receiver<ContentHash>) {
     let secret = SecretKey::generate();
     let id = MemberId::from(secret.public());
     let endpoint = endpoint(secret, vec![iroh_blobs::ALPN.to_vec()]).await;
-    let (events, served) = serving_events(pacer);
+    let (events, served) = serving_events(pacer, gate);
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(store, Some(events)))
         .spawn();
@@ -124,7 +155,12 @@ async fn limited_fetcher(provider: MemberId, addr: &NodeAddr, rate: u64) -> Blob
 /// A fetcher of what `provider` at `addr` serves, on an endpoint and store of
 /// its own.
 async fn fetcher(provider: MemberId, addr: &NodeAddr) -> Blobs {
-    let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
+    fetcher_as(SecretKey::generate(), provider, addr).await
+}
+
+/// [`fetcher`], as the member `secret` is.
+async fn fetcher_as(secret: SecretKey, provider: MemberId, addr: &NodeAddr) -> Blobs {
+    let endpoint = endpoint(secret, Vec::new()).await;
     AddressBook::install(&endpoint)
         .unwrap()
         .learn(provider, addr);
@@ -656,5 +692,77 @@ async fn a_served_blob_is_told() {
         .unwrap();
 
     assert_eq!(served.recv().await, Some(hash));
+    let _ = router.shutdown().await;
+}
+
+/// A request the gate refuses is not served, nor told; the same requester is
+/// served what the gate allows, and another member what it refused the first.
+#[tokio::test]
+async fn a_blob_the_gate_refuses_a_member_is_not_served_to_it() {
+    let store = MemStore::new();
+    let refused = added(&store, b"content for those who pledge").await;
+    let allowed = added(&store, b"an entry anyone may read").await;
+    let secret = SecretKey::generate();
+    let member = MemberId::from(secret.public());
+    let gate = AllBut {
+        member,
+        hash: refused,
+    };
+    let (id, addr, router, mut served) = serving_judged_by(&store, None, gate).await;
+
+    let blobs = fetcher_as(secret, id, &addr).await;
+    assert!(blobs.fetch(refused, vec![id]).await.is_err());
+    blobs.fetch(allowed, vec![id]).await.unwrap();
+    assert_eq!(
+        served.recv().await,
+        Some(allowed),
+        "only what was served is told"
+    );
+    fetcher(id, &addr)
+        .await
+        .fetch(refused, vec![id])
+        .await
+        .unwrap();
+    assert_eq!(served.recv().await, Some(refused));
+
+    let _ = router.shutdown().await;
+}
+
+/// A request for many blobs at once is judged like one for each: refused
+/// whole if any is refused, so it is no way around the gate.
+#[tokio::test]
+async fn a_request_for_many_blobs_is_refused_if_the_gate_refuses_one() {
+    let store = MemStore::new();
+    let refused = added(&store, b"content for those who pledge").await;
+    let allowed = added(&store, b"an entry anyone may read").await;
+    let secret = SecretKey::generate();
+    let member = MemberId::from(secret.public());
+    let gate = AllBut {
+        member,
+        hash: refused,
+    };
+    let (id, addr, router, _served) = serving_judged_by(&store, None, gate).await;
+    let endpoint = endpoint(secret, Vec::new()).await;
+    AddressBook::install(&endpoint).unwrap().learn(id, &addr);
+    let get_many = async |hashes: &[ContentHash]| {
+        let connection = endpoint
+            .connect(PublicKey::from(id), iroh_blobs::ALPN)
+            .await
+            .unwrap();
+        let request = hashes
+            .iter()
+            .fold(GetManyRequest::builder(), |request, hash| {
+                request.hash(to_blobs(*hash), ChunkRanges::all())
+            })
+            .build();
+        MemStore::new()
+            .remote()
+            .execute_get_many(connection, request)
+            .await
+    };
+
+    assert!(get_many(&[allowed, refused]).await.is_err());
+    get_many(&[allowed]).await.unwrap();
+
     let _ = router.shutdown().await;
 }
