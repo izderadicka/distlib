@@ -25,6 +25,7 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 0,
   settings: null,
+  custody: null,
   storage: {
     limit_bytes: null,
     own_bytes: 0,
@@ -122,7 +123,9 @@ describe("the shell", () => {
         description: null,
         files: {},
         last_modified: 0,
-        availability: { held: false, providers: 0 },
+        added_by: [],
+        custodians: null,
+        availability: { held: false, providers: 0, online: [] },
         ratings: { average: null, count: 0, mine: null },
         reviews: [],
         bookmarks: [],

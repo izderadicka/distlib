@@ -1,5 +1,6 @@
 // A real `distlib` node for a browser to talk to: a group of one, founded in
-// a directory of its own, on ports nobody else is using.
+// a directory of its own, on ports nobody else is using — or a member joining
+// such a group.
 //
 // The binary is `DISTLIB_BIN`, or the workspace's debug build. A debug build
 // reads the UI from `web/dist` as it runs, so `npm run build` before these
@@ -17,6 +18,12 @@ const BINARY =
 
 /** How long a node gets to start before the test gives up on it. */
 const STARTUP_MS = 60_000;
+
+/** The group's default minimum pledge, which weighs more than one step. */
+const PLEDGE = "100000000000";
+
+/** Custody follows a change to the membership after a second, not an hour. */
+const GROUP = "[group]\nsettle_secs = 1\nmax_settle_secs = 1\n";
 
 export class Node {
   /** The page's address. */
@@ -41,23 +48,34 @@ export class Node {
 
   /** Founds a group of one and waits for its API. */
   static async found(): Promise<Node> {
-    if (!existsSync(BINARY)) {
-      throw new Error(`no distlib binary at ${BINARY}: run \`cargo build -p distlib\`, or set DISTLIB_BIN`);
-    }
-    const dir = mkdtempSync(join(tmpdir(), "distlib-e2e-"));
-    const ports = { transport: await freeUdpPort(), api: await freeTcpPort() };
-    const net = `[net]\nbind_addr_v4 = "127.0.0.1:${ports.transport}"\nrelay_mode = "disabled"\n`;
-    const api = `[api]\nbind_addr = "127.0.0.1:${ports.api}"\n`;
-    writeFileSync(join(dir, "config.toml"), `${net}\n${api}`);
-    const id = identity(dir);
+    const { dir, ports, config, id } = await prepare();
     writeFileSync(
       join(dir, "config.toml"),
-      `${net}\n${api}\n[consensus]\ncore = [\n  { member = "${id}", addrs = ["127.0.0.1:${ports.transport}"] },\n]\n`,
+      `${config}\n${GROUP}\n[consensus]\ncore = [\n  { member = "${id}", addrs = ["127.0.0.1:${ports.transport}"] },\n]\n`,
     );
     try {
       const node = new Node(dir, ports, id, await run(dir, ["run", "--found-group"]));
       // A member pledges before it adds: the group's default minimum.
-      distlib(dir, "pledge", "100000000000");
+      distlib(dir, "pledge", PLEDGE);
+      return node;
+    } catch (error) {
+      rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /**
+   * A member `founder` admits as `name`, joined with its ticket, running,
+   * and pledging enough to weigh, so it is a custodian of what others add.
+   */
+  static async joining(founder: Node, name: string): Promise<Node> {
+    const { dir, ports, id } = await prepare();
+    try {
+      founder.admit(id, name);
+      const ticket = distlib(founder.dir, "ticket").split("\n")[0].trim();
+      distlib(dir, "join", ticket);
+      const node = new Node(dir, ports, id, await run(dir, ["run"]));
+      await untilItSucceeds(() => distlib(dir, "pledge", PLEDGE), "the new member never pledged");
       return node;
     } catch (error) {
       rmSync(dir, { recursive: true, force: true });
@@ -105,6 +123,36 @@ export class Node {
   async dispose(): Promise<void> {
     await this.stop();
     rmSync(this.dir, { recursive: true, force: true });
+  }
+}
+
+/** A directory of its own, ports nobody uses, their configuration, and an identity. */
+async function prepare(): Promise<{ dir: string; ports: { transport: number; api: number }; config: string; id: string }> {
+  if (!existsSync(BINARY)) {
+    throw new Error(`no distlib binary at ${BINARY}: run \`cargo build -p distlib\`, or set DISTLIB_BIN`);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "distlib-e2e-"));
+  const ports = { transport: await freeUdpPort(), api: await freeTcpPort() };
+  const config =
+    `[net]\nbind_addr_v4 = "127.0.0.1:${ports.transport}"\nrelay_mode = "disabled"\n\n` +
+    `[api]\nbind_addr = "127.0.0.1:${ports.api}"\n`;
+  writeFileSync(join(dir, "config.toml"), config);
+  return { dir, ports, config, id: identity(dir) };
+}
+
+/** Runs `action` until it stops throwing, for up to a startup's time. */
+async function untilItSucceeds(action: () => unknown, what: string): Promise<void> {
+  const deadline = Date.now() + STARTUP_MS;
+  for (;;) {
+    try {
+      action();
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) {
+        throw new Error(`${what}: ${error}`);
+      }
+      await new Promise((later) => setTimeout(later, 500));
+    }
   }
 }
 

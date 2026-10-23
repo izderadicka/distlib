@@ -6,11 +6,13 @@
   // **Uploaded on submit, not when picked**, so a form abandoned half-filled
   // leaves nothing on the node. **Checked here first**: a name the node
   // would refuse only after the upload is cheaper to refuse before it.
+  // **An add that leaves the pledge short stays here** to say so (D8), with
+  // a link to the item, rather than opening it.
   import MetadataFields from "./MetadataFields.svelte";
   import { bytes } from "./lib/format";
   import { emptyDraft, fields } from "./lib/metadata";
   import { href, navigate } from "./lib/router.svelte";
-  import { call, Unauthorised } from "./lib/rpc";
+  import { call, Unauthorised, type UnderPledged } from "./lib/rpc";
   import { upload } from "./lib/upload";
 
   let { onUnauthorised }: { onUnauthorised: () => void } = $props();
@@ -23,6 +25,10 @@
   let adding = $state(false);
   /** An item that was already in the library, which this add changed nothing about. */
   let existing = $state<{ item_id: string; title: string | null } | null>(null);
+  /** An item made while the pledge is short, which this page stays on to say. */
+  let created = $state<{ item_id: string; title: string | null } | null>(null);
+  /** This node's pledge, short of what its adds now require. */
+  let short = $state<UnderPledged | null>(null);
 
   const total = $derived(files.reduce((sum, file) => sum + file.size, 0));
   const busy = $derived(sending !== null || adding);
@@ -52,12 +58,16 @@
     files = [...((event.currentTarget as HTMLInputElement).files ?? [])];
     failure = null;
     existing = null;
+    created = null;
+    short = null;
   }
 
   async function add(event: SubmitEvent) {
     event.preventDefault();
     failure = problem(files);
     existing = null;
+    created = null;
+    short = null;
     if (failure) {
       return;
     }
@@ -75,10 +85,13 @@
       sending = null;
       adding = true;
       const added = await call("library.add", { uploads, ...fields(draft) });
-      if (added.created) {
-        navigate(href({ page: "item", id: added.item_id }));
-      } else {
+      short = added.under_pledged;
+      if (!added.created) {
         existing = { item_id: added.item_id, title: added.title };
+      } else if (short) {
+        created = { item_id: added.item_id, title: added.title };
+      } else {
+        navigate(href({ page: "item", id: added.item_id }));
       }
     } catch (error) {
       if (error instanceof Unauthorised) {
@@ -125,6 +138,19 @@
       These files are already in the library, as
       <a href={href({ page: "item", id: existing.item_id })}>{existing.title ?? "an untitled item"}</a>.
       Nothing was changed: the details above were not applied.
+    </p>
+  {/if}
+
+  {#if created}
+    <p class="notice">
+      Added as <a href={href({ page: "item", id: created.item_id })}>{created.title ?? "an untitled item"}</a>.
+    </p>
+  {/if}
+
+  {#if short}
+    <p class="failure">
+      This node's pledge of {bytes(short.pledge_bytes)} is below the {bytes(short.required_pledge_bytes)} its adds
+      now require. Raise it with <code>distlib pledge</code>.
     </p>
   {/if}
 </form>

@@ -5,7 +5,8 @@
   // when it comes. So does news of any member's availability, which is named
   // by member rather than by item, and of its bookmarks. Who is who — this
   // node's own member, and everybody's names — is loaded beside it, and again
-  // when the membership changes.
+  // when the membership changes. Custody recomputed has no news of its own:
+  // its custodians show at the next load.
   import { onMount } from "svelte";
 
   import Bookmarks from "./Bookmarks.svelte";
@@ -14,7 +15,7 @@
   import Reviews from "./Reviews.svelte";
   import StarRating from "./StarRating.svelte";
   import type { Listen } from "./lib/events";
-  import { availability, bytes, instant, ratingSummary } from "./lib/format";
+  import { availability, bytes, instant, memberName, ratingSummary } from "./lib/format";
   import { whoIsWho } from "./lib/members";
   import { reloader } from "./lib/reloader";
   import { call, failureOf, type FileRecord, type ItemRecord, Unauthorised } from "./lib/rpc";
@@ -77,6 +78,11 @@
   }
 
   const last = $derived(item && instant(item.last_modified));
+
+  /** Whether `member` is online: this node always is, and is not listed. */
+  function presence(member: string, online: string[]): string {
+    return member === me || online.includes(member) ? "online" : "offline";
+  }
 </script>
 
 {#if failure}
@@ -138,6 +144,32 @@
         {/each}
       </tbody>
     </table>
+  </section>
+
+  <section>
+    <h2>Kept for the group</h2>
+    {#if item.custodians === null}
+      <p class="hint">Who keeps it is not worked out yet.</p>
+    {:else}
+      {@const online = item.availability.online}
+      <table>
+        <thead>
+          <tr><th>Member</th><th>Keeps it as</th><th>Now</th></tr>
+        </thead>
+        <tbody>
+          <!-- An adder who has left keeps nothing for the group. -->
+          {#each item.added_by.filter((member) => names.has(member)) as member (member)}
+            <tr><td>{memberName(member, names, me)}</td><td>its adder</td><td>{presence(member, online)}</td></tr>
+          {/each}
+          {#each item.custodians as member (member)}
+            <tr><td>{memberName(member, names, me)}</td><td>custodian</td><td>{presence(member, online)}</td></tr>
+          {/each}
+        </tbody>
+      </table>
+      {#if item.custodians.length === 0}
+        <p class="hint">No other member pledges enough to be its custodian.</p>
+      {/if}
+    {/if}
   </section>
 
   <StarRating itemId={id} ratings={item.ratings} {onUnauthorised} />

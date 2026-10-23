@@ -24,6 +24,8 @@ export interface NodeStatus {
   pending: number;
   /** What the group decided when it was founded; `null` before there is one. */
   settings: GroupSettings | null;
+  /** This node's custody and the group's load; `null` until custody is computed. */
+  custody: Custody | null;
   /** What this node keeps, against its storage limit. */
   storage: Storage;
   /** The catalogue's swarm, as this node sees it. */
@@ -32,6 +34,14 @@ export interface NodeStatus {
     neighbours: string[];
     last_sync: LastSync[];
   };
+}
+
+/** What a node is custodian of, and how loaded the group's pledges are. */
+export interface Custody {
+  items: number;
+  bytes: number;
+  /** Each item's size per custodian slot, over the group's total weight: above 1, some items are a copy short. `null` when no pledge weighs anything. */
+  load_factor: number | null;
 }
 
 /** The bytes a node keeps, each blob once under the strongest reason. */
@@ -82,6 +92,8 @@ export interface Member {
   member: string;
   name: string;
   pledge_bytes: number;
+  /** What it added requires it to pledge, and never less than the group's minimum (D8). */
+  required_pledge_bytes: number;
   core: boolean;
 }
 
@@ -118,6 +130,11 @@ export interface Availability {
   held: boolean;
   /** `null` while some online member's holdings are not known yet. */
   providers: number | null;
+}
+
+/** What `library.item` says of who has an item: also who is online, this node left out. */
+export interface ItemAvailability extends Availability {
+  online: string[];
 }
 
 /** One result of `library.list` or `library.search`. */
@@ -179,7 +196,11 @@ export interface ItemRecord extends ItemSummary {
   files: Record<string, FileRecord>;
   /** Microseconds since the epoch. */
   last_modified: number;
-  availability: Availability;
+  /** Whoever wrote one of its files, members or not any more. */
+  added_by: string[];
+  /** Who keeps it for the group besides its adders; `null` until custody is computed. */
+  custodians: string[] | null;
+  availability: ItemAvailability;
   ratings: Ratings;
   reviews: ReviewRecord[];
   bookmarks: BookmarkRecord[];
@@ -231,6 +252,12 @@ export type TaskState = {
     | { state: "failed"; error: string }
   );
 
+/** A pledge short of what a member's adds require (D8). */
+export interface UnderPledged {
+  pledge_bytes: number;
+  required_pledge_bytes: number;
+}
+
 /** A page of items, and how many there are in all. */
 export interface ItemPage {
   results: Hit[];
@@ -248,7 +275,14 @@ interface Methods {
   "library.item": { params: { item_id: string }; result: ItemRecord };
   "library.add": {
     params: { uploads: string[] } & Fields;
-    result: { item_id: string; created: boolean; title: string | null; contributed_files: string[] };
+    result: {
+      item_id: string;
+      created: boolean;
+      title: string | null;
+      contributed_files: string[];
+      /** This node's pledge and what its adds now require, when the pledge falls short (D8). */
+      under_pledged: UnderPledged | null;
+    };
   };
   /** Writes the fields given, and only those. */
   "library.edit_metadata": { params: { item_id: string; fields: Fields }; result: { item_id: string } };

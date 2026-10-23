@@ -36,7 +36,9 @@ const MLOCI: ItemRecord = {
   series: { index: 1.0, name: "Mloci" },
   title: "Válka s mloky",
   year: 1936,
-  availability: { held: false, providers: 1 },
+  added_by: [],
+  custodians: [],
+  availability: { held: false, providers: 1, online: [] },
   ratings: { average: null, count: 0, mine: null },
   reviews: [],
   bookmarks: [],
@@ -65,7 +67,14 @@ async function node(method: string) {
     case "node.status":
       return { member: ME };
     case "group.members":
-      return { group: "g", changed_at: 1, members: [{ member: OTHER, name: "bob", pledge_bytes: 0, core: false }] };
+      return {
+        group: "g",
+        changed_at: 1,
+        members: [
+          { member: ME, name: "", pledge_bytes: 0, required_pledge_bytes: 0, core: true },
+          { member: OTHER, name: "bob", pledge_bytes: 0, required_pledge_bytes: 0, core: false },
+        ],
+      };
     default:
       return answer;
   }
@@ -87,12 +96,15 @@ function details(): Record<string, string> {
   return Object.fromEntries(terms.map((term) => [term.textContent, term.nextElementSibling?.textContent ?? ""]));
 }
 
-/** The files table's rows, header left out, as text. */
-const files = () =>
-  screen
-    .getAllByRole("row")
-    .slice(1)
-    .map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent));
+/** The rows of the table under the heading starting `heading`, header left out, as text. */
+function rows(heading: string): string[][] {
+  const section = screen.getByRole("heading", { name: new RegExp(`^${heading}`) }).closest("section");
+  return [...(section?.querySelectorAll("tbody tr") ?? [])].map((row) =>
+    [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? ""),
+  );
+}
+
+const files = () => rows("Files");
 
 describe("the item page", () => {
   beforeEach(() => {
@@ -158,6 +170,46 @@ describe("the item page", () => {
     expect(details().Series).toBe("Mloci");
   });
 
+  it("shows who keeps it for the group, and whether each is online", async () => {
+    const CAROL = "c".repeat(64);
+    answer = { ...MLOCI, added_by: [ME], custodians: [OTHER, CAROL], availability: { ...MLOCI.availability, online: [OTHER] } };
+    open();
+
+    await screen.findByText("bob");
+    expect(rows("Kept for the group")).toEqual([
+      ["you", "its adder", "online"],
+      ["bob", "custodian", "online"],
+      ["cccccccc…", "custodian", "offline"],
+    ]);
+    expect(screen.queryByText(/No other member/)).toBeNull();
+  });
+
+  it("says when no member but its adder keeps it", async () => {
+    answer = { ...MLOCI, added_by: [OTHER] };
+    open();
+
+    await screen.findByText("bob");
+    expect(rows("Kept for the group")).toEqual([["bob", "its adder", "offline"]]);
+    expect(screen.getByText("No other member pledges enough to be its custodian.")).toBeTruthy();
+  });
+
+  it("leaves out an adder who is no longer a member", async () => {
+    const GONE = "e".repeat(64);
+    answer = { ...MLOCI, added_by: [GONE, OTHER], custodians: [] };
+    open();
+
+    await screen.findByText("bob");
+    expect(rows("Kept for the group")).toEqual([["bob", "its adder", "offline"]]);
+  });
+
+  it("says when who keeps it is not worked out yet", async () => {
+    answer = { ...MLOCI, added_by: [OTHER], custodians: null };
+    open();
+
+    await screen.findByText("Who keeps it is not worked out yet.");
+    expect(screen.queryByText("its adder")).toBeNull();
+  });
+
   it("lists files in the order they are played: by disc, then place, then name", async () => {
     const file = { format: "mp3", role: "content", size: 1 } as const;
     answer = {
@@ -221,7 +273,7 @@ describe("the item page", () => {
     const { events } = open();
     await screen.findByText("1 online");
 
-    answer = { ...MLOCI, availability: { held: true, providers: 2 } };
+    answer = { ...MLOCI, availability: { held: true, providers: 2, online: [] } };
     events.tell({ type: "availability.changed", member_id: OTHER });
 
     await screen.findByText("held here, 2 online");

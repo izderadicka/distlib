@@ -42,6 +42,7 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 1,
   settings: SETTINGS,
+  custody: { items: 3, bytes: 120_000_000_000, load_factor: 0.4567 },
   storage: {
     limit_bytes: 500_000_000_000,
     own_bytes: 1_500_000_000,
@@ -63,8 +64,8 @@ function members(...extra: Members["members"]): Members {
     changed_at: 4,
     members: [
       // A founder names nobody, themselves included.
-      { member: ME, name: "", pledge_bytes: 1_500_000_000, core: true },
-      { member: CAROL, name: "carol", pledge_bytes: 0, core: false },
+      { member: ME, name: "", pledge_bytes: 1_500_000_000, required_pledge_bytes: 1_000_000_000, core: true },
+      { member: CAROL, name: "carol", pledge_bytes: 0, required_pledge_bytes: 50_000_000_000, core: false },
       ...extra,
     ],
   };
@@ -104,7 +105,7 @@ function described(heading: string): Record<string, string | null | undefined> {
   return Object.fromEntries(
     [...(section?.querySelectorAll("dt") ?? [])].map((term) => [
       term.textContent,
-      term.nextElementSibling?.textContent,
+      term.nextElementSibling?.textContent?.replace(/\s+/g, " ").trim(),
     ]),
   );
 }
@@ -187,17 +188,17 @@ describe("the node page", () => {
           ],
         },
       },
-      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }),
+      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }),
     };
     open();
 
     await screen.findByText("dave");
     const [me, carol, dave] = cells();
     expect(me.slice(-2)).toEqual(["—", "—"]);
-    expect(carol[4]).toBe("yes");
-    expect(carol[5]).not.toContain("failed");
-    expect(dave[4]).toBe("—");
-    expect(dave[5]).toMatch(/ failed$/);
+    expect(carol[5]).toBe("yes");
+    expect(carol[6]).not.toContain("failed");
+    expect(dave[5]).toBe("—");
+    expect(dave[6]).toMatch(/ failed$/);
     const times = [...document.querySelectorAll("td time")].map((time) => time.getAttribute("datetime"));
     expect(times).toEqual([FINISHED_AT, FINISHED_AT]);
   });
@@ -214,6 +215,68 @@ describe("the node page", () => {
     });
     expect(screen.getByText(/the cache goes first/)).toBeTruthy();
     expect(screen.queryByText(/over the limit on their own/)).toBeNull();
+  });
+
+  it("shows this node's pledge, what it is required to pledge, and its custody", async () => {
+    open();
+
+    await screen.findByText("Pledge and custody");
+    expect(described("Pledge and custody")).toEqual({
+      Pledge: "1.5 GB",
+      Required: "1 GB",
+      "Custodian of": "3 items, 120 GB",
+      "Group load": "0.46",
+    });
+    expect(screen.queryByText(/below what its adds require/)).toBeNull();
+    expect(screen.queryByText(/a copy short/)).toBeNull();
+  });
+
+  it("warns when this node's pledge is below what its adds require", async () => {
+    const [me, carol] = members().members;
+    answer = { ...answer, members: { ...members(), members: [{ ...me, required_pledge_bytes: 2_000_000_000 }, carol] } };
+    open();
+
+    await screen.findByText(/below what its adds require/);
+    expect(described("Pledge and custody").Required).toBe("2 GB");
+  });
+
+  it("warns when the group's pledges do not cover every copy", async () => {
+    answer = { ...answer, status: { ...STATUS, custody: { items: 3, bytes: 1, load_factor: 1.25 } } };
+    open();
+
+    await screen.findByText(/some items are a copy short/);
+    expect(described("Pledge and custody")["Group load"]).toBe("1.25");
+  });
+
+  it("says when custody is not worked out yet", async () => {
+    answer = { ...answer, status: { ...STATUS, custody: null } };
+    open();
+
+    await screen.findByText("Pledge and custody");
+    expect(described("Pledge and custody")).toMatchObject({
+      "Custodian of": "not worked out yet",
+      "Group load": "not worked out yet",
+    });
+  });
+
+  it("says when no pledge weighs anything", async () => {
+    answer = { ...answer, status: { ...STATUS, custody: { items: 0, bytes: 0, load_factor: null } } };
+    open();
+
+    await screen.findByText("Pledge and custody");
+    expect(described("Pledge and custody")).toMatchObject({
+      "Custodian of": "0 items, 0 B",
+      "Group load": "no pledge weighs anything yet",
+    });
+  });
+
+  it("shows what each member is required to pledge, and who falls short", async () => {
+    open();
+
+    await screen.findByText("carol");
+    const [me, carol] = cells();
+    expect(me[4]).toBe("1 GB");
+    expect(carol[4]).toBe("50 GB — short");
   });
 
   it("says when there is no storage limit", async () => {
@@ -253,19 +316,19 @@ describe("the node page", () => {
   it("loads again when the catalogue's swarm changes", async () => {
     const { events } = open();
     await screen.findByText("carol");
-    expect(cells()[1][4]).toBe("—");
+    expect(cells()[1][5]).toBe("—");
 
     answer = { ...answer, status: { ...STATUS, sync: { neighbours: [CAROL], last_sync: [] } } };
     events.tell({ type: "sync.status" });
 
-    await waitFor(() => expect(cells()[1][4]).toBe("yes"));
+    await waitFor(() => expect(cells()[1][5]).toBe("yes"));
   });
 
   it("loads again when the membership changes", async () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }) };
     events.tell({ type: "membership.changed" });
 
     await screen.findByText("dave");
@@ -275,7 +338,7 @@ describe("the node page", () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, core: false }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }) };
     events.tell({ type: "resync" });
 
     await screen.findByText("dave");
