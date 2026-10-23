@@ -157,7 +157,8 @@
           <tr><th>Member</th><th>Keeps it as</th><th>Now</th></tr>
         </thead>
         <tbody>
-          {#each item.added_by as member (member)}
+          <!-- An adder who has left keeps nothing for the group. -->
+          {#each item.added_by.filter((member) => names.has(member)) as member (member)}
             <tr><td>{memberName(member, names, me)}</td><td>its adder</td><td>{presence(member, online)}</td></tr>
           {/each}
           {#each item.custodians as member (member)}

@@ -67,7 +67,14 @@ async function node(method: string) {
     case "node.status":
       return { member: ME };
     case "group.members":
-      return { group: "g", changed_at: 1, members: [{ member: OTHER, name: "bob", pledge_bytes: 0, core: false }] };
+      return {
+        group: "g",
+        changed_at: 1,
+        members: [
+          { member: ME, name: "", pledge_bytes: 0, required_pledge_bytes: 0, core: true },
+          { member: OTHER, name: "bob", pledge_bytes: 0, required_pledge_bytes: 0, core: false },
+        ],
+      };
     default:
       return answer;
   }
@@ -184,6 +191,15 @@ describe("the item page", () => {
     await screen.findByText("bob");
     expect(rows("Kept for the group")).toEqual([["bob", "its adder", "offline"]]);
     expect(screen.getByText("No other member pledges enough to be its custodian.")).toBeTruthy();
+  });
+
+  it("leaves out an adder who is no longer a member", async () => {
+    const GONE = "e".repeat(64);
+    answer = { ...MLOCI, added_by: [GONE, OTHER], custodians: [] };
+    open();
+
+    await screen.findByText("bob");
+    expect(rows("Kept for the group")).toEqual([["bob", "its adder", "offline"]]);
   });
 
   it("says when who keeps it is not worked out yet", async () => {
