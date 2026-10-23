@@ -46,7 +46,13 @@ describe("the add page", () => {
       size: chosen.size,
     }));
     vi.mocked(call).mockReset();
-    vi.mocked(call).mockResolvedValue({ item_id: ITEM, created: true, title: "Válka s mloky", contributed_files: [] });
+    vi.mocked(call).mockResolvedValue({
+      item_id: ITEM,
+      created: true,
+      title: "Válka s mloky",
+      contributed_files: [],
+      under_pledged: null,
+    });
   });
 
   it("uploads the files, adds them as one item with what was said of it, and opens it", async () => {
@@ -135,7 +141,13 @@ describe("the add page", () => {
   });
 
   it("says when the files are already an item, and that nothing was applied", async () => {
-    vi.mocked(call).mockResolvedValue({ item_id: ITEM, created: false, title: "R.U.R.", contributed_files: [] });
+    vi.mocked(call).mockResolvedValue({
+      item_id: ITEM,
+      created: false,
+      title: "R.U.R.",
+      contributed_files: [],
+      under_pledged: null,
+    });
     open();
     await choose(file("rur.epub"));
     await fireEvent.input(field("Title"), { target: { value: "A better title" } });
@@ -146,6 +158,43 @@ describe("the add page", () => {
     expect(screen.getByText(/the details above were not applied/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "R.U.R." }).getAttribute("href")).toBe(`/items/${ITEM}`);
     expect(router.route).toEqual({ page: "library", query: "", number: 1 });
+  });
+
+  it("stays to say when the add leaves this node's pledge short, with a link to the item", async () => {
+    const short = { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000 };
+    vi.mocked(call).mockResolvedValue({
+      item_id: ITEM,
+      created: true,
+      title: "Válka s mloky",
+      contributed_files: [],
+      under_pledged: short,
+    });
+    open();
+    await choose(file("c1.mp3"));
+
+    await submit();
+
+    await screen.findByText(/pledge of 100 GB is below the 120 GB its adds now require/);
+    expect(screen.getByRole("link", { name: "Válka s mloky" }).getAttribute("href")).toBe(`/items/${ITEM}`);
+    expect(router.route).toEqual({ page: "library", query: "", number: 1 });
+  });
+
+  it("says the pledge is short when the files were already an item, too", async () => {
+    vi.mocked(call).mockResolvedValue({
+      item_id: ITEM,
+      created: false,
+      title: "R.U.R.",
+      contributed_files: [],
+      under_pledged: { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000 },
+    });
+    open();
+    await choose(file("rur.epub"));
+
+    await submit();
+
+    await screen.findByText(/already in the library/);
+    expect(screen.getByText(/below the 120 GB its adds now require/)).toBeTruthy();
+    expect(screen.queryByText(/^Added as/)).toBeNull();
   });
 
   it("shows why an upload failed, and adds nothing", async () => {

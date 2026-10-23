@@ -548,8 +548,9 @@ impl Api {
     }
 
     /// `library.item` — the full record the read model holds for one item;
-    /// its `availability`: `held`, `providers`, and the online `holders` and
-    /// `unknown` members behind them; and current members' `ratings`,
+    /// its `availability`: `held`, `providers`, the online `holders` and
+    /// `unknown` members behind them, and who is `online`; and current
+    /// members' `ratings`,
     /// `reviews` and `bookmarks`.
     async fn item(&self, params: ItemParams) -> Result<Value, Error> {
         let stored = self

@@ -44,7 +44,8 @@ impl<'a> Seen<'a> {
     }
 
     /// Everything, as `library.item` shows it: also who the online holders
-    /// are, and whose holdings are why `providers` is `null`.
+    /// are, whose holdings are why `providers` is `null`, and who is online,
+    /// this node left out as everywhere here.
     pub(crate) fn of(&self, item: &ItemId) -> Value {
         let holders = self.holders(item);
         json!({
@@ -52,6 +53,7 @@ impl<'a> Seen<'a> {
             "providers": counted(&holders, &self.unknown),
             "holders": holders,
             "unknown": self.unknown,
+            "online": self.online,
         })
     }
 

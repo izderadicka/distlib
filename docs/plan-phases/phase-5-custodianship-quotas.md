@@ -599,10 +599,11 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
     skips its own check (a test requester) is refused the content by every serving node, and still
     syncs the catalogue; pledging the minimum lets both through.
 
-- **5b-6 — keeping, in the UI.** The item page's custodians with their online state; the Node page's
+- **5b-6 — keeping, in the UI.** *(done; delta P5-21)* The item page's custodians with their online state; the Node page's
   pledge, requirement and load factor (its storage is 5b-3c's); D8's warning on the add page and
   each member's requirement in the members list (from 5b-5a's API).
-  **Acceptance:** Vitest per view; one e2e path from adding an item to seeing its custodians.
+  **Acceptance:** Vitest per view; one e2e path, over two nodes, from adding an item to seeing its
+  custodians.
 
 ### 5c — checking custody (6 PRs)
 

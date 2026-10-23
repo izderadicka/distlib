@@ -33,7 +33,9 @@ sequencing plan of the phase currently being built.
 > - **Web UI:** served by the node itself (`distlib ui` prints a signed-in link). You can
 >   browse and search the library, read and edit an item, download it with live progress,
 >   rate, review and bookmark it, add an item from files chosen in the browser, search
->   everybody's bookmarks, and make, comment on and fulfil wishes. Release builds and a Dockerfile exist.
+>   everybody's bookmarks, and make, comment on and fulfil wishes. An item's page shows who
+  keeps it for the group, online or not; the Node page shows this node's pledge against
+  what its adds require, and the group's load. Release builds and a Dockerfile exist.
 >
 > Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
 > see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and
@@ -379,7 +381,7 @@ curl -s http://127.0.0.1:11280/rpc \
 | `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. Refused below the group's minimum or below half of what this node is required to pledge; `under_pledged` says so when it is below that requirement. |
 | `group.ticket` | A join ticket for this group. |
 | `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |
-| `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, and the online `holders` and `unknown` members behind them; its `ratings` (`average`, `count`, and this member's as `mine`), `reviews` and `bookmarks`. |
+| `library.item` | `{item_id}` — one item's full record; its `availability`: `held`, `providers`, the online `holders` and `unknown` members behind them, and who is `online` (this node left out); its `custodians`, `null` until custody is computed; its `ratings` (`average`, `count`, and this member's as `mine`), `reviews` and `bookmarks`. |
 | `library.add` | `{kind, files \| uploads, title?, …}` — add a file set as one item. Refused when it would take own and custody past the storage limit, or require more than twice this node's pledge; `under_pledged` warns when it requires more than the pledge. |
 | `library.edit_metadata` | `{item_id, fields}` — write the fields given, and only those. |
 | `library.download` / `library.task` | Start a download, returning a `task_id`; ask how it stands. Online members holding the item are asked first, offline members last. Refused while this node pledges less than the group's minimum. |

@@ -115,7 +115,7 @@ async fn an_items_providers_drop_when_its_holder_stops() {
         .unwrap();
     assert_eq!(
         item["availability"],
-        json!({ "held": false, "providers": 1, "holders": [bob_id], "unknown": [] })
+        json!({ "held": false, "providers": 1, "holders": [bob_id], "unknown": [], "online": [bob_id] })
     );
     let ids = alice.catalogue().item_ids().await.unwrap();
     let record = alice.catalogue().item(item_id).await.unwrap();

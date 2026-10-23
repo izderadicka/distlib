@@ -179,6 +179,33 @@ test("a file chosen in the browser becomes an item", async ({ page, node }) => {
   await expect(rows(page).filter({ hasText: "Válka s mloky" })).toBeVisible();
 });
 
+test("an item added in the browser shows the member who keeps it for the group", async ({ page, node }) => {
+  const bob = await Node.joining(node, "bob");
+  try {
+    await page.goto(node.link);
+    await page.getByRole("link", { name: "Add" }).click();
+    await page
+      .locator('input[type="file"]')
+      .setInputFiles({ name: "rur.epub", mimeType: "application/epub+zip", buffer: Buffer.from("a play") });
+    await page.getByLabel("Title").fill("R.U.R.");
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect(page.getByRole("heading", { name: "R.U.R." })).toBeVisible();
+
+    // Custody follows bob's pledge once it has settled, and has no news of
+    // its own: the page shows it at a load after that.
+    const kept = page.locator("section").filter({ has: page.getByRole("heading", { name: "Kept for the group" }) });
+    await expect(async () => {
+      await page.reload();
+      await expect(kept.getByRole("row").filter({ hasText: "bob" })).toContainText(/custodian\s*online/, {
+        timeout: 2_000,
+      });
+    }).toPass({ timeout: 60_000 });
+    await expect(kept.getByRole("row").filter({ hasText: "you" })).toContainText(/its adder\s*online/);
+  } finally {
+    await bob.dispose();
+  }
+});
+
 test("an item's details are edited from its page", async ({ page, node }) => {
   node.add("rur.epub", "a play", "--kind", "ebook", "--title", "RUR", "--author", "Karel Čapek");
   await page.goto(node.link);

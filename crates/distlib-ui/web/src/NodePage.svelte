@@ -3,7 +3,9 @@
   // stream: the page loads when it opens, and again on every `resync` —
   // which each connection starts with — on `membership.changed`, on
   // `sync.status`, for each member's place in the catalogue's swarm, and on
-  // an item added or a download finished, which change what is kept.
+  // an item added or a download finished, which change what is kept and what
+  // is required. Custody recomputed has no news of its own, and shows at the
+  // next load.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
@@ -56,6 +58,7 @@
   });
 
   const neighbours = $derived(new Set(status?.sync.neighbours));
+  const mine = $derived(members.find((member) => member.member === status?.member));
   const lastSync = $derived(new Map(status?.sync.last_sync.map((last) => [last.member, last])));
 
   /** A core node says what Raft makes it; a follower has no Raft to ask. */
@@ -142,11 +145,50 @@
   </section>
 
   <section>
+    <h2>Pledge and custody</h2>
+    <dl>
+      {#if mine}
+        <dt>Pledge</dt>
+        <dd>{bytes(mine.pledge_bytes)}</dd>
+        <dt>Required</dt>
+        <dd>{bytes(mine.required_pledge_bytes)}</dd>
+      {/if}
+      <dt>Custodian of</dt>
+      <dd>
+        {#if status.custody}
+          {status.custody.items} item{status.custody.items === 1 ? "" : "s"}, {bytes(status.custody.bytes)}
+        {:else}
+          not worked out yet
+        {/if}
+      </dd>
+      <dt>Group load</dt>
+      <dd>
+        {#if !status.custody}
+          not worked out yet
+        {:else if status.custody.load_factor === null}
+          no pledge weighs anything yet
+        {:else}
+          {status.custody.load_factor.toFixed(2)}
+        {/if}
+      </dd>
+    </dl>
+    {#if mine && mine.pledge_bytes < mine.required_pledge_bytes}
+      <p class="failure">
+        This node's pledge is below what its adds require. Raise it with <code>distlib pledge</code>; adds
+        that require far more are refused until then.
+      </p>
+    {/if}
+    {#if (status.custody?.load_factor ?? 0) > 1}
+      <p class="failure">The group's pledges do not cover every copy: some items are a copy short.</p>
+    {/if}
+  </section>
+
+  <section>
     <h2>Members <span class="count">{members.length}</span></h2>
     <table>
       <thead>
         <tr>
-          <th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th><th>Neighbour</th><th>Last sync</th>
+          <th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th><th class="number">Required</th><th>Neighbour</th><th>Last sync</th>
         </tr>
       </thead>
       <tbody>
@@ -158,6 +200,9 @@
             <td><code title={member.member}>{member.member.slice(0, 12)}…</code></td>
             <td>{member.core ? "core" : "follower"}{member.member === status.leader ? " (leader)" : ""}</td>
             <td class="number">{bytes(member.pledge_bytes)}</td>
+            <td class="number">
+              {bytes(member.required_pledge_bytes)}{member.pledge_bytes < member.required_pledge_bytes ? " — short" : ""}
+            </td>
             <td>{neighbours.has(member.member) ? "yes" : "—"}</td>
             <td>
               {#if last}
