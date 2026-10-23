@@ -55,8 +55,7 @@ pub struct Custody {
 pub(crate) enum CustodyChange {
     /// A whole pass: read [`Custody::my_items`] again.
     Recomputed,
-    /// One item added or changed, and whether this node keeps it; no other
-    /// item moved across the pledge with it.
+    /// One item added or changed, and whether this node keeps it.
     Item { item: ItemId, mine: bool },
 }
 

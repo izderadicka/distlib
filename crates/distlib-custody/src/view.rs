@@ -88,20 +88,21 @@ impl CustodyView {
         view
     }
 
-    /// One item added or changed since the pass: whether this node keeps
-    /// it, or, if other items moved across the pledge with it, that all are
-    /// to be read again.
-    pub(crate) fn update(&mut self, item: &CustodyItem) -> CustodyChange {
+    /// One item added or changed since the pass, and the changes to
+    /// announce: always whether this node keeps it, since a file added to an
+    /// item it keeps is one more blob to keep; then, if other items moved
+    /// across the pledge with it, that every item is to be read again.
+    pub(crate) fn update(&mut self, item: &CustodyItem) -> Vec<CustodyChange> {
         self.insert(item, self.group.custody_score(item, self.me));
         let cut_before = self.cut_at_pledge();
+        let mut changes = vec![CustodyChange::Item {
+            item: item.item,
+            mine: self.is_mine(item.item),
+        }];
         if self.others_moved(item.item, cut_before.as_ref()) {
-            CustodyChange::Recomputed
-        } else {
-            CustodyChange::Item {
-                item: item.item,
-                mine: self.is_mine(item.item),
-            }
+            changes.push(CustodyChange::Recomputed);
         }
+        changes
     }
 
     /// Whether this node keeps `item`.
@@ -333,27 +334,31 @@ mod tests {
             me,
             &[sized(b, vec![other], 50), sized(c, vec![other], 30)],
         );
-        let item_change = |item, mine| CustodyChange::Item { item, mine };
+        let updated = |item, mine, others_moved: bool| {
+            let mut changes = vec![CustodyChange::Item { item, mine }];
+            changes.extend(others_moved.then_some(CustodyChange::Recomputed));
+            changes
+        };
 
         // 105 of 100: d alone does not fit, and nothing else moves.
-        let change = view.update(&sized(d, vec![other], 25));
-        assert_eq!(change, item_change(d, false));
+        let changes = view.update(&sized(d, vec![other], 25));
+        assert_eq!(changes, updated(d, false, false));
         // 90 of 100: nothing cut.
-        let change = view.update(&sized(d, vec![other], 10));
-        assert_eq!(change, item_change(d, true));
+        let changes = view.update(&sized(d, vec![other], 10));
+        assert_eq!(changes, updated(d, true, false));
 
         // The highest, 60, pushes b out; c and d still fit after it.
-        let change = view.update(&sized(a, vec![other], 60));
-        assert_eq!(change, CustodyChange::Recomputed);
+        let changes = view.update(&sized(a, vec![other], 60));
+        assert_eq!(changes, updated(a, true, true));
         assert_eq!(view.my_items(), HashSet::from([a, c, d]));
 
         // d grows past what is left, and moves nothing else.
-        let change = view.update(&sized(d, vec![other], 15));
-        assert_eq!(change, item_change(d, false));
+        let changes = view.update(&sized(d, vec![other], 15));
+        assert_eq!(changes, updated(d, false, false));
 
         // a is now partly this node's own: b and d fit again.
-        let change = view.update(&sized(a, vec![other, me], 60));
-        assert_eq!(change, CustodyChange::Recomputed);
+        let changes = view.update(&sized(a, vec![other, me], 60));
+        assert_eq!(changes, updated(a, false, true));
         assert_eq!(view.my_items(), HashSet::from([b, c, d]));
         assert_eq!(view.status().over_pledge, OverPledge::default());
     }

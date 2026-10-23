@@ -134,8 +134,7 @@ async fn whole_pass(store: &Store, group: CustodyGroup, me: MemberId, published:
     }
 }
 
-/// One item added or changed: whether this node keeps it, at once, or that
-/// every item is to be read again when it moved others across the pledge.
+/// One item added or changed: whether this node keeps it, at once.
 async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
     // Before the first pass, which will read it anyway.
     if published.view.borrow().is_none() {
@@ -144,13 +143,11 @@ async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
     match store.item(item_id).await {
         Ok(Some(stored)) => {
             let item = stored.custody_item();
-            let mut change = None;
+            let mut changes = None;
             published.view.send_modify(|view| {
-                change = view.as_mut().map(|view| view.update(&item));
+                changes = view.as_mut().map(|view| view.update(&item));
             });
-            // Every time, not only when it changes: a file added to an item
-            // this node keeps is one more blob to keep.
-            if let Some(change) = change {
+            for change in changes.unwrap_or_default() {
                 let _ = published.changes.send(change);
             }
         }

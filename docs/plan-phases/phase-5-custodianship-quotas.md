@@ -686,7 +686,7 @@ Every open C-number appears here once.
 |---|---|---|
 | **C34** | **One `replicas` for the whole group** (D2) | **No phase.** Per-item values need a rule about who may ask the group to store an item more times. |
 | **C35** | **A false `FileRecord::size` is logged, not acted on** (ground truth 4) | **No phase.** The fetching custodian knows the real size; correcting the catalogue's claim is a later decision. |
-| **C36** | **Everyone's custody at once costs items × members** (ground truth 9) | **No phase.** Nothing in phase 5 needs it; overflow (C38) would. |
+| **C36** | **Everyone's custody at once costs items × members** (ground truth 9) | **Comes due in 5c** (P5-22): coverage and probes judge a member within its pledge, which takes that member's whole assignment in its score order — one pass over every item per member checked. Overflow (C38) would need it too. |
 | **C37** | **Settings are fixed at founding** (D2) | **No phase.** A `GroupSettingsChanged` with core approval, if a group needs it. |
 | **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase.** The load factor warns first, and since 5b-7 a node says what is over its own pledge (P5-22). |
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
