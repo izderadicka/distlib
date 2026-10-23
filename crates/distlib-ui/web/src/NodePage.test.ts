@@ -42,7 +42,7 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 1,
   settings: SETTINGS,
-  custody: { items: 3, bytes: 120_000_000_000, load_factor: 0.4567 },
+  custody: { items: 3, bytes: 120_000_000_000, over_pledge: { items: 0, bytes: 0 }, load_factor: 0.4567 },
   storage: {
     limit_bytes: 500_000_000_000,
     own_bytes: 1_500_000_000,
@@ -229,6 +229,18 @@ describe("the node page", () => {
     });
     expect(screen.queryByText(/below what its adds require/)).toBeNull();
     expect(screen.queryByText(/a copy short/)).toBeNull();
+    expect(screen.queryByText(/Over this node's pledge/)).toBeNull();
+  });
+
+  it("warns when custody is over this node's pledge", async () => {
+    answer = {
+      ...answer,
+      status: { ...STATUS, custody: { ...STATUS.custody!, over_pledge: { items: 2, bytes: 30_000_000_000 } } },
+    };
+    open();
+
+    const warning = await screen.findByText(/Over this node's pledge/);
+    expect(warning.textContent?.replace(/\s+/g, " ")).toContain("2 items, 30 GB of its custody, not fetched");
   });
 
   it("warns when this node's pledge is below what its adds require", async () => {
@@ -241,7 +253,7 @@ describe("the node page", () => {
   });
 
   it("warns when the group's pledges do not cover every copy", async () => {
-    answer = { ...answer, status: { ...STATUS, custody: { items: 3, bytes: 1, load_factor: 1.25 } } };
+    answer = { ...answer, status: { ...STATUS, custody: { ...STATUS.custody!, load_factor: 1.25 } } };
     open();
 
     await screen.findByText(/some items are a copy short/);
@@ -260,7 +272,7 @@ describe("the node page", () => {
   });
 
   it("says when no pledge weighs anything", async () => {
-    answer = { ...answer, status: { ...STATUS, custody: { items: 0, bytes: 0, load_factor: null } } };
+    answer = { ...answer, status: { ...STATUS, custody: { items: 0, bytes: 0, over_pledge: { items: 0, bytes: 0 }, load_factor: null } } };
     open();
 
     await screen.findByText("Pledge and custody");

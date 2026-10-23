@@ -29,8 +29,8 @@ pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
 pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
-pub use view::CustodyStatus;
 use view::CustodyView;
+pub use view::{CustodyStatus, OverPledge};
 
 /// What custody is computed from.
 #[derive(Debug)]
@@ -55,7 +55,8 @@ pub struct Custody {
 pub(crate) enum CustodyChange {
     /// A whole pass: read [`Custody::my_items`] again.
     Recomputed,
-    /// One item added or changed, and whether this node keeps it.
+    /// One item added or changed, and whether this node keeps it; no other
+    /// item moved across the pledge with it.
     Item { item: ItemId, mine: bool },
 }
 

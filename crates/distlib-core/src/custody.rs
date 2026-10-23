@@ -42,6 +42,48 @@ impl WeightRule {
     }
 }
 
+/// Of the items a member is custodian of, given highest score first with
+/// their sizes, those it keeps within `pledge_bytes`: each that still fits in
+/// what is left, so one too large is passed over for smaller ones after it.
+pub fn within_pledge(
+    pledge_bytes: u64,
+    highest_first: impl IntoIterator<Item = (ItemId, u64)>,
+) -> impl Iterator<Item = (ItemId, u64)> {
+    let mut left_bytes = pledge_bytes;
+    highest_first.into_iter().filter(move |(_, size_bytes)| {
+        let fits = *size_bytes <= left_bytes;
+        if fits {
+            left_bytes -= size_bytes;
+        }
+        fits
+    })
+}
+
+/// A member's score for one item it is custodian of: the higher, the more
+/// firmly it is the item's (D9 keeps the highest within the pledge).
+#[derive(Debug, Clone, Copy)]
+pub struct CustodyScore(f64);
+
+impl PartialEq for CustodyScore {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for CustodyScore {}
+
+impl PartialOrd for CustodyScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CustodyScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
 /// An item as custody sees it: who added it, whose copies are their own and
 /// so are never ranked as its custodians, and how much there is to keep.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +103,10 @@ pub struct CustodyGroup {
     /// Derived from [`CUSTODY_CONTEXT`] once, so that a score is one keyed
     /// hash of exactly one 64-byte block: the item and the member.
     key: [u8; 32],
-    /// Every member, sorted: a creator still in here keeps its own copy.
-    members: Vec<MemberId>,
+    /// Every member with its pledge, sorted: a creator still in here keeps
+    /// its own copy. The pledge too, not only the weight: one changed within
+    /// a step moves nothing but where its custody is cut (D9).
+    members: Vec<(MemberId, u64)>,
     /// The members with a weight, sorted by id: the only ones ranked.
     weighted: Vec<(MemberId, f64)>,
 }
@@ -87,7 +131,7 @@ impl CustodyGroup {
         Self {
             replicas,
             key: blake3::derive_key(CUSTODY_CONTEXT, &[]),
-            members: pledges.into_iter().map(|(member, _)| member).collect(),
+            members: pledges,
             weighted,
         }
     }
@@ -114,17 +158,20 @@ impl CustodyGroup {
 
     /// Whether `me` is one of `item`'s custodians: what
     /// [`Self::custodians`] says, without scoring every member.
+    pub fn is_custodian(&self, item: &CustodyItem, me: MemberId) -> bool {
+        self.custody_score(item, me).is_some()
+    }
+
+    /// `me`'s score for `item`, if `me` is one of its custodians.
     ///
     /// Stops at the first `slots` members found to outrank `me`, which for an
     /// item `me` is not custodian of comes after a handful of scores, however
     /// large the group.
-    pub fn is_custodian(&self, item: &CustodyItem, me: MemberId) -> bool {
+    pub fn custody_score(&self, item: &CustodyItem, me: MemberId) -> Option<CustodyScore> {
         let slots = self.slots(item);
-        let Some(weight) = self.weight_of(me) else {
-            return false;
-        };
+        let weight = self.weight_of(me)?;
         if slots == 0 || item.creators.contains(&me) {
-            return false;
+            return None;
         }
         let mine = Ranked::new(&self.key, item.item, me, weight);
         self.candidates(item)
@@ -132,14 +179,17 @@ impl CustodyGroup {
             .filter(|(member, weight)| Ranked::new(&self.key, item.item, *member, *weight) > mine)
             .nth(slots - 1)
             .is_none()
+            .then_some(mine.score)
     }
 
-    /// The items of `items` that `me` is custodian of, in the order given.
-    pub fn custody_of(&self, me: MemberId, items: &[CustodyItem]) -> Vec<ItemId> {
+    /// The items of `items` that `me` is custodian of, in the order given,
+    /// with `me`'s score for each.
+    pub fn custody_of(&self, me: MemberId, items: &[CustodyItem]) -> Vec<(ItemId, CustodyScore)> {
         if self.weight_of(me).is_none() {
             return Vec::new();
         }
-        let kept = |item: &CustodyItem| self.is_custodian(item, me).then_some(item.item);
+        let kept =
+            |item: &CustodyItem| self.custody_score(item, me).map(|score| (item.item, score));
         if items.len() < PARALLEL_FROM {
             items.iter().filter_map(kept).collect()
         } else {
@@ -180,12 +230,20 @@ impl CustodyGroup {
         (total_weight > 0.0).then(|| demand_bytes as f64 / total_weight)
     }
 
+    /// What `member` pledges, in bytes: nothing if it is not a member.
+    pub fn pledge_of(&self, member: MemberId) -> u64 {
+        self.members
+            .binary_search_by_key(&member, |(member, _)| *member)
+            .map_or(0, |index| self.members[index].1)
+    }
+
     /// How many custodians `item` has: one fewer while a creator is a member.
     fn slots(&self, item: &CustodyItem) -> usize {
-        let created_here = item
-            .creators
-            .iter()
-            .any(|creator| self.members.binary_search(creator).is_ok());
+        let created_here = item.creators.iter().any(|creator| {
+            self.members
+                .binary_search_by_key(creator, |(member, _)| *member)
+                .is_ok()
+        });
         usize::from(self.replicas).saturating_sub(usize::from(created_here))
     }
 
@@ -212,7 +270,7 @@ impl CustodyGroup {
 /// take a hash collision, rank the lower member id first.
 #[derive(Debug, Clone, Copy)]
 struct Ranked {
-    score: f64,
+    score: CustodyScore,
     member: MemberId,
 }
 
@@ -233,7 +291,7 @@ impl Ranked {
         // last bit, so two nodes can rank a near-tie differently (P5-4).
         // `libm::log` would make it the same everywhere.
         Self {
-            score: -weight / h.ln(),
+            score: CustodyScore(-weight / h.ln()),
             member,
         }
     }
@@ -256,7 +314,7 @@ impl PartialOrd for Ranked {
 impl Ord for Ranked {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.score
-            .total_cmp(&other.score)
+            .cmp(&other.score)
             .then_with(|| other.member.cmp(&self.member))
     }
 }

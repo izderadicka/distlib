@@ -178,6 +178,13 @@
         that require far more are refused until then.
       </p>
     {/if}
+    {#if status.custody && status.custody.over_pledge.items > 0}
+      {@const over = status.custody.over_pledge}
+      <p class="failure">
+        Over this node's pledge: {over.items} item{over.items === 1 ? "" : "s"}, {bytes(over.bytes)} of its custody,
+        not fetched and so a copy short. Raise the pledge with <code>distlib pledge</code>.
+      </p>
+    {/if}
     {#if (status.custody?.load_factor ?? 0) > 1}
       <p class="failure">The group's pledges do not cover every copy: some items are a copy short.</p>
     {/if}
