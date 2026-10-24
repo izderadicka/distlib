@@ -26,6 +26,8 @@ export interface NodeStatus {
   settings: GroupSettings | null;
   /** This node's custody and the group's load; `null` until custody is computed. */
   custody: Custody | null;
+  /** How many items the pin manager has in each state. */
+  pins: PinCounts;
   /** What this node keeps, against its storage limit. */
   storage: Storage;
   /** The catalogue's swarm, as this node sees it. */
@@ -44,6 +46,17 @@ export interface Custody {
   pledge_bytes: number;
   /** Each item's size per custodian slot, over the group's total weight: above 1, some items are a copy short. `null` when no pledge weighs anything. */
   load_factor: number | null;
+}
+
+/** Where the items a node is custodian of stand. */
+export interface PinCounts {
+  queued: number;
+  fetching: number;
+  failed: number;
+  /** Not fetched: they would not fit within the storage limit, so each is a copy short. */
+  waiting_for_room: number;
+  kept: number;
+  releasing: number;
 }
 
 /** The bytes a node keeps, each blob once under the strongest reason. */

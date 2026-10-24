@@ -6,6 +6,8 @@
 //! raised to the group's minimum too. 5b-3b-2's: a node at its storage
 //! limit evicts the oldest cached item to take on a new download or a new
 //! custody, never an own or custody item, and leaves the exported file be.
+//! 5c-1c's: custody that would not fit even so waits, evicting nothing,
+//! until letting go of another custody makes room.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -707,37 +709,72 @@ async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refuse
     assert!(second.keeps(KeepReason::Own, added, added_file).await);
 }
 
-/// The title of a book [`add_a_book`] would add through `founder` of which
-/// `custodian` is ranked custodian, from titles `prefix` 0, 1, 2 and on, and
-/// the item it would be.
-fn a_title_kept_by(
-    custodian: MemberId,
-    founder: MemberId,
-    group: &CustodyGroup,
+/// The title of a book of `size` [`add_a_book`] would add through `founder`
+/// whose custodian is the one `ranked` wants under each of `groups`, from
+/// titles `prefix` 0, 1, 2 and on, and the item it would be.
+fn a_title_ranked(
     prefix: &str,
+    size: usize,
+    founder: MemberId,
+    ranked: &[(&CustodyGroup, MemberId)],
 ) -> (String, ItemId) {
     (0..)
         .map(|number| {
             let title = format!("{prefix} {number}");
-            let hash = iroh_blobs::Hash::new(book_text(&title, BOOK));
+            let hash = iroh_blobs::Hash::new(book_text(&title, size));
             (title, ItemId::from_content_hashes(&[*hash.as_bytes()]))
         })
         .find(|(_, item)| {
-            let ranked = CustodyItem {
+            let item = CustodyItem {
                 item: *item,
                 creators: vec![founder],
                 size_bytes: 0,
             };
-            group.custodians(&ranked)[0] == custodian
+            ranked
+                .iter()
+                .all(|(group, custodian)| group.custodians(&item)[0] == *custodian)
         })
-        .expect("some title is ranked to each member")
+        .expect("some title is ranked as wanted")
 }
 
-/// **Custody makes room by evicting the cache**, and is fetched anyway when
-/// even the whole cache is not room enough. An evicted item rechecked
-/// before collection deletes it is not held.
+/// Rates `item` through `node`, so the projection rechecks it while `file`'s
+/// bytes are still here, evicted but not collected: it is not held.
+async fn rechecked_while_its_bytes_are_here(node: &Node, item: ItemId, file: ContentHash) {
+    node.call("community.rate", json!({ "item_id": item, "rating": 3 }))
+        .await;
+    tokio::time::timeout(SOON, async {
+        let store = node.runtime.store();
+        while !store
+            .item(item)
+            .await
+            .unwrap()
+            .is_some_and(|stored| stored.ratings.contains_key(&node.id))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the rating was projected");
+    assert!(node.runtime.blobs().has(file).await.unwrap());
+    assert!(
+        !node.runtime.catalogue().holdings().holds(item),
+        "announced as held again once rechecked"
+    );
+}
+
+/// How custody ranks `ids`, the third pledging `third_pledge` and the others
+/// 100 GB.
+fn ranking(ids: [MemberId; 3], third_pledge: u64) -> CustodyGroup {
+    let pledges = [100 * GB, 100 * GB, third_pledge];
+    CustodyGroup::new(2, settings().weight_rule(), ids.into_iter().zip(pledges))
+}
+
+/// **Custody makes room by evicting the cache, and waits when even the whole
+/// cache is not room enough**, evicting nothing; it is fetched once letting
+/// go of another custody makes room. An evicted item rechecked before
+/// collection deletes it is not held.
 #[tokio::test(flavor = "multi_thread")]
-async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
+async fn custody_evicts_the_cache_and_waits_when_even_that_is_not_room() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let (founder, second, third) = three_nodes_with(
@@ -755,33 +792,34 @@ async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
         ],
     )
     .await;
-    let group = CustodyGroup::new(
-        2,
-        settings().weight_rule(),
-        [founder.id, second.id, third.id]
-            .iter()
-            .map(|id| (*id, 100 * GB)),
-    );
-    let add_one_kept_by = async |custodian: &Node, prefix: &str| {
-        let (title, ranked) = a_title_kept_by(custodian.id, founder.id, &group, prefix);
-        let added = add_a_book(&founder, dir.path(), &title, BOOK).await;
-        assert_eq!(added.0, ranked, "the item ranked is the item added");
+    // Before and after the third raises its pledge.
+    let ids = [founder.id, second.id, third.id];
+    let (before, after) = (ranking(ids, 100 * GB), ranking(ids, 1_000 * GB));
+    let add_one_ranked = async |prefix: &str, size: usize, ranked: &[(&CustodyGroup, MemberId)]| {
+        let (title, item) = a_title_ranked(prefix, size, founder.id, ranked);
+        let added = add_a_book(&founder, dir.path(), &title, size).await;
+        assert_eq!(added.0, item, "the item ranked is the item added");
         added
+    };
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    let cache = async |item: ItemId, file: ContentHash| {
+        until_projected(&second.runtime, item, 1, "the second member").await;
+        download(&api(&second.runtime, &second.key), item, &dest).await;
+        assert!(second.keeps(KeepReason::Cache, item, file).await);
     };
 
     // The second caches a book the third keeps for the group.
-    let (cached, cached_file) = add_one_kept_by(&third, "Cached").await;
+    let (cached, cached_file) = add_one_ranked("Cached", BOOK, &[(&before, third.id)]).await;
     third
         .until_keeps(true, KeepReason::Custody, cached, cached_file)
         .await;
-    until_projected(&second.runtime, cached, 1, "the second member").await;
-    let dest = dir.path().join("downloads");
-    std::fs::create_dir_all(&dest).unwrap();
-    download(&api(&second.runtime, &second.key), cached, &dest).await;
-    assert!(second.keeps(KeepReason::Cache, cached, cached_file).await);
+    cache(cached, cached_file).await;
 
-    // Its first custody needs the cached book's room.
-    let (kept, kept_file) = add_one_kept_by(&second, "Kept").await;
+    // Its first custody needs the cached book's room. The third will take it
+    // over once it pledges more.
+    let (kept, kept_file) =
+        add_one_ranked("Kept", BOOK, &[(&before, second.id), (&after, third.id)]).await;
     second
         .until_keeps(true, KeepReason::Custody, kept, kept_file)
         .await;
@@ -789,36 +827,40 @@ async fn custody_evicts_the_cache_and_is_kept_even_without_room() {
     assert!(!second.runtime.catalogue().holdings().holds(cached));
     assert!(!over_the_limit(&second).await);
 
-    // Rated, so the projection rechecks it while its bytes are still here:
-    // released, it is not held.
-    second
-        .call("community.rate", json!({ "item_id": cached, "rating": 3 }))
-        .await;
-    tokio::time::timeout(SOON, async {
-        let store = second.runtime.store();
-        while !store
-            .item(cached)
-            .await
-            .unwrap()
-            .is_some_and(|stored| stored.ratings.contains_key(&second.id))
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the rating was projected");
-    assert!(second.runtime.blobs().has(cached_file).await.unwrap());
-    assert!(
-        !second.runtime.catalogue().holdings().holds(cached),
-        "announced as held again once rechecked"
-    );
+    rechecked_while_its_bytes_are_here(&second, cached, cached_file).await;
 
-    // Its second has no room to be made, and is kept anyway.
-    let (over, over_file) = add_one_kept_by(&second, "Over").await;
+    // A small book cached, then a second custody with no room to be made,
+    // even with the small one gone: it waits, and the small one stays.
+    let small_size = BOOK * 2 / 5;
+    let third_keeps_it = [(&before, third.id), (&after, third.id)];
+    let (small, small_file) = add_one_ranked("Small", small_size, &third_keeps_it).await;
+    third
+        .until_keeps(true, KeepReason::Custody, small, small_file)
+        .await;
+    cache(small, small_file).await;
+    let (over, over_file) =
+        add_one_ranked("Over", BOOK, &[(&before, second.id), (&after, second.id)]).await;
+    second.until_pins("waiting_for_room", 1).await;
+    assert!(!second.keeps(KeepReason::Custody, over, over_file).await);
+    assert!(
+        second.keeps(KeepReason::Cache, small, small_file).await,
+        "evicted for nothing"
+    );
+    assert!(!over_the_limit(&second).await);
+
+    // The third takes the first custody over; once it holds it, the second
+    // lets go of it into the cache, and that is room for the one waiting.
+    third
+        .call("group.pledge_set", json!({ "bytes": 1_000 * GB }))
+        .await;
+    third
+        .until_keeps(true, KeepReason::Custody, kept, kept_file)
+        .await;
     second
         .until_keeps(true, KeepReason::Custody, over, over_file)
         .await;
-    assert!(over_the_limit(&second).await);
+    second.until_pins("waiting_for_room", 0).await;
+    assert!(!over_the_limit(&second).await);
 }
 
 /// Node `index` of `nodes`, running.
@@ -922,4 +964,51 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     node(&nodes, bystander)
         .until_keeps(true, KeepReason::Cache, item, file)
         .await;
+}
+
+/// **An emergency copy is made past the storage limit**, where custody
+/// waits. Both others have room for half a book: the custodian waits for
+/// room, so the founder's copy stays the only one, and after the delay the
+/// other makes the emergency copy all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_emergency_copy_goes_past_the_limit_where_custody_waits() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let half_a_book = || Tuning {
+        storage_limit: NonZeroU64::new(BOOK as u64 / 2),
+        ..Tuning::default()
+    };
+    let tunings = [Tuning::default(), half_a_book(), half_a_book()];
+    let nodes = founded(dir.path(), &[100 * GB; 3], tunings, &settings).await;
+    let [founder, second, third] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let group = CustodyGroup::new(
+        2,
+        settings.weight_rule(),
+        [founder.id, second.id, third.id].map(|id| (id, 100 * GB)),
+    );
+    let ranked = CustodyItem {
+        item,
+        creators: vec![founder.id],
+        size_bytes: 0,
+    };
+    let (custodian, copier) = if group.custodians(&ranked) == [second.id] {
+        (&second, &third)
+    } else {
+        (&third, &second)
+    };
+
+    custodian.until_pins("waiting_for_room", 1).await;
+    copier
+        .until_keeps(true, KeepReason::Cache, item, file)
+        .await;
+    assert!(!custodian.keeps(KeepReason::Custody, item, file).await);
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
 }

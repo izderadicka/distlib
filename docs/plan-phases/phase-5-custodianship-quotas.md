@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -217,7 +217,9 @@ space is short.
     used first, until the total fits.
   - **Mandatory alone over the limit** evicts the whole cache and is then reported in `node.status`
     and on the Node page; `library.add` refuses an add that would make it worse, and
-    `group.pledge_set` refuses a pledge that is not below the limit.
+    `group.pledge_set` refuses a pledge that is not below the limit. *(P5-26: a custody fetch that
+    would not fit even with the whole cache gone waits instead, evicting nothing; only the
+    emergency copy goes past the limit.)*
   - **Custody past the pledge** — possible, since custody follows weight and not pledge exactly (D9)
     — is kept all the same, and `node.status`, `distlib status` and the Node page say so. *(P5-25:
     5b-7 cut it at the pledge and left the rest a copy short; undone in 5c-1b.)*
@@ -635,8 +637,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   should hold too, the share it announces; shown in the members list.
   *Split in four* (P5-24, P5-25): **5c-1a** *(done)* — coverage worked out and in `group.members`;
   **5c-1b** *(done)* — 5b-7's cut undone, so *should hold* is everything a member is custodian of,
-  and the heartbeat's count over the pledge goes with it; **5c-1c** — custody fetches stop at the
-  storage limit rather than going past it; **5c-1d** — the members list on the Node page and in
+  and the heartbeat's count over the pledge goes with it; **5c-1c** *(done)* — custody fetches
+  stop at the storage limit rather than going past it; **5c-1d** — the members list on the Node page and in
   `distlib members`.
   **Acceptance:** a custodian that holds its items shows full coverage; one whose pin manager is
   stopped falls behind once its assignments are older than `max_settle_secs`; one still within that

@@ -1,7 +1,7 @@
 //! The pin manager (phase 5's D7): keeps what this node is custodian of with a
-//! `custody/` tag on each of the item's files, fetching what is not here, and
-//! lets go of what it no longer is, into the cache, once the item has
-//! `replicas` live copies elsewhere.
+//! `custody/` tag on each of the item's files, fetching what is not here
+//! within the storage limit, and lets go of what it no longer is, into the
+//! cache, once the item has `replicas` live copies elsewhere.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -62,6 +62,7 @@ pub struct PinCounts {
     pub queued: usize,
     pub fetching: usize,
     pub failed: usize,
+    pub waiting_for_room: usize,
     pub kept: usize,
     pub releasing: usize,
 }
@@ -166,6 +167,10 @@ enum Pin {
     },
     /// Its fetch failed: asked again when availability changes.
     Failed,
+    /// Not fetched, since it would not fit within the storage limit even
+    /// with the whole cache evicted: asked again when this node lets go of
+    /// custody of an item, and at start.
+    WaitingForRoom,
     /// Tagged, and every file here.
     Kept,
     /// No longer this node's: kept until enough copies are elsewhere.
@@ -267,11 +272,18 @@ impl Pins {
                     Pin::Queued { .. } => counts.queued += 1,
                     Pin::Fetching { .. } => counts.fetching += 1,
                     Pin::Failed => counts.failed += 1,
+                    Pin::WaitingForRoom => counts.waiting_for_room += 1,
                     Pin::Kept => counts.kept += 1,
                     Pin::Releasing => counts.releasing += 1,
                 }
                 counts
             });
+        if self.counts.borrow().waiting_for_room == 0 && counts.waiting_for_room > 0 {
+            tracing::error!(
+                items = counts.waiting_for_room,
+                "custody does not fit within the storage limit; items wait for room, each a copy short"
+            );
+        }
         self.counts.send_if_modified(|published| {
             let changed = *published != counts;
             *published = counts;
@@ -290,7 +302,10 @@ impl Pins {
             let needs_keeping = match self.pins.get(item) {
                 None | Some(Pin::Releasing) => true,
                 Some(Pin::Kept) => !self.keeper.holdings.holds(*item),
-                Some(Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed) => false,
+                // A pass makes no room: letting go of an item does.
+                Some(
+                    Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed | Pin::WaitingForRoom,
+                ) => false,
             };
             if needs_keeping {
                 self.want(*item);
@@ -391,6 +406,14 @@ impl Pins {
                     Pin::Kept
                 }
             }
+            Err(KeepError::NoRoom { short_by }) => {
+                tracing::debug!(%item, short_by, "waiting for room within the storage limit");
+                if wanted_again {
+                    self.queued()
+                } else {
+                    Pin::WaitingForRoom
+                }
+            }
             Err(error) => {
                 if error.is_unavailable() {
                     tracing::warn!(%item, %error, "could not fetch an item this node keeps; asking again when availability changes");
@@ -434,7 +457,7 @@ impl Pins {
                     };
                 }
                 Pin::Releasing => releasing.push(*item),
-                Pin::Queued { .. } | Pin::Kept => {}
+                Pin::Queued { .. } | Pin::Kept | Pin::WaitingForRoom => {}
             }
         }
         for item in releasing {
@@ -453,10 +476,23 @@ impl Pins {
             Ok(()) => {
                 self.pins.remove(&item);
                 tracing::debug!(%item, "no longer custodian; kept as cache");
+                self.ask_again_for_room();
             }
             Err(error) => {
                 tracing::error!(%item, %error, "could not release an item into the cache; trying again when availability changes");
                 self.pins.insert(item, Pin::Releasing);
+            }
+        }
+    }
+
+    /// What waits for room is asked again: an item let go of into the cache
+    /// is room that can be evicted.
+    fn ask_again_for_room(&mut self) {
+        for pin in self.pins.values_mut() {
+            if *pin == Pin::WaitingForRoom {
+                *pin = Pin::Queued {
+                    turn: self.next_turn.take(),
+                };
             }
         }
     }
@@ -467,7 +503,9 @@ impl Pins {
 /// fetched again.
 fn wanted(pin: Option<Pin>, turn: Turn) -> Pin {
     match pin {
-        None | Some(Pin::Failed | Pin::Kept | Pin::Releasing) => Pin::Queued { turn },
+        None | Some(Pin::Failed | Pin::WaitingForRoom | Pin::Kept | Pin::Releasing) => {
+            Pin::Queued { turn }
+        }
         Some(queued @ Pin::Queued { .. }) => queued,
         Some(Pin::Fetching {
             task,
@@ -516,6 +554,8 @@ pub(crate) enum KeepError {
     Storage(#[from] StorageError),
     #[error("no byte arrived for {STALLED_AFTER:?}")]
     Stalled,
+    #[error("{short_by} bytes short of room within the storage limit")]
+    NoRoom { short_by: u64 },
 }
 
 impl KeepError {
@@ -544,8 +584,10 @@ impl Keeper {
     /// say, is only tagged.
     ///
     /// Tagged before room is made, so a cached copy is kept for `reason`
-    /// before anything is let go of. Fetched even when the whole cache is not
-    /// room enough: custody and an emergency copy are kept whatever the limit.
+    /// before anything is let go of. When even the whole cache is not room
+    /// enough, custody evicts nothing and is not fetched; an emergency copy
+    /// is fetched all the same, since a last copy matters more than the
+    /// limit.
     pub(crate) async fn keep(&self, item_id: ItemId, reason: KeepReason) -> Result<(), KeepError> {
         let Some(stored) = self.store.item(item_id).await? else {
             return Ok(());
@@ -559,11 +601,16 @@ impl Keeper {
         for (hash, _) in &files {
             self.blobs.keep(reason, item_id, *hash).await?;
         }
-        let room = self
-            .storage
-            .make_room(item_id, files.iter().copied())
-            .await?;
+        let sizes = files.iter().copied();
+        let room = if reason == KeepReason::Custody {
+            self.storage.make_room_if_it_fits(item_id, sizes).await?
+        } else {
+            self.storage.make_room(item_id, sizes).await?
+        };
         if let Room::Short(short_by) = room {
+            if reason == KeepReason::Custody {
+                return Err(KeepError::NoRoom { short_by });
+            }
             tracing::warn!(item = %item_id, ?reason, short_by, "kept over the storage limit, with the whole cache evicted");
         }
         let providers = self.providers(item_id);

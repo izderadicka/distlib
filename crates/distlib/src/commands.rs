@@ -1854,15 +1854,36 @@ fn past_the_pledge(custody: &Value) -> String {
 /// Where the items this node keeps stand, once there are any.
 fn print_pins(pins: &Value) {
     let count = |state: &str| pins[state].as_u64().unwrap_or(0);
-    let states = ["kept", "fetching", "queued", "failed", "releasing"];
+    let states = [
+        "kept",
+        "fetching",
+        "queued",
+        "failed",
+        "waiting_for_room",
+        "releasing",
+    ];
     if states.iter().all(|state| count(state) == 0) {
         return;
     }
     let counts: Vec<String> = states
         .iter()
-        .map(|state| format!("{} {state}", count(state)))
+        .map(|state| format!("{} {}", count(state), state.replace('_', " ")))
         .collect();
     println!("pins        {}", counts.join(", "));
+    if let Some(warning) = waiting_for_room_warning(count("waiting_for_room")) {
+        println!("{warning}");
+    }
+}
+
+/// The warning for custody that does not fit within the storage limit, if
+/// any waits.
+fn waiting_for_room_warning(waiting: u64) -> Option<String> {
+    (waiting > 0).then(|| {
+        format!(
+            "WARNING     {waiting} items this node is custodian of wait for room within the \
+             storage limit, each a copy short; raise `[storage] limit_bytes`"
+        )
+    })
 }
 
 /// The bytes this node keeps, by reason, and its limit if it has one.
@@ -1950,6 +1971,13 @@ mod tests {
         assert!(warning.contains("pledges 100 bytes"), "{warning}");
         assert!(warning.contains("`distlib pledge 120`"), "{warning}");
         assert_eq!(under_pledged_warning(&Value::Null), None);
+    }
+
+    #[test]
+    fn custody_waiting_for_room_warns_only_when_some_waits() {
+        let warning = waiting_for_room_warning(2).expect("two waiting warn");
+        assert!(warning.contains("2 items"), "{warning}");
+        assert_eq!(waiting_for_room_warning(0), None);
     }
 
     #[test]

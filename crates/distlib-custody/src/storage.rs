@@ -1,6 +1,7 @@
 //! The storage limit, kept by evicting the cache (phase 5's "Why a node keeps
 //! an item"): before a custody fetch, a download or an add, the cached items
-//! used longest ago are let go of until what is about to be kept fits.
+//! used longest ago are let go of until what is about to be kept fits. A
+//! custody fetch that would not fit even so waits (P5-26).
 
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -32,8 +33,16 @@ struct Inner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Room {
     Made,
-    /// Over the limit by this many bytes, with all that could go evicted.
+    /// Over the limit by this many bytes, even with all that could go
+    /// evicted.
     Short(u64),
+}
+
+/// What to evict when even the whole cache is not room enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhenShort {
+    EvictAnyway,
+    EvictNothing,
 }
 
 /// Why room could not be made.
@@ -75,6 +84,26 @@ impl Storage {
         item: ItemId,
         files: impl IntoIterator<Item = (ContentHash, u64)>,
     ) -> Result<Room, StorageError> {
+        self.evict_for(item, files, WhenShort::EvictAnyway).await
+    }
+
+    /// [`Self::make_room`], but when even the whole cache is not enough,
+    /// nothing is evicted: for custody, which then waits rather than goes
+    /// past the limit.
+    pub async fn make_room_if_it_fits(
+        &self,
+        item: ItemId,
+        files: impl IntoIterator<Item = (ContentHash, u64)>,
+    ) -> Result<Room, StorageError> {
+        self.evict_for(item, files, WhenShort::EvictNothing).await
+    }
+
+    async fn evict_for(
+        &self,
+        item: ItemId,
+        files: impl IntoIterator<Item = (ContentHash, u64)>,
+        when_short: WhenShort,
+    ) -> Result<Room, StorageError> {
         let Some(limit) = self.inner.limit else {
             return Ok(Room::Made);
         };
@@ -84,6 +113,9 @@ impl Storage {
         let plan = kept.evictions(item, kept.uncounted_bytes(files), limit.get(), |item| {
             last_used.get(&item).copied()
         });
+        if plan.short_by > 0 && when_short == WhenShort::EvictNothing {
+            return Ok(Room::Short(plan.short_by));
+        }
         for evicted in plan.items {
             self.evict(evicted).await?;
         }
