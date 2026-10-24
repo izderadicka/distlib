@@ -171,6 +171,7 @@ async fn a_custodian_that_never_fetches_falls_behind_once_its_assignment_is_old(
     founder.until_coverage(second.id, 0, 0).await;
     founder.until_coverage(third.id, 0, 0).await;
     let book = add_a_book(&founder, dir.path(), "Dune").await;
+    until_projected(&founder.runtime, book, 1, "the founder").await;
     let custodian = founder
         .call("library.item", json!({ "item_id": book }))
         .await["custodians"][0]
