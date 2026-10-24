@@ -1250,6 +1250,7 @@ dependencies = [
  "distlib-net",
  "distlib-store",
  "distlib-sync",
+ "getrandom 0.3.4",
  "iroh",
  "serde",
  "thiserror 2.0.20",

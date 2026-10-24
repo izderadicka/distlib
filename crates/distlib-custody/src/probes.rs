@@ -261,14 +261,17 @@ fn below(bound: u64) -> Result<u64, getrandom::Error> {
 mod tests {
     #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
-    fn a_pick_is_one_of_the_choices_and_none_of_nothing() {
+    fn a_pick_is_any_of_the_choices_and_none_of_nothing() {
         assert_eq!(pick::<u8>(&[]).unwrap(), None);
-        assert_eq!(pick(&[7]).unwrap(), Some(7));
-        let picked = pick(&[1, 2, 3]).unwrap().unwrap();
-        assert!([1, 2, 3].contains(&picked));
+        let picked: HashSet<u8> = (0..300)
+            .map(|_| pick(&[1, 2, 3]).unwrap().unwrap())
+            .collect();
+        assert_eq!(picked, HashSet::from([1, 2, 3]));
     }
 
     #[test]
