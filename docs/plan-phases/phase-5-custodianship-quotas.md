@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -476,7 +476,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Twenty-three PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
+Twenty-four PRs — fourteen planned, 5a-3, 5b-1 and 5c-2 each split in two, 5b-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -617,7 +617,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node pledging room for one of two books fetches the one it scores higher, says
   the other is over its pledge, and never tags it.
 
-### 5c — checking custody (9 PRs)
+### 5c — checking custody (10 PRs)
 
 - **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
@@ -646,6 +646,9 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 
 - **5c-2 — probes (D11), and failures in the catalogue (D12).** Random sampling with the suspect
   share, the repair hook, failure keys written and cleared; off when the group says so.
+  *Split in two* (P5-27): **5c-2a** *(done)* — random probes, and failure keys written and cleared;
+  **5c-2b** — the failed copy counted as missing, for the emergency copy and for letting go of
+  custody, and one probe in four re-checking a suspect.
   **Acceptance:** a custodian holding the item passes and nothing is written; one whose blob was
   deleted underneath it fails, its key appears on every node, and the item gets its emergency copy if
   that was its last real one; its next pass clears the key; an unreachable custodian is skipped; a

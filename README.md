@@ -483,6 +483,14 @@ Custody follows weight, not the pledge exactly, so a node can be custodian of mo
 than it pledged. It keeps all of it even so; `distlib status` and the Node page say
 so, and raising the pledge with `distlib pledge` tells the group the room it takes.
 
+Unless the group was founded with `probes` off, every `probe_every_secs` a node asks
+one of the other custodians of an item it holds for a random 1 KiB of one of the
+item's files, checked against the file's hash. A member that cannot be reached is
+skipped. One that is reached and does not send the right bytes within 30 seconds has
+failed: the prober records it in the catalogue, under `probe/<custodian>/<prober>`,
+and clears it at its next probe of that member that passes. Only a member pledging
+the group's minimum probes, since the others are not sent content.
+
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If
 passes stop, which iroh-blobs does after one fails, an error is logged after two
