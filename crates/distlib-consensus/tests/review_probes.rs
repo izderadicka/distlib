@@ -8,9 +8,8 @@
 //! Run: cargo nextest run -p distlib-consensus --test review_probes
 //! No network sockets or timing-dependent concurrency are needed.
 //!
-//! The purge probe schedules the problematic storage interleaving explicitly;
-//! it does not exercise the private network handler. The snapshot probe holds
-//! an old builder across reset, modeling detached snapshot work.
+//! The obsolete purge probe was removed after master disabled automatic purging.
+//! The snapshot probe holds an old builder across reset, modeling detached work.
 
 #![allow(clippy::unwrap_used)]
 
@@ -21,8 +20,7 @@ use distlib_consensus::{
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use iroh::SecretKey;
 use openraft::{
-    CommittedLeaderId, Entry, EntryPayload, LogId, RaftSnapshotBuilder,
-    storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
+    CommittedLeaderId, Entry, EntryPayload, LogId, RaftSnapshotBuilder, storage::RaftStateMachine,
 };
 use std::sync::Arc;
 
@@ -140,29 +138,4 @@ async fn pre_reset_snapshot_builder_can_restore_the_deleted_snapshot() {
         200
     );
     assert_eq!(sm.last_applied_index(), 0);
-}
-
-#[tokio::test]
-async fn fetch_watermark_check_and_entry_read_can_straddle_a_purge() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut log = LogStore::open(dir.path().join("raft.redb")).unwrap();
-    let key = SecretKey::generate();
-    let event = MembershipEvent::found(
-        vec![(record(&key, 0), NodeAddr::default())],
-        Default::default(),
-        Timestamp::from_millis(1),
-    )
-    .unwrap();
-    log.blocking_append(vec![Entry::<TypeConfig> {
-        log_id: log_id(1),
-        payload: EntryPayload::Normal(sign(&key, event, 0)),
-    }])
-    .await
-    .unwrap();
-    assert_eq!(log.events_after(0, 1).unwrap().len(), 1);
-    // The same three operations used by fetch and purge, in an allowed interleaving.
-    assert_eq!(log.first_available().unwrap(), 1);
-    log.purge(log_id(1)).await.unwrap();
-    assert!(log.events_after(0, 1).unwrap().is_empty());
-    assert_eq!(log.first_available().unwrap(), 2);
 }

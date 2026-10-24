@@ -414,6 +414,64 @@ async fn an_item_already_cached_is_kept_without_a_fetch() {
     }
 }
 
+/// **Custody over the pledge is not fetched.** The founder adds two books of
+/// about a megabyte; the second member, the only other with a weight, pledges
+/// room for one. It keeps the one it scores higher, says the other is over its
+/// pledge, and never tags it.
+#[tokio::test(flavor = "multi_thread")]
+async fn custody_over_the_pledge_is_not_fetched() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    // Steps of a byte, so a pledge of a megabyte and a half weighs something.
+    let settings = GroupSettings {
+        weight_step_bytes: NonZeroU64::MIN,
+        ..settings()
+    };
+    let pledge = BOOK as u64 * 3 / 2;
+    let tunings = std::iter::repeat_with(Tuning::default);
+    let nodes = founded(dir.path(), &[100 * GB, 0, 0], tunings, &settings).await;
+    let [founder, second, third] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let dune = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let emma = add_a_book(&founder, dir.path(), "Emma", BOOK).await;
+    until_projected(&second.runtime, emma.0, 1, "the second member").await;
+
+    let group = CustodyGroup::new(
+        settings.replicas.get(),
+        settings.weight_rule(),
+        [(founder.id, 100 * GB), (second.id, pledge), (third.id, 0)],
+    );
+    let score = |item| {
+        let item = CustodyItem {
+            item,
+            creators: vec![founder.id],
+            size_bytes: 0,
+        };
+        group.custody_score(&item, second.id).unwrap()
+    };
+    let (higher, lower) = if score(dune.0) > score(emma.0) {
+        (dune, emma)
+    } else {
+        (emma, dune)
+    };
+
+    second
+        .call("group.pledge_set", json!({ "bytes": pledge }))
+        .await;
+    second.until_custodian_of(1).await;
+    second
+        .until_keeps(true, KeepReason::Custody, higher.0, higher.1)
+        .await;
+    let over_pledge = &second.call("node.status", json!({})).await["custody"]["over_pledge"];
+    assert_eq!(over_pledge["items"], json!(1));
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(!second.tagged_for_custody(lower.0, lower.1).await);
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
 /// **A custodian whose fetch failed asks again when a holder comes back, and
 /// fetches what a restart left half kept.** The founder adds a book nobody
 /// else weighs enough to keep, and stops. The second member pledges, becomes

@@ -455,6 +455,38 @@ mod tests {
         assert_eq!(next_change(&both, &both, &nobody()), None);
     }
 
+    // Review evidence: these assert current defects, not desired behavior.
+    // They deliberately call the actual reconciliation helpers.
+    #[test]
+    fn review_disjoint_replacement_removes_every_old_voter_before_learning() {
+        let voters = view(&[(1, 11)]);
+        let wanted = view(&[(2, 12)]);
+        assert_eq!(
+            next_change(&wanted, &voters, &nobody()),
+            Some(Change::Remove(BTreeSet::from([raw(1)])))
+        );
+    }
+
+    #[test]
+    fn review_interrupted_joint_promotion_is_mistaken_for_convergence() {
+        let wanted = view(&[(1, 11), (2, 12), (3, 13), (4, 14)]);
+        let nodes: BTreeMap<_, _> = wanted
+            .iter()
+            .map(|(member, addr)| (RawMemberId::from(*member), addr.clone()))
+            .collect();
+        let joint = openraft::Membership::new(
+            vec![
+                BTreeSet::from([raw(1), raw(2), raw(3)]),
+                BTreeSet::from([raw(1), raw(2), raw(3), raw(4)]),
+            ],
+            nodes,
+        );
+        assert_eq!(joint.get_joint_config().len(), 2);
+        let voters = current_voters(&joint).unwrap();
+        assert_eq!(voters, wanted);
+        assert_eq!(next_change(&wanted, &voters, &nobody()), None);
+    }
+
     #[test]
     fn a_moved_address_is_set_and_only_for_the_one_that_moved() {
         let wanted = view(&[(1, 11), (2, 12), (3, 99)]);

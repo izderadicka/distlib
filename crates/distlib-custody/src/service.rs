@@ -143,18 +143,13 @@ async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
     match store.item(item_id).await {
         Ok(Some(stored)) => {
             let item = stored.custody_item();
-            let mut mine = false;
+            let mut changes = None;
             published.view.send_modify(|view| {
-                if let Some(view) = view {
-                    mine = view.update(&item);
-                }
+                changes = view.as_mut().map(|view| view.update(&item));
             });
-            // Every time, not only when it changes: a file added to an item
-            // this node keeps is one more blob to keep.
-            let _ = published.changes.send(CustodyChange::Item {
-                item: item_id,
-                mine,
-            });
+            for change in changes.unwrap_or_default() {
+                let _ = published.changes.send(change);
+            }
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(%item_id, %error, "could not read an item for custody"),

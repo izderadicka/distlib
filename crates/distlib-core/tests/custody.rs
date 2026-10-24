@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeSet, sync::LazyLock};
 
-use distlib_core::{CustodyGroup, CustodyItem, ItemId, MemberId, WeightRule};
+use distlib_core::{CustodyGroup, CustodyItem, ItemId, MemberId, WeightRule, within_pledge};
 use iroh::SecretKey;
 use proptest::prelude::*;
 
@@ -176,6 +176,27 @@ proptest! {
     }
 
     #[test]
+    fn within_the_pledge_keeps_in_order_what_fits_and_passes_over_only_what_does_not(
+        pledge in 0..1_000_u64,
+        sizes in prop::collection::vec(0..400_u64, 0..20),
+    ) {
+        let assigned: Vec<(ItemId, u64)> = (0..).map(item).zip(sizes).collect();
+        let kept: Vec<(ItemId, u64)> = within_pledge(pledge, assigned.iter().copied()).collect();
+        let kept_bytes: u64 = kept.iter().map(|(_, size)| size).sum();
+        prop_assert!(kept_bytes <= pledge);
+        // In the order given: kept is a subsequence of assigned.
+        let mut rest = assigned.iter();
+        prop_assert!(kept.iter().all(|kept| rest.any(|assigned| assigned == kept)));
+        // Each passed over would not fit even in what is left at the end.
+        let left = pledge - kept_bytes;
+        prop_assert!(assigned.iter().filter(|item| !kept.contains(item)).all(|(_, size)| *size > left));
+        let total: u64 = assigned.iter().map(|(_, size)| size).sum();
+        if total <= pledge {
+            prop_assert_eq!(kept, assigned);
+        }
+    }
+
+    #[test]
     fn a_pledge_changed_within_one_step_or_above_the_cap_weighs_the_same(
         pledge in 0..2_000_u64,
         change in 0..10_u64,
@@ -219,6 +240,18 @@ fn a_pledge_below_the_minimum_weighs_nothing() {
     assert_eq!(rule.weight(25), 20);
 }
 
+/// A pledge changed within a step weighs the same but is another group: the
+/// change still settles, and moves where its custody is cut.
+#[test]
+fn a_pledge_changed_within_a_step_is_another_group() {
+    let [a, b] = [POOL[0], POOL[1]];
+    let before = group(&[(a, 500), (b, 105)]);
+    let after = group(&[(a, 500), (b, 108)]);
+    assert_eq!(RULE.weight(105), RULE.weight(108));
+    assert_ne!(before, after);
+    assert_eq!((after.pledge_of(b), after.pledge_of(POOL[2])), (108, 0));
+}
+
 /// Over many items a member's share of the custodian slots follows its share
 /// of the weight. Not exactly: a member is custodian of an item at most once,
 /// so the heaviest fall a little short of their share and the lightest gain.
@@ -260,10 +293,13 @@ fn custody_of_is_is_custodian_over_every_item() {
     for count in [100, 5_000] {
         let all = items(count, &members);
         for member in &members {
-            let one_by_one: Vec<ItemId> = all
+            let one_by_one: Vec<_> = all
                 .iter()
-                .filter(|item| group.is_custodian(item, *member))
-                .map(|item| item.item)
+                .filter_map(|item| {
+                    group
+                        .custody_score(item, *member)
+                        .map(|score| (item.item, score))
+                })
                 .collect();
             assert_eq!(group.custody_of(*member, &all), one_by_one);
         }
