@@ -965,3 +965,50 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
         .until_keeps(true, KeepReason::Cache, item, file)
         .await;
 }
+
+/// **An emergency copy is made past the storage limit**, where custody
+/// waits. Both others have room for half a book: the custodian waits for
+/// room, so the founder's copy stays the only one, and after the delay the
+/// other makes the emergency copy all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_emergency_copy_goes_past_the_limit_where_custody_waits() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let half_a_book = || Tuning {
+        storage_limit: NonZeroU64::new(BOOK as u64 / 2),
+        ..Tuning::default()
+    };
+    let tunings = [Tuning::default(), half_a_book(), half_a_book()];
+    let nodes = founded(dir.path(), &[100 * GB; 3], tunings, &settings).await;
+    let [founder, second, third] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let group = CustodyGroup::new(
+        2,
+        settings.weight_rule(),
+        [founder.id, second.id, third.id].map(|id| (id, 100 * GB)),
+    );
+    let ranked = CustodyItem {
+        item,
+        creators: vec![founder.id],
+        size_bytes: 0,
+    };
+    let (custodian, copier) = if group.custodians(&ranked) == [second.id] {
+        (&second, &third)
+    } else {
+        (&third, &second)
+    };
+
+    custodian.until_pins("waiting_for_room", 1).await;
+    copier
+        .until_keeps(true, KeepReason::Cache, item, file)
+        .await;
+    assert!(!custodian.keeps(KeepReason::Custody, item, file).await);
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}

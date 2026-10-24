@@ -169,7 +169,7 @@ enum Pin {
     Failed,
     /// Not fetched, since it would not fit within the storage limit even
     /// with the whole cache evicted: asked again when this node lets go of
-    /// custody of an item, at a whole pass, and at start.
+    /// custody of an item, and at start.
     WaitingForRoom,
     /// Tagged, and every file here.
     Kept,
@@ -300,9 +300,12 @@ impl Pins {
         };
         for item in &mine {
             let needs_keeping = match self.pins.get(item) {
-                None | Some(Pin::Releasing | Pin::WaitingForRoom) => true,
+                None | Some(Pin::Releasing) => true,
                 Some(Pin::Kept) => !self.keeper.holdings.holds(*item),
-                Some(Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed) => false,
+                // A pass makes no room: letting go of an item does.
+                Some(
+                    Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed | Pin::WaitingForRoom,
+                ) => false,
             };
             if needs_keeping {
                 self.want(*item);
