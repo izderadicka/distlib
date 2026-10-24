@@ -82,7 +82,6 @@ fn availability(
             membership: node.subscribe(),
             own_address: node.own_address(),
             holdings: catalogue.holdings().clone(),
-            over_pledge_items: tokio::sync::watch::Sender::new(0).subscribe(),
         },
         Duration::from_secs(60),
         tasks.events().clone(),
@@ -119,7 +118,6 @@ fn custody(node: &MembershipNode, store: &Store, tasks: &Tasks) -> Custody {
             store: store.clone(),
             events: tasks.events().subscribe(),
             replays: tokio::sync::watch::channel(0).1,
-            over_pledge_items: tokio::sync::watch::Sender::new(0),
         },
     )
 }

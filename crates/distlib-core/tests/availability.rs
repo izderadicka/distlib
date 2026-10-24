@@ -31,7 +31,6 @@ fn heartbeat(key: &SecretKey, direct: Vec<SocketAddr>, holdings: Holdings) -> He
         seq: u64::MAX,
         interval_secs: u32::MAX,
         holdings,
-        over_pledge_items: u64::MAX,
         leaving: false,
     }
 }

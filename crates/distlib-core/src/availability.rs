@@ -74,10 +74,6 @@ pub struct Heartbeat {
     /// these, so two nodes with different settings still agree (D4).
     pub interval_secs: u32,
     pub holdings: Holdings,
-    /// How many items the member is custodian of but are over its pledge,
-    /// and so are not fetched (phase 5's 5b-7). A peer judging its coverage
-    /// (D10) works out where its custody is cut only when this is not zero.
-    pub over_pledge_items: u64,
     /// Said once, on a graceful stop, so the member is gone at once rather
     /// than after its TTL.
     pub leaving: bool,

@@ -19,7 +19,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{Custody, view::CustodyView};
+use crate::Custody;
 
 /// How often coverage is worked out again, unless beats come more often.
 pub const COVERAGE_EVERY: Duration = Duration::from_secs(30);
@@ -40,7 +40,7 @@ pub struct CoverageSources {
     pub membership: watch::Receiver<MembershipState>,
     /// An item's creators and size.
     pub store: Store,
-    /// Who is online, what they hold, and who says it is over its pledge.
+    /// Who is online, and what they hold.
     pub availability: Availability,
     /// What this node holds.
     pub holdings: Holdings,
@@ -137,7 +137,7 @@ async fn count_now(
     };
     let max_settle = Duration::from_secs(membership.borrow().settings().max_settle_secs.into());
     let online = availability.online().borrow().clone();
-    let mut judged = to_judge(online, |member| availability.knows_holdings_of(member));
+    let judged = to_judge(online, |member| availability.knows_holdings_of(member));
 
     let mut held = Vec::with_capacity(since.len());
     for (item, since) in since {
@@ -145,26 +145,10 @@ async fn count_now(
             held.push((stored.custody_item(), since));
         }
     }
-    // Only a member that says it is over its pledge has its custody cut,
-    // which takes a pass over every item for it.
-    let over_pledge: Vec<MemberId> = judged
-        .keys()
-        .filter(|member| availability.over_pledge_items_of(member) > 0)
-        .copied()
-        .collect();
-    let every_item = if over_pledge.is_empty() {
-        Vec::new()
-    } else {
-        store.custody_items().await?
-    };
 
     let availability = availability.clone();
     let now = Instant::now();
     let counted = tokio::task::spawn_blocking(move || {
-        for member in over_pledge {
-            let kept = CustodyView::compute(group.clone(), member, &every_item).my_items();
-            judged.insert(member, Expects::Within(kept));
-        }
         count(
             &group,
             &held,
@@ -177,34 +161,15 @@ async fn count_now(
     Ok(counted)
 }
 
-/// The members of `online` whose holdings are known, each expected to hold
-/// everything it is custodian of until its custody is cut.
+/// The members of `online` whose holdings are known.
 fn to_judge(
     online: impl IntoIterator<Item = MemberId>,
     knows_holdings_of: impl Fn(&MemberId) -> bool,
-) -> HashMap<MemberId, Expects> {
+) -> HashSet<MemberId> {
     online
         .into_iter()
         .filter(|member| knows_holdings_of(member))
-        .map(|member| (member, Expects::Everything))
         .collect()
-}
-
-/// What a judged member is expected to hold of the items it is custodian of.
-#[derive(Debug)]
-enum Expects {
-    Everything,
-    /// Only these: the rest are over its pledge (5b-7).
-    Within(HashSet<ItemId>),
-}
-
-impl Expects {
-    fn includes(&self, item: &ItemId) -> bool {
-        match self {
-            Self::Everything => true,
-            Self::Within(kept) => kept.contains(item),
-        }
-    }
 }
 
 /// Each `judged` member's coverage of `held`, each item with when its
@@ -214,23 +179,21 @@ impl Expects {
 fn count(
     group: &CustodyGroup,
     held: &[(CustodyItem, Instant)],
-    judged: &HashMap<MemberId, Expects>,
+    judged: &HashSet<MemberId>,
     holders: impl Fn(&ItemId) -> Vec<MemberId>,
     old_enough: impl Fn(Instant) -> bool,
 ) -> HashMap<MemberId, MemberCoverage> {
     let mut counted: HashMap<MemberId, MemberCoverage> = judged
-        .keys()
+        .iter()
         .map(|member| (*member, MemberCoverage::default()))
         .collect();
     for (item, _) in held.iter().filter(|(_, since)| old_enough(*since)) {
         let announced_by = holders(&item.item);
-        for custodian in group.custodians(item) {
-            let Some(expects) = judged.get(&custodian) else {
-                continue;
-            };
-            if !expects.includes(&item.item) {
-                continue;
-            }
+        for custodian in group
+            .custodians(item)
+            .into_iter()
+            .filter(|custodian| judged.contains(custodian))
+        {
             let coverage = counted.entry(custodian).or_default();
             coverage.expected += 1;
             if announced_by.contains(&custodian) {
@@ -284,7 +247,7 @@ mod tests {
         let (group, me, bob, carol) = group();
         let start = Instant::now();
         let held = [(item(1, me), start), (item(2, me), start)];
-        let judged = HashMap::from([(bob, Expects::Everything), (carol, Expects::Everything)]);
+        let judged = HashSet::from([bob, carol]);
         // Bob announces both, Carol only the first.
         let holders = |item: &ItemId| {
             if *item == ItemId::from_bytes([1; 32]) {
@@ -299,20 +262,13 @@ mod tests {
     }
 
     #[test]
-    fn a_young_assignment_an_unjudged_member_and_one_over_its_pledge_are_not_counted() {
+    fn a_young_assignment_and_an_unjudged_member_are_not_counted() {
         let (group, me, bob, carol) = group();
         let start = Instant::now();
         let young = start + Duration::from_secs(1);
-        let held = [
-            (item(1, me), start),
-            (item(2, me), young),
-            (item(3, me), start),
-        ];
-        // Carol is not judged; Bob is over his pledge, keeping item 1 only.
-        let judged = HashMap::from([(
-            bob,
-            Expects::Within(HashSet::from([ItemId::from_bytes([1; 32])])),
-        )]);
+        let held = [(item(1, me), start), (item(2, me), young)];
+        // Carol is not judged.
+        let judged = HashSet::from([bob]);
         let counted = count(
             &group,
             &held,
@@ -327,7 +283,7 @@ mod tests {
     #[test]
     fn a_judged_member_with_nothing_to_hold_counts_nothing() {
         let (group, _, bob, _) = group();
-        let judged = HashMap::from([(bob, Expects::Everything)]);
+        let judged = HashSet::from([bob]);
         let counted = count(&group, &[], &judged, |_| Vec::new(), |_| true);
         assert_eq!(counted, HashMap::from([(bob, covered(0, 0))]));
     }
@@ -336,6 +292,6 @@ mod tests {
     fn a_member_is_judged_only_once_what_it_holds_is_known() {
         let (_, _, bob, carol) = group();
         let judged = to_judge([bob, carol], |member| *member == bob);
-        assert_eq!(judged.keys().collect::<Vec<_>>(), [&bob]);
+        assert_eq!(judged, HashSet::from([bob]));
     }
 }

@@ -88,8 +88,6 @@ pub struct Sources {
     pub own_address: watch::Receiver<Option<SignedAddress>>,
     /// What this node holds — `Catalogue::holdings`.
     pub holdings: Holdings,
-    /// How many items this node's custody leaves over its pledge.
-    pub over_pledge_items: watch::Receiver<u64>,
 }
 
 /// This node's heartbeat, who else is online, and what they hold.
@@ -142,7 +140,6 @@ impl Availability {
             membership,
             own_address,
             holdings,
-            over_pledge_items,
         } = sources;
         // Which run of this node a beat is from: a restart is told apart from
         // a replay by this, not by a clock.
@@ -161,7 +158,6 @@ impl Availability {
                 membership,
                 own_address,
                 holdings,
-                over_pledge_items,
                 interval,
                 epoch,
                 published,
@@ -203,12 +199,6 @@ impl Availability {
     /// it is unknown rather than "holds nothing" (D5).
     pub fn knows_holdings_of(&self, member: &MemberId) -> bool {
         lock(&self.inner.holders).is_known(member)
-    }
-
-    /// How many items `member`'s last beat said are over its pledge: none
-    /// until it is heard.
-    pub fn over_pledge_items_of(&self, member: &MemberId) -> u64 {
-        lock(&self.inner.holders).over_pledge_items_of(member)
     }
 
     /// Stops beating and tells the group this node is going — before the
@@ -265,7 +255,6 @@ struct Joining {
     membership: watch::Receiver<MembershipState>,
     own_address: watch::Receiver<Option<SignedAddress>>,
     holdings: Holdings,
-    over_pledge_items: watch::Receiver<u64>,
     interval: Duration,
     epoch: u64,
     published: watch::Sender<BTreeSet<MemberId>>,
@@ -283,7 +272,6 @@ async fn join_when_founded(joining: Joining) {
         mut membership,
         own_address,
         holdings,
-        over_pledge_items,
         interval,
         epoch,
         published,
@@ -333,7 +321,6 @@ async fn join_when_founded(joining: Joining) {
                 membership: membership.clone(),
                 own_address,
                 holdings,
-                over_pledge_items,
                 said,
             },
             &neighbour_up,
@@ -365,7 +352,6 @@ struct Beating {
     membership: watch::Receiver<MembershipState>,
     own_address: watch::Receiver<Option<SignedAddress>>,
     holdings: Holdings,
-    over_pledge_items: watch::Receiver<u64>,
     said: Arc<Mutex<Option<Said>>>,
 }
 
@@ -383,7 +369,6 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
         membership,
         mut own_address,
         holdings,
-        mut over_pledge_items,
         said,
     } = beating;
     let mut statement = Statement::new(holdings.blobs.clone());
@@ -409,7 +394,6 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
                         seq,
                         interval_secs: whole_seconds(stretched),
                         holdings: stated,
-                        over_pledge_items: *over_pledge_items.borrow_and_update(),
                         leaving: false,
                     };
                     // Recorded before it is sent, so a goodbye always counts
@@ -441,11 +425,6 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
             // the one already due, or a busy node would beat less often than
             // it promised, and outlive its TTL.
             _ = changes.changed() => {
-                tokio::time::sleep_until((last_beat + CHANGE_FLOOR).min(due)).await;
-            }
-            // Under the same floor: a member newly over its pledge is judged
-            // without its cut until its peers hear so (phase 5's D10).
-            Ok(()) = over_pledge_items.changed() => {
                 tokio::time::sleep_until((last_beat + CHANGE_FLOOR).min(due)).await;
             }
         }
@@ -651,7 +630,6 @@ fn hear(hearing: Hearing<'_>, content: &[u8]) -> distlib_core::error::Result<Opt
     }
     let member = beat.address.member();
     let Heard { fetch, changed } = holders.heard(member, &beat.holdings);
-    holders.over_pledge_heard(member, beat.over_pledge_items);
     if changed {
         tell(events, member);
     }

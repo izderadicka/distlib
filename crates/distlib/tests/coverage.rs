@@ -1,14 +1,13 @@
 //! 5c-1's acceptance (phase 5's D10): a custodian that holds its items shows
-//! full coverage, not blamed for what is over its pledge; one whose pin
-//! manager is stopped falls behind once its assignment is older than
-//! `max_settle_secs`, and is not blamed before.
+//! full coverage; one whose pin manager is stopped falls behind once its
+//! assignment is older than `max_settle_secs`, and is not blamed before.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    num::{NonZeroU8, NonZeroU32, NonZeroU64},
+    num::{NonZeroU8, NonZeroU32},
     path::Path,
     time::Duration,
 };
@@ -30,12 +29,10 @@ const BOOK: usize = 1_000_000;
 /// How old an assignment must be before it counts.
 const MAX_SETTLE_SECS: u32 = 8;
 
-/// Two copies of everything, the creator's one of them; steps of a byte, so
-/// a pledge of a megabyte and a half weighs something.
+/// Two copies of everything, the creator's one of them.
 fn settings() -> GroupSettings {
     GroupSettings {
         replicas: NonZeroU8::new(2).unwrap(),
-        weight_step_bytes: NonZeroU64::MIN,
         min_pledge_bytes: 0,
         settle_secs: 1,
         max_settle_secs: MAX_SETTLE_SECS,
@@ -137,19 +134,17 @@ async fn add_a_book(node: &Node, dir: &Path, title: &str) -> ItemId {
 }
 
 /// The founder adds two books; the second member, the only other with a
-/// weight, pledges room for one, so it is custodian of both and keeps one.
-/// The founder counts it at one of one: the book over its pledge is not
-/// blamed. The third member is custodian of nothing, and counts nothing.
+/// weight, is custodian of both and keeps both: the founder counts it at two
+/// of two. The third member is custodian of nothing, and counts nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_custodian_holding_what_its_pledge_allows_shows_full_coverage() {
+async fn a_custodian_holding_its_items_shows_full_coverage() {
     let dir = TempDir::new().unwrap();
-    let pledge = BOOK as u64 * 3 / 2;
-    let [founder, second, third] = three_nodes(dir.path(), [100 * GB, pledge, 0]).await;
+    let [founder, second, third] = three_nodes(dir.path(), [100 * GB, 100 * GB, 0]).await;
     add_a_book(&founder, dir.path(), "Dune").await;
     let emma = add_a_book(&founder, dir.path(), "Emma").await;
     until_projected(&second.runtime, emma, 1, "the second member").await;
 
-    founder.until_coverage(second.id, 1, 1).await;
+    founder.until_coverage(second.id, 2, 2).await;
     founder.until_coverage(third.id, 0, 0).await;
 
     for node in [founder, second, third] {

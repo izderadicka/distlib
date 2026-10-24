@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -46,8 +46,9 @@ pinned data fails probes from 2 peers and shows up red in the members list.*
 - **`replicas` is a group property, set when the group is founded**, and settings do not change after
   founding in this phase (rounds 1–2).
 - **The creator keeps what it added, and its copy is one of the `replicas`** (rounds 1–2).
-- **Two budgets** (round 2): the pledge, in the log, bounds custody; a local storage limit, larger
-  than the pledge, bounds everything, and pressure on it evicts the cache.
+- **Two budgets** (round 2): the pledge, in the log, weighs custody; a local storage limit, larger
+  than the pledge, bounds everything, and pressure on it evicts the cache. *(P5-25: the pledge
+  weighs custody but no longer cuts it; custody past it is kept.)*
 - **Membership changes are settled and throttled locally** (round 3): custody is recomputed once
   membership has been quiet for a while; no custody epochs in the log for now.
 - **Joins rebalance, throttled** (round 3): a new member takes its fair share, at a rate.
@@ -207,7 +208,7 @@ space is short.
 - **A blob goes only when no reason is left.** A download of an item this node is also custodian of
   is kept as long as the custody is; losing custody of an item still in the cache leaves it cached.
 - **Two budgets, one shared with the group and one not:**
-  - **The pledge** is in the log: the space a member offers the group, which bounds its custody and
+  - **The pledge** is in the log: the space a member offers the group, which weighs its custody and
     which the quota rule measures (D8).
   - **The storage limit** is local, `[storage] limit_bytes` in the node's config, never shared: the
     disk space distlib may use on this machine for all three reasons together. It must be larger than
@@ -217,10 +218,9 @@ space is short.
   - **Mandatory alone over the limit** evicts the whole cache and is then reported in `node.status`
     and on the Node page; `library.add` refuses an add that would make it worse, and
     `group.pledge_set` refuses a pledge that is not below the limit.
-  - **Custody over the pledge** — possible, since custody follows weight and not pledge exactly (D9)
-    — pins the highest-scoring assigned items up to the pledge and leaves the rest, which then show
-    a copy short. *(5b-7, P5-22: each that still fits, so one too large is passed over; only new
-    fetches stop, what is held going by the usual safe release.)*
+  - **Custody past the pledge** — possible, since custody follows weight and not pledge exactly (D9)
+    — is kept all the same, and `node.status`, `distlib status` and the Node page say so. *(P5-25:
+    5b-7 cut it at the pledge and left the rest a copy short; undone in 5c-1b.)*
 - **What the user exported is the user's.** `library.download` writes a file outside the store; the
   copy in the store is the cache, and freeing it never touches the export.
 
@@ -474,7 +474,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Twenty-one PRs — fourteen planned, 5a-3, 5b-1 and 5c-1 each split in two, 5b-2 in three, and 5c-0 and 5b-7 added in review. Each ends compiling,
+Twenty-three PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -608,14 +608,14 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** Vitest per view; one e2e path, over two nodes, from adding an item to seeing its
   custodians.
 
-- **5b-7 — custody over the pledge (D9).** *(done; delta P5-22)* Added in review of 5b-3a (P5-15).
+- **5b-7 — custody over the pledge (D9).** *(done; delta P5-22; undone in 5c-1b, P5-25)* Added in review of 5b-3a (P5-15).
   Custody cuts what this node keeps at its pledge: the assigned items by this node's score, highest
   first, each kept while it fits in what is left. What is over is not fetched, and is reported in
   `node.status` (`custody.over_pledge`), `distlib status` and the Node page.
   **Acceptance:** a node pledging room for one of two books fetches the one it scores higher, says
   the other is over its pledge, and never tags it.
 
-### 5c — checking custody (7 PRs)
+### 5c — checking custody (9 PRs)
 
 - **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
@@ -632,18 +632,18 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   a follower asks for the next at once.
 
 - **5c-1 — coverage from heartbeats (D10).** Per member, of the items this node holds and that member
-  should hold too, the share it announces; shown in the members list. *Should hold* is within that
-  member's pledge (5b-7, P5-22): an item over it is not blamed.
-  *Split in two* (P5-24): **5c-1a** *(done)* — coverage worked out and in `group.members`, with each
-  heartbeat saying how many items are over its sender's pledge; **5c-1b** — the members list on the
-  Node page and in `distlib members`.
+  should hold too, the share it announces; shown in the members list.
+  *Split in four* (P5-24, P5-25): **5c-1a** *(done)* — coverage worked out and in `group.members`;
+  **5c-1b** *(done)* — 5b-7's cut undone, so *should hold* is everything a member is custodian of,
+  and the heartbeat's count over the pledge goes with it; **5c-1c** — custody fetches stop at the
+  storage limit rather than going past it; **5c-1d** — the members list on the Node page and in
+  `distlib members`.
   **Acceptance:** a custodian that holds its items shows full coverage; one whose pin manager is
   stopped falls behind once its assignments are older than `max_settle_secs`; one still within that
   time is not blamed.
 
 - **5c-2 — probes (D11), and failures in the catalogue (D12).** Random sampling with the suspect
-  share, the repair hook, failure keys written and cleared; off when the group says so. Only items
-  within the probed member's pledge are probed (5b-7, P5-22).
+  share, the repair hook, failure keys written and cleared; off when the group says so.
   **Acceptance:** a custodian holding the item passes and nothing is written; one whose blob was
   deleted underneath it fails, its key appears on every node, and the item gets its emergency copy if
   that was its last real one; its next pass clears the key; an unreachable custodian is skipped; a
@@ -693,9 +693,9 @@ Every open C-number appears here once.
 |---|---|---|
 | **C34** | **One `replicas` for the whole group** (D2) | **No phase.** Per-item values need a rule about who may ask the group to store an item more times. |
 | **C35** | **A false `FileRecord::size` is logged, not acted on** (ground truth 4) | **No phase.** The fetching custodian knows the real size; correcting the catalogue's claim is a later decision. |
-| **C36** | **Everyone's custody at once costs items × members** (ground truth 9) | **Comes due in 5c** (P5-22): coverage and probes judge a member within its pledge, which takes that member's whole assignment in its score order — one pass over every item per member checked. Overflow (C38) would need it too. |
+| **C36** | **Everyone's custody at once costs items × members** (ground truth 9) | **No phase** (P5-25): 5c no longer judges a member within its pledge, so nothing needs another member's whole assignment. Overflow (C38) would. |
 | **C37** | **Settings are fixed at founding** (D2) | **No phase.** A `GroupSettingsChanged` with core approval, if a group needs it. |
-| **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase.** The load factor warns first, and since 5b-7 a node says what is over its own pledge (P5-22). |
+| **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase** (Ivan, P5-25). The load factor warns first, a node says when its custody is past its pledge, coverage shows a custodian that cannot keep up, and an item down to its last copy gets D6's emergency copy. |
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
