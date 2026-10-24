@@ -7,7 +7,7 @@
 //! invalidates (§4.4).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -252,6 +252,11 @@ fn starts_as_core(
     let membership = state_machine.membership();
     if membership.group_id().is_some() {
         membership.is_core(&me)
+            || state_machine
+                .raft_membership()
+                .borrow()
+                .voter_ids()
+                .any(|id| id == RawMemberId::from(me))
     } else {
         core.iter().any(|(member, _)| *member == me)
     }
@@ -272,7 +277,7 @@ fn start_first_role(role: &Role) {
     };
     let asking =
         ask_once_for_the_directory(role.me, role.client.clone(), Arc::clone(&role.sources));
-    let enacting = core_group::enact(raft, role.state_machine.clone());
+    let enacting = core_group::enact(raft, role.state_machine.clone(), role.network.clone());
     start(
         &role.core_group,
         // Joined rather than spawned beside it, so the one-shot ask lives and
@@ -1225,8 +1230,8 @@ async fn serve_role(role: Role) {
     }
 }
 
-/// Waits for the log to say this node no longer votes, and then makes that
-/// true: the mirror of [`take_the_seat`], and the smaller half of it.
+/// Waits for both application intent and a durable, uniform Raft removal
+/// before standing down. Until then the old quorum still needs this node.
 ///
 /// **Ordered, like its mirror, and for the same kind of reason:**
 ///
@@ -1256,7 +1261,7 @@ async fn serve_role(role: Role) {
 /// had as a voter, so nothing pokes its new follow loop and the timer is what
 /// it waits on.
 ///
-/// Only a membership newer than `seated_at`, the one that seated this node,
+/// Only a membership at least as new as `seated_at`, the one that seated this node,
 /// can unseat it. A node catching up after promotion passes through older
 /// ones — from a snapshot, or entries applied in more than one batch — and
 /// those do not name it as core. Acting on one would stand it down, follow,
@@ -1267,16 +1272,17 @@ async fn serve_role(role: Role) {
 /// as its mirror does.
 async fn stand_down(role: &Role, seated_at: u64) -> bool {
     let mut memberships = role.state_machine.subscribe();
+    let mut applied = role.state_machine.raft_membership();
     loop {
         {
             let seen = memberships.borrow_and_update();
-            if seen.changed_at() > seated_at && !seen.is_core(&role.me) {
+            if may_retire(&seen, &applied.borrow_and_update(), role.me, seated_at) {
                 break;
             }
         }
-        if memberships.changed().await.is_err() {
-            tracing::error!("membership channel closed");
-            return false;
+        tokio::select! {
+            changed = memberships.changed() => { if changed.is_err() { return false; } }
+            changed = applied.changed() => { if changed.is_err() { return false; } }
         }
     }
     tracing::info!("the log says this node no longer votes; standing down");
@@ -1297,6 +1303,20 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
         tracing::warn!(%error, "could not point the follow cursor at what is applied");
     }
 
+    // The new group may be disjoint from startup configuration. Follow the
+    // voters whose committed configuration authorized this retirement.
+    let membership = role.state_machine.raft_membership().borrow().clone();
+    let core = membership
+        .voter_ids()
+        .filter_map(|id| {
+            Some((
+                MemberId::try_from(id).ok()?,
+                membership.membership().get_node(&id)?.clone(),
+            ))
+        })
+        .collect();
+    *role.sources.lock().unwrap_or_else(PoisonError::into_inner) = Sources { core, leader: None };
+
     let listens = role.listens.clone();
     start(
         &role.follow,
@@ -1304,6 +1324,23 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
     );
     tracing::info!("this node is now a follower");
     true
+}
+
+/// Application intent alone is insufficient. Both views must have reached
+/// the seating boundary, and the durable Raft configuration must be uniform
+/// and exclude this node. Joint configurations still require the old quorum.
+fn may_retire(
+    wanted: &MembershipState,
+    applied: &openraft::StoredMembership<RawMemberId, NodeAddr>,
+    me: MemberId,
+    seated_at: u64,
+) -> bool {
+    wanted.group_id().is_some()
+        && wanted.changed_at() >= seated_at
+        && !wanted.is_core(&me)
+        && applied.log_id().is_some_and(|id| id.index >= seated_at)
+        && applied.membership().get_joint_config().len() == 1
+        && !applied.voter_ids().any(|id| id == RawMemberId::from(me))
 }
 
 /// A Raft for this node, over its stores, as a voter starts one or a promoted
@@ -1384,7 +1421,19 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
     tracing::info!("the log says this node votes now; taking a seat in consensus");
 
     stop(follow);
-    trusted.replace(state_machine.membership().core().keys().copied().collect());
+    // A disjoint replacement is taught by the old leader, which the desired
+    // core no longer names. Keep the authenticated follower sources trusted
+    // during replay as well as the requested new core.
+    let mut voters: BTreeSet<_> = state_machine.membership().core().keys().copied().collect();
+    voters.extend(
+        role.sources
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .core
+            .iter()
+            .map(|(id, _)| *id),
+    );
+    trusted.replace(voters);
 
     if let Err(error) = state_machine.reset_for_promotion().await {
         // Left a follower, and a working one: the seat stays empty, so the
@@ -1408,7 +1457,11 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
     seat.take(raft.clone());
     start(
         core_group,
-        tokio::spawn(core_group::enact(raft, state_machine.clone())),
+        tokio::spawn(core_group::enact(
+            raft,
+            state_machine.clone(),
+            role.network.clone(),
+        )),
     );
     tracing::info!("this node is now a voter");
     Some(seated_at)
@@ -1544,6 +1597,7 @@ async fn follow_membership(
     enforced: watch::Sender<MembershipState>,
 ) {
     let mut memberships = state_machine.subscribe();
+    let mut raft_memberships = state_machine.raft_membership();
     // What this task last published, so it can tell a core node that has
     // *moved* from one it is merely seeing again. Empty at startup, which is
     // right: there are no connections yet to be pointing anywhere stale.
@@ -1554,6 +1608,15 @@ async fn follow_membership(
         // started enforces them immediately rather than at the next change —
         // which for a quiet group could be a very long time.
         let membership = memberships.borrow_and_update().clone();
+        // Install the Raft-only exception before revoking application access.
+        // Both watches publish after storage commits, including Raft-only
+        // entries, so cleanup also closes obsolete Raft connections.
+        let raft_membership = raft_memberships.borrow_and_update().clone();
+        hooks.set_raft_peers(
+            raft_membership
+                .nodes()
+                .filter_map(|(id, _)| MemberId::try_from(*id).ok()),
+        );
 
         if membership.group_id().is_some() {
             // Where the voters are, from the same source that decides who they
@@ -1585,9 +1648,9 @@ async fn follow_membership(
         // Only now: whoever reads the membership can rely on it being enforced.
         enforced.send_replace(membership);
 
-        if memberships.changed().await.is_err() {
-            tracing::error!("membership channel closed");
-            return;
+        tokio::select! {
+            changed = memberships.changed() => { if changed.is_err() { return; } }
+            changed = raft_memberships.changed() => { if changed.is_err() { return; } }
         }
     }
 }
@@ -1632,5 +1695,141 @@ fn let_go_of_the_moved(
             let closed = hooks.close_connections_to(*member);
             tracing::info!(%member, closed, "the log moves a core node; letting go of it");
         }
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use openraft::{
+        CommittedLeaderId, Entry, EntryPayload, LogId, Membership, StoredMembership,
+        storage::RaftStateMachine,
+    };
+
+    fn configuration(
+        index: u64,
+        voters: Vec<Vec<MemberId>>,
+    ) -> StoredMembership<RawMemberId, NodeAddr> {
+        let configs: Vec<BTreeSet<_>> = voters
+            .into_iter()
+            .map(|ids| ids.into_iter().map(RawMemberId::from).collect())
+            .collect();
+        let nodes: BTreeMap<_, _> = configs
+            .iter()
+            .flatten()
+            .map(|id| (*id, NodeAddr::default()))
+            .collect();
+        StoredMembership::new(
+            Some(LogId::new(
+                CommittedLeaderId::new(1, RawMemberId::default()),
+                index,
+            )),
+            Membership::new(configs, nodes),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One restart scenario, kept in execution order.
+    async fn retirement_waits_for_durable_uniform_removal_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retirement.redb");
+        let mut store = StateMachineStore::open(&path).unwrap();
+        let key = SecretKey::from_bytes(&[1; 32]);
+        let old = MemberId::from(key.public());
+        let new = MemberId::from(SecretKey::from_bytes(&[2; 32]).public());
+        let record = |id| crate::MemberRecord {
+            member_id: id,
+            display_name: "member".into(),
+            pledge_bytes: 0,
+        };
+        let founded = MembershipEvent::found(
+            vec![(record(old), NodeAddr::default())],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap();
+        let events = [
+            founded,
+            MembershipEvent::MemberAdded {
+                member: record(new),
+            },
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(new, NodeAddr::default())],
+            },
+        ];
+        for (index, event) in events.into_iter().enumerate() {
+            let signed = SignedEvent::sign(
+                &key,
+                event,
+                Timestamp::from_millis(1),
+                store.membership().changed_at(),
+            )
+            .unwrap();
+            let results = store
+                .apply([Entry {
+                    log_id: LogId::new(
+                        CommittedLeaderId::new(1, RawMemberId::from(old)),
+                        index as u64 + 1,
+                    ),
+                    payload: EntryPayload::Normal(signed),
+                }])
+                .await
+                .unwrap();
+            assert!(results.iter().all(|result| result.is_ok()));
+        }
+        let wanted = store.membership();
+        assert!(!wanted.is_core(&old));
+        let at = wanted.changed_at();
+        let old_config = configuration(at + 1, vec![vec![old, new]]);
+        let joint = configuration(at + 2, vec![vec![old, new], vec![new]]);
+        let final_config = configuration(at + 3, vec![vec![new]]);
+        assert!(!may_retire(&wanted, &StoredMembership::default(), old, at));
+        assert!(!may_retire(&wanted, &old_config, old, at));
+        assert!(!may_retire(&wanted, &joint, old, at));
+        assert!(may_retire(&wanted, &final_config, old, at));
+        assert!(
+            !may_retire(&wanted, &final_config, old, at + 10),
+            "historical replay must not retire a new seat"
+        );
+
+        let mut changes = store.raft_membership();
+        store
+            .apply([Entry {
+                log_id: *old_config.log_id().as_ref().unwrap(),
+                payload: EntryPayload::Membership(old_config.membership().clone()),
+            }])
+            .await
+            .unwrap();
+        assert!(
+            changes.has_changed().unwrap(),
+            "Raft-only entries must wake retirement"
+        );
+        assert_eq!(*changes.borrow_and_update(), old_config);
+        drop(changes);
+        drop(store);
+        let mut store = StateMachineStore::open(&path).unwrap();
+        assert!(
+            starts_as_core(&store, old, &[]),
+            "pending removal must resume voting after restart"
+        );
+        assert_eq!(*store.raft_membership().borrow(), old_config);
+        store
+            .apply([Entry {
+                log_id: *final_config.log_id().as_ref().unwrap(),
+                payload: EntryPayload::Membership(final_config.membership().clone()),
+            }])
+            .await
+            .unwrap();
+        assert!(
+            !starts_as_core(&store, old, &[(old, NodeAddr::default())]),
+            "a completed removal overrides stale bootstrap config"
+        );
+        assert!(may_retire(
+            &store.membership(),
+            &store.raft_membership().borrow(),
+            old,
+            at
+        ));
     }
 }

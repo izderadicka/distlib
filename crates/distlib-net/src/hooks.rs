@@ -7,7 +7,7 @@
 //! else. **Do not move this into a protocol handler.**
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -89,6 +89,8 @@ struct Refusals {
 #[derive(Debug, Clone)]
 pub struct AllowlistHooks {
     allowlist: Allowlist,
+    /// Transport exception for the Raft configuration still being retired.
+    raft_peers: tokio::sync::watch::Sender<HashSet<MemberId>>,
     /// Connections seen since start-up, by peer.
     ///
     /// Weak handles, because [`EndpointHooks`] is explicit that holding a
@@ -105,6 +107,7 @@ impl AllowlistHooks {
     pub fn new(allowlist: Allowlist) -> Self {
         Self {
             allowlist,
+            raft_peers: tokio::sync::watch::channel(HashSet::new()).0,
             connections: Arc::new(Mutex::new(HashMap::new())),
             refusals: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -125,9 +128,36 @@ impl AllowlistHooks {
     /// Returns when the allowlist can no longer change — the writer has been
     /// dropped — since there is nothing further to react to.
     pub async fn evict_expelled(mut self) {
-        while self.allowlist.changed().await.is_ok() {
+        let mut raft_peers = self.raft_peers.subscribe();
+        loop {
+            tokio::select! {
+                changed = self.allowlist.changed() => {
+                    if changed.is_err() { return; }
+                }
+                _ = raft_peers.changed() => {}
+            }
             self.evict_once();
         }
+    }
+
+    /// Keeps the applied Raft configuration reachable during reconfiguration.
+    /// This grants access only to the Raft ALPN; application protocols still
+    /// enforce the ordinary membership allowlist. The Raft handler separately
+    /// authenticates voters before accepting state-changing RPCs.
+    pub fn set_raft_peers(&self, peers: impl IntoIterator<Item = MemberId>) {
+        let peers = peers.into_iter().collect();
+        self.raft_peers.send_if_modified(|current| {
+            if *current == peers {
+                return false;
+            }
+            *current = peers;
+            true
+        });
+    }
+
+    fn admits(&self, peer: &MemberId, alpn: &[u8]) -> bool {
+        self.allowlist.is_allowed(peer)
+            || (alpn == crate::alpn::RAFT && self.raft_peers.borrow().contains(peer))
     }
 
     /// Closes every connection to `peer`, whatever protocol opened it.
@@ -179,20 +209,20 @@ impl AllowlistHooks {
     fn evict_once(&self) {
         let mut connections = self.lock();
         connections.retain(|peer, handles| {
-            if self.allowlist.is_allowed(peer) {
-                // Still a member; keep only the connections still open.
-                handles.retain(Self::is_live);
-                return !handles.is_empty();
-            }
-
-            for connection in handles.iter().filter_map(WeakConnectionHandle::upgrade) {
-                // The same code a refused handshake gets, so an evicted peer
-                // and a rejected one cannot tell the two apart — and both learn
-                // to stop retrying.
+            handles.retain(|handle| {
+                let Some(connection) = handle.upgrade() else {
+                    return false;
+                };
+                if !crate::connections::is_live(&connection) {
+                    return false;
+                }
+                if self.admits(peer, connection.alpn()) {
+                    return true;
+                }
                 connection.close(close_code::NOT_A_MEMBER, NOT_A_MEMBER_REASON);
-            }
-            tracing::info!(peer = %peer, "closed connections to a former member");
-            false
+                false
+            });
+            !handles.is_empty()
         });
     }
 
@@ -286,7 +316,7 @@ impl EndpointHooks for AllowlistHooks {
     /// Verification is [`Self::after_handshake`]'s job.
     async fn before_connect(&self, addr: &EndpointAddr, alpn: &[u8]) -> BeforeConnectOutcome {
         let peer = MemberId::from(addr.id);
-        if self.allowlist.is_allowed(&peer) {
+        if self.admits(&peer, alpn) {
             return BeforeConnectOutcome::Accept;
         }
         // `debug`: this node's own choice, not news. iroh-docs remembers the
@@ -308,7 +338,7 @@ impl EndpointHooks for AllowlistHooks {
     /// rather than claimed.
     async fn after_handshake(&self, conn: &Connection) -> AfterHandshakeOutcome {
         let peer = MemberId::from(conn.remote_id());
-        if self.allowlist.is_allowed(&peer) {
+        if self.admits(&peer, conn.alpn()) {
             // Recorded only once admitted: a rejected connection is closed
             // here and there is nothing left to evict later.
             self.remember(peer, conn);
@@ -410,5 +440,19 @@ mod tests {
             remembered <= REFUSALS_REMEMBERED,
             "kept {remembered} peers, which is more than the cap"
         );
+    }
+    #[test]
+    fn retiring_raft_peers_get_no_application_access() {
+        let (writer, hooks) = hooks();
+        let peer = an_id(2);
+        writer.replace([peer]);
+        hooks.set_raft_peers([peer]);
+        writer.replace([]);
+        assert!(hooks.admits(&peer, crate::alpn::RAFT));
+        assert!(!hooks.admits(&peer, crate::alpn::PING));
+        assert!(!hooks.admits(&peer, crate::alpn::MEMBERLOG));
+        assert!(!hooks.admits(&an_id(3), crate::alpn::RAFT));
+        hooks.set_raft_peers([]);
+        assert!(!hooks.admits(&peer, crate::alpn::RAFT));
     }
 }

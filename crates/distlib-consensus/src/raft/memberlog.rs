@@ -465,8 +465,17 @@ fn source(raft: &Raft<TypeConfig>) -> Source {
         Source {
             core: metrics
                 .membership_config
-                .nodes()
-                .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+                .voter_ids()
+                .filter_map(|id| {
+                    Some((
+                        MemberId::try_from(id).ok()?,
+                        metrics
+                            .membership_config
+                            .membership()
+                            .get_node(&id)?
+                            .clone(),
+                    ))
+                })
                 .collect(),
             leader: metrics
                 .current_leader
