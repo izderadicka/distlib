@@ -110,8 +110,8 @@ async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) ->
     nodes.try_into().ok().unwrap()
 }
 
-/// The founder adds a book, which the second member has projected: the book
-/// and its one file.
+/// The founder adds a book, which it and the second member have projected:
+/// the book and its one file.
 async fn add_a_book(founder: &Node, second: &Node, dir: &Path) -> (ItemId, ContentHash) {
     founder.runtime.catalogue().ready().await;
     let file = dir.join("dune.epub");
@@ -124,6 +124,7 @@ async fn add_a_book(founder: &Node, second: &Node, dir: &Path) -> (ItemId, Conte
         .await
         .unwrap();
     let book: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    until_projected(&founder.runtime, book, 1, "the founder").await;
     until_projected(&second.runtime, book, 1, "the second member").await;
     let stored = founder.runtime.store().item(book).await.unwrap().unwrap();
     (book, *stored.item.files.keys().next().unwrap())
