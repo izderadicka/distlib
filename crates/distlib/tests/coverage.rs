@@ -167,6 +167,9 @@ async fn a_custodian_that_never_fetches_falls_behind_once_its_assignment_is_old(
     let [founder, second, third] = three_nodes(dir.path(), [100 * GB; 3]).await;
     second.runtime.pins().shutdown();
     third.runtime.pins().shutdown();
+    // Both judged, so custody is computed, before the clock starts.
+    founder.until_coverage(second.id, 0, 0).await;
+    founder.until_coverage(third.id, 0, 0).await;
     let book = add_a_book(&founder, dir.path(), "Dune").await;
     let custodian = founder
         .call("library.item", json!({ "item_id": book }))
@@ -174,8 +177,7 @@ async fn a_custodian_that_never_fetches_falls_behind_once_its_assignment_is_old(
         .clone();
     let custodian: MemberId = serde_json::from_value(custodian).unwrap();
 
-    // Judged already, and nothing yet counted against it.
-    founder.until_coverage(custodian, 0, 0).await;
+    // Nothing counted against it yet, within `max_settle_secs`.
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
         founder.coverage_of(custodian).await,

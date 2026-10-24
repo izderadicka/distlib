@@ -823,15 +823,17 @@ async fn a_change_in_a_members_availability_is_told() {
     bob.router.shutdown().await.unwrap();
 }
 
-/// **What a member says is over its pledge reaches the others** with its next
-/// beat, and saying nothing is over takes it back.
+/// **What a member says is over its pledge reaches the others** promptly,
+/// with a beat the change prompts, well before its minute's beat; and saying
+/// nothing is over takes it back.
 #[tokio::test]
-async fn what_a_member_says_is_over_its_pledge_is_heard() {
-    let (alice, bob, _membership) = a_pair(Duration::from_secs(1)).await;
+async fn what_a_member_says_is_over_its_pledge_is_heard_promptly() {
+    let (alice, bob, _membership) = a_pair(Duration::from_secs(60)).await;
     alice.sees_online(&[bob.id]).await;
     for items in [3, 0] {
         bob.over_pledge_items.send_replace(items);
-        tokio::time::timeout(SOON, async {
+        // The change's floor is ten seconds after the last beat.
+        tokio::time::timeout(Duration::from_secs(15), async {
             while alice.availability.over_pledge_items_of(&bob.id) != items {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }

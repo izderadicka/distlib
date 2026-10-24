@@ -383,7 +383,7 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
         membership,
         mut own_address,
         holdings,
-        over_pledge_items,
+        mut over_pledge_items,
         said,
     } = beating;
     let mut statement = Statement::new(holdings.blobs.clone());
@@ -409,7 +409,7 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
                         seq,
                         interval_secs: whole_seconds(stretched),
                         holdings: stated,
-                        over_pledge_items: *over_pledge_items.borrow(),
+                        over_pledge_items: *over_pledge_items.borrow_and_update(),
                         leaving: false,
                     };
                     // Recorded before it is sent, so a goodbye always counts
@@ -441,6 +441,11 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
             // the one already due, or a busy node would beat less often than
             // it promised, and outlive its TTL.
             _ = changes.changed() => {
+                tokio::time::sleep_until((last_beat + CHANGE_FLOOR).min(due)).await;
+            }
+            // Under the same floor: a member newly over its pledge is judged
+            // without its cut until its peers hear so (phase 5's D10).
+            Ok(()) = over_pledge_items.changed() => {
                 tokio::time::sleep_until((last_beat + CHANGE_FLOOR).min(due)).await;
             }
         }
