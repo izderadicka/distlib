@@ -375,7 +375,7 @@ curl -s http://127.0.0.1:11280/rpc \
 | Method | |
 |---|---|
 | `node.status` | Identity, group, whether this node votes, Raft state, current leader; its `custody`: the items it keeps for the group, those `over_pledge`, and the group's `load_factor`; the bytes it keeps as own, custody and cache against its storage limit. |
-| `group.members` | The membership as this node's log has it, with each member's pledge and what it is required to pledge. |
+| `group.members` | The membership as this node's log has it, with each member's pledge and what it is required to pledge, and its `coverage`: of the items this node holds that the member should keep too, how many it should (`expected`) and how many its heartbeat says it holds (`announced`) — `null` while it is offline or what it holds is not known yet. |
 | `group.propose_add` | `{member, name?}` — admit a member. |
 | `group.propose_expel` | `{member, reason}` — remove one. |
 | `group.propose_core` | Move a core node, or add or drop one. |

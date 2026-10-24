@@ -71,6 +71,8 @@ struct Node {
     /// member fetched from here.
     served: Arc<AtomicUsize>,
     holdings: Holdings,
+    /// What custody would tell the heartbeat is over this node's pledge.
+    over_pledge_items: watch::Sender<u64>,
     /// For listening to the topic as it is, beside the node's own heartbeat.
     gossip: Gossip,
     /// What the heartbeat says on the node's event bus.
@@ -103,6 +105,7 @@ impl Node {
         let says = watch::Sender::new(None);
         let blobs = MemStore::new();
         let holdings = Holdings::new((*blobs).clone());
+        let over_pledge_items = watch::Sender::new(0);
         let (events, _) = broadcast::channel(64);
         let availability = Availability::start(
             &transport,
@@ -111,6 +114,7 @@ impl Node {
                 membership,
                 own_address: says.subscribe(),
                 holdings: holdings.clone(),
+                over_pledge_items: over_pledge_items.subscribe(),
             },
             interval,
             events.clone(),
@@ -148,6 +152,7 @@ impl Node {
             blobs,
             served,
             holdings,
+            over_pledge_items,
             gossip,
             events,
             router,
@@ -813,6 +818,29 @@ async fn a_change_in_a_members_availability_is_told() {
         .unwrap()
         .unwrap();
     assert_eq!(event, about_bob, "his going");
+
+    alice.router.shutdown().await.unwrap();
+    bob.router.shutdown().await.unwrap();
+}
+
+/// **What a member says is over its pledge reaches the others** promptly,
+/// with a beat the change prompts, well before its minute's beat; and saying
+/// nothing is over takes it back.
+#[tokio::test]
+async fn what_a_member_says_is_over_its_pledge_is_heard_promptly() {
+    let (alice, bob, _membership) = a_pair(Duration::from_secs(60)).await;
+    alice.sees_online(&[bob.id]).await;
+    for items in [3, 0] {
+        bob.over_pledge_items.send_replace(items);
+        // The change's floor is ten seconds after the last beat.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while alice.availability.over_pledge_items_of(&bob.id) != items {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("alice never heard bob say {items} over his pledge"));
+    }
 
     alice.router.shutdown().await.unwrap();
     bob.router.shutdown().await.unwrap();

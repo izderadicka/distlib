@@ -42,7 +42,12 @@ fn founded(me: MemberId, other: &SecretKey) -> MembershipState {
 
 /// One item of one file, added by `creator`.
 fn an_item(creator: MemberId) -> StoredItem {
-    let hash = ContentHash::from_bytes([1; 32]);
+    an_item_of(1, creator, GB)
+}
+
+/// Item `seed`, of one file of `size` bytes, added by `creator`.
+fn an_item_of(seed: u8, creator: MemberId, size: u64) -> StoredItem {
+    let hash = ContentHash::from_bytes([seed; 32]);
     StoredItem {
         item: Item {
             files: BTreeMap::from([(
@@ -50,15 +55,15 @@ fn an_item(creator: MemberId) -> StoredItem {
                 FileRecord {
                     role: FileRole::Content,
                     format: "epub".to_owned(),
-                    size: GB,
-                    filename: "1.epub".to_owned(),
+                    size,
+                    filename: format!("{seed}.epub"),
                     seq: None,
                     disc: None,
                     title: None,
                     duration: None,
                 },
             )]),
-            ..Item::new(ItemId::from_bytes([1; 32]))
+            ..Item::new(ItemId::from_bytes([seed; 32]))
         },
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
@@ -91,6 +96,7 @@ async fn a_replay_finished_before_the_start_still_counts() {
             store,
             events,
             replays,
+            over_pledge_items: watch::Sender::new(0),
         },
     );
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -100,5 +106,40 @@ async fn a_replay_finished_before_the_start_still_counts() {
     })
     .await
     .expect("custody of the one item, from the replay that had finished");
+    custody.shutdown();
+}
+
+/// What the whole pass leaves over this node's pledge is said for the
+/// heartbeat: two items of 60 GB, both this node's, against its 100 GB.
+#[tokio::test]
+async fn the_whole_pass_says_what_is_over_the_pledge() {
+    let other = SecretKey::generate();
+    let me = MemberId::from(SecretKey::generate().public());
+    let store = Store::open(None).await.unwrap();
+    for seed in [1, 2] {
+        let item = an_item_of(seed, MemberId::from(other.public()), 60 * GB);
+        store.upsert_item(item).await.unwrap();
+    }
+    let (_membership_tx, membership) = watch::channel(founded(me, &other));
+    let (_events_tx, events) = broadcast::channel(16);
+    let (replays_tx, replays) = watch::channel(0);
+    replays_tx.send_replace(1);
+    let over_pledge_items = watch::Sender::new(0);
+    let mut told = over_pledge_items.subscribe();
+
+    let custody = Custody::start(
+        me,
+        CustodySources {
+            membership,
+            store,
+            events,
+            replays,
+            over_pledge_items,
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), told.wait_for(|items| *items == 1))
+        .await
+        .expect("one item said to be over the pledge")
+        .unwrap();
     custody.shutdown();
 }

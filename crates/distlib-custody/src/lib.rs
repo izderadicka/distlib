@@ -4,6 +4,7 @@
 //! Nothing here is stored: custody is a function of the log's members and
 //! pledges and the catalogue's items, computed again at every start.
 
+mod coverage;
 mod emergency;
 mod pins;
 mod service;
@@ -18,13 +19,15 @@ use std::{
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{CustodyItem, Event, ItemId, MemberId};
+use distlib_core::{CustodyGroup, CustodyItem, Event, ItemId, MemberId};
 use distlib_store::Store;
 use tokio::{
     sync::{broadcast, watch},
     task::JoinHandle,
+    time::Instant,
 };
 
+pub use coverage::{COVERAGE_EVERY, Coverage, CoverageSources, MemberCoverage};
 pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
 pub use serving::PledgedOnly;
@@ -42,6 +45,9 @@ pub struct CustodySources {
     pub events: broadcast::Receiver<Event>,
     /// Bumped by each replay of the read model, which announces nothing.
     pub replays: watch::Receiver<u64>,
+    /// Where it says how many items are over this node's pledge, for its
+    /// heartbeat.
+    pub over_pledge_items: watch::Sender<u64>,
 }
 
 /// This node's custody, kept up to date by a background task.
@@ -87,6 +93,7 @@ impl Custody {
         let published = Published {
             view: view_tx,
             changes: changes.clone(),
+            over_pledge_items: sources.over_pledge_items.clone(),
         };
         let task = tokio::spawn(service::run(me, sources, published));
         Self {
@@ -121,6 +128,21 @@ impl Custody {
             .borrow()
             .as_ref()
             .is_some_and(|view| view.is_mine(item))
+    }
+
+    /// The settled group, and when each of `items` that custody knows had its
+    /// custodians worked out. `None` until custody has been computed.
+    pub(crate) fn assignments(
+        &self,
+        items: impl IntoIterator<Item = ItemId>,
+    ) -> Option<(CustodyGroup, Vec<(ItemId, Instant)>)> {
+        let view = self.inner.view.borrow();
+        let view = view.as_ref()?;
+        let since = items
+            .into_iter()
+            .filter_map(|item| view.assigned_since(item).map(|since| (item, since)))
+            .collect();
+        Some((view.group().clone(), since))
     }
 
     /// Each change to which items this node keeps, from now on.

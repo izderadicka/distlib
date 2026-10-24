@@ -194,6 +194,7 @@ async fn start_local_api(
         downloads: runtime.downloads().to_path_buf(),
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
+        coverage: runtime.coverage().clone(),
         pins: runtime.pins().counts(),
         storage: runtime.storage().clone(),
         collections: runtime.collections(),

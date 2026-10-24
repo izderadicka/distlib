@@ -7,6 +7,7 @@ use std::{
 
 use distlib_core::{CustodyGroup, CustodyItem, CustodyScore, ItemId, MemberId, within_pledge};
 use serde::Serialize;
+use tokio::time::Instant;
 
 use crate::CustodyChange;
 
@@ -39,6 +40,9 @@ struct Part {
     demand_bytes: u64,
     /// This node's score, when it is one of the item's custodians.
     score: Option<CustodyScore>,
+    /// When its custodians were last worked out: at the whole pass, or when
+    /// it arrived or its files changed since (D10 counts only older ones).
+    since: Instant,
 }
 
 /// What is kept of the assigned items when they are more than the pledge.
@@ -81,8 +85,9 @@ impl CustodyView {
             demand_bytes: 0,
             cut: None,
         };
+        let now = Instant::now();
         for item in items {
-            view.insert(item, scores.get(&item.item).copied());
+            view.insert(item, scores.get(&item.item).copied(), now);
         }
         view.cut_at_pledge();
         view
@@ -93,7 +98,16 @@ impl CustodyView {
     /// item it keeps is one more blob to keep; then, if other items moved
     /// across the pledge with it, that every item is to be read again.
     pub(crate) fn update(&mut self, item: &CustodyItem) -> Vec<CustodyChange> {
-        self.insert(item, self.group.custody_score(item, self.me));
+        // A rating or a review changes nothing about who keeps it.
+        let since = self
+            .items
+            .get(&item.item)
+            .filter(|old| {
+                old.size_bytes == item.size_bytes
+                    && old.demand_bytes == self.group.demand_bytes(item)
+            })
+            .map_or_else(Instant::now, |old| old.since);
+        self.insert(item, self.group.custody_score(item, self.me), since);
         let cut_before = self.cut_at_pledge();
         let mut changes = vec![CustodyChange::Item {
             item: item.item,
@@ -123,6 +137,15 @@ impl CustodyView {
 
     pub(crate) fn custodians(&self, item: &CustodyItem) -> Vec<MemberId> {
         self.group.custodians(item)
+    }
+
+    pub(crate) fn group(&self) -> &CustodyGroup {
+        &self.group
+    }
+
+    /// When `item`'s custodians were last worked out, if it is known.
+    pub(crate) fn assigned_since(&self, item: ItemId) -> Option<Instant> {
+        self.items.get(&item).map(|part| part.since)
     }
 
     pub(crate) fn status(&self) -> CustodyStatus {
@@ -171,11 +194,12 @@ impl CustodyView {
             .any(|item| cut_before.is_none_or(|cut| cut.kept.contains(&item)) != self.is_mine(item))
     }
 
-    fn insert(&mut self, item: &CustodyItem, score: Option<CustodyScore>) {
+    fn insert(&mut self, item: &CustodyItem, score: Option<CustodyScore>, since: Instant) {
         let part = Part {
             size_bytes: item.size_bytes,
             demand_bytes: self.group.demand_bytes(item),
             score,
+            since,
         };
         if let Some(old) = self.items.insert(item.item, part) {
             self.remove_from_totals(item.item, old);
@@ -361,5 +385,20 @@ mod tests {
         assert_eq!(changes, updated(a, false, true));
         assert_eq!(view.my_items(), HashSet::from([b, c, d]));
         assert_eq!(view.status().over_pledge, OverPledge::default());
+    }
+
+    #[test]
+    fn an_items_custodians_are_dated_anew_only_when_its_files_change() {
+        let (group, me, other) = pair();
+        let mut view = CustodyView::compute(group, me, &[item(1, other, 100)]);
+        let worked_out = view.assigned_since(ItemId::from_bytes([1; 32]));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // A rating or a review: the same files.
+        view.update(&item(1, other, 100));
+        assert_eq!(view.assigned_since(ItemId::from_bytes([1; 32])), worked_out);
+        // A file added.
+        view.update(&item(1, other, 150));
+        assert!(view.assigned_since(ItemId::from_bytes([1; 32])) > worked_out);
     }
 }
