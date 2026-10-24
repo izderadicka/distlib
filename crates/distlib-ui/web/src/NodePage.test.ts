@@ -65,8 +65,8 @@ function members(...extra: Members["members"]): Members {
     changed_at: 4,
     members: [
       // A founder names nobody, themselves included.
-      { member: ME, name: "", pledge_bytes: 1_500_000_000, required_pledge_bytes: 1_000_000_000, core: true },
-      { member: CAROL, name: "carol", pledge_bytes: 0, required_pledge_bytes: 50_000_000_000, core: false },
+      { member: ME, name: "", pledge_bytes: 1_500_000_000, required_pledge_bytes: 1_000_000_000, core: true, coverage: null },
+      { member: CAROL, name: "carol", pledge_bytes: 0, required_pledge_bytes: 50_000_000_000, core: false, coverage: null },
       ...extra,
     ],
   };
@@ -189,17 +189,17 @@ describe("the node page", () => {
           ],
         },
       },
-      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }),
+      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }),
     };
     open();
 
     await screen.findByText("dave");
     const [me, carol, dave] = cells();
     expect(me.slice(-2)).toEqual(["—", "—"]);
-    expect(carol[5]).toBe("yes");
-    expect(carol[6]).not.toContain("failed");
-    expect(dave[5]).toBe("—");
-    expect(dave[6]).toMatch(/ failed$/);
+    expect(carol[6]).toBe("yes");
+    expect(carol[7]).not.toContain("failed");
+    expect(dave[6]).toBe("—");
+    expect(dave[7]).toMatch(/ failed$/);
     const times = [...document.querySelectorAll("td time")].map((time) => time.getAttribute("datetime"));
     expect(times).toEqual([FINISHED_AT, FINISHED_AT]);
   });
@@ -293,6 +293,23 @@ describe("the node page", () => {
     expect(carol[4]).toBe("50 GB — short");
   });
 
+  it("shows each member's coverage once there is something to cover", async () => {
+    // Not judged; three of four; judged with nothing to hold of this node's.
+    const [me, carol] = members().members;
+    const dave = { member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false };
+    answer = {
+      ...answer,
+      members: {
+        ...members(),
+        members: [me, { ...carol, coverage: { expected: 4, announced: 3 } }, { ...dave, coverage: { expected: 0, announced: 0 } }],
+      },
+    };
+    open();
+
+    await screen.findByText("dave");
+    expect(cells().map((row) => row[5])).toEqual(["—", "3 of 4", "—"]);
+  });
+
   it("says when there is no storage limit", async () => {
     answer = { ...answer, status: { ...STATUS, storage: { ...STATUS.storage, limit_bytes: null } } };
     open();
@@ -337,19 +354,19 @@ describe("the node page", () => {
   it("loads again when the catalogue's swarm changes", async () => {
     const { events } = open();
     await screen.findByText("carol");
-    expect(cells()[1][5]).toBe("—");
+    expect(cells()[1][6]).toBe("—");
 
     answer = { ...answer, status: { ...STATUS, sync: { neighbours: [CAROL], last_sync: [] } } };
     events.tell({ type: "sync.status" });
 
-    await waitFor(() => expect(cells()[1][5]).toBe("yes"));
+    await waitFor(() => expect(cells()[1][6]).toBe("yes"));
   });
 
   it("loads again when the membership changes", async () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }) };
     events.tell({ type: "membership.changed" });
 
     await screen.findByText("dave");
@@ -359,7 +376,7 @@ describe("the node page", () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }) };
     events.tell({ type: "resync" });
 
     await screen.findByText("dave");

@@ -110,6 +110,14 @@ export interface Member {
   /** What it added requires it to pledge, and never less than the group's minimum (D8). */
   required_pledge_bytes: number;
   core: boolean;
+  /** `null` while this node does not judge it: offline, or what it holds not known yet (D10). */
+  coverage: MemberCoverage | null;
+}
+
+/** Of the items this node holds that a member should hold too, how many it announces. */
+export interface MemberCoverage {
+  expected: number;
+  announced: number;
 }
 
 /** `group.members`. */

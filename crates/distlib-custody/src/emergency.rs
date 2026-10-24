@@ -221,11 +221,11 @@ impl Emergency {
     }
 }
 
-/// Keeps `item` as cache, counted as used now so it is not the first to go.
+/// Keeps `item` as cache, counted as used first so it is never the first to
+/// go, not even just after it lands.
 async fn copy(keeper: &Keeper, item: ItemId) -> Result<(), KeepError> {
-    keeper.keep(item, KeepReason::Cache).await?;
     keeper.store.mark_used(item, SystemTime::now()).await?;
-    Ok(())
+    keeper.keep(item, KeepReason::Cache).await
 }
 
 #[cfg(test)]

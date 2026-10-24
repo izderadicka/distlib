@@ -201,7 +201,7 @@
     <table>
       <thead>
         <tr>
-          <th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th><th class="number">Required</th><th>Neighbour</th><th>Last sync</th>
+          <th>Name</th><th>Member</th><th>Role</th><th class="number">Pledge</th><th class="number">Required</th><th>Coverage</th><th>Neighbour</th><th>Last sync</th>
         </tr>
       </thead>
       <tbody>
@@ -216,6 +216,7 @@
             <td class="number">
               {bytes(member.required_pledge_bytes)}{member.pledge_bytes < member.required_pledge_bytes ? " — short" : ""}
             </td>
+            <td>{member.coverage?.expected ? `${member.coverage.announced} of ${member.coverage.expected}` : "—"}</td>
             <td>{neighbours.has(member.member) ? "yes" : "—"}</td>
             <td>
               {#if last}

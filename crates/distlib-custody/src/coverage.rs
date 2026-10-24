@@ -12,7 +12,7 @@ use distlib_consensus::MembershipState;
 use distlib_core::{CustodyGroup, CustodyItem, ItemId, MemberId};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Holdings};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     sync::watch,
     task::{JoinError, JoinHandle},
@@ -26,7 +26,7 @@ pub const COVERAGE_EVERY: Duration = Duration::from_secs(30);
 
 /// One member's coverage: of the items this node holds that the member
 /// should hold too, how many it announces.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberCoverage {
     pub expected: usize,
     pub announced: usize,
