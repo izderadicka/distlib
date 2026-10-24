@@ -277,7 +277,7 @@ async fn two_stores_can_share_one_database() {
 }
 
 #[tokio::test]
-async fn events_are_served_at_most_a_page_at_a_time_and_blanks_are_left_out() {
+async fn events_are_served_a_page_at_a_time_by_count_and_by_bytes_and_blanks_are_left_out() {
     let (mut store, _dir) = store();
     let blank = Entry {
         log_id: log_id(1, 2),
@@ -294,15 +294,18 @@ async fn events_are_served_at_most_a_page_at_a_time_and_blanks_are_left_out() {
         .await
         .unwrap();
 
-    let served = |after, at_most| {
-        store
-            .events_after(after, 5, at_most)
-            .unwrap()
-            .into_iter()
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
+    let served = |after, at_most, at_most_bytes| {
+        let page = store
+            .events_after(after, 5, at_most, at_most_bytes)
+            .unwrap();
+        let indices: Vec<u64> = page.events.into_iter().map(|(index, _)| index).collect();
+        (indices, page.cut_short)
     };
-    assert_eq!(served(0, 2), vec![1, 3]);
-    assert_eq!(served(3, 2), vec![4, 5]);
-    assert_eq!(served(0, 10), vec![1, 3, 4, 5]);
+    let any_size = usize::MAX;
+    assert_eq!(served(0, 2, any_size), (vec![1, 3], true));
+    assert_eq!(served(3, 2, any_size), (vec![4, 5], false));
+    assert_eq!(served(0, 10, any_size), (vec![1, 3, 4, 5], false));
+    // Too few bytes for even one: one all the same, so a page always moves on.
+    assert_eq!(served(0, 10, 1), (vec![1], true));
+    assert_eq!(served(4, 10, 1), (vec![5], false));
 }

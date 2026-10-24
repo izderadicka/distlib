@@ -254,7 +254,7 @@ the same allowlist, but fetching it from the core nodes rather than voting. Noth
 configures that: a node not in the list follows, and once the group exists the log
 decides rather than the config. The log is never cut short: every signed event since
 the founding one is kept as the group's history, and a member joining later reads
-all of it, a thousand events at a time.
+all of it, a page at a time.
 
 **9. Hand them a ticket** instead of talking them through the config. Admitting
 somebody puts them in the log; a ticket tells them where the group is:

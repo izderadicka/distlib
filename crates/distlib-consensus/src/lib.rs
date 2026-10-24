@@ -22,9 +22,9 @@ pub use error::{ConsensusError, Result};
 pub use event::{MAX_DISPLAY_NAME, MAX_REASON, MemberRecord, MembershipEvent, Timestamp};
 pub use node::{MembershipNode, RAFT_DB, alpns};
 pub use raft::{
-    EVENTS_PER_FETCH, FetchFailed, Fetched, LogStore, MemberlogClient, MemberlogProtocol,
-    ProposeError, ProposeOutcome, RaftClient, RaftNetworkFactoryImpl, RaftProtocol, Source,
-    StateMachineStore, TypeConfig,
+    BYTES_PER_FETCH, EVENTS_PER_FETCH, FetchFailed, Fetched, LogPage, LogStore, MemberlogClient,
+    MemberlogProtocol, ProposeError, ProposeOutcome, RaftClient, RaftNetworkFactoryImpl,
+    RaftProtocol, Source, StateMachineStore, TypeConfig,
 };
 pub use signed::SignedEvent;
 pub use state::{MembershipState, Proposal};

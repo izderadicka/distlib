@@ -39,7 +39,9 @@ use crate::{
     error::ConsensusError,
     raft::seat::Seat,
     raft::{
-        log_store::LogStore, network::MAX_RPC_BYTES, state_machine::StateMachineStore,
+        log_store::{LogPage, LogStore},
+        network::MAX_RPC_BYTES,
+        state_machine::StateMachineStore,
         types::TypeConfig,
     },
     signed::SignedEvent,
@@ -147,7 +149,7 @@ pub enum Fetched {
         /// forever.
         up_to: u64,
         /// The events in `(cursor, up_to]`, each with its log index: at most
-        /// [`EVENTS_PER_FETCH`].
+        /// [`EVENTS_PER_FETCH`] of them, in at most [`BYTES_PER_FETCH`].
         events: Vec<(u64, SignedEvent)>,
         /// Whether events past `up_to` are applied already, to be asked for at
         /// once rather than at the next poll.
@@ -161,10 +163,15 @@ pub enum Fetched {
 }
 
 /// The most events one answer holds. The log is never purged (C43), so a
-/// joiner reads all of it, and an answer must stay far below
-/// [`MAX_RPC_BYTES`]: an event is about 600 bytes, so a page is under a
-/// megabyte.
+/// joiner reads all of it, a page at a time: an event is a few hundred bytes,
+/// so a page of them is under a megabyte.
 pub const EVENTS_PER_FETCH: usize = 1_000;
+
+/// The most bytes of events one answer holds, as stored, so it stays below
+/// [`MAX_RPC_BYTES`] whatever they are: a core group change carries a list of
+/// addresses bounded only by the request that proposed it. One event is
+/// always served, however large, and it fitted in that request.
+pub const BYTES_PER_FETCH: usize = 4 * 1024 * 1024;
 
 /// Where a follower should ask next, and who is worth asking first.
 ///
@@ -347,10 +354,13 @@ impl MemberlogProtocol {
         // decision the group has not finished making.
         let applied = self.state_machine.last_applied_index();
 
-        match self.log.events_after(cursor, applied, EVENTS_PER_FETCH) {
-            Ok(events) => {
+        match self
+            .log
+            .events_after(cursor, applied, EVENTS_PER_FETCH, BYTES_PER_FETCH)
+        {
+            Ok(LogPage { events, cut_short }) => {
                 let up_to = match events.last() {
-                    Some((last, _)) if events.len() == EVENTS_PER_FETCH => *last,
+                    Some((last, _)) if cut_short => *last,
                     _ => applied,
                 };
                 Fetched::Entries {

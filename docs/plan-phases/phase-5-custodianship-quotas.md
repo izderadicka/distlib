@@ -622,12 +622,14 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   refusal stays on the core nodes as the group's audit history, and a follower can always read
   from index 0, so P1-29's `TooFarBehind` can no longer happen. Decided with Ivan after measuring:
   about 600 bytes per event on disk, so a busy group of 1,000 members (about 3,800 entries a year)
-  holds about 230 MB after a hundred years; a joiner verifies the whole log once.
+  holds about 230 MB after a hundred years; a joiner verifies the whole log once. *(Measured in
+  P5-23: 299 bytes an entry, about 120 MB a century, a joiner of 100,000 entries caught up in 6 s.)*
   **Acceptance:** a member joining after the leader has taken a snapshot reads every entry from the
   founding one onward, settings included, and the log's first index stays 1; the measurement
   repeated at 100,000 entries — size on disk, and how long a joiner takes to catch up.
   *Paged* (P5-23): one answer held the whole log, which past about 27,000 events would not fit
-  in an answer at all; it now holds a thousand events, and a follower asks for the next at once.
+  in an answer at all; it now holds a thousand events or 4 MiB of them, whichever comes first, and
+  a follower asks for the next at once.
 
 - **5c-1 — coverage from heartbeats (D10).** Per member, of the items this node holds and that member
   should hold too, the share it announces; shown in the members list. *Should hold* is within that
