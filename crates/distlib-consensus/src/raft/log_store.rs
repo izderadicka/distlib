@@ -77,6 +77,15 @@ pub(crate) fn clear_for_promotion(txn: &WriteTransaction) -> StorageResult<()> {
     Ok(())
 }
 
+/// A page of the log's membership events.
+#[derive(Debug, Default)]
+pub struct LogPage {
+    /// Each with its log index.
+    pub events: Vec<(u64, SignedEvent)>,
+    /// Whether the page stopped at a limit with more of the range after it.
+    pub cut_short: bool,
+}
+
 /// A Raft log stored in a redb database.
 ///
 /// Cheap to clone — clones share one database handle. openraft asks for a
@@ -154,8 +163,9 @@ impl LogStore {
         .await
     }
 
-    /// The id of the last entry still present, ignoring anything purged.
-    /// The membership events in `(after, up_to]`, with their log indices.
+    /// The first membership events in `(after, up_to]`, with their log
+    /// indices: at most `at_most` of them, and no more than `at_most_bytes` as
+    /// stored, but always one if there is one.
     ///
     /// The serving half of `distlib/memberlog/0`. Raft's blank entries are left
     /// out — they carry no membership event, and a follower folds events rather
@@ -165,37 +175,40 @@ impl LogStore {
     /// `up_to` is the caller's business, not this method's: only entries the
     /// state machine has *applied* may be served, and the log does not know
     /// what has been applied.
-    pub fn events_after(&self, after: u64, up_to: u64) -> StorageResult<Vec<(u64, SignedEvent)>> {
+    pub fn events_after(
+        &self,
+        after: u64,
+        up_to: u64,
+        at_most: usize,
+        at_most_bytes: usize,
+    ) -> StorageResult<LogPage> {
         let fail = reading(ErrorSubject::Logs);
         let txn = self.db.begin_read().map_err(|source| fail(&source))?;
         let table = txn.open_table(LOG).map_err(|source| fail(&source))?;
 
-        table
+        let mut page = LogPage::default();
+        let mut bytes = 0;
+        for row in table
             .range(after.saturating_add(1)..=up_to)
             .map_err(|source| fail(&source))?
-            .map(|row| {
-                let (index, value) = row.map_err(|source| fail(&source))?;
-                let entry: Entry =
-                    postcard::from_bytes(value.value()).map_err(|source| fail(&source))?;
-                Ok(match entry.payload {
-                    EntryPayload::Normal(event) => Some((index.value(), event)),
-                    _ => None,
-                })
-            })
-            .filter_map(Result::transpose)
-            .collect()
+        {
+            let (index, value) = row.map_err(|source| fail(&source))?;
+            let stored = value.value();
+            let entry: Entry = postcard::from_bytes(stored).map_err(|source| fail(&source))?;
+            let EntryPayload::Normal(event) = entry.payload else {
+                continue;
+            };
+            bytes += stored.len();
+            if page.events.len() == at_most || (!page.events.is_empty() && bytes > at_most_bytes) {
+                page.cut_short = true;
+                break;
+            }
+            page.events.push((index.value(), event));
+        }
+        Ok(page)
     }
 
-    /// The lowest index this log can still serve.
-    ///
-    /// Everything below has been purged after a snapshot, so a follower asking
-    /// from further back cannot be caught up from entries alone.
-    pub fn first_available(&self) -> StorageResult<u64> {
-        let purged: Option<LogId<NodeId>> =
-            self.read_meta(LAST_PURGED, ErrorSubject::Logs)?.flatten();
-        Ok(purged.map_or(1, |log_id| log_id.index.saturating_add(1)))
-    }
-
+    /// The id of the last entry still present, ignoring anything purged.
     fn last_log_id(&self) -> StorageResult<Option<LogId<NodeId>>> {
         let fail = reading(ErrorSubject::Logs);
         let txn = self.db.begin_read().map_err(|source| fail(&source))?;

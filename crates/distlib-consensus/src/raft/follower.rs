@@ -61,14 +61,6 @@ const IDLE_POLL: Duration = Duration::from_secs(30);
 /// leaving quickly, where having nothing new to fetch is not.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// How long to wait when catching up is impossible.
-///
-/// Long, because nothing this loop does will change the answer: the entries
-/// this node needs have been purged everywhere, and it stays stuck until it can
-/// be given the state itself. Retrying at [`RETRY_DELAY`] would fill the log
-/// with a message that is already as loud as it needs to be.
-const STRANDED_BACKOFF: Duration = Duration::from_secs(60);
-
 /// How long to wait after being refused by everyone who answered.
 ///
 /// Only reached by a node that has never held the log — one waiting to be
@@ -175,15 +167,18 @@ pub async fn follow(following: Following, mut hints: Hints) {
         // `UpToDate` counts as well as `Fetched`, and that is not a detail: a
         // node that restarts with its log already current never sees `Fetched`,
         // and a restart is the case this matters most for — see P2-17.
-        if !addresses_asked_for && matches!(progress, Progress::Fetched | Progress::UpToDate) {
+        if !addresses_asked_for && matches!(progress, Progress::Fetched { .. } | Progress::UpToDate)
+        {
             addresses_asked_for = ask_for_the_directory(me, &client, &sources).await;
         }
 
         let delay = match progress {
-            // A source hands over everything it has applied in one answer, so
-            // there is nothing waiting behind a successful fetch. Asking again
-            // at once would buy an empty round trip per change.
-            Progress::Fetched | Progress::UpToDate => IDLE_POLL,
+            // A page short of what the source has applied: the rest at once.
+            Progress::Fetched { more: true } => Duration::ZERO,
+            // The source handed over everything it has applied, so there is
+            // nothing waiting behind it. Asking again at once would buy an
+            // empty round trip per change.
+            Progress::Fetched { more: false } | Progress::UpToDate => IDLE_POLL,
 
             // Somebody else may be reachable, or this one may come back.
             Progress::Unreachable => RETRY_DELAY,
@@ -192,9 +187,8 @@ pub async fn follow(following: Following, mut hints: Hints) {
             // different one cannot help, so try the same thing again shortly.
             Progress::NotStored => RETRY_DELAY,
 
-            // Nothing this loop does will fix either of these.
+            // Nothing this loop does will fix this.
             Progress::NoSources => IDLE_POLL,
-            Progress::Stranded => STRANDED_BACKOFF,
 
             // Every core node that answered says this node is not in the
             // group. Which of the two things that means depends on whether
@@ -265,8 +259,8 @@ async fn wait_for_a_reason(delay: Duration, hints: &mut Hints, cursor: u64) {
 /// because the right thing to do next differs for each: retry soon, retry
 /// slowly, or accept that retrying will not help.
 enum Progress {
-    /// Entries arrived and were applied.
-    Fetched,
+    /// Entries arrived and were applied, and whether the source has more.
+    Fetched { more: bool },
 
     /// A source answered and had nothing this node has not already got.
     UpToDate,
@@ -286,14 +280,6 @@ enum Progress {
     /// from a node that is behaving perfectly would be the wrong response to
     /// local storage failing.
     NotStored,
-
-    /// This node is behind what the log still holds.
-    ///
-    /// Nothing here recovers from this — see [`Fetched::TooFarBehind`]. It
-    /// needs the state itself, which no protocol serves yet.
-    ///
-    /// [`Fetched::TooFarBehind`]: crate::Fetched::TooFarBehind
-    Stranded,
 
     /// There is nowhere to ask.
     ///
@@ -377,6 +363,7 @@ async fn fetch_log_from_core_nodes(
             Ok(Fetched::Entries {
                 up_to,
                 events,
+                more,
                 source,
             }) => {
                 // Take the new view of the group before applying, so that even
@@ -394,7 +381,7 @@ async fn fetch_log_from_core_nodes(
                     return Progress::NotStored;
                 }
                 tracing::debug!(count = events.len(), up_to, from = %member, "followed the log");
-                return Progress::Fetched;
+                return Progress::Fetched { more };
             }
 
             // Reachable, but with nothing to give: a core node that has not
@@ -402,20 +389,6 @@ async fn fetch_log_from_core_nodes(
             Ok(Fetched::NoGroup) => {
                 answered_otherwise += 1;
                 tracing::debug!(from = %member, "asked a node that has no group yet");
-            }
-
-            // Unrecoverable from entries alone, and asking another core node
-            // will not help — they purge at the same watermark.
-            Ok(Fetched::TooFarBehind { first_available }) => {
-                tracing::error!(
-                    cursor,
-                    first_available,
-                    from = %member,
-                    "this node is behind what the log still holds; it needs the membership \
-                     state itself, which nothing serves yet — delete this node's data \
-                     directory and rejoin, or wait for snapshot transfer"
-                );
-                return Progress::Stranded;
             }
 
             Err(error) if error.refused => {

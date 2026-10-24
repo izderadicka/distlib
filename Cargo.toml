@@ -174,3 +174,16 @@ unsafe_code = "deny"
 unwrap_used = "deny"
 # A ceiling on function length; the threshold is in clippy.toml.
 too_many_lines = "warn"
+
+# Signatures are checked on every membership event a node folds, and in a
+# dev build the curve arithmetic is some 200 times slower than in release:
+# about 7 ms an event, where release takes 37 µs. Optimised here so tests that
+# fold thousands of events take seconds, as curve25519-dalek itself advises.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

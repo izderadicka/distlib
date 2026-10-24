@@ -157,6 +157,11 @@ impl Peer {
         let _ = self.router.shutdown().await;
     }
 
+    /// Where this node keeps its data.
+    pub fn dir(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+
     pub fn record(&self, name: &str) -> MemberRecord {
         MemberRecord {
             member_id: self.id,

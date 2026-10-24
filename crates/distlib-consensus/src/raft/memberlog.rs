@@ -39,7 +39,9 @@ use crate::{
     error::ConsensusError,
     raft::seat::Seat,
     raft::{
-        log_store::LogStore, network::MAX_RPC_BYTES, state_machine::StateMachineStore,
+        log_store::{LogPage, LogStore},
+        network::MAX_RPC_BYTES,
+        state_machine::StateMachineStore,
         types::TypeConfig,
     },
     signed::SignedEvent,
@@ -139,28 +141,37 @@ enum Response {
 pub enum Fetched {
     /// Committed membership events, and how far they reach.
     Entries {
-        /// The serving node's applied index — the caller's next cursor.
+        /// The caller's next cursor: the serving node's applied index, or the
+        /// last event served when there are more than one answer holds.
         ///
-        /// Not the last event's index, because most entries carry no event: a
-        /// cursor taken from the last event would re-request the gap forever.
+        /// Not always the last event's index, because most entries carry no
+        /// event: a cursor taken from the last event would re-request the gap
+        /// forever.
         up_to: u64,
-        /// The events in `(cursor, up_to]`, each with its log index.
+        /// The events in `(cursor, up_to]`, each with its log index: at most
+        /// [`EVENTS_PER_FETCH`] of them, in at most [`BYTES_PER_FETCH`].
         events: Vec<(u64, SignedEvent)>,
+        /// Whether events past `up_to` are applied already, to be asked for at
+        /// once rather than at the next poll.
+        more: bool,
         /// Where to ask next time.
         source: Source,
     },
 
     /// The serving node has no group yet, so there is nothing to hand over.
     NoGroup,
-
-    /// The cursor is below what this node's log still holds.
-    ///
-    /// Everything before `first_available` was purged after a snapshot. A
-    /// follower this far behind cannot be caught up from entries alone and
-    /// needs the state itself — which is phase 1b's next problem, not this
-    /// one, since the log is tiny and openraft snapshots at 5000 entries.
-    TooFarBehind { first_available: u64 },
 }
+
+/// The most events one answer holds. The log is never purged (C43), so a
+/// joiner reads all of it, a page at a time: an event is a few hundred bytes,
+/// so a page of them is under a megabyte.
+pub const EVENTS_PER_FETCH: usize = 1_000;
+
+/// The most bytes of events one answer holds, as stored, so it stays below
+/// [`MAX_RPC_BYTES`] whatever they are: a core group change carries a list of
+/// addresses bounded only by the request that proposed it. One event is
+/// always served, however large, and it fitted in that request.
+pub const BYTES_PER_FETCH: usize = 4 * 1024 * 1024;
 
 /// Where a follower should ask next, and who is worth asking first.
 ///
@@ -199,8 +210,8 @@ pub enum ProposeOutcome {
 
 /// Why asking for the log produced nothing.
 ///
-/// One case, because the outcomes that are not failures — no group yet, purged
-/// past the cursor — are [`Fetched`] variants rather than errors.
+/// One case, because the outcome that is not a failure — no group yet — is a
+/// [`Fetched`] variant rather than an error.
 #[derive(Debug, thiserror::Error)]
 #[error("could not fetch the log from {member}: {message}")]
 pub struct FetchFailed {
@@ -332,7 +343,7 @@ impl MemberlogProtocol {
             .collect()
     }
 
-    /// Everything committed since `cursor`.
+    /// What is committed since `cursor`, a page at a time.
     fn fetch(&self, raft: &Raft<TypeConfig>, cursor: u64) -> Fetched {
         if self.state_machine.membership().group_id().is_none() {
             return Fetched::NoGroup;
@@ -341,27 +352,24 @@ impl MemberlogProtocol {
         // Only what has been *applied*. Entries beyond it are committed but not
         // yet part of anybody's membership, and serving them would hand over a
         // decision the group has not finished making.
-        let up_to = self.state_machine.last_applied_index();
+        let applied = self.state_machine.last_applied_index();
 
-        match self.log.first_available() {
-            Ok(first) if cursor.saturating_add(1) < first => {
-                return Fetched::TooFarBehind {
-                    first_available: first,
+        match self
+            .log
+            .events_after(cursor, applied, EVENTS_PER_FETCH, BYTES_PER_FETCH)
+        {
+            Ok(LogPage { events, cut_short }) => {
+                let up_to = match events.last() {
+                    Some((last, _)) if cut_short => *last,
+                    _ => applied,
                 };
+                Fetched::Entries {
+                    up_to,
+                    events,
+                    more: up_to < applied,
+                    source: source(raft),
+                }
             }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, "could not read the purge watermark");
-                return Fetched::NoGroup;
-            }
-        }
-
-        match self.log.events_after(cursor, up_to) {
-            Ok(events) => Fetched::Entries {
-                up_to,
-                events,
-                source: source(raft),
-            },
             Err(error) => {
                 // Nothing to hand over rather than a protocol error: the caller
                 // will ask another core node, which is the right response to
@@ -602,11 +610,11 @@ impl MemberlogClient {
         self.propose(leader, addr, event).await
     }
 
-    /// Asks `member` for everything committed since `cursor`.
+    /// Asks `member` for what is committed since `cursor`, a page at a time.
     ///
     /// The answer is an outcome, not a success or a failure: a node with no
-    /// group and one that has purged past the cursor have both answered
-    /// correctly, and a follower does something different with each.
+    /// group yet has answered correctly, and a follower does something
+    /// different with that.
     pub async fn fetch(
         &self,
         member: MemberId,
