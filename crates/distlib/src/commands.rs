@@ -1342,12 +1342,7 @@ pub async fn members(paths: &Paths) -> Result<()> {
         listing.members.iter().filter(|member| member.core).count()
     );
     for member in &listing.members {
-        println!(
-            "  {}{}{}",
-            member.name,
-            if member.core { "  core" } else { "" },
-            coverage_clause(member.coverage)
-        );
+        println!("{}", member_line(member));
     }
     Ok(())
 }
@@ -1491,6 +1486,16 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
             })
             .collect(),
     })
+}
+
+/// One member's line in `distlib members`.
+fn member_line(member: &Listed) -> String {
+    format!(
+        "  {}{}{}",
+        member.name,
+        if member.core { "  core" } else { "" },
+        coverage_clause(member.coverage)
+    )
 }
 
 /// A member's coverage (D10) as a clause: none while it is not judged or
@@ -2020,6 +2025,8 @@ mod tests {
         );
         let unjudged = live_member(&json!({ "member": "abc", "coverage": null }));
         assert_eq!(unjudged.coverage, None);
+        assert_eq!(member_line(&judged), "  carol (abc)  coverage 3 of 4");
+        assert_eq!(member_line(&unjudged), "  abc");
     }
 
     #[test]
