@@ -19,8 +19,8 @@ use std::{
 use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId,
-    ItemKind, MemberId, NodeAddr, Rating, Review, SignedAddress, Wish, WishFields, WishId,
-    WishStatus,
+    ItemKind, MemberId, NodeAddr, ProbeFailure, Rating, Review, SignedAddress, Wish, WishFields,
+    WishId, WishStatus,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, CatalogueStorage, catalogue_key};
@@ -323,6 +323,77 @@ async fn a_rating_forged_in_another_members_name_counts_on_no_node() {
             BTreeMap::from([(bob, rating(5))]),
             "on {name}"
         );
+    }
+
+    for node in &nodes {
+        node.shutdown().await;
+    }
+}
+
+/// Phase 5's D12: alice's failed probe of bob reaches every node, carol's
+/// forgery of one in alice's name counts on none, and once alice clears hers
+/// it is gone from every node.
+#[tokio::test]
+async fn a_probe_failure_reaches_every_node_until_its_prober_clears_it() {
+    let ([alice, bob, carol], nodes, _logs) = three_founders().await;
+    let failure = ProbeFailure {
+        item: ItemId::from_bytes([9; 32]),
+        blob: ContentHash::from_bytes([7; 32]),
+        chunk: 3,
+        in_a_row: 1,
+    };
+    nodes[0]
+        .catalogue
+        .record_probe_failure(bob, &failure)
+        .await
+        .unwrap();
+    let forged = CommunityKey::ProbeFailure {
+        custodian: carol,
+        prober: alice,
+    };
+    nodes[2]
+        .catalogue
+        .put(forged.encode(), failure.encode())
+        .await
+        .unwrap();
+
+    let failures_on = |node: &Node| {
+        let catalogue = node.catalogue.clone();
+        async move {
+            let failures = catalogue.probe_failures().await.unwrap();
+            failures
+                .iter()
+                .map(|recorded| (recorded.custodian, recorded.prober, recorded.failure))
+                .collect::<Vec<_>>()
+        }
+    };
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        until(
+            &format!("alice's failure and the forgery reach {name}"),
+            || async {
+                node.catalogue
+                    .get(forged.encode())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    && !failures_on(node).await.is_empty()
+            },
+        )
+        .await;
+        assert_eq!(
+            failures_on(node).await,
+            [(bob, alice, failure)],
+            "on {name}"
+        );
+    }
+
+    nodes[0].catalogue.clear_probe_failure(bob).await.unwrap();
+    for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
+        until(&format!("the clearing reaches {name}"), || async {
+            failures_on(node).await.is_empty()
+        })
+        .await;
     }
 
     for node in &nodes {

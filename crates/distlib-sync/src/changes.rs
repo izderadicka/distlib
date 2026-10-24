@@ -375,7 +375,8 @@ fn note(batch: &mut Batch, key: &[u8]) -> bool {
         Some(CommunityKey::Wish { wish, .. } | CommunityKey::WishComment { wish, .. }) => {
             batch.changed_wishes.insert(wish)
         }
-        None => false,
+        // Read from the catalogue where they are needed, not by the read model.
+        Some(CommunityKey::ProbeFailure { .. }) | None => false,
     }
 }
 
