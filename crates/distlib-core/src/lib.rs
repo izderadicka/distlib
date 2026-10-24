@@ -35,7 +35,7 @@ pub use config::{
     ApiConfig, AvailabilityConfig, Config, ConsensusConfig, CoreMember, LibraryConfig, NetConfig,
     RelayMode, StorageConfig, TransferConfig,
 };
-pub use custody::{CustodyGroup, CustodyItem, WeightRule};
+pub use custody::{CustodyGroup, CustodyItem, CustodyScore, WeightRule, within_pledge};
 pub use error::CoreError;
 pub use event::{Event, Progress, TaskId};
 pub use group_settings::{GroupSettings, PledgeStanding};
