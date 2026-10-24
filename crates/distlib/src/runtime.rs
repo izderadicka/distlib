@@ -28,7 +28,7 @@ use distlib_core::{
 };
 use distlib_custody::{
     COVERAGE_EVERY, Coverage, CoverageSources, Custody, CustodySources, PinManager, PinSources,
-    PledgedOnly, Storage,
+    PledgedOnly, ProbeSources, Probes, Storage,
 };
 use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
@@ -254,6 +254,11 @@ impl Runtime {
         &self.keeping.coverage
     }
 
+    /// This node's probes of its co-custodians.
+    pub fn probes(&self) -> &Probes {
+        &self.keeping.probes
+    }
+
     /// What keeps this node's custody in its blob store.
     pub fn pins(&self) -> &PinManager {
         &self.keeping.pins
@@ -322,6 +327,7 @@ impl Runtime {
         // running against a closing document logs failures about a shutdown.
         self.projection.shutdown();
         self.keeping.coverage.shutdown();
+        self.keeping.probes.shutdown();
         self.keeping.pins.shutdown();
         self.keeping.custody.shutdown();
         if let Some(transfer_limits) = &self.transfer_limits {
@@ -439,6 +445,8 @@ struct Keeping {
     custody: Custody,
     /// How much of what this node holds each other custodian announces.
     coverage: Coverage,
+    /// Whether they hold it, a chunk at a time.
+    probes: Probes,
     pins: PinManager,
     /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
     storage: Storage,
@@ -578,9 +586,20 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
         },
         coverage_every(inputs.config),
     );
+    let probes = Probes::start(ProbeSources {
+        me,
+        custody: custody.clone(),
+        membership: inputs.node.subscribe(),
+        store: inputs.store.clone(),
+        blobs: inputs.blobs.clone(),
+        availability: inputs.availability.clone(),
+        holdings: inputs.catalogue.holdings().clone(),
+        catalogue: inputs.catalogue.clone(),
+    });
     Keeping {
         custody,
         coverage,
+        probes,
         pins,
         storage,
     }

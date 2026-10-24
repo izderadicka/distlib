@@ -7,6 +7,7 @@
 mod coverage;
 mod emergency;
 mod pins;
+mod probes;
 mod service;
 mod serving;
 mod settling;
@@ -29,6 +30,7 @@ use tokio::{
 
 pub use coverage::{COVERAGE_EVERY, Coverage, CoverageSources, MemberCoverage};
 pub use pins::{PinCounts, PinManager, PinSources};
+pub use probes::{PROBE_WITHIN, ProbeCounts, ProbeSources, Probes};
 use service::Published;
 pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
@@ -139,6 +141,15 @@ impl Custody {
             .filter_map(|item| view.assigned_since(item).map(|since| (item, since)))
             .collect();
         Some((view.group().clone(), since))
+    }
+
+    /// The settled group. `None` until custody has been computed.
+    pub(crate) fn group(&self) -> Option<CustodyGroup> {
+        self.inner
+            .view
+            .borrow()
+            .as_ref()
+            .map(|view| view.group().clone())
     }
 
     /// Each change to which items this node keeps, from now on.
