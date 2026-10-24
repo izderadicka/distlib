@@ -105,6 +105,8 @@ struct Inner {
     /// published by the caller, so nothing can apply an entry and forget to say
     /// so.
     membership: watch::Sender<MembershipState>,
+    /// Published only after the corresponding state-machine transaction commits.
+    raft_membership: watch::Sender<StoredMembership<NodeId, NodeAddr>>,
 }
 
 /// The membership state machine, persisted in redb.
@@ -128,12 +130,17 @@ impl StateMachineStore {
                 applied: Mutex::new(Applied::default()),
                 snapshot_seq: AtomicU64::new(0),
                 membership: watch::channel(MembershipState::new()).0,
+                raft_membership: watch::channel(StoredMembership::default()).0,
             }),
         };
         if let Some(applied) =
             read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
             store.inner.membership.send_replace(applied.state.clone());
+            store
+                .inner
+                .raft_membership
+                .send_replace(applied.membership.clone());
             *store.lock()? = applied;
         }
         Ok(store)
@@ -157,6 +164,23 @@ impl StateMachineStore {
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
         self.peek().state.clone()
+    }
+
+    /// The durable, applied Raft configuration, including changes that do not
+    /// alter application membership. Effective (uncommitted) configurations
+    /// must never authorize retirement.
+    pub(crate) fn raft_membership(&self) -> watch::Receiver<StoredMembership<NodeId, NodeAddr>> {
+        self.inner.raft_membership.subscribe()
+    }
+
+    fn announce_raft(&self, membership: StoredMembership<NodeId, NodeAddr>) {
+        self.inner.raft_membership.send_if_modified(|current| {
+            if *current == membership {
+                return false;
+            }
+            *current = membership;
+            true
+        });
     }
 
     /// The last log index this node has applied.
@@ -332,6 +356,7 @@ impl StateMachineStore {
         // Announced like any other change, and this one matters more than most:
         // it is what tells the allowlist task to stop publishing and hold what
         // it has.
+        self.announce_raft(StoredMembership::default());
         self.announce(&MembershipState::new());
         Ok(())
     }
@@ -473,7 +498,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is ever held across an await.
-        let (encoded, derived) = {
+        let (encoded, derived, raft_membership) = {
             let mut applied = self.lock()?;
             for entry in entries {
                 let index = entry.log_id.index;
@@ -531,7 +556,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 }
             }
             let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
-            (encoded, applied.state.clone())
+            (encoded, applied.state.clone(), applied.membership.clone())
         };
 
         write_key(
@@ -545,6 +570,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // After the commit: an observer told about a membership the node could
         // still lose to a crash would be enforcing one that never happened.
+        self.announce_raft(raft_membership);
         self.announce(&derived);
         Ok(responses)
     }
@@ -584,6 +610,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         )?;
 
         let membership = applied.state.clone();
+        let raft_membership = applied.membership.clone();
         *self.lock()? = applied;
 
         // Both keys in one transaction. The applied state and the snapshot it
@@ -612,6 +639,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // about an expulsion. Without this the allowlist would keep admitting a
         // member the group removed while that node was away, until some later
         // entry happened to change the membership again.
+        self.announce_raft(raft_membership);
         self.announce(&membership);
         Ok(())
     }

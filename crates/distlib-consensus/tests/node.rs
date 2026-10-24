@@ -2725,3 +2725,180 @@ async fn a_node_promoted_after_the_log_was_purged_is_sent_a_snapshot() {
     joiner.shutdown().await;
     founder.shutdown().await;
 }
+
+/// Finding 1 in #154: applying CoreGroupChanged must not shut down the old
+/// majority before it can commit its own replacement. Choose the current
+/// leader as a departing voter so the successor must finish reconciliation.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn retiring_the_leader_and_old_majority_preserves_writes() {
+    let peers = a_founded_trio().await;
+    let leader = peers
+        .iter()
+        .find_map(|peer| {
+            peer.node
+                .raft()
+                .and_then(|raft| raft.metrics().borrow().current_leader)
+        })
+        .unwrap();
+    let survivor = peers
+        .iter()
+        .position(|peer| RawMemberId::from(peer.id) != leader)
+        .unwrap();
+    peers[0]
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(peers[survivor].id, peers[survivor].addr.clone())],
+            },
+            &peers[0].secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&peers[1], "the shrink proposal").await;
+    peers[1]
+        .node
+        .propose(MembershipEvent::Approved { proposal }, &peers[1].secret)
+        .await
+        .unwrap();
+
+    until_upto(
+        PATIENTLY,
+        "uniform singleton and retired old majority",
+        || {
+            peers.iter().enumerate().all(|(index, peer)| {
+                if index != survivor {
+                    return peer.node.raft().is_none();
+                }
+                peer.node.raft().is_some_and(|raft| {
+                    let metrics = raft.metrics();
+                    let seen = metrics.borrow();
+                    seen.membership_config.membership().get_joint_config().len() == 1
+                        && seen.membership_config.voter_ids().collect::<Vec<_>>()
+                            == vec![RawMemberId::from(peer.id)]
+                        && seen.last_applied >= *seen.membership_config.log_id()
+                })
+            })
+        },
+    )
+    .await;
+    peers[survivor]
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: peers[survivor].id,
+                pledge_bytes: PLEDGE,
+            },
+            &peers[survivor].secret,
+        )
+        .await
+        .unwrap();
+    until_upto(PATIENTLY, "retired learners to be forgotten", || {
+        peers[survivor]
+            .node
+            .raft()
+            .is_some_and(|raft| raft.metrics().borrow().membership_config.nodes().count() == 1)
+    })
+    .await;
+    for peer in peers {
+        peer.shutdown().await;
+    }
+}
+
+/// A singleton cannot remove its only voter before introducing the new one.
+/// The promoted follower must trust the old leader during its blank replay
+/// window even though the requested core already excludes that leader.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn disjoint_singleton_replacement_converges_and_accepts_writes() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.record("founder"), founder.addr.clone())],
+            Default::default(),
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "founding", |m| m.group_id().is_some()).await;
+    let key = SecretKey::generate();
+    let joining = MemberId::from(key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberRecord {
+                    member_id: joining,
+                    display_name: "replacement".into(),
+                    pledge_bytes: 0,
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    let joiner = Peer::start_with(
+        key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    wait_for_upto(&joiner, PATIENTLY, "the replacement to follow", |m| {
+        m.is_member(&joining)
+    })
+    .await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(joiner.id, joiner.addr.clone())],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    until_upto(PATIENTLY, "the old singleton to retire", || {
+        founder.node.raft().is_none()
+    })
+    .await;
+    until_upto(
+        PATIENTLY,
+        "the replacement to lead alone and clean up",
+        || {
+            joiner.node.raft().is_some_and(|raft| {
+                let metrics = raft.metrics();
+                let seen = metrics.borrow();
+                seen.current_leader == Some(RawMemberId::from(joiner.id))
+                    && seen.membership_config.membership().get_joint_config().len() == 1
+                    && seen.membership_config.nodes().count() == 1
+                    && seen.membership_config.voter_ids().collect::<Vec<_>>()
+                        == vec![RawMemberId::from(joiner.id)]
+            })
+        },
+    )
+    .await;
+    joiner
+        .node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: joiner.id,
+                pledge_bytes: PLEDGE,
+            },
+            &joiner.secret,
+        )
+        .await
+        .unwrap();
+    wait_for_upto(
+        &founder,
+        PATIENTLY,
+        "retired founder to follow later writes",
+        |m| {
+            m.member(&joiner.id)
+                .is_some_and(|record| record.pledge_bytes == PLEDGE)
+        },
+    )
+    .await;
+    joiner.shutdown().await;
+    founder.shutdown().await;
+}

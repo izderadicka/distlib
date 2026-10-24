@@ -60,6 +60,8 @@ enum Request {
     AppendEntries(AppendEntriesRequest<TypeConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
+    /// Read-only acknowledgment used before forgetting a retired learner.
+    Retired,
 }
 
 /// What it answers.
@@ -75,6 +77,7 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
+    Retired(bool),
 }
 
 /// Who this node will speak consensus with while it holds no voter set of its
@@ -188,6 +191,7 @@ impl RaftProtocol {
 
     async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
+            Request::Retired => Response::Retired(self.seat.raft().is_none()),
             Request::AppendEntries(rpc) => Response::AppendEntries(raft.append_entries(rpc).await),
             Request::Vote(rpc) => Response::Vote(raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
@@ -224,6 +228,9 @@ impl RaftProtocol {
     /// through follower mode while never being a voter — and would otherwise go
     /// on serving consensus to whoever that stale config names.
     fn may_speak_raft(&self, raft: &Raft<TypeConfig>, peer: MemberId) -> bool {
+        if self.applied_voter(peer) {
+            return true;
+        }
         {
             let metrics = raft.metrics();
             let membership = &metrics.borrow().membership_config;
@@ -235,6 +242,13 @@ impl RaftProtocol {
         }
 
         self.state_machine.membership().group_id().is_none() && self.trusted.contains(&peer)
+    }
+    fn applied_voter(&self, peer: MemberId) -> bool {
+        self.state_machine
+            .raft_membership()
+            .borrow()
+            .voter_ids()
+            .any(|id| id == RawMemberId::from(peer))
     }
 }
 
@@ -248,32 +262,14 @@ impl ProtocolHandler for RaftProtocol {
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
         loop {
-            // Re-checked every time rather than once at accept, and both
-            // halves can move under a long-lived connection. Whether this node
-            // has a Raft at all now changes — a follower is promoted and takes
-            // its seat without restarting — and so does who may speak to it:
-            // founding ends, and later a `CoreGroupChanged` demotes somebody. A
-            // check made only at accept would keep serving whoever got in
-            // before either moved. §4.4 makes the same argument for the
-            // allowlist: refusing the *next* connection is not enough when the
-            // current one is still open. One lock and one watch borrow per RPC
-            // is not worth optimising away.
-            //
-            // An empty seat is refused as a non-voter, because that is what
-            // this node is. It is not an error and not a protocol failure: every
-            // node serves this ALPN now, since a router cannot be given a
-            // protocol after it spawns and a node that may be promoted has to be
-            // listening before it has anything to answer with.
-            let Some(raft) = self
-                .seat
-                .raft()
-                .filter(|raft| self.may_speak_raft(raft, peer))
-            else {
-                tracing::info!(%peer, "refused raft rpc from a non-voter");
+            let admitted = self.seat.raft().as_ref().map_or_else(
+                || self.applied_voter(peer),
+                |raft| self.may_speak_raft(raft, peer),
+            );
+            if !admitted {
                 connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
                 return Ok(());
-            };
-
+            }
             let (mut send, mut recv) = match connection.accept_bi().await {
                 Ok(streams) => streams,
                 // The peer closed the connection: the normal way this ends.
@@ -283,7 +279,22 @@ impl ProtocolHandler for RaftProtocol {
             let encoded = recv.read_to_end(MAX_RPC_BYTES).await.accepting()?;
             let request: Request = postcard::from_bytes(&encoded).accepting()?;
 
-            let response = self.answer(&raft, request).await;
+            // Authorize after receiving each request: the seat and membership
+            // may change while accept_bi() waits. A retired node still answers
+            // the read-only acknowledgment, but never a consensus mutation.
+            let raft = self.seat.raft();
+            let authorized = raft.as_ref().map_or_else(
+                || self.applied_voter(peer),
+                |raft| self.may_speak_raft(raft, peer),
+            );
+            let response = if authorized && matches!(request, Request::Retired) {
+                Response::Retired(self.seat.raft().is_none())
+            } else if let Some(raft) = raft.filter(|_| authorized) {
+                self.answer(&raft, request).await
+            } else {
+                connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                return Ok(());
+            };
             let encoded = postcard::to_stdvec(&response).accepting()?;
 
             send.write_all(&encoded).await.accepting()?;
@@ -382,6 +393,17 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
+    /// True only after the remote has vacated its Raft seat. Silence or an
+    /// older peer that does not recognize this query is never an acknowledgment.
+    pub(crate) async fn retired(
+        &self,
+    ) -> Result<bool, RPCError<NodeId, NodeAddr, RaftError<NodeId>>> {
+        match self.call(Request::Retired).await? {
+            Response::Retired(retired) => Ok(retired),
+            other => Err(mismatched(self.target, &other)),
+        }
+    }
+
     /// Where to dial, from the addressing Raft carries in its membership.
     ///
     /// An empty [`NodeAddr`] is meaningful rather than broken: it means "find

@@ -41,9 +41,11 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use openraft::{ChangeMembers, Raft, ServerState};
+use openraft::{ChangeMembers, Raft, RaftNetworkFactory, ServerState};
 
-use crate::raft::{state_machine::StateMachineStore, types::TypeConfig};
+use crate::raft::{
+    network::RaftNetworkFactoryImpl, state_machine::StateMachineStore, types::TypeConfig,
+};
 
 /// How long to wait before trying again after a change that did not take.
 ///
@@ -89,7 +91,11 @@ enum Pass {
 ///
 /// Never returns. Started only on a core node — a follower has no Raft to
 /// change — and aborted at shutdown.
-pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineStore) {
+pub(crate) async fn enact(
+    raft: Raft<TypeConfig>,
+    state_machine: StateMachineStore,
+    mut network: RaftNetworkFactoryImpl,
+) {
     let mut published = state_machine.subscribe();
     // `server_metrics` rather than `metrics`: the latter changes on every
     // heartbeat, and the only thing worth waking for is this node's own
@@ -98,7 +104,7 @@ pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineSto
     let mut server = raft.server_metrics();
 
     loop {
-        match pass(&raft, &state_machine).await {
+        match pass(&raft, &state_machine, &mut network).await {
             // Something moved; the next pass may find the rest of it. Removals
             // and address changes are separate joint-consensus rounds, so more
             // than one pass is the ordinary case rather than an error path.
@@ -126,15 +132,8 @@ pub(crate) async fn enact(raft: Raft<TypeConfig>, state_machine: StateMachineSto
         // until the next membership change — which is to say, the recovery this
         // module promises would not exist.
         //
-        // **Argued, not tested.** Removing the second arm fails nothing in the
-        // suite, and no deterministic test for it was found: creating a gap
-        // requires a committed change, and committing one requires a leader,
-        // whose own loop then closes the gap before any other node could be
-        // asked to. A test would have to race the two, and a detector that
-        // fires half the time is worse than an honest note. The case that
-        // deserves one is a leader removing *itself*: openraft leaves the
-        // cluster in a joint config if leadership is lost before the uniform
-        // config commits, and finishing that is exactly this arm's job.
+        // In particular, the surviving leader must finish a transition whose
+        // previous leader retired. The old-majority regression exercises it.
         tokio::select! {
             changed = published.changed() => {
                 if changed.is_err() {
@@ -182,10 +181,9 @@ enum Change {
 /// two things to do submits the first and is called again. Addresses come
 /// before removals: a departing voter is not in `wanted`, so its address is
 /// never in `Readdress` anyway, and taking the half that cannot reduce the
-/// voter set first means a failure in between leaves a group that is fully
-/// addressable rather than one short. Promotion comes last of the three,
-/// because it is the only one that has to wait for somebody else — a learner
-/// catching up — and a pass blocked on that must not hold up a removal.
+/// voter set first keeps addresses usable. Additions and catch-up must finish
+/// before removals: a disjoint replacement still needs the old quorum to
+/// introduce its successors.
 ///
 /// `learners` is every node openraft has that is not a voter, against whether
 /// replication to it has caught up.
@@ -216,15 +214,6 @@ fn next_change(
         return Some(Change::Readdress(moved));
     }
 
-    let departed: BTreeSet<RawMemberId> = voters
-        .keys()
-        .filter(|member| !wanted.contains_key(member))
-        .map(|member| RawMemberId::from(*member))
-        .collect();
-    if !departed.is_empty() {
-        return Some(Change::Remove(departed));
-    }
-
     // Whoever the log makes a voter and Raft does not have yet, in the two
     // steps openraft requires. `learners` is who it already replicates to, so
     // the first step is for everybody else and the second only for those it has
@@ -253,6 +242,15 @@ fn next_change(
     }
     if !behind.is_empty() {
         return Some(Change::CatchingUp(behind));
+    }
+
+    let departed: BTreeSet<RawMemberId> = voters
+        .keys()
+        .filter(|member| !wanted.contains_key(member))
+        .map(|member| RawMemberId::from(*member))
+        .collect();
+    if !departed.is_empty() {
+        return Some(Change::Remove(departed));
     }
 
     None
@@ -314,10 +312,23 @@ fn learner_progress(
 async fn pass(
     raft: &Raft<TypeConfig>,
     state_machine: &StateMachineStore,
+    network: &mut RaftNetworkFactoryImpl,
 ) -> Result<Pass, Box<dyn std::error::Error + Send + Sync>> {
     let server = raft.server_metrics().borrow().clone();
     if server.state != ServerState::Leader {
         return Ok(Pass::NotOurs);
+    }
+
+    // A new leader can inherit a committed joint configuration. Finish its
+    // recorded target before interpreting a newer application-level request;
+    // the union of the joint voter sets is not a converged configuration.
+    let configs = server.membership_config.membership().get_joint_config();
+    if configs.len() > 1 {
+        if let Some(target) = configs.last() {
+            raft.change_membership(ChangeMembers::ReplaceAllVoters(target.clone()), true)
+                .await?;
+        }
+        return Ok(Pass::Changed);
     }
 
     let Some(voters) = current_voters(server.membership_config.membership()) else {
@@ -347,7 +358,7 @@ async fn pass(
 
     let published = state_machine.membership();
     let Some(change) = next_change(published.core(), &voters, &learners) else {
-        return Ok(Pass::Converged);
+        return retire_learners(raft, &published, &server.membership_config, network).await;
     };
 
     match change {
@@ -370,12 +381,10 @@ async fn pass(
         }
         Change::Remove(departed) => {
             tracing::info!(count = departed.len(), "the log drops a core node");
-            // `retain: false` — not kept on as learners. P1-22 refuses
-            // `distlib/raft/0` to anyone who is not a current voter, so
-            // retaining them would mean replicating to a node this group also
-            // refuses to talk to: a standing failure rather than a graceful
-            // demotion.
-            raft.change_membership(ChangeMembers::RemoveVoters(departed), false)
+            // Retain replication until each removed node acknowledges the
+            // applied uniform configuration. Otherwise the final commit
+            // heartbeat may never reach it, and it cannot safely stand down.
+            raft.change_membership(ChangeMembers::RemoveVoters(departed), true)
                 .await?;
             Ok(Pass::Changed)
         }
@@ -408,6 +417,44 @@ async fn pass(
             Ok(Pass::Waiting)
         }
     }
+}
+
+/// Forget only learners that have durably learned they no longer vote. Offline
+/// nodes remain learners until they return; they do not count toward quorum.
+/// A failed status request never authorizes removal. Each probe is bounded so
+/// an unreachable node cannot indefinitely block the reconciliation task.
+async fn retire_learners(
+    raft: &Raft<TypeConfig>,
+    wanted: &crate::MembershipState,
+    membership: &openraft::StoredMembership<RawMemberId, NodeAddr>,
+    network: &mut RaftNetworkFactoryImpl,
+) -> Result<Pass, Box<dyn std::error::Error + Send + Sync>> {
+    if wanted.core().is_empty() {
+        return Ok(Pass::Converged);
+    }
+    let voters: BTreeSet<_> = membership.voter_ids().collect();
+    let mut waiting = false;
+    let mut retired = BTreeSet::new();
+    for (id, addr) in membership.nodes() {
+        if voters.contains(id) || MemberId::try_from(*id).is_ok_and(|id| wanted.is_core(&id)) {
+            continue;
+        }
+        waiting = true;
+        let client = network.new_client(*id, addr).await;
+        if let Ok(Ok(true)) = tokio::time::timeout(RETRY, client.retired()).await {
+            retired.insert(*id);
+        }
+    }
+    if !retired.is_empty() {
+        raft.change_membership(ChangeMembers::RemoveNodes(retired), true)
+            .await?;
+        return Ok(Pass::Changed);
+    }
+    Ok(if waiting {
+        Pass::Waiting
+    } else {
+        Pass::Converged
+    })
 }
 
 #[cfg(test)]
@@ -590,5 +637,27 @@ mod tests {
         let voters = view(&[(1, 11), (2, 12)]);
 
         assert_eq!(next_change(&BTreeMap::new(), &voters, &nobody()), None);
+    }
+    #[test]
+    fn disjoint_replacement_learns_and_promotes_before_removing_old_quorum() {
+        let wanted = view(&[(4, 14)]);
+        let old = view(&[(1, 11), (2, 12), (3, 13)]);
+        assert_eq!(
+            next_change(&wanted, &old, &nobody()),
+            Some(Change::Learn(BTreeMap::from([(raw(4), at(14))])))
+        );
+        assert_eq!(
+            next_change(&wanted, &old, &learners(&[(4, false)])),
+            Some(Change::CatchingUp(vec![member(4)]))
+        );
+        assert_eq!(
+            next_change(&wanted, &old, &learners(&[(4, true)])),
+            Some(Change::Promote(BTreeSet::from([raw(4)])))
+        );
+        let expanded = view(&[(1, 11), (2, 12), (3, 13), (4, 14)]);
+        assert_eq!(
+            next_change(&wanted, &expanded, &nobody()),
+            Some(Change::Remove(BTreeSet::from([raw(1), raw(2), raw(3)])))
+        );
     }
 }
