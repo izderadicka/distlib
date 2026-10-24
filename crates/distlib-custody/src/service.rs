@@ -21,6 +21,7 @@ pub(crate) async fn run(me: MemberId, sources: CustodySources, published: Publis
         store,
         mut events,
         mut replays,
+        ..
     } = sources;
     let Some(mut settling) = first_group(&mut membership).await else {
         tracing::error!("the membership log is gone before a group was founded; custody stops");
@@ -111,6 +112,22 @@ pub(crate) fn custody_group(membership: &MembershipState) -> CustodyGroup {
 pub(crate) struct Published {
     pub(crate) view: watch::Sender<Option<CustodyView>>,
     pub(crate) changes: broadcast::Sender<CustodyChange>,
+    pub(crate) over_pledge_items: watch::Sender<u64>,
+}
+
+impl Published {
+    /// Says, for the heartbeat, how many items the view leaves over this
+    /// node's pledge.
+    fn tell_over_pledge(&self) {
+        let items = self.view.borrow().as_ref().map_or(0, |view| {
+            u64::try_from(view.status().over_pledge.items).unwrap_or(u64::MAX)
+        });
+        self.over_pledge_items.send_if_modified(|told| {
+            let changed = *told != items;
+            *told = items;
+            changed
+        });
+    }
 }
 
 /// Custody of every item, off the async workers: about two seconds a million
@@ -127,6 +144,7 @@ async fn whole_pass(store: &Store, group: CustodyGroup, me: MemberId, published:
         Ok(computed) => {
             tracing::info!(custody = ?computed.status(), "custody computed");
             published.view.send_replace(Some(computed));
+            published.tell_over_pledge();
             // Nobody listening is fine: whoever starts later reads the view.
             let _ = published.changes.send(CustodyChange::Recomputed);
         }
@@ -147,6 +165,7 @@ async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
             published.view.send_modify(|view| {
                 changes = view.as_mut().map(|view| view.update(&item));
             });
+            published.tell_over_pledge();
             for change in changes.unwrap_or_default() {
                 let _ = published.changes.send(change);
             }

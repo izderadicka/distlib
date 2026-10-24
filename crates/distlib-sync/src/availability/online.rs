@@ -150,6 +150,7 @@ mod tests {
             seq,
             interval_secs,
             holdings: Holdings::default(),
+            over_pledge_items: 0,
             leaving: false,
         }
     }

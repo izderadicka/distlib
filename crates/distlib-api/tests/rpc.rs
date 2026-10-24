@@ -25,7 +25,7 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, CustodySources, PinCounts, Storage};
+use distlib_custody::{Coverage, CoverageSources, Custody, CustodySources, PinCounts, Storage};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
@@ -82,11 +82,32 @@ fn availability(
             membership: node.subscribe(),
             own_address: node.own_address(),
             holdings: catalogue.holdings().clone(),
+            over_pledge_items: tokio::sync::watch::Sender::new(0).subscribe(),
         },
         Duration::from_secs(60),
         tasks.events().clone(),
     )
     .unwrap()
+}
+
+/// The coverage `Api` reports, from `custody`.
+fn coverage(
+    custody: &Custody,
+    node: &MembershipNode,
+    store: &Store,
+    availability: &Availability,
+    catalogue: &Catalogue,
+) -> Coverage {
+    Coverage::start(
+        CoverageSources {
+            custody: custody.clone(),
+            membership: node.subscribe(),
+            store: store.clone(),
+            availability: availability.clone(),
+            holdings: catalogue.holdings().clone(),
+        },
+        Duration::from_secs(1),
+    )
 }
 
 /// The custody `Api` reports. No projection runs here, so nothing replays.
@@ -98,6 +119,7 @@ fn custody(node: &MembershipNode, store: &Store, tasks: &Tasks) -> Custody {
             store: store.clone(),
             events: tasks.events().subscribe(),
             replays: tokio::sync::watch::channel(0).1,
+            over_pledge_items: tokio::sync::watch::Sender::new(0),
         },
     )
 }
@@ -244,6 +266,8 @@ impl Harness {
         let token = "0123456789abcdef".repeat(4);
         let tasks = Tasks::new(distlib_api::events::bus());
         let availability = availability(&transport, &secret, &node, &catalogue, &tasks);
+        let custody = custody(&node, &store, &tasks);
+        let coverage = coverage(&custody, &node, &store, &availability, &catalogue);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -259,7 +283,8 @@ impl Harness {
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
-                custody: custody(&node, &store, &tasks),
+                custody,
+                coverage,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage: Storage::new(
                     None,
@@ -427,6 +452,9 @@ impl Harness {
         let catalogue = catalogue.expect("node 0 built one above");
         let token = "0123456789abcdef".repeat(4);
         let blobs = blobs.expect("node 0 built one above");
+        let availability = heartbeat.expect("node 0 built one above");
+        let custody = custody(&nodes[0], &store, &tasks);
+        let coverage = coverage(&custody, &nodes[0], &store, &availability, &catalogue);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -438,11 +466,12 @@ impl Harness {
                 blobs: blobs.clone(),
                 store: store.clone(),
                 search: search.clone(),
-                availability: heartbeat.expect("node 0 built one above"),
+                availability,
                 tasks: tasks.clone(),
                 downloads: dir.path().join("downloads"),
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
-                custody: custody(&nodes[0], &store, &tasks),
+                custody,
+                coverage,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage: Storage::new(
                     None,

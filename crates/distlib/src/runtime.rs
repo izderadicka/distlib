@@ -14,7 +14,7 @@
 //! would have bought nothing.
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -26,7 +26,10 @@ use distlib_consensus::{MembershipNode, MembershipState};
 use distlib_core::{
     Config, ContentHash, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
 };
-use distlib_custody::{Custody, CustodySources, PinManager, PinSources, PledgedOnly, Storage};
+use distlib_custody::{
+    COVERAGE_EVERY, Coverage, CoverageSources, Custody, CustodySources, PinManager, PinSources,
+    PledgedOnly, Storage,
+};
 use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
 };
@@ -67,9 +70,8 @@ pub struct Runtime {
     /// Held rather than detached: dropping it stops the task, so a runtime
     /// that goes away does not leave one writing to a database nobody reads.
     projection: Projection,
-    /// Which items this node keeps for the group.
-    custody: Custody,
-    pins: PinManager,
+    /// Custody, the pin manager, the storage limit and coverage.
+    keeping: Keeping,
     /// Sets the transfer limits once the group is known, each raised to the
     /// group's minimum; none without a limit.
     transfer_limits: Option<JoinHandle<()>>,
@@ -85,8 +87,6 @@ pub struct Runtime {
     downloads: PathBuf,
     /// What the web UI uploads, held for `library.add`.
     uploads: Uploads,
-    /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
-    storage: Storage,
     router: Router,
 }
 
@@ -142,6 +142,7 @@ impl Runtime {
         // On the same swarm, one topic the whole group shares, apart from the
         // membership and catalogue topics. It beats once this node knows its
         // group and where it is, and both arrive from the node.
+        let (over_pledge_told, over_pledge_items) = watch::channel(0);
         let availability = Availability::start(
             &transport,
             secret,
@@ -149,6 +150,7 @@ impl Runtime {
                 membership: node.subscribe(),
                 own_address: node.own_address(),
                 holdings: catalogue.holdings().clone(),
+                over_pledge_items,
             },
             Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
             tasks.events().clone(),
@@ -168,7 +170,7 @@ impl Runtime {
             tasks.events().clone(),
         );
         // After the projection, whose read model and events custody follows.
-        let (custody, pins, storage) = start_keeping(
+        let keeping = start_keeping(
             member_id(secret),
             &CustodyInputs {
                 node: &node,
@@ -178,8 +180,8 @@ impl Runtime {
                 availability: &availability,
                 blobs: &media,
                 events: tasks.events(),
-                storage_limit: config.storage.limit_bytes,
-                max_fetches: config.transfer.max_fetches,
+                over_pledge_items: over_pledge_told,
+                config,
             },
         );
 
@@ -198,8 +200,7 @@ impl Runtime {
             store,
             search,
             projection,
-            custody,
-            pins,
+            keeping,
             transfer_limits,
             collections,
             upkeep,
@@ -207,7 +208,6 @@ impl Runtime {
             // `join` keeps an absolute path as it is.
             downloads: data_dir.root().join(&config.library.download_dir),
             uploads,
-            storage,
             router,
         })
     }
@@ -249,12 +249,17 @@ impl Runtime {
 
     /// Which items this node keeps for the group.
     pub fn custody(&self) -> &Custody {
-        &self.custody
+        &self.keeping.custody
+    }
+
+    /// How much of what this node holds each other custodian announces.
+    pub fn coverage(&self) -> &Coverage {
+        &self.keeping.coverage
     }
 
     /// What keeps this node's custody in its blob store.
     pub fn pins(&self) -> &PinManager {
-        &self.pins
+        &self.keeping.pins
     }
 
     /// When the last garbage collection pass began; `None` before the first.
@@ -264,7 +269,7 @@ impl Runtime {
 
     /// The storage limit, and the cache's eviction to stay within it.
     pub fn storage(&self) -> &Storage {
-        &self.storage
+        &self.keeping.storage
     }
 
     /// The event bus: what the projection publishes into, and what the local
@@ -319,8 +324,9 @@ impl Runtime {
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
         self.projection.shutdown();
-        self.pins.shutdown();
-        self.custody.shutdown();
+        self.keeping.coverage.shutdown();
+        self.keeping.pins.shutdown();
+        self.keeping.custody.shutdown();
         if let Some(transfer_limits) = &self.transfer_limits {
             transfer_limits.abort();
         }
@@ -425,8 +431,22 @@ struct CustodyInputs<'a> {
     availability: &'a Availability,
     blobs: &'a Blobs,
     events: &'a broadcast::Sender<Event>,
-    storage_limit: Option<NonZeroU64>,
-    max_fetches: NonZeroUsize,
+    /// Where custody tells the heartbeat what is over this node's pledge.
+    over_pledge_items: watch::Sender<u64>,
+    /// For the storage limit, the fetches at once, and the beat interval.
+    config: &'a Config,
+}
+
+/// What keeps this node's custody: working it out, keeping it within the
+/// storage limit, and watching its co-custodians keep theirs.
+struct Keeping {
+    /// Which items this node keeps for the group.
+    custody: Custody,
+    /// How much of what this node holds each other custodian announces.
+    coverage: Coverage,
+    pins: PinManager,
+    /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
+    storage: Storage,
 }
 
 /// The blobs protocol's events: each request judged by the requester's pledge
@@ -523,9 +543,9 @@ fn set_once_the_group_is_known(
 
 /// Starts following `me`'s custody, and keeping it in the blob store within
 /// the storage limit.
-fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManager, Storage) {
+fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
     let storage = Storage::new(
-        inputs.storage_limit,
+        inputs.config.storage.limit_bytes,
         inputs.blobs.clone(),
         inputs.store.clone(),
         inputs.catalogue.holdings().clone(),
@@ -537,6 +557,7 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManag
             store: inputs.store.clone(),
             events: inputs.events.subscribe(),
             replays: inputs.projection.replays(),
+            over_pledge_items: inputs.over_pledge_items.clone(),
         },
     );
     let pins = PinManager::start(
@@ -551,9 +572,24 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> (Custody, PinManag
             events: inputs.events.subscribe(),
             storage: storage.clone(),
         },
-        inputs.max_fetches,
+        inputs.config.transfer.max_fetches,
     );
-    (custody, pins, storage)
+    let coverage = Coverage::start(
+        CoverageSources {
+            custody: custody.clone(),
+            membership: inputs.node.subscribe(),
+            store: inputs.store.clone(),
+            availability: inputs.availability.clone(),
+            holdings: inputs.catalogue.holdings().clone(),
+        },
+        coverage_every(inputs.config),
+    );
+    Keeping {
+        custody,
+        coverage,
+        pins,
+        storage,
+    }
 }
 
 async fn open_blobs(
@@ -576,6 +612,13 @@ async fn open_blobs(
 }
 
 /// `[storage] gc_interval_secs`.
+/// How often coverage is worked out: every thirty seconds, or every beat
+/// interval if that is shorter, since it changes only as beats arrive.
+fn coverage_every(config: &Config) -> Duration {
+    let beats = Duration::from_secs(u64::from(config.availability.beat_interval_secs.get()));
+    COVERAGE_EVERY.min(beats)
+}
+
 fn gc_interval(config: &Config) -> Duration {
     Duration::from_secs(u64::from(config.storage.gc_interval_secs.get()))
 }

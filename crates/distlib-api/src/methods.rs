@@ -18,7 +18,7 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
     Review, Series, TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Custody, PinCounts, Room, Storage, StorageError};
+use distlib_custody::{Coverage, Custody, PinCounts, Room, Storage, StorageError};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
@@ -90,6 +90,8 @@ pub struct Api {
     pub uploads: Uploads,
     /// Which items this node keeps for the group, and each item's custodians.
     pub custody: Custody,
+    /// How much of what this node holds each other custodian announces.
+    pub coverage: Coverage,
     /// Where the items this node keeps stand: queued, fetched, kept.
     pub pins: watch::Receiver<PinCounts>,
     /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
@@ -243,6 +245,9 @@ impl Api {
                     "pledge_bytes": record.pledge_bytes,
                     "required_pledge_bytes": settings.required_pledge(added),
                     "core": membership.is_core(&record.member_id),
+                    // Null while it is not judged: offline, or what it holds
+                    // not known yet.
+                    "coverage": self.coverage.of(&record.member_id),
                 })
             })
             .collect();

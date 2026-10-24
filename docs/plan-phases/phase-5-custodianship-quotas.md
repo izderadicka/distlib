@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -474,7 +474,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Twenty PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 in three, and 5c-0 and 5b-7 added in review. Each ends compiling,
+Twenty-one PRs — fourteen planned, 5a-3, 5b-1 and 5c-1 each split in two, 5b-2 in three, and 5c-0 and 5b-7 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -615,7 +615,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node pledging room for one of two books fetches the one it scores higher, says
   the other is over its pledge, and never tags it.
 
-### 5c — checking custody (6 PRs)
+### 5c — checking custody (7 PRs)
 
 - **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
@@ -634,6 +634,9 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 - **5c-1 — coverage from heartbeats (D10).** Per member, of the items this node holds and that member
   should hold too, the share it announces; shown in the members list. *Should hold* is within that
   member's pledge (5b-7, P5-22): an item over it is not blamed.
+  *Split in two* (P5-24): **5c-1a** *(done)* — coverage worked out and in `group.members`, with each
+  heartbeat saying how many items are over its sender's pledge; **5c-1b** — the members list on the
+  Node page and in `distlib members`.
   **Acceptance:** a custodian that holds its items shows full coverage; one whose pin manager is
   stopped falls behind once its assignments are older than `max_settle_secs`; one still within that
   time is not blamed.
