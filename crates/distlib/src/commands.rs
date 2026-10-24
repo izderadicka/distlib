@@ -1855,19 +1855,19 @@ fn past_the_pledge(custody: &Value) -> String {
 fn print_pins(pins: &Value) {
     let count = |state: &str| pins[state].as_u64().unwrap_or(0);
     let states = [
-        ("kept", "kept"),
-        ("fetching", "fetching"),
-        ("queued", "queued"),
-        ("failed", "failed"),
-        ("waiting_for_room", "waiting for room"),
-        ("releasing", "releasing"),
+        "kept",
+        "fetching",
+        "queued",
+        "failed",
+        "waiting_for_room",
+        "releasing",
     ];
-    if states.iter().all(|(state, _)| count(state) == 0) {
+    if states.iter().all(|state| count(state) == 0) {
         return;
     }
     let counts: Vec<String> = states
         .iter()
-        .map(|(state, label)| format!("{} {label}", count(state)))
+        .map(|state| format!("{} {}", count(state), state.replace('_', " ")))
         .collect();
     println!("pins        {}", counts.join(", "));
     if let Some(warning) = waiting_for_room_warning(count("waiting_for_room")) {
