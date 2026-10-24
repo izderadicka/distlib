@@ -43,6 +43,7 @@ const STATUS: NodeStatus = {
   pending: 1,
   settings: SETTINGS,
   custody: { items: 3, bytes: 120_000_000_000, pledge_bytes: 200_000_000_000, load_factor: 0.4567 },
+  pins: { queued: 0, fetching: 0, failed: 0, waiting_for_room: 0, kept: 3, releasing: 0 },
   storage: {
     limit_bytes: 500_000_000_000,
     own_bytes: 1_500_000_000,
@@ -230,6 +231,7 @@ describe("the node page", () => {
     expect(screen.queryByText(/below what its adds require/)).toBeNull();
     expect(screen.queryByText(/a copy short/)).toBeNull();
     expect(screen.queryByText(/more than this node's pledge/)).toBeNull();
+    expect(screen.queryByText(/for room within the/)).toBeNull();
   });
 
   it("warns when custody is past this node's pledge", async () => {
@@ -309,6 +311,13 @@ describe("the node page", () => {
 
     await screen.findByText(/over the limit on their own/);
     expect(screen.queryByText(/the cache goes first/)).toBeNull();
+  });
+
+  it("warns when custody waits for room within the limit", async () => {
+    answer = { ...answer, status: { ...STATUS, pins: { ...STATUS.pins, waiting_for_room: 2 } } };
+    open();
+    const warning = await screen.findByText(/wait for room/);
+    expect(warning.textContent?.replace(/\s+/g, " ")).toContain("2 items this node is custodian of wait for room");
   });
 
   it.each([

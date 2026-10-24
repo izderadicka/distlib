@@ -142,6 +142,13 @@
     {:else if storage.limit_bytes !== null}
       <p class="hint">When there is no room, the cache goes first, what was used longest ago first.</p>
     {/if}
+    {#if status.pins.waiting_for_room > 0}
+      {@const waiting = status.pins.waiting_for_room}
+      <p class="failure">
+        {waiting} item{waiting === 1 ? "" : "s"} this node is custodian of wait{waiting === 1 ? "s" : ""} for room within the
+        limit, each a copy short. Raise the limit.
+      </p>
+    {/if}
   </section>
 
   <section>

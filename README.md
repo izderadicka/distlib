@@ -473,7 +473,11 @@ past the limit is refused. `distlib status` shows the bytes kept for each reason
 When a download, a custody fetch or an add needs room, the downloads used longest
 ago are evicted from the store first; never what you added or keep for the group,
 and never the files a download wrote out. A download that would not fit even then
-is refused.
+is refused. A custody fetch that would not fit waits instead, evicting nothing,
+until the node lets go of another item it kept for the group or starts again with
+more room; each item waiting is a copy short, and `distlib status` and the Node page
+warn of it. Only an emergency copy of an item down to its last copy is fetched past
+the limit.
 
 Custody follows weight, not the pledge exactly, so a node can be custodian of more
 than it pledged. It keeps all of it even so; `distlib status` and the Node page say
