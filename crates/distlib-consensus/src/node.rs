@@ -122,11 +122,18 @@ const LEADER_CHANGE_WAIT: Duration = Duration::from_millis(ELECTION_TIMEOUT_MAX 
 /// The price is detection: a leader that really has died is replaced after one
 /// to two seconds rather than a fraction of one, which nothing in a membership
 /// log notices.
+///
+/// **Nothing is ever purged** (C43): openraft still snapshots, but keeps every
+/// entry behind the snapshot, so the signed log is the group's whole history
+/// and a follower can always read it from the founding entry. With nothing
+/// purged, openraft never sends a snapshot to a voter either, so every core
+/// node holds the whole log too.
 fn raft_config() -> Config {
     Config {
         heartbeat_interval: 250,
         election_timeout_min: 1_000,
         election_timeout_max: ELECTION_TIMEOUT_MAX,
+        max_in_snapshot_log_to_keep: u64::MAX,
         ..Config::default()
     }
 }

@@ -14,7 +14,8 @@ pub mod types;
 
 pub use log_store::LogStore;
 pub use memberlog::{
-    FetchFailed, Fetched, MemberlogClient, MemberlogProtocol, ProposeError, ProposeOutcome, Source,
+    EVENTS_PER_FETCH, FetchFailed, Fetched, MemberlogClient, MemberlogProtocol, ProposeError,
+    ProposeOutcome, Source,
 };
 pub use network::{RaftClient, RaftNetworkFactoryImpl, RaftProtocol};
 pub(crate) use seat::Seat;

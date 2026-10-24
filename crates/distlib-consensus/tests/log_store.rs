@@ -275,3 +275,34 @@ async fn two_stores_can_share_one_database() {
 
     assert_eq!(indices(&mut other).await, vec![1]);
 }
+
+#[tokio::test]
+async fn events_are_served_at_most_a_page_at_a_time_and_blanks_are_left_out() {
+    let (mut store, _dir) = store();
+    let blank = Entry {
+        log_id: log_id(1, 2),
+        payload: EntryPayload::Blank,
+    };
+    store
+        .blocking_append(vec![
+            entry(1, 1),
+            blank,
+            entry(1, 3),
+            entry(1, 4),
+            entry(1, 5),
+        ])
+        .await
+        .unwrap();
+
+    let served = |after, at_most| {
+        store
+            .events_after(after, 5, at_most)
+            .unwrap()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(served(0, 2), vec![1, 3]);
+    assert_eq!(served(3, 2), vec![4, 5]);
+    assert_eq!(served(0, 10), vec![1, 3, 4, 5]);
+}

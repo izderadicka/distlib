@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -617,7 +617,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 
 ### 5c — checking custody (6 PRs)
 
-- **5c-0 — the whole log, kept (C43).** The log is never purged: `max_in_snapshot_log_to_keep` at
+- **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
   refusal stays on the core nodes as the group's audit history, and a follower can always read
   from index 0, so P1-29's `TooFarBehind` can no longer happen. Decided with Ivan after measuring:
@@ -626,6 +626,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a member joining after the leader has taken a snapshot reads every entry from the
   founding one onward, settings included, and the log's first index stays 1; the measurement
   repeated at 100,000 entries — size on disk, and how long a joiner takes to catch up.
+  *Paged* (P5-23): one answer held the whole log, which past about 27,000 events would not fit
+  in an answer at all; it now holds a thousand events, and a follower asks for the next at once.
 
 - **5c-1 — coverage from heartbeats (D10).** Per member, of the items this node holds and that member
   should hold too, the share it announces; shown in the members list. *Should hold* is within that
@@ -692,7 +694,7 @@ Every open C-number appears here once.
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
-| **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **5c-0**: never purge. |
+| **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **Closed by 5c-0** (P5-23): never purged, and served a page at a time. |
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 
 ---

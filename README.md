@@ -252,7 +252,9 @@ Whoever you admit does not need to be in `[consensus] core`. A node listed there
 votes on the log; every other member **follows** it — holding the same log, deriving
 the same allowlist, but fetching it from the core nodes rather than voting. Nothing
 configures that: a node not in the list follows, and once the group exists the log
-decides rather than the config.
+decides rather than the config. The log is never cut short: every signed event since
+the founding one is kept as the group's history, and a member joining later reads
+all of it, a thousand events at a time.
 
 **9. Hand them a ticket** instead of talking them through the config. Admitting
 somebody puts them in the log; a ticket tells them where the group is:
