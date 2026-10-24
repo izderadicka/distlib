@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 
 use distlib_core::{
-    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ItemId, ItemKind, Key,
-    MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, REVIEW_MAX_BYTES, Rating, ResolvedWish, Review,
-    WISH_MAX_BYTES, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, ContentHash, ItemId, ItemKind,
+    Key, MemberId, NOTE_MAX_BYTES, POSITION_MAX_BYTES, ProbeFailure, REVIEW_MAX_BYTES, Rating,
+    ResolvedWish, Review, WISH_MAX_BYTES, Wish, WishFields, WishId, WishStatus,
 };
 use iroh::SecretKey;
 use serde_json::json;
@@ -46,6 +46,14 @@ fn comment(member: MemberId) -> CommunityKey {
     CommunityKey::WishComment { wish: WISH, member }
 }
 
+/// A failure the member found probing `custodian`.
+fn probe_failure(custodian: MemberId, member: MemberId) -> CommunityKey {
+    CommunityKey::ProbeFailure {
+        custodian,
+        prober: member,
+    }
+}
+
 #[test]
 fn a_key_reads_back_as_itself() {
     let bob = member();
@@ -56,6 +64,7 @@ fn a_key_reads_back_as_itself() {
         bookmark(bob, B),
         wish(bob),
         comment(bob),
+        probe_failure(member(), bob),
     ] {
         let encoded = key.encode();
         assert_eq!(
@@ -78,6 +87,11 @@ fn a_key_is_named_by_its_kind_the_item_and_the_member() {
     );
     assert_eq!(wish(bob).encode(), format!("wish/{WISH}/{bob}"));
     assert_eq!(comment(bob).encode(), format!("wish_comment/{WISH}/{bob}"));
+    let carol = member();
+    assert_eq!(
+        probe_failure(carol, bob).encode(),
+        format!("probe/{carol}/{bob}")
+    );
 }
 
 /// A second spelling of one member's key would be a second rating by them,
@@ -129,6 +143,9 @@ fn anything_else_is_somebody_elses_key() {
         format!("wish_comment/{WISH}"),
         format!("item/{ITEM}/title"),
         format!("rating/{bob}/{ITEM}"),
+        format!("probe/{bob}"),
+        format!("probe/{bob}/{bob}/{ITEM}"),
+        format!("probe/{ITEM}/{bob}"),
     ] {
         assert_eq!(CommunityKey::parse(key.as_bytes()), None, "{key}");
     }
@@ -481,4 +498,16 @@ fn a_wish_without_a_titled_entry_does_not_resolve() {
         ),
     )]);
     assert_eq!(ResolvedWish::resolve(&entries), None);
+}
+
+#[test]
+fn a_probe_failure_reads_back_as_itself() {
+    let failure = ProbeFailure {
+        item: ITEM,
+        blob: ContentHash::from_bytes([0xef; 32]),
+        chunk: 41,
+        in_a_row: 2,
+    };
+    assert_eq!(ProbeFailure::decode(&failure.encode()), Some(failure));
+    assert_eq!(ProbeFailure::decode(b"5"), None);
 }

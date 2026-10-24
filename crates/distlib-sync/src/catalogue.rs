@@ -28,7 +28,7 @@ use std::{
 use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{
     Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
-    MemberId, Rating, Review, Wish, WishId,
+    MemberId, ProbeFailure, Rating, Review, Wish, WishId,
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -169,6 +169,16 @@ struct CommunityEntry<T> {
     key: CommunityKey,
     value: T,
     written: u64,
+}
+
+/// One prober's recorded failure of one custodian (phase 5's D12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedFailure {
+    pub custodian: MemberId,
+    pub prober: MemberId,
+    pub failure: ProbeFailure,
+    /// When the prober wrote it, in microseconds since the epoch.
+    pub written: u64,
 }
 
 /// The community entries that count under one key prefix, and whether one
@@ -713,6 +723,53 @@ impl Catalogue {
             member: self.inner.me,
         };
         self.delete(key.encode()).await
+    }
+
+    /// Records this node's member's latest failed probe of `custodian`
+    /// (phase 5's D12), replacing the one before.
+    pub async fn record_probe_failure(
+        &self,
+        custodian: MemberId,
+        failure: &ProbeFailure,
+    ) -> Result<()> {
+        let key = CommunityKey::ProbeFailure {
+            custodian,
+            prober: self.inner.me,
+        };
+        self.put(key.encode(), failure.encode()).await
+    }
+
+    /// Clears this node's member's failures of `custodian`, if it has any.
+    pub async fn clear_probe_failure(&self, custodian: MemberId) -> Result<()> {
+        let key = CommunityKey::ProbeFailure {
+            custodian,
+            prober: self.inner.me,
+        };
+        self.delete(key.encode()).await
+    }
+
+    /// Every prober's failures of every custodian this node holds, each
+    /// counted only if that prober wrote it, with when it was written.
+    pub async fn probe_failures(&self) -> Result<Vec<RecordedFailure>> {
+        let read = self
+            .read_community_entries(CommunityKey::all_probe_failures(), ProbeFailure::decode)
+            .await?;
+        Ok(read
+            .entries
+            .into_iter()
+            .filter_map(|entry| {
+                // The prefix holds no other kind of key.
+                let CommunityKey::ProbeFailure { custodian, prober } = entry.key else {
+                    return None;
+                };
+                Some(RecordedFailure {
+                    custodian,
+                    prober,
+                    failure: entry.value,
+                    written: entry.written,
+                })
+            })
+            .collect())
     }
 
     /// Every member's rating of `item` this node holds, each counted only if

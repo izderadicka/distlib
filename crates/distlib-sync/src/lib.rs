@@ -14,7 +14,7 @@ pub mod error;
 pub use availability::{Availability, Holdings, Sources};
 pub use catalogue::{
     Catalogue, CatalogueStorage, ImportedFile, ItemBookmarks, ReadBookmark, ReadItem, ReadWish,
-    alpns, catalogue_key,
+    RecordedFailure, alpns, catalogue_key,
 };
 pub use changes::{Batch, Changes, LastSync, SyncState};
 pub use error::{Result, SyncError};

@@ -32,7 +32,7 @@ use std::{
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr, StorageUse};
 use distlib_net::{
     AddressBook, Blobs, BytePacer,
-    blobs::{ServingGate, partial_of, serving_events},
+    blobs::{Probed, ServingGate, partial_of, serving_events},
 };
 use iroh::{
     Endpoint, PublicKey, SecretKey,
@@ -41,6 +41,7 @@ use iroh::{
 };
 use iroh_blobs::{
     BlobsProtocol,
+    api::Store,
     protocol::{ChunkRanges, GetManyRequest},
     store::{fs::FsStore, mem::MemStore},
 };
@@ -118,7 +119,7 @@ async fn serving_with(
 
 /// [`serving_with`], each request judged by `gate`.
 async fn serving_judged_by(
-    store: &MemStore,
+    store: &Store,
     pacer: Option<Arc<BytePacer>>,
     gate: impl ServingGate,
 ) -> (MemberId, NodeAddr, Router, mpsc::Receiver<ContentHash>) {
@@ -765,4 +766,69 @@ async fn a_request_for_many_blobs_is_refused_if_the_gate_refuses_one() {
     get_many(&[allowed]).await.unwrap();
 
     let _ = router.shutdown().await;
+}
+
+/// Phase 5's D11: a held blob's chunk passes, one the member does not have
+/// fails, and a member nobody can reach is unreachable rather than failed.
+#[tokio::test]
+async fn a_probe_passes_for_a_held_chunk_and_fails_for_a_missing_one() {
+    let a_store = MemStore::new();
+    let held = added_bytes(&a_store, 5_000, 1).await;
+    let (a_id, a_addr, a_router) = serving(&a_store).await;
+    let prober = fetcher(a_id, &a_addr).await;
+    let within = Duration::from_secs(10);
+
+    assert_eq!(prober.probe(a_id, held, 4, within).await, Probed::Passed);
+    let missing = ContentHash::from_bytes([0xab; 32]);
+    assert_eq!(prober.probe(a_id, missing, 0, within).await, Probed::Failed);
+    let stranger = MemberId::from(SecretKey::generate().public());
+    assert_eq!(
+        prober
+            .probe(stranger, held, 0, Duration::from_secs(2))
+            .await,
+        Probed::Unreachable
+    );
+
+    a_router.shutdown().await.unwrap();
+}
+
+/// A member whose bytes changed underneath its store, which still calls the
+/// blob complete: the chunk fails verification, and passes again once the
+/// bytes are back. Over 16 KiB, so the bytes are a file and not inline.
+#[tokio::test]
+async fn a_probe_fails_once_the_bytes_on_disk_are_not_the_blob() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let a_store = FsStore::load(dir.path().join("blobs")).await.unwrap();
+    let bytes: Vec<u8> = (0..64 * 1024u32).map(|n| (n % 251) as u8).collect();
+    let hash = a_store.add_bytes(bytes.clone()).await.unwrap().hash;
+    let held = ContentHash::from_bytes(*hash.as_bytes());
+    let (a_id, a_addr, a_router, _served) = serving_judged_by(&a_store, None, Everyone).await;
+    let prober = fetcher(a_id, &a_addr).await;
+    let within = Duration::from_secs(10);
+    assert_eq!(prober.probe(a_id, held, 10, within).await, Probed::Passed);
+
+    let data = dir
+        .path()
+        .join("blobs/data")
+        .join(format!("{}.data", hash.to_hex()));
+    std::fs::write(&data, vec![0; bytes.len()]).unwrap();
+    assert_eq!(prober.probe(a_id, held, 10, within).await, Probed::Failed);
+    std::fs::write(&data, &bytes).unwrap();
+    assert_eq!(prober.probe(a_id, held, 10, within).await, Probed::Passed);
+
+    a_router.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_held_blob_has_its_chunks_counted_and_a_missing_one_none() {
+    let store = MemStore::new();
+    let blobs = Blobs::new(&store, &endpoint(SecretKey::generate(), Vec::new()).await);
+    let one = added_bytes(&store, 1, 1).await;
+    let exact = added_bytes(&store, 2048, 2).await;
+    let past = added_bytes(&store, 2049, 3).await;
+    assert_eq!(blobs.chunks(one).await.unwrap(), Some(1));
+    assert_eq!(blobs.chunks(exact).await.unwrap(), Some(2));
+    assert_eq!(blobs.chunks(past).await.unwrap(), Some(3));
+    let missing = ContentHash::from_bytes([0xab; 32]);
+    assert_eq!(blobs.chunks(missing).await.unwrap(), None);
 }

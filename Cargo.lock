@@ -1261,6 +1261,7 @@ dependencies = [
 name = "distlib-net"
 version = "0.1.0"
 dependencies = [
+ "bao-tree",
  "distlib-core",
  "futures-lite",
  "iroh",
