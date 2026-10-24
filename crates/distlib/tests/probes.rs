@@ -2,7 +2,7 @@
 //! passes and nothing is written; one whose bytes changed underneath it fails,
 //! its key appears on every node, and its next pass clears the key; an
 //! unreachable custodian is skipped; a group founded with `probes` off makes
-//! no probes.
+//! no probes, and neither does a member below the minimum pledge.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -35,13 +35,15 @@ const GB: u64 = 1_000_000_000;
 /// bytes are a file of their own.
 const BOOK: usize = 1_000_000;
 
+/// The founder's, its book's custodian's and a member with no weight's.
+const PLEDGES: [u64; 3] = [100 * GB, 100 * GB, 0];
+
 /// Two copies of everything, the creator's one of them; a probe a second.
-fn settings(probes: bool) -> GroupSettings {
+fn settings() -> GroupSettings {
     GroupSettings {
         replicas: NonZeroU8::new(2).unwrap(),
         min_pledge_bytes: 0,
         settle_secs: 1,
-        probes,
         probe_every_secs: NonZeroU32::MIN,
         ..GroupSettings::default()
     }
@@ -83,9 +85,13 @@ async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> 
     .unwrap_or_else(|_| panic!("{what} within {SOON:?}"));
 }
 
-/// The founder, its book's custodian, and a member with no weight; the book
-/// added, and kept by its custodian.
-async fn a_book_kept(dir: &Path, probes: bool) -> ([Node; 3], ItemId, ContentHash) {
+/// The founder, its book's custodian, and a member with no weight, founded
+/// with `settings` and `pledges`; the book added, and kept by its custodian.
+async fn a_book_kept(
+    dir: &Path,
+    settings: &GroupSettings,
+    pledges: [u64; 3],
+) -> ([Node; 3], ItemId, ContentHash) {
     init_logging();
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
@@ -103,8 +109,8 @@ async fn a_book_kept(dir: &Path, probes: bool) -> ([Node; 3], ItemId, ContentHas
         });
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip([100 * GB, 100 * GB, 0]).collect();
-    found(&runtimes, &nodes[0].key, &pledges, &settings(probes)).await;
+    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
+    found(&runtimes, &nodes[0].key, &pledges, settings).await;
     let [founder, second, third]: [Node; 3] = nodes.try_into().ok().unwrap();
 
     founder.runtime.catalogue().ready().await;
@@ -131,7 +137,8 @@ async fn a_book_kept(dir: &Path, probes: bool) -> ([Node; 3], ItemId, ContentHas
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass() {
     let dir = TempDir::new().unwrap();
-    let ([founder, second, third], book, blob) = a_book_kept(dir.path(), true).await;
+    let ([founder, second, third], book, blob) =
+        a_book_kept(dir.path(), &settings(), PLEDGES).await;
 
     // Passes, and nothing is written.
     until("the founder's probes pass", || async {
@@ -172,7 +179,8 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_custodian_is_skipped_not_failed() {
     let dir = TempDir::new().unwrap();
-    let ([founder, second, third], _book, _blob) = a_book_kept(dir.path(), true).await;
+    let ([founder, second, third], _book, _blob) =
+        a_book_kept(dir.path(), &settings(), PLEDGES).await;
     until("the founder's probes pass", || async {
         founder.probed().passed >= 1
     })
@@ -194,9 +202,34 @@ async fn an_unreachable_custodian_is_skipped_not_failed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_founded_without_probes_makes_none() {
     let dir = TempDir::new().unwrap();
-    let ([founder, second, third], _book, _blob) = a_book_kept(dir.path(), false).await;
+    let probes_off = GroupSettings {
+        probes: false,
+        ..settings()
+    };
+    let ([founder, second, third], _book, _blob) =
+        a_book_kept(dir.path(), &probes_off, PLEDGES).await;
 
     // Long enough for a few probes, a second apart, had there been any.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(founder.probed(), ProbeCounts::default());
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The founder pledges 60 GB of the group's 100 GB minimum: its add is warned,
+/// not refused, but it is not sent content, so its probes would all fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_below_the_minimum_pledge_makes_no_probes() {
+    let dir = TempDir::new().unwrap();
+    let minimum = GroupSettings {
+        min_pledge_bytes: 100 * GB,
+        ..settings()
+    };
+    let ([founder, second, third], _book, _blob) =
+        a_book_kept(dir.path(), &minimum, [60 * GB, 100 * GB, 0]).await;
+
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(founder.probed(), ProbeCounts::default());
 

@@ -826,6 +826,9 @@ async fn a_held_blob_has_its_chunks_counted_and_a_missing_one_none() {
     let one = added_bytes(&store, 1, 1).await;
     let exact = added_bytes(&store, 2048, 2).await;
     let past = added_bytes(&store, 2049, 3).await;
+    let empty = added_bytes(&store, 0, 0).await;
+    // Still one to probe: a probe has to pick one.
+    assert_eq!(blobs.chunks(empty).await.unwrap(), Some(1));
     assert_eq!(blobs.chunks(one).await.unwrap(), Some(1));
     assert_eq!(blobs.chunks(exact).await.unwrap(), Some(2));
     assert_eq!(blobs.chunks(past).await.unwrap(), Some(3));
