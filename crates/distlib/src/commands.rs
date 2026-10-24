@@ -19,6 +19,7 @@ use distlib_core::{
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
+use distlib_custody::MemberCoverage;
 use distlib_net::{AllowlistHooks, allowlist, build_endpoint, ping};
 
 use crate::{Runtime, cli::Kind};
@@ -1342,9 +1343,10 @@ pub async fn members(paths: &Paths) -> Result<()> {
     );
     for member in &listing.members {
         println!(
-            "  {}{}",
+            "  {}{}{}",
             member.name,
-            if member.core { "  core" } else { "" }
+            if member.core { "  core" } else { "" },
+            coverage_clause(member.coverage)
         );
     }
     Ok(())
@@ -1443,6 +1445,8 @@ struct Listing {
 struct Listed {
     name: String,
     core: bool,
+    /// Only a running node works it out.
+    coverage: Option<MemberCoverage>,
 }
 
 /// The membership as the running node has it.
@@ -1452,19 +1456,25 @@ async fn live_members(paths: &Paths) -> Result<Listing> {
         .as_array()
         .context("the api did not return a member list")?
         .iter()
-        .map(|member| Listed {
-            name: named(
-                member["member"].as_str().unwrap_or_default(),
-                member["name"].as_str().unwrap_or_default(),
-            ),
-            core: member["core"].as_bool().unwrap_or(false),
-        })
+        .map(live_member)
         .collect();
 
     Ok(Listing {
         group: answer["group"].as_str().map(str::to_owned),
         members,
     })
+}
+
+/// One entry of `group.members`, as listed.
+fn live_member(member: &Value) -> Listed {
+    Listed {
+        name: named(
+            member["member"].as_str().unwrap_or_default(),
+            member["name"].as_str().unwrap_or_default(),
+        ),
+        core: member["core"].as_bool().unwrap_or(false),
+        coverage: serde_json::from_value(member["coverage"].clone()).unwrap_or_default(),
+    }
 }
 
 /// The membership as this node's database has it.
@@ -1477,9 +1487,24 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
             .map(|member| Listed {
                 name: display(member),
                 core: membership.is_core(&member.member_id),
+                coverage: None,
             })
             .collect(),
     })
+}
+
+/// A member's coverage (D10) as a clause: none while it is not judged or
+/// has nothing to hold of what this node holds.
+fn coverage_clause(coverage: Option<MemberCoverage>) -> String {
+    coverage
+        .filter(|coverage| coverage.expected > 0)
+        .map(
+            |MemberCoverage {
+                 expected,
+                 announced,
+             }| { format!("  coverage {announced} of {expected}") },
+        )
+        .unwrap_or_default()
 }
 
 /// `distlib status`
@@ -1978,6 +2003,37 @@ mod tests {
         let warning = waiting_for_room_warning(2).expect("two waiting warn");
         assert!(warning.contains("2 items"), "{warning}");
         assert_eq!(waiting_for_room_warning(0), None);
+    }
+
+    #[test]
+    fn a_live_member_carries_its_coverage_when_judged() {
+        let judged = live_member(&json!({
+            "member": "abc", "name": "carol", "core": false,
+            "coverage": { "expected": 4, "announced": 3 },
+        }));
+        assert_eq!(
+            judged.coverage,
+            Some(MemberCoverage {
+                expected: 4,
+                announced: 3
+            })
+        );
+        let unjudged = live_member(&json!({ "member": "abc", "coverage": null }));
+        assert_eq!(unjudged.coverage, None);
+    }
+
+    #[test]
+    fn coverage_is_a_clause_only_when_there_is_something_to_cover() {
+        let coverage = |expected, announced| {
+            Some(MemberCoverage {
+                expected,
+                announced,
+            })
+        };
+        assert_eq!(coverage_clause(coverage(4, 3)), "  coverage 3 of 4");
+        assert_eq!(coverage_clause(coverage(4, 4)), "  coverage 4 of 4");
+        assert_eq!(coverage_clause(coverage(0, 0)), "");
+        assert_eq!(coverage_clause(None), "");
     }
 
     #[test]

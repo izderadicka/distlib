@@ -35,7 +35,7 @@ sequencing plan of the phase currently being built.
 >   rate, review and bookmark it, add an item from files chosen in the browser, search
 >   everybody's bookmarks, and make, comment on and fulfil wishes. An item's page shows who
   keeps it for the group, online or not; the Node page shows this node's pledge against
-  what its adds require, and the group's load. Release builds and a Dockerfile exist.
+  what its adds require, the group's load, and each member's coverage of what this node holds. Release builds and a Dockerfile exist.
 >
 > Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
 > see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and
@@ -353,7 +353,7 @@ them hold for every protocol added later.
 | `distlib wish fulfill <wish_id> <item_id>` | Say that an item in the catalogue answers a wish. |
 | `distlib download <item_id> [--dest] [--file]` | Fetch an item's files from the group and write them out. |
 | `distlib admin reindex` | Rebuild the read model and search index from the catalogue. |
-| `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
+| `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. A running node adds each member's coverage, "coverage 3 of 4", once there is something to cover. |
 | `distlib status [--online]` | Identity, paths, relay mode, group and role — plus Raft role and leader while the node runs. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
 
