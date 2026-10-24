@@ -86,12 +86,8 @@ async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> 
 }
 
 /// The founder, its book's custodian, and a member with no weight, founded
-/// with `settings` and `pledges`; the book added, and kept by its custodian.
-async fn a_book_kept(
-    dir: &Path,
-    settings: &GroupSettings,
-    pledges: [u64; 3],
-) -> ([Node; 3], ItemId, ContentHash) {
+/// with `settings` and `pledges`.
+async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) -> [Node; 3] {
     init_logging();
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
@@ -111,8 +107,12 @@ async fn a_book_kept(
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
     let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
     found(&runtimes, &nodes[0].key, &pledges, settings).await;
-    let [founder, second, third]: [Node; 3] = nodes.try_into().ok().unwrap();
+    nodes.try_into().ok().unwrap()
+}
 
+/// The founder adds a book, which the second member has projected: the book
+/// and its one file.
+async fn add_a_book(founder: &Node, second: &Node, dir: &Path) -> (ItemId, ContentHash) {
     founder.runtime.catalogue().ready().await;
     let file = dir.join("dune.epub");
     std::fs::write(&file, "Dune\n".repeat(BOOK / 5)).unwrap();
@@ -126,7 +126,17 @@ async fn a_book_kept(
     let book: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
     until_projected(&second.runtime, book, 1, "the second member").await;
     let stored = founder.runtime.store().item(book).await.unwrap().unwrap();
-    let blob = *stored.item.files.keys().next().unwrap();
+    (book, *stored.item.files.keys().next().unwrap())
+}
+
+/// [`three_nodes`], and a book added and kept by its custodian.
+async fn a_book_kept(
+    dir: &Path,
+    settings: &GroupSettings,
+    pledges: [u64; 3],
+) -> ([Node; 3], ItemId, ContentHash) {
+    let [founder, second, third] = three_nodes(dir, settings, pledges).await;
+    let (book, blob) = add_a_book(&founder, &second, dir).await;
     until("the custodian holds the book", || async {
         second.runtime.catalogue().holdings().holds(book)
     })
@@ -195,6 +205,24 @@ async fn an_unreachable_custodian_is_skipped_not_failed() {
     assert!(founder.failures().await.is_empty());
 
     for node in [founder, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The custodian never fetches the book, so never announces it: nobody probes
+/// it for a book it does not claim, which is coverage's business (D10).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_that_does_not_announce_the_item_is_not_probed() {
+    let dir = TempDir::new().unwrap();
+    let [founder, second, third] = three_nodes(dir.path(), &settings(), PLEDGES).await;
+    second.runtime.pins().shutdown();
+    add_a_book(&founder, &second, dir.path()).await;
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(founder.probed(), ProbeCounts::default());
+    assert!(founder.failures().await.is_empty());
+
+    for node in [founder, second, third] {
         node.runtime.shutdown().await;
     }
 }
