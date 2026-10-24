@@ -1837,20 +1837,18 @@ fn print_custody(custody: &Value) {
         "custody     {} items, {} bytes{}; group load {load}",
         custody["items"],
         custody["bytes"],
-        over_the_pledge(&custody["over_pledge"])
+        past_the_pledge(custody)
     );
 }
 
-/// The custody past this node's pledge, which it does not fetch, as a clause:
-/// none when there is none.
-fn over_the_pledge(over_pledge: &Value) -> String {
-    if over_pledge["items"].as_u64().unwrap_or(0) == 0 {
+/// Custody past this node's pledge, which it keeps all the same, as a
+/// clause: none while custody fits.
+fn past_the_pledge(custody: &Value) -> String {
+    let pledge = custody["pledge_bytes"].as_u64().unwrap_or(0);
+    if custody["bytes"].as_u64().unwrap_or(0) <= pledge {
         return String::new();
     }
-    format!(
-        "; {} items, {} bytes over the pledge",
-        over_pledge["items"], over_pledge["bytes"]
-    )
+    format!(", past the pledge of {pledge} bytes")
 }
 
 /// Where the items this node keeps stand, once there are any.
@@ -1955,12 +1953,15 @@ mod tests {
     }
 
     #[test]
-    fn custody_over_the_pledge_is_a_clause_only_when_there_is_some() {
+    fn custody_past_the_pledge_is_a_clause_only_when_it_is_past() {
         assert_eq!(
-            over_the_pledge(&json!({ "items": 2, "bytes": 300 })),
-            "; 2 items, 300 bytes over the pledge"
+            past_the_pledge(&json!({ "bytes": 300, "pledge_bytes": 200 })),
+            ", past the pledge of 200 bytes"
         );
-        assert_eq!(over_the_pledge(&json!({ "items": 0, "bytes": 0 })), "");
+        assert_eq!(
+            past_the_pledge(&json!({ "bytes": 200, "pledge_bytes": 200 })),
+            ""
+        );
     }
 
     #[test]

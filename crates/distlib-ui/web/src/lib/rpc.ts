@@ -40,8 +40,8 @@ export interface NodeStatus {
 export interface Custody {
   items: number;
   bytes: number;
-  /** What it is custodian of beyond its pledge: not fetched, so each such item is a copy short. */
-  over_pledge: { items: number; bytes: number };
+  /** Its pledge, as the settled membership has it: custody may go past it, and is kept all the same. */
+  pledge_bytes: number;
   /** Each item's size per custodian slot, over the group's total weight: above 1, some items are a copy short. `null` when no pledge weighs anything. */
   load_factor: number | null;
 }

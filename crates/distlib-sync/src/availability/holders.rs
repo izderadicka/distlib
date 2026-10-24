@@ -20,8 +20,6 @@ use distlib_core::{ContentHash, Holdings, ItemId, MemberId};
 pub(super) struct Holders {
     index: Index,
     stated: HashMap<MemberId, Stated>,
-    /// What each member's last beat said is over its pledge, when not zero.
-    over_pledge_items: HashMap<MemberId, u64>,
 }
 
 /// What taking in one statement did.
@@ -171,22 +169,7 @@ impl Holders {
     /// Forgets whoever `is_member` no longer admits — one pass over the map.
     pub(super) fn retain_members(&mut self, is_member: impl Fn(&MemberId) -> bool) {
         self.stated.retain(|member, _| is_member(member));
-        self.over_pledge_items.retain(|member, _| is_member(member));
         self.index.retain(is_member);
-    }
-
-    /// Takes in what `member`'s newest beat says is over its pledge.
-    pub(super) fn over_pledge_heard(&mut self, member: MemberId, items: u64) {
-        if items == 0 {
-            self.over_pledge_items.remove(&member);
-        } else {
-            self.over_pledge_items.insert(member, items);
-        }
-    }
-
-    /// What `member`'s last beat said is over its pledge.
-    pub(super) fn over_pledge_items_of(&self, member: &MemberId) -> u64 {
-        self.over_pledge_items.get(member).copied().unwrap_or(0)
     }
 
     /// The members known to hold `item`.

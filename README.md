@@ -374,7 +374,7 @@ curl -s http://127.0.0.1:11280/rpc \
 
 | Method | |
 |---|---|
-| `node.status` | Identity, group, whether this node votes, Raft state, current leader; its `custody`: the items it keeps for the group, those `over_pledge`, and the group's `load_factor`; the bytes it keeps as own, custody and cache against its storage limit. |
+| `node.status` | Identity, group, whether this node votes, Raft state, current leader; its `custody`: the items it keeps for the group and their size, its `pledge_bytes`, and the group's `load_factor`; the bytes it keeps as own, custody and cache against its storage limit. |
 | `group.members` | The membership as this node's log has it, with each member's pledge and what it is required to pledge, and its `coverage`: of the items this node holds that the member should keep too, how many it should (`expected`) and how many its heartbeat says it holds (`announced`) — `null` while it is offline or what it holds is not known yet. |
 | `group.propose_add` | `{member, name?}` — admit a member. |
 | `group.propose_expel` | `{member, reason}` — remove one. |
@@ -476,10 +476,8 @@ and never the files a download wrote out. A download that would not fit even the
 is refused.
 
 Custody follows weight, not the pledge exactly, so a node can be custodian of more
-than it pledged. It then fetches only what fits in the pledge, the items it ranks
-highest first, and leaves the rest a copy short; `distlib status` and the Node page
-say how much is over. What it already holds is let go of only once the group has
-its copies elsewhere.
+than it pledged. It keeps all of it even so; `distlib status` and the Node page say
+so, and raising the pledge with `distlib pledge` tells the group the room it takes.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If

@@ -142,7 +142,6 @@ impl Runtime {
         // On the same swarm, one topic the whole group shares, apart from the
         // membership and catalogue topics. It beats once this node knows its
         // group and where it is, and both arrive from the node.
-        let (over_pledge_told, over_pledge_items) = watch::channel(0);
         let availability = Availability::start(
             &transport,
             secret,
@@ -150,7 +149,6 @@ impl Runtime {
                 membership: node.subscribe(),
                 own_address: node.own_address(),
                 holdings: catalogue.holdings().clone(),
-                over_pledge_items,
             },
             Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
             tasks.events().clone(),
@@ -180,7 +178,6 @@ impl Runtime {
                 availability: &availability,
                 blobs: &media,
                 events: tasks.events(),
-                over_pledge_items: over_pledge_told,
                 config,
             },
         );
@@ -431,8 +428,6 @@ struct CustodyInputs<'a> {
     availability: &'a Availability,
     blobs: &'a Blobs,
     events: &'a broadcast::Sender<Event>,
-    /// Where custody tells the heartbeat what is over this node's pledge.
-    over_pledge_items: watch::Sender<u64>,
     /// For the storage limit, the fetches at once, and the beat interval.
     config: &'a Config,
 }
@@ -557,7 +552,6 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
             store: inputs.store.clone(),
             events: inputs.events.subscribe(),
             replays: inputs.projection.replays(),
-            over_pledge_items: inputs.over_pledge_items.clone(),
         },
     );
     let pins = PinManager::start(

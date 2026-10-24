@@ -32,8 +32,8 @@ pub use pins::{PinCounts, PinManager, PinSources};
 use service::Published;
 pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
+pub use view::CustodyStatus;
 use view::CustodyView;
-pub use view::{CustodyStatus, OverPledge};
 
 /// What custody is computed from.
 #[derive(Debug)]
@@ -45,9 +45,6 @@ pub struct CustodySources {
     pub events: broadcast::Receiver<Event>,
     /// Bumped by each replay of the read model, which announces nothing.
     pub replays: watch::Receiver<u64>,
-    /// Where it says how many items are over this node's pledge, for its
-    /// heartbeat.
-    pub over_pledge_items: watch::Sender<u64>,
 }
 
 /// This node's custody, kept up to date by a background task.
@@ -93,7 +90,6 @@ impl Custody {
         let published = Published {
             view: view_tx,
             changes: changes.clone(),
-            over_pledge_items: sources.over_pledge_items.clone(),
         };
         let task = tokio::spawn(service::run(me, sources, published));
         Self {
