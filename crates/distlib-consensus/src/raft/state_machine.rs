@@ -39,7 +39,6 @@ use crate::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
             write_key, write_txn, writing,
         },
-        log_store,
         types::TypeConfig,
     },
     signed::SignedEvent,
@@ -270,67 +269,23 @@ impl StateMachineStore {
         Ok(verdicts)
     }
 
-    /// Empties everything this node has applied, so a Raft can fill it in.
+    /// Resets the derived projection before a follower resumes Raft replay.
     ///
-    /// **Only for a follower being promoted**, and it is why promotion touches
-    /// storage rather than only plumbing. There are two reasons for it, and
-    /// they are worth keeping apart because only one of them is load-bearing.
+    /// A never-voting follower has no Raft membership of its own. Clearing its
+    /// projection opens the bounded bootstrap window in `RaftProtocol`, whose
+    /// trusted voters are captured before this call. It also prevents folding
+    /// fetched events a second time over a projection already ahead of Raft.
     ///
-    /// **The one that is: it is what lets the leader reach this node at all.**
-    /// A node with a founded log and an empty Raft voter set is, to
-    /// [`crate::raft::RaftProtocol`], a node that is not a voter and must not
-    /// be talked into behaving like one — the P1-22 rule, and a deliberate
-    /// one. A follower that seats a Raft without clearing its projection is
-    /// exactly that shape, so it refuses the very `AppendEntries` that would
-    /// catch it up, and the promotion never completes. Mutation-checked: skip
-    /// this call and the node takes its seat and is never made a voter.
-    /// Blanking the projection puts it back into the "no group yet" window
-    /// where [`crate::raft::network::TrustedCore`] answers instead — which is
-    /// why that type holds the core group the log gave rather than
-    /// configuration.
+    /// The Raft log, committed pointer and vote must survive. A demoted node
+    /// can still be a retained learner at its leader when promotion starts;
+    /// clearing entries it acknowledged would violate OpenRaft's monotonic
+    /// replication progress and can panic the leader. With whole-log retention,
+    /// `Raft::new` can rebuild the projection from the preserved committed log.
+    /// The role's `seated_at` boundary prevents historical replay of a demotion
+    /// from retiring this new seat before the promotion has been replayed.
     ///
-    /// **The one that is not, or not demonstrably: folding exactly once.** A
-    /// follower's projection is already complete — it has folded every event
-    /// fetched over `distlib/memberlog/0` — but its *Raft* log is empty,
-    /// because it never ran one or because this emptied it. So the leader
-    /// replicates from the beginning
-    /// and the fold would run a second time over events it has already folded.
-    /// Tried, out of curiosity: the second fold converges on the same
-    /// membership, because most of it is refused the second time — a member
-    /// already added, a group already founded — and refusals leave the state
-    /// alone. So this is not fixing a corruption anybody has seen. It makes
-    /// once-only true by construction rather than by case analysis over log
-    /// shapes, which is the weaker claim and the honest one.
-    ///
-    /// **The allowlist survives this**, which is what makes it safe: with no
-    /// `GroupFounded` applied, [`crate::MembershipNode`]'s allowlist task
-    /// leaves the last set in place rather than publishing an empty one — the
-    /// same rule that lets a founding node connect before there is a log. So
-    /// this node keeps talking to exactly whom it was talking to, and the log
-    /// replaces that picture when it arrives.
-    ///
-    /// `followed_upto` goes with the rest. It is a cursor into a log this node
-    /// no longer fetches, and leaving it set would strand a value that means
-    /// nothing to a voter.
-    ///
-    /// **So does the Raft log**, in the same transaction — which is the part a
-    /// node that voted before needs (C12). Its log still holds what it had
-    /// when it was demoted, and `Raft::new` re-applies that up to the stored
-    /// committed pointer, undoing the blanking above: the projection comes
-    /// back as it stood at the demotion, a core group without this node in
-    /// it, and the node stands down as soon as it has sat down. See
-    /// [`crate::raft::log_store::clear_for_promotion`], which keeps the vote.
-    ///
-    /// **So does the snapshot**, in the same transaction, because it is the
-    /// one piece of this store keyed to a log index rather than derived from
-    /// the state: a snapshot built at index 200 of the log this node followed
-    /// outlives a reset that puts `last_applied` back to nothing. Leaving it
-    /// costs twice. `get_current_snapshot` would hand the leader a picture of
-    /// a group this node is no longer in, and — worse — `build_snapshot`
-    /// refuses to persist anything older than what is stored, so every
-    /// snapshot this node ever built again would be silently dropped and its
-    /// log would never compact. Reachable by demote, restart as a follower,
-    /// promote again.
+    /// Clear the old snapshot and follower cursor with the projection. The
+    /// endpoint keeps its last application allowlist during the blank window.
     pub async fn reset_for_promotion(&self) -> StorageResult<()> {
         let encoded = {
             let mut applied = self.lock()?;
@@ -338,10 +293,8 @@ impl StateMachineStore {
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
-        // One transaction: an applied cursor at nothing beside a snapshot at
-        // index 200, or beside a log that re-applies up to it, is exactly the
-        // disagreement this is clearing, and a crash between two writes would
-        // persist it.
+        // The projection and its snapshot reset together. Raft history is
+        // deliberately untouched, including its durable commit and vote.
         write_txn(&self.inner.db, ErrorSubject::StateMachine, move |txn| {
             let fail = writing(ErrorSubject::StateMachine);
             let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
@@ -349,7 +302,7 @@ impl StateMachineStore {
                 .insert(APPLIED, encoded.as_slice())
                 .map_err(|source| fail(&source))?;
             table.remove(SNAPSHOT).map_err(|source| fail(&source))?;
-            log_store::clear_for_promotion(txn)
+            Ok(())
         })
         .await?;
 

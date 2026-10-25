@@ -1163,9 +1163,9 @@ struct Role {
     network: RaftNetworkFactoryImpl,
     /// The Raft log store, for each Raft this node builds on being promoted.
     ///
-    /// A clone of the one a voter's openraft writes. Promotion empties it,
-    /// because a node that voted before still holds entries a new learner must
-    /// not have.
+    /// A clone of the one a voter's openraft writes. Promotion preserves it:
+    /// the leader may still remember entries this node acknowledged as a
+    /// retained learner before its previous seat was vacated.
     log: LogStore,
     state_machine: StateMachineStore,
     client: MemberlogClient,
@@ -1206,8 +1206,8 @@ impl Role {
 /// most once and demote at most once, and a node demoted and promoted again
 /// stayed a follower while the log called it a voter. Going round again is
 /// sound because promotion puts the node back exactly where a follower that
-/// never voted starts — a blank state machine and an empty Raft log — so the
-/// second seat is the first one over again.
+/// never voted starts for projection replay. Its existing Raft log is kept,
+/// and the seating boundary protects the new seat during historical replay.
 ///
 /// **Either half giving up ends the task**, so the loop never goes round on a
 /// transition that did not happen. Today neither half can see its channel
@@ -1377,15 +1377,11 @@ async fn new_raft(
 ///    gives *now* — because step 3 takes that knowledge away, and step 4
 ///    leaves a node with no voters of its own for as long as it takes to be
 ///    caught up. See [`TrustedCore`].
-/// 3. **Blank the state machine, and the Raft log with it.** Not tidiness: a
-///    node with a founded log and no Raft voters of its own is one that
-///    `RaftProtocol` refuses consensus to, by the rule that stops a follower
-///    being talked into a group it is not in (P1-22). A promoted node that
-///    kept its projection would refuse the very replication meant to catch it
-///    up. Blanking puts it back into the window step 2 just seeded. The log
-///    goes too because a node that voted before still holds one, and
-///    `Raft::new` would re-apply it and undo the blanking (C12). See
-///    [`StateMachineStore::reset_for_promotion`], which has the measurement.
+/// 3. **Blank the state machine, preserving the Raft log.** The leader may
+///    still track this node as a retained learner, so acknowledged entries
+///    cannot disappear. The projection is replayed from the preserved log and
+///    subsequent replication. `seated_at` prevents historical demotions from
+///    unseating this promotion. See [`StateMachineStore::reset_for_promotion`].
 /// 4. **Build the Raft and sit down.** `Raft::new` reads the applied state
 ///    once, at construction, which is why step 3 cannot come after it.
 /// 5. **Start reconciling**, so this node does its share of putting later

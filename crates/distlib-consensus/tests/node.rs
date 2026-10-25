@@ -880,7 +880,9 @@ async fn a_demoted_node_catches_up_on_what_it_missed() {
 /// most once, so the second promotion was never acted on. And with that fixed
 /// alone, the node flapped: `Raft::new` re-applied the log it still held from
 /// before its demotion, rebuilt a core group without it, and it stood down as
-/// soon as it had sat down — which is why promotion now empties the log too.
+/// soon as it had sat down. The seating boundary must protect that replay;
+/// clearing acknowledged log entries instead races retained-learner cleanup
+/// and violates the leader's replication progress (PR #160 CI regression).
 ///
 /// Slow for the reason `a_demoted_node_catches_up_on_what_it_missed` is: the
 /// demoted node learns of its promotion by its follow loop's idle poll.
