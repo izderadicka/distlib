@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -662,10 +662,11 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   alone does not; `distlib expel --with-evidence` proposes with a reason that names the failures and
   fits `MAX_REASON`. Vitest per view.
 
-- **5c-4 — §9's acceptance, as one test, reworded (P5-1).** Five nodes, `replicas = 3`: an expelled
+- **5c-4 — §9's acceptance, as one test, reworded (P5-1).** *(done)* Five nodes, `replicas = 3`: an expelled
   custodian's items are fetched by the next-ranked member; an item down to one holder gets an
   emergency copy after the delay; a node whose pinned blob is deleted fails probes from two peers and
-  is red everywhere.
+  is red everywhere. *As one story* (P5-1): the custodian whose data is gone is red, and is the one
+  expelled, with the evidence; its data is emptied in place rather than deleted.
 
 - **5c-5 — by-hand check.** [`manual-check.md`](../manual-check.md) grows within its one story, and
   what it finds is fixed before the phase is called done.
