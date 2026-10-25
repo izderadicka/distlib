@@ -330,6 +330,7 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
         chunk: CHUNK,
         in_a_row: 1,
     };
+    third.runtime.catalogue().ready().await;
     third
         .runtime
         .catalogue()
@@ -415,7 +416,6 @@ async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
         ..settings()
     };
     let [founder, second, third] = three_nodes(dir.path(), &probes_off, PLEDGES).await;
-    founder.runtime.catalogue().ready().await;
     let failure = ProbeFailure {
         item: ItemId::from_bytes([1; 32]),
         blob: ContentHash::from_bytes([2; 32]),
@@ -423,9 +423,9 @@ async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
         in_a_row: 2,
     };
     for prober in [&founder, &third] {
-        prober
-            .runtime
-            .catalogue()
+        let catalogue = prober.runtime.catalogue();
+        catalogue.ready().await;
+        catalogue
             .record_probe_failure(second.id, &failure)
             .await
             .unwrap();
@@ -535,6 +535,7 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
         chunk: CHUNK,
         in_a_row: 1,
     };
+    third.runtime.catalogue().ready().await;
     third
         .runtime
         .catalogue()
