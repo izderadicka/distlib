@@ -19,6 +19,7 @@ distlib-net = { workspace = true }
 distlib-sync = { workspace = true }
 # A probe's item, custodian, file and chunk, chosen at random.
 getrandom = { workspace = true, features = ["std"] }
+chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

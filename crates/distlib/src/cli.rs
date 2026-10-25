@@ -99,8 +99,13 @@ pub enum Command {
         member: MemberId,
 
         /// Why. Kept in the log as the record of the decision.
+        #[arg(long, required_unless_present = "with_evidence")]
+        reason: Option<String>,
+
+        /// Add the member's probe failures that count to the reason: each
+        /// prober's latest, cut to fit the log's 512 bytes.
         #[arg(long)]
-        reason: String,
+        with_evidence: bool,
     },
 
     /// List the changes waiting for approvals.
@@ -544,4 +549,20 @@ pub enum CoreCommand {
         /// The member to stop counting as a voter.
         member: MemberId,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_expulsion_needs_a_reason_unless_it_gives_the_evidence() {
+        let member = MemberId::from(iroh::SecretKey::from_bytes(&[1; 32]).public()).to_string();
+        let parsed =
+            |args: &[&str]| Cli::try_parse_from([&["distlib", "expel", &member], args].concat());
+        assert!(parsed(&[]).is_err());
+        assert!(parsed(&["--reason", "gone"]).is_ok());
+        assert!(parsed(&["--with-evidence"]).is_ok());
+        assert!(parsed(&["--with-evidence", "--reason", "lost its disk"]).is_ok());
+    }
 }

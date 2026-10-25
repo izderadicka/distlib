@@ -36,7 +36,7 @@ pub use probes::{PROBE_WITHIN, ProbeCounts, ProbeError, ProbeSources, Probes};
 use service::Published;
 pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
-pub use suspects::{RED_FROM_PROBERS, Suspect, suspects};
+pub use suspects::{RED_FROM_PROBERS, Suspect, evidence_reason, suspects};
 pub use view::CustodyStatus;
 use view::CustodyView;
 

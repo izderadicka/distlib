@@ -6,7 +6,8 @@
 //! a failed copy that was the item's last real one gets an emergency copy.
 //! 5c-2c's: a failure another member recorded is re-checked at its chunk.
 //! 5c-3a's: failures from two probers turn a member red on every node, and
-//! one prober's alone does not; check now probes a member at once.
+//! one prober's alone does not; check now probes a member at once. 5c-3b's:
+//! an expulsion with evidence names the failures, within `MAX_REASON`.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -398,6 +399,79 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
     }
 
     for node in nodes {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The founder and the third member have each recorded a failure of the
+/// second. An expulsion with evidence proposes with a reason that names both,
+/// after the reason given, within the log's `MAX_REASON`; one of a member
+/// with no failures, or without a reason, is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
+    let dir = TempDir::new().unwrap();
+    let probes_off = GroupSettings {
+        probes: false,
+        ..settings()
+    };
+    let [founder, second, third] = three_nodes(dir.path(), &probes_off, PLEDGES).await;
+    founder.runtime.catalogue().ready().await;
+    let failure = ProbeFailure {
+        item: ItemId::from_bytes([1; 32]),
+        blob: ContentHash::from_bytes([2; 32]),
+        chunk: 7,
+        in_a_row: 2,
+    };
+    for prober in [&founder, &third] {
+        prober
+            .runtime
+            .catalogue()
+            .record_probe_failure(second.id, &failure)
+            .await
+            .unwrap();
+    }
+    until("both failures reach the founder", || async {
+        founder.failed_by(second.id).await == 2
+    })
+    .await;
+
+    for refused in [
+        json!({ "member": third.id, "with_evidence": true }),
+        json!({ "member": second.id }),
+    ] {
+        assert!(
+            founder.call("group.propose_expel", refused).await.is_err(),
+            "no evidence to give, or no reason"
+        );
+    }
+    let proposed = founder
+        .call(
+            "group.propose_expel",
+            json!({ "member": second.id, "reason": "lost its disk", "with_evidence": true }),
+        )
+        .await
+        .unwrap();
+    let reason = proposed["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("lost its disk — failed probes by 2 members within 7 days: "),
+        "{reason}"
+    );
+    for prober in [&founder, &third] {
+        assert!(
+            reason.contains(&format!("by {}", prober.id.fmt_short())),
+            "{reason}"
+        );
+    }
+    assert!(reason.contains("chunk 7, 2 in a row"), "{reason}");
+    assert!(reason.len() <= distlib_consensus::MAX_REASON);
+    let pending = founder.call("group.pending", json!({})).await.unwrap();
+    assert_eq!(
+        pending["pending"].as_array().unwrap().len(),
+        1,
+        "a core member's expulsion waits for the others"
+    );
+
+    for node in [founder, second, third] {
         node.runtime.shutdown().await;
     }
 }

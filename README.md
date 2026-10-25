@@ -331,7 +331,7 @@ them hold for every protocol added later.
 | `distlib run` | Run the node until `Ctrl-C` or `SIGTERM` — or until the group expels it, which a non-voting member finds out by being refused, and which it reports before exiting. Stop it with one of those rather than `kill -9`: the shutdown is what commits the blob store's record of the files this node has fetched. |
 | `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
 | `distlib admit <member> [--name]` | Admit a member. Needs the node running. |
-| `distlib expel <member> --reason` | Remove one, recording why. Needs the node running. |
+| `distlib expel <member> --reason` | Remove one, recording why. `--with-evidence` adds its probe failures to the reason, and makes `--reason` optional. Needs the node running. |
 | `distlib pending` | List the changes waiting for approvals. |
 | `distlib approve <proposal>` | Approve a pending change. |
 | `distlib withdraw <proposal>` | Take back a change you proposed. |
@@ -503,6 +503,10 @@ members list. The Node page's Suspects section lists every member with failures 
 count, the most probers first, with each prober's latest failure, and **Check now**
 probes one at once from this node: at its latest failure's chunk if it still announces
 that item. The outcome is recorded like any probe's.
+`distlib expel <member> --with-evidence [--reason "..."]` proposes expelling a
+suspect with a reason that names its failures, after the reason given: each prober,
+when, the item, the chunk and how many in a row, cut to fit the log's 512 bytes. It
+is refused for a member with no failures that count.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If
