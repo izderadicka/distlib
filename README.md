@@ -492,7 +492,10 @@ and clears it at its next probe of that member that passes. Only a member pledgi
 the group's minimum probes, since the others are not sent content. A copy that
 failed a probe within the group's `failure_window_secs` does not count as a copy:
 an item whose last real copy it was gets its emergency copy, and a custodian giving
-up its custody keeps the item until enough real copies are elsewhere.
+up its custody keeps the item until enough real copies are elsewhere. One probe in
+four re-checks a suspect instead: a failure this node recorded, then one another
+member recorded, each at the chunk it failed at, then a member announcing less than
+it should hold.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If

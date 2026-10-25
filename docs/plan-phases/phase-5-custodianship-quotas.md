@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -644,11 +644,11 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   stopped falls behind once its assignments are older than `max_settle_secs`; one still within that
   time is not blamed.
 
-- **5c-2 — probes (D11), and failures in the catalogue (D12).** Random sampling with the suspect
+- **5c-2 — probes (D11), and failures in the catalogue (D12).** *(done)* Random sampling with the suspect
   share, the repair hook, failure keys written and cleared; off when the group says so.
   *Split in three* (P5-27, P5-28): **5c-2a** *(done)* — random probes, and failure keys written and cleared;
   **5c-2b** *(done)* — the failed copy counted as missing, for the emergency copy and for letting go of
-  custody; **5c-2c** — one probe in four re-checking a suspect.
+  custody; **5c-2c** *(done)* — one probe in four re-checking a suspect.
   **Acceptance:** a custodian holding the item passes and nothing is written; one whose blob was
   deleted underneath it fails, its key appears on every node, and the item gets its emergency copy if
   that was its last real one; its next pass clears the key; an unreachable custodian is skipped; a
