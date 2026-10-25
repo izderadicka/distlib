@@ -6,7 +6,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -18,8 +18,11 @@ use distlib_core::{
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
     Review, Series, TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Coverage, Custody, PinCounts, Room, Storage, StorageError};
-use distlib_net::{Blobs, NetError};
+use distlib_custody::{
+    Coverage, Custody, PinCounts, ProbeError, Probes, Room, Storage, StorageError, Suspect,
+    suspects,
+};
+use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{
     BookmarkFilter, ReindexHandle, SearchIndex, Store, StoreError, StoredBookmark, StoredItem,
 };
@@ -92,6 +95,8 @@ pub struct Api {
     pub custody: Custody,
     /// How much of what this node holds each other custodian announces.
     pub coverage: Coverage,
+    /// This node's probes, for `group.check`.
+    pub probes: Probes,
     /// Where the items this node keeps stand: queued, fetched, kept.
     pub pins: watch::Receiver<PinCounts>,
     /// `[storage] limit_bytes`, and the cache's eviction to stay within it.
@@ -114,6 +119,8 @@ impl Api {
             "group.withdraw" => self.withdraw(parse(params)?).await,
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
             "group.ticket" => self.ticket(),
+            "group.suspects" => self.suspects().await,
+            "group.check" => self.check(parse(params)?).await,
             "admin.reindex" => self.reindex().await,
             "library.search" => self.search(parse(params)?).await,
             "library.list" => self.list(parse(params)?).await,
@@ -234,6 +241,13 @@ impl Api {
     async fn members(&self) -> Result<Value, Error> {
         let added = self.store.added_bytes().await.map_err(query_error)?;
         let membership = self.node.membership();
+        let red: HashSet<MemberId> = self
+            .suspects_now(&membership)
+            .await?
+            .into_iter()
+            .filter(Suspect::is_red)
+            .map(|suspect| suspect.member)
+            .collect();
         let settings = membership.settings();
         let members: Vec<Value> = membership
             .members()
@@ -248,6 +262,8 @@ impl Api {
                     // Null while it is not judged: offline, or what it holds
                     // not known yet.
                     "coverage": self.coverage.of(&record.member_id),
+                    // Failures from at least two probers within the window.
+                    "red": red.contains(&record.member_id),
                 })
             })
             .collect();
@@ -257,6 +273,70 @@ impl Api {
             "changed_at": membership.changed_at(),
             "members": members,
         }))
+    }
+
+    /// The members with probe failures that count (D12); none before the
+    /// catalogue opens, which is a moment after the group is known.
+    async fn suspects_now(&self, membership: &MembershipState) -> Result<Vec<Suspect>, Error> {
+        let failures = match self.catalogue.probe_failures().await {
+            Ok(failures) => failures,
+            Err(SyncError::NoGroupYet) => return Ok(Vec::new()),
+            Err(error) => return Err(sync_error(error)),
+        };
+        Ok(suspects(failures, membership, SystemTime::now()))
+    }
+
+    /// `group.suspects` — the members with probe failures that count, the
+    /// most probers first (D12), each with every prober's latest failure.
+    async fn suspects(&self) -> Result<Value, Error> {
+        let membership = self.node.membership();
+        let name = |member: &MemberId| membership.member(member).map(|record| &record.display_name);
+        let mut listed = Vec::new();
+        for suspect in self.suspects_now(&membership).await? {
+            let mut failures = Vec::with_capacity(suspect.failures.len());
+            for recorded in &suspect.failures {
+                let title = self
+                    .store
+                    .item(recorded.failure.item)
+                    .await
+                    .map_err(query_error)?
+                    .and_then(|stored| stored.item.title);
+                failures.push(json!({
+                    "prober": recorded.prober,
+                    "prober_name": name(&recorded.prober),
+                    "item": recorded.failure.item,
+                    "title": title,
+                    "blob": recorded.failure.blob,
+                    "chunk": recorded.failure.chunk,
+                    "in_a_row": recorded.failure.in_a_row,
+                    "written": recorded.written,
+                }));
+            }
+            listed.push(json!({
+                "member": suspect.member,
+                "name": name(&suspect.member),
+                "red": suspect.is_red(),
+                "failures": failures,
+            }));
+        }
+        Ok(json!({ "suspects": listed }))
+    }
+
+    /// `group.check` — probes a member now, from this node (D12's check now):
+    /// `outcome` is `passed`, `failed`, `unreachable`, or null with nothing
+    /// of it to probe.
+    async fn check(&self, params: Check) -> Result<Value, Error> {
+        let outcome = self
+            .probes
+            .check(params.member)
+            .await
+            .map_err(probe_error)?
+            .map(|probed| match probed {
+                Probed::Passed => "passed",
+                Probed::Failed => "failed",
+                Probed::Unreachable => "unreachable",
+            });
+        Ok(json!({ "outcome": outcome }))
     }
 
     /// `group.pending` — the changes waiting for approvals (§4.4 step 2).
@@ -1854,6 +1934,15 @@ fn storage_error(error: StorageError) -> Error {
     Error::failed(error.to_string())
 }
 
+/// Asking a node to probe itself is the caller's mistake; the rest is this
+/// node's group or pledge, or the probe itself failing to run.
+fn probe_error(error: ProbeError) -> Error {
+    match error {
+        ProbeError::Itself => Error::invalid_params(error.to_string()),
+        other => Error::failed(other.to_string()),
+    }
+}
+
 /// A one-line description of a proposal, for an operator deciding about it.
 ///
 /// Rendered here rather than at the CLI because the API is the surface a
@@ -1949,6 +2038,12 @@ struct ProposeAdd {
     member: MemberId,
     #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Check {
+    member: MemberId,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

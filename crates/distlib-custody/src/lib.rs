@@ -13,6 +13,7 @@ mod service;
 mod serving;
 mod settling;
 mod storage;
+mod suspects;
 mod view;
 
 use std::{
@@ -31,10 +32,11 @@ use tokio::{
 
 pub use coverage::{COVERAGE_EVERY, Coverage, CoverageSources, MemberCoverage};
 pub use pins::{PinCounts, PinManager, PinSources};
-pub use probes::{PROBE_WITHIN, ProbeCounts, ProbeSources, Probes};
+pub use probes::{PROBE_WITHIN, ProbeCounts, ProbeError, ProbeSources, Probes};
 use service::Published;
 pub use serving::PledgedOnly;
 pub use storage::{Room, Storage, StorageError};
+pub use suspects::{RED_FROM_PROBERS, Suspect, suspects};
 pub use view::CustodyStatus;
 use view::CustodyView;
 

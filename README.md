@@ -497,6 +497,13 @@ four re-checks a suspect instead: a failure this node recorded, then one another
 member recorded, each at the chunk it failed at, then a member announcing less than
 it should hold.
 
+A member with failures from at least two probers, each within `failure_window_secs`
+and each prober still a member, is red: in `distlib members`, and in the Node page's
+members list. The Node page's Suspects section lists every member with failures that
+count, the most probers first, with each prober's latest failure, and **Check now**
+probes one at once from this node: at its latest failure's chunk if it still announces
+that item. The outcome is recorded like any probe's.
+
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If
 passes stop, which iroh-blobs does after one fails, an error is logged after two

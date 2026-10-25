@@ -196,6 +196,7 @@ async fn start_local_api(
         uploads: runtime.uploads().clone(),
         custody: runtime.custody().clone(),
         coverage: runtime.coverage().clone(),
+        probes: runtime.probes().clone(),
         pins: runtime.pins().counts(),
         storage: runtime.storage().clone(),
         collections: runtime.collections(),
@@ -1442,6 +1443,8 @@ struct Listed {
     core: bool,
     /// Only a running node works it out.
     coverage: Option<MemberCoverage>,
+    /// Failed by at least two probers (D12). Only a running node knows.
+    red: bool,
 }
 
 /// The membership as the running node has it.
@@ -1469,6 +1472,7 @@ fn live_member(member: &Value) -> Listed {
         ),
         core: member["core"].as_bool().unwrap_or(false),
         coverage: serde_json::from_value(member["coverage"].clone()).unwrap_or_default(),
+        red: member["red"].as_bool().unwrap_or(false),
     }
 }
 
@@ -1483,6 +1487,7 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
                 name: display(member),
                 core: membership.is_core(&member.member_id),
                 coverage: None,
+                red: false,
             })
             .collect(),
     })
@@ -1491,10 +1496,15 @@ fn stored_members(paths: &Paths) -> Result<Listing> {
 /// One member's line in `distlib members`.
 fn member_line(member: &Listed) -> String {
     format!(
-        "  {}{}{}",
+        "  {}{}{}{}",
         member.name,
         if member.core { "  core" } else { "" },
-        coverage_clause(member.coverage)
+        coverage_clause(member.coverage),
+        if member.red {
+            "  red: failed probes by two or more members"
+        } else {
+            ""
+        }
     )
 }
 
@@ -2027,6 +2037,11 @@ mod tests {
         assert_eq!(unjudged.coverage, None);
         assert_eq!(member_line(&judged), "  carol (abc)  coverage 3 of 4");
         assert_eq!(member_line(&unjudged), "  abc");
+        let red = live_member(&json!({ "member": "abc", "red": true }));
+        assert_eq!(
+            member_line(&red),
+            "  abc  red: failed probes by two or more members"
+        );
     }
 
     #[test]
