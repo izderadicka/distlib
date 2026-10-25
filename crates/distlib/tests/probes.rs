@@ -4,6 +4,7 @@
 //! unreachable custodian is skipped; a group founded with `probes` off makes
 //! no probes, and neither does a member below the minimum pledge. 5c-2b's:
 //! a failed copy that was the item's last real one gets an emergency copy.
+//! 5c-2c's: a failure another member recorded is re-checked at its chunk.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -22,6 +23,7 @@ use std::{
 use distlib::Runtime;
 use distlib_core::{
     ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason, MemberId,
+    ProbeFailure,
 };
 use distlib_custody::ProbeCounts;
 use distlib_sync::RecordedFailure;
@@ -175,6 +177,15 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
         })
         .await;
     }
+    // Every chunk is wrong, so the next probe fails too, and is counted.
+    until("the failures are counted in a row", || async {
+        founder
+            .failures()
+            .await
+            .iter()
+            .any(|recorded| recorded.failure.in_a_row >= 2)
+    })
+    .await;
 
     // Back, and the founder's next pass clears it everywhere.
     std::fs::write(&bytes, &book_bytes).unwrap();
@@ -252,6 +263,48 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
             .any(|recorded| recorded.custodian == custodian.id),
         "the failure is recorded"
     );
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The custodian's copy is wrong in one chunk of the book's 977, and the
+/// third member has recorded a failure there. Random probes would come to that
+/// chunk once in 977; the founder's suspect share re-checks it in seconds,
+/// fails it too, and records its own failure at it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
+    const CHUNK: u64 = 500;
+    let dir = TempDir::new().unwrap();
+    let ([founder, second, third], book, blob) =
+        a_book_kept(dir.path(), &settings(), PLEDGES).await;
+
+    let bytes = second.bytes_of(blob);
+    let mut book_bytes = std::fs::read(&bytes).unwrap();
+    let start = usize::try_from(CHUNK * 1024).unwrap();
+    book_bytes[start..start + 1024].fill(0);
+    std::fs::write(&bytes, &book_bytes).unwrap();
+    let failure = ProbeFailure {
+        item: book,
+        blob,
+        chunk: CHUNK,
+        in_a_row: 1,
+    };
+    third
+        .runtime
+        .catalogue()
+        .record_probe_failure(second.id, &failure)
+        .await
+        .unwrap();
+
+    until("the founder fails the custodian at that chunk", || async {
+        founder.failures().await.iter().any(|recorded| {
+            (recorded.custodian, recorded.prober, recorded.failure.chunk)
+                == (second.id, founder.id, CHUNK)
+        })
+    })
+    .await;
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;

@@ -24,7 +24,7 @@ pub(crate) async fn follow(
     // Taken before the first read, so a change during it is not missed.
     let mut changed = catalogue.probe_failures_changed();
     loop {
-        let window = Duration::from_secs(membership.borrow().settings().failure_window_secs.into());
+        let window = failure_window(&membership.borrow());
         let next_out = match catalogue.probe_failures().await {
             Ok(failures) => {
                 let (failed_copies, next_out) = failed_within(&failures, window, SystemTime::now());
@@ -46,6 +46,22 @@ pub(crate) async fn follow(
     }
 }
 
+/// The group's `failure_window_secs`: how long a failure counts.
+pub(crate) fn failure_window(membership: &MembershipState) -> Duration {
+    Duration::from_secs(membership.settings().failure_window_secs.into())
+}
+
+/// How long `recorded` has left in `window` at `now`; `None` once it is out.
+pub(crate) fn left_in_window(
+    recorded: &RecordedFailure,
+    window: Duration,
+    now: SystemTime,
+) -> Option<Duration> {
+    let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let age = now.saturating_sub(Duration::from_micros(recorded.written));
+    window.checked_sub(age).filter(|left| !left.is_zero())
+}
+
 /// The copies `failures` written within `window` of `now` say are missing,
 /// and how long until the first of them is out of the window.
 fn failed_within(
@@ -53,12 +69,10 @@ fn failed_within(
     window: Duration,
     now: SystemTime,
 ) -> (HashSet<(MemberId, ItemId)>, Option<Duration>) {
-    let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     failures
         .iter()
         .filter_map(|recorded| {
-            let age = now.saturating_sub(Duration::from_micros(recorded.written));
-            let left = window.checked_sub(age).filter(|left| !left.is_zero())?;
+            let left = left_in_window(recorded, window, now)?;
             Some(((recorded.custodian, recorded.failure.item), left))
         })
         .fold(

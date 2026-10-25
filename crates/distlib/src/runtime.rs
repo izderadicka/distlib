@@ -590,6 +590,7 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
     let probes = Probes::start(ProbeSources {
         me,
         custody: custody.clone(),
+        coverage: coverage.clone(),
         membership: inputs.node.subscribe(),
         store: inputs.store.clone(),
         blobs: inputs.blobs.clone(),

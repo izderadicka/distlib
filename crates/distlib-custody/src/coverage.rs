@@ -32,6 +32,13 @@ pub struct MemberCoverage {
     pub announced: usize,
 }
 
+impl MemberCoverage {
+    /// Whether the member announces less than it should hold: a suspect.
+    pub fn is_low(&self) -> bool {
+        self.announced < self.expected
+    }
+}
+
 /// What coverage is worked out from.
 pub struct CoverageSources {
     /// Who the custodians of each item are, and since when.
@@ -80,6 +87,15 @@ impl Coverage {
     /// count.
     pub fn of(&self, member: &MemberId) -> Option<MemberCoverage> {
         lock(&self.inner.counted).get(member).copied()
+    }
+
+    /// The members whose coverage, as last worked out, is low.
+    pub(crate) fn low(&self) -> Vec<MemberId> {
+        lock(&self.inner.counted)
+            .iter()
+            .filter(|(_, coverage)| coverage.is_low())
+            .map(|(member, _)| *member)
+            .collect()
     }
 
     /// Stops the task. Dropping the last handle does the same.
@@ -286,6 +302,13 @@ mod tests {
         let judged = HashSet::from([bob]);
         let counted = count(&group, &[], &judged, |_| Vec::new(), |_| true);
         assert_eq!(counted, HashMap::from([(bob, covered(0, 0))]));
+    }
+
+    #[test]
+    fn coverage_is_low_when_less_is_announced_than_expected() {
+        assert!(covered(2, 1).is_low());
+        assert!(!covered(2, 2).is_low());
+        assert!(!covered(0, 0).is_low());
     }
 
     #[test]
