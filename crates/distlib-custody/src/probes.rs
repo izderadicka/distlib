@@ -16,7 +16,10 @@ use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Catalogue, Holdings, RecordedFailure, SyncError};
 use serde::Serialize;
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{Mutex as AsyncMutex, watch},
+    task::JoinHandle,
+};
 
 use crate::{
     Coverage, Custody,
@@ -56,14 +59,26 @@ pub struct ProbeSources {
     pub catalogue: Catalogue,
 }
 
-/// This node's probes, made in the background.
-#[derive(Debug, Clone)]
+/// This node's probes, made in the background, and at once when asked.
+#[derive(Clone)]
 pub struct Probes {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug, Default)]
+impl std::fmt::Debug for Probes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probes")
+            .field("counts", &self.counts())
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
+    sources: ProbeSources,
+    /// This node's own failures recorded, by custodian, read from the
+    /// catalogue at the first probe. Held through a probe, so a check and a
+    /// scheduled probe take turns.
+    mine: AsyncMutex<Option<HashMap<MemberId, ProbeFailure>>>,
     counts: Mutex<ProbeCounts>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -79,14 +94,28 @@ impl Drop for Inner {
 impl Probes {
     /// Starts probing, every `probe_every_secs` while the group probes.
     pub fn start(sources: ProbeSources) -> Self {
-        let inner = Arc::new(Inner::default());
-        let task = tokio::spawn(run(sources, Arc::downgrade(&inner)));
+        let inner = Arc::new(Inner {
+            sources,
+            mine: AsyncMutex::new(None),
+            counts: Mutex::default(),
+            task: Mutex::default(),
+        });
+        let task = tokio::spawn(run(Arc::downgrade(&inner)));
         *lock(&inner.task) = Some(task);
         Self { inner }
     }
 
     pub fn counts(&self) -> ProbeCounts {
         *lock(&self.inner.counts)
+    }
+
+    /// Probes `member` now (D12's check now): at the chunk of its latest
+    /// failure recorded within the window, if it still announces that item,
+    /// otherwise at a random chunk of an item this node holds that it is
+    /// custodian of and announces. Recorded and counted like any probe.
+    /// `None` with nothing of it to probe.
+    pub async fn check(&self, member: MemberId) -> Result<Option<Probed>, ProbeError> {
+        self.inner.check(member).await
     }
 
     /// Stops the task. Dropping the last handle does the same.
@@ -101,9 +130,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Why a probe could not be chosen or its outcome recorded.
+/// Why a probe was not made, or its outcome not recorded.
 #[derive(Debug, thiserror::Error)]
-enum ProbeError {
+pub enum ProbeError {
+    #[error("the group was founded without probes")]
+    ProbesOff,
+    #[error("this node pledges less than the group's minimum, so it is not sent content to probe")]
+    BelowMinimum,
+    #[error("a node does not probe itself")]
+    Itself,
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -114,9 +149,14 @@ enum ProbeError {
     Random(#[from] getrandom::Error),
 }
 
-async fn run(sources: ProbeSources, inner: Weak<Inner>) {
+async fn run(inner: Weak<Inner>) {
+    let Some(mut membership) = inner
+        .upgrade()
+        .map(|inner| inner.sources.membership.clone())
+    else {
+        return;
+    };
     // The settings come with the group, and never change after.
-    let mut membership = sources.membership.clone();
     let Ok(every) = membership
         .wait_for(|state| state.group_id().is_some())
         .await
@@ -125,26 +165,130 @@ async fn run(sources: ProbeSources, inner: Weak<Inner>) {
         tracing::error!("the log is gone before there was a group; no probes are made");
         return;
     };
-    // This node's own failures recorded, by custodian. Read from the
-    // catalogue at the first probe.
-    let mut mine: Option<HashMap<MemberId, ProbeFailure>> = None;
     loop {
         tokio::time::sleep(every).await;
-        let probed = probe_once(&sources, &mut mine).await;
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        let mut counts = lock(&inner.counts);
-        match probed {
-            Ok(Some(Probed::Passed)) => counts.passed += 1,
-            Ok(Some(Probed::Failed)) => counts.failed += 1,
-            Ok(Some(Probed::Unreachable)) => counts.skipped += 1,
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(%error, "could not make a probe; trying again at the next");
-            }
+        if let Err(error) = inner.probe_once().await {
+            tracing::warn!(%error, "could not make a probe; trying again at the next");
         }
     }
+}
+
+impl Inner {
+    /// One probe, if this node probes and there is a custodian to probe: one
+    /// in four a suspect, otherwise, or with no suspect, an item this node
+    /// holds that another custodian announces.
+    async fn probe_once(&self) -> Result<Option<Probed>, ProbeError> {
+        if refusal(&self.sources).is_some() {
+            return Ok(None);
+        }
+        let mut mine = self.mine.lock().await;
+        let mine = loaded(&mut mine, &self.sources).await?;
+        let suspect = if below(SUSPECT_ONE_IN)? == 0 {
+            suspect_target(&self.sources, mine).await?
+        } else {
+            None
+        };
+        let target = match suspect {
+            Some(target) => target,
+            None => match random_target(&self.sources, None).await? {
+                Some(target) => target,
+                None => return Ok(None),
+            },
+        };
+        self.make(mine, target).await.map(Some)
+    }
+
+    /// See [`Probes::check`].
+    async fn check(&self, member: MemberId) -> Result<Option<Probed>, ProbeError> {
+        if let Some(refused) = refusal(&self.sources) {
+            return Err(refused);
+        }
+        if member == self.sources.me {
+            return Err(ProbeError::Itself);
+        }
+        let mut mine = self.mine.lock().await;
+        let mine = loaded(&mut mine, &self.sources).await?;
+        let target = match latest_evidence(&self.sources, member).await? {
+            Some(target) => target,
+            None => match random_target(&self.sources, Some(member)).await? {
+                Some(target) => target,
+                None => return Ok(None),
+            },
+        };
+        self.make(mine, target).await.map(Some)
+    }
+
+    /// Probes `target`, counts how it came out, and records it.
+    async fn make(
+        &self,
+        mine: &mut HashMap<MemberId, ProbeFailure>,
+        target: Target,
+    ) -> Result<Probed, ProbeError> {
+        let probed = self
+            .sources
+            .blobs
+            .probe(target.custodian, target.blob, target.chunk, PROBE_WITHIN)
+            .await;
+        {
+            let mut counts = lock(&self.counts);
+            match probed {
+                Probed::Passed => counts.passed += 1,
+                Probed::Failed => counts.failed += 1,
+                Probed::Unreachable => counts.skipped += 1,
+            }
+        }
+        record(&self.sources.catalogue, mine, target, probed).await?;
+        Ok(probed)
+    }
+}
+
+/// Why this node makes no probes now, if it makes none: the group does not
+/// probe, or this node pledges less than the minimum and is refused content,
+/// which would read as failures.
+fn refusal(sources: &ProbeSources) -> Option<ProbeError> {
+    let membership = sources.membership.borrow();
+    if !membership.settings().probes {
+        Some(ProbeError::ProbesOff)
+    } else if !membership.pledges_the_minimum(&sources.me) {
+        Some(ProbeError::BelowMinimum)
+    } else {
+        None
+    }
+}
+
+/// This node's own failures, read from the catalogue the first time.
+async fn loaded<'a>(
+    mine: &'a mut Option<HashMap<MemberId, ProbeFailure>>,
+    sources: &ProbeSources,
+) -> Result<&'a mut HashMap<MemberId, ProbeFailure>, SyncError> {
+    Ok(match mine {
+        Some(mine) => mine,
+        None => mine.insert(my_failures(&sources.catalogue, sources.me).await?),
+    })
+}
+
+/// `member`'s latest failure recorded within the window, at its chunk, if it
+/// still announces that item.
+async fn latest_evidence(
+    sources: &ProbeSources,
+    member: MemberId,
+) -> Result<Option<Target>, SyncError> {
+    let window = failure_window(&sources.membership.borrow());
+    let now = SystemTime::now();
+    Ok(sources
+        .catalogue
+        .probe_failures()
+        .await?
+        .iter()
+        .filter(|recorded| {
+            recorded.custodian == member && left_in_window(recorded, window, now).is_some()
+        })
+        .max_by_key(|recorded| recorded.written)
+        .map(|recorded| Target::recorded(member, &recorded.failure))
+        .filter(|target| sources.availability.holders(&target.item).contains(&member)))
 }
 
 /// One probe in this many re-checks a suspect (D11).
@@ -170,44 +314,6 @@ impl Target {
             chunk: failure.chunk,
         }
     }
-}
-
-/// One probe, if the group probes, this node pledges the minimum (a member
-/// below it is refused content, which would read as failures), and there is
-/// a custodian to probe: one in four a suspect, otherwise, or with no
-/// suspect, an item this node holds that another custodian announces.
-async fn probe_once(
-    sources: &ProbeSources,
-    mine: &mut Option<HashMap<MemberId, ProbeFailure>>,
-) -> Result<Option<Probed>, ProbeError> {
-    {
-        let membership = sources.membership.borrow();
-        if !membership.settings().probes || !membership.pledges_the_minimum(&sources.me) {
-            return Ok(None);
-        }
-    }
-    let mine = match mine {
-        Some(mine) => mine,
-        None => mine.insert(my_failures(&sources.catalogue, sources.me).await?),
-    };
-    let suspect = if below(SUSPECT_ONE_IN)? == 0 {
-        suspect_target(sources, mine).await?
-    } else {
-        None
-    };
-    let target = match suspect {
-        Some(target) => target,
-        None => match random_target(sources, None).await? {
-            Some(target) => target,
-            None => return Ok(None),
-        },
-    };
-    let probed = sources
-        .blobs
-        .probe(target.custodian, target.blob, target.chunk, PROBE_WITHIN)
-        .await;
-    record(&sources.catalogue, mine, target, probed).await?;
-    Ok(Some(probed))
 }
 
 /// A suspect to re-check (D11), of the custodians that still announce the

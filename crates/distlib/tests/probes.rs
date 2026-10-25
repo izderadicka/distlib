@@ -5,6 +5,8 @@
 //! no probes, and neither does a member below the minimum pledge. 5c-2b's:
 //! a failed copy that was the item's last real one gets an emergency copy.
 //! 5c-2c's: a failure another member recorded is re-checked at its chunk.
+//! 5c-3a's: failures from two probers turn a member red on every node, and
+//! one prober's alone does not; check now probes a member at once.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -28,7 +30,7 @@ use distlib_core::{
 use distlib_custody::ProbeCounts;
 use distlib_sync::RecordedFailure;
 use iroh::SecretKey;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
@@ -68,6 +70,40 @@ impl Node {
 
     fn probed(&self) -> ProbeCounts {
         self.runtime.probes().counts()
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, distlib_api::rpc::Error> {
+        api(&self.runtime, &self.key)
+            .call(method, Some(params))
+            .await
+    }
+
+    /// Whether its `group.members` says `member` is red.
+    async fn says_red(&self, member: MemberId) -> bool {
+        let members = self.call("group.members", json!({})).await.unwrap();
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|listed| listed["member"] == json!(member) && listed["red"] == json!(true))
+    }
+
+    /// How many probers' failures of `member` its `group.suspects` lists.
+    async fn failed_by(&self, member: MemberId) -> usize {
+        let listed = self.call("group.suspects", json!({})).await.unwrap();
+        listed["suspects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|suspect| suspect["member"] == json!(member))
+            .map_or(0, |suspect| suspect["failures"].as_array().unwrap().len())
+    }
+
+    async fn check(&self, member: MemberId) -> Value {
+        self.call("group.check", json!({ "member": member }))
+            .await
+            .unwrap()["outcome"]
+            .clone()
     }
 
     /// Where the blob store keeps `blob`'s bytes.
@@ -269,13 +305,15 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
     }
 }
 
+/// The chunk the tests below make wrong, of the book's 977.
+const CHUNK: u64 = 500;
+
 /// The custodian's copy is wrong in one chunk of the book's 977, and the
 /// third member has recorded a failure there. Random probes would come to that
 /// chunk once in 977; the founder's suspect share re-checks it in seconds,
 /// fails it too, and records its own failure at it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
-    const CHUNK: u64 = 500;
     let dir = TempDir::new().unwrap();
     let ([founder, second, third], book, blob) =
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
@@ -305,6 +343,150 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
         })
     })
     .await;
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The founder's failure of the second member alone does not make it red on
+/// any node; the third's as well does, on every node. Probes are off, so
+/// nothing clears the two written here.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
+    let dir = TempDir::new().unwrap();
+    let probes_off = GroupSettings {
+        probes: false,
+        ..settings()
+    };
+    let nodes = three_nodes(dir.path(), &probes_off, PLEDGES).await;
+    let [founder, second, third] = &nodes;
+    founder.runtime.catalogue().ready().await;
+    let failure = ProbeFailure {
+        item: ItemId::from_bytes([1; 32]),
+        blob: ContentHash::from_bytes([2; 32]),
+        chunk: 0,
+        in_a_row: 1,
+    };
+
+    founder
+        .runtime
+        .catalogue()
+        .record_probe_failure(second.id, &failure)
+        .await
+        .unwrap();
+    for node in &nodes {
+        until("the founder's failure reaches every node", || async {
+            node.failed_by(second.id).await == 1
+        })
+        .await;
+        assert!(!node.says_red(second.id).await, "one prober is not enough");
+    }
+
+    third
+        .runtime
+        .catalogue()
+        .record_probe_failure(second.id, &failure)
+        .await
+        .unwrap();
+    for node in &nodes {
+        until("the second member is red on every node", || async {
+            node.says_red(second.id).await
+        })
+        .await;
+        assert!(!node.says_red(founder.id).await);
+    }
+
+    for node in nodes {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// A node knows its group a moment before its catalogue opens, and in no
+/// group it has none: nothing is red then, and nobody a suspect.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_without_its_catalogue_lists_no_suspects() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let me: MemberId = key.public().into();
+    let runtime = Runtime::start(&key, &config(&[me]), &DataDir::new(dir.path().join("0")))
+        .await
+        .unwrap();
+    let api = api(&runtime, &key);
+
+    let members = api.call("group.members", None).await.unwrap();
+    assert_eq!(members["members"], json!([]));
+    let listed = api.call("group.suspects", None).await.unwrap();
+    assert_eq!(listed["suspects"], json!([]));
+
+    runtime.shutdown().await;
+}
+
+/// Probes come an hour apart, so only check now makes one: it passes, fails
+/// once the custodian's bytes are wrong and records the failure, and passes
+/// again once they are back, which clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
+    let dir = TempDir::new().unwrap();
+    let hourly = GroupSettings {
+        probe_every_secs: NonZeroU32::new(3600).unwrap(),
+        ..settings()
+    };
+    let ([founder, second, third], book, blob) = a_book_kept(dir.path(), &hourly, PLEDGES).await;
+    until("the founder sees the custodian hold the book", || async {
+        founder.check(second.id).await == json!("passed")
+    })
+    .await;
+
+    let bytes = second.bytes_of(blob);
+    let book_bytes = std::fs::read(&bytes).unwrap();
+    std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
+    assert_eq!(founder.check(second.id).await, json!("failed"));
+    assert_eq!(founder.failed_by(second.id).await, 1);
+
+    std::fs::write(&bytes, &book_bytes).unwrap();
+    assert_eq!(founder.check(second.id).await, json!("passed"));
+    assert!(founder.failures().await.is_empty());
+
+    // Wrong in one chunk of 977, where the third member recorded a failure:
+    // the check goes to that chunk, where a random one would pass.
+    let mut one_chunk_wrong = book_bytes.clone();
+    let start = usize::try_from(CHUNK * 1024).unwrap();
+    one_chunk_wrong[start..start + 1024].fill(0);
+    std::fs::write(&bytes, &one_chunk_wrong).unwrap();
+    let failure = ProbeFailure {
+        item: book,
+        blob,
+        chunk: CHUNK,
+        in_a_row: 1,
+    };
+    third
+        .runtime
+        .catalogue()
+        .record_probe_failure(second.id, &failure)
+        .await
+        .unwrap();
+    until("the third member's failure reaches the founder", || async {
+        founder.failed_by(second.id).await == 1
+    })
+    .await;
+    assert_eq!(founder.check(second.id).await, json!("failed"));
+    assert!(
+        founder
+            .failures()
+            .await
+            .iter()
+            .any(|recorded| recorded.prober == founder.id && recorded.failure.chunk == CHUNK)
+    );
+
+    assert!(
+        founder
+            .call("group.check", json!({ "member": founder.id }))
+            .await
+            .is_err(),
+        "a node does not probe itself"
+    );
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;
@@ -365,6 +547,13 @@ async fn a_group_founded_without_probes_makes_none() {
     // Long enough for a few probes, a second apart, had there been any.
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(founder.probed(), ProbeCounts::default());
+    assert!(
+        founder
+            .call("group.check", json!({ "member": second.id }))
+            .await
+            .is_err(),
+        "nor checks"
+    );
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;

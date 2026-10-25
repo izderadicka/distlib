@@ -71,8 +71,8 @@ async function node(method: string) {
         group: "g",
         changed_at: 1,
         members: [
-          { member: ME, name: "", pledge_bytes: 0, required_pledge_bytes: 0, core: true, coverage: null },
-          { member: OTHER, name: "bob", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null },
+          { member: ME, name: "", pledge_bytes: 0, required_pledge_bytes: 0, core: true, coverage: null, red: false },
+          { member: OTHER, name: "bob", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null, red: false },
         ],
       };
     default:

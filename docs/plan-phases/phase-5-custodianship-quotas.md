@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -476,7 +476,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Twenty-five PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 and 5c-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
+Twenty-six PRs — fourteen planned, 5a-3, 5b-1 and 5c-3 each split in two, 5b-2 and 5c-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -617,7 +617,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node pledging room for one of two books fetches the one it scores higher, says
   the other is over its pledge, and never tags it.
 
-### 5c — checking custody (11 PRs)
+### 5c — checking custody (12 PRs)
 
 - **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
@@ -656,6 +656,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 
 - **5c-3 — the suspects view and expulsion with evidence (D12).** Red, the suspects view, check now,
   and `distlib expel --with-evidence`.
+  *Split in two* (P5-30): **5c-3a** *(done)* — red, the suspects view and check now; **5c-3b** —
+  `distlib expel --with-evidence` and `group.propose_expel`'s `with_evidence`.
   **Acceptance:** failures from two probers turn a member red on every node; one prober's failure
   alone does not; `distlib expel --with-evidence` proposes with a reason that names the failures and
   fits `MAX_REASON`. Vitest per view.

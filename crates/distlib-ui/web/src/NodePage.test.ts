@@ -1,8 +1,17 @@
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NodePage from "./NodePage.svelte";
-import { call, type GroupSettings, type Members, type NodeStatus, RpcError, Unauthorised } from "./lib/rpc";
+import {
+  call,
+  type CheckOutcome,
+  type GroupSettings,
+  type Members,
+  type NodeStatus,
+  RpcError,
+  type Suspect,
+  Unauthorised,
+} from "./lib/rpc";
 import { fakeListen } from "./testing";
 
 vi.mock("./lib/rpc", async (original) => ({
@@ -65,15 +74,47 @@ function members(...extra: Members["members"]): Members {
     changed_at: 4,
     members: [
       // A founder names nobody, themselves included.
-      { member: ME, name: "", pledge_bytes: 1_500_000_000, required_pledge_bytes: 1_000_000_000, core: true, coverage: null },
-      { member: CAROL, name: "carol", pledge_bytes: 0, required_pledge_bytes: 50_000_000_000, core: false, coverage: null },
+      { member: ME, name: "", pledge_bytes: 1_500_000_000, required_pledge_bytes: 1_000_000_000, core: true, coverage: null, red: false },
+      { member: CAROL, name: "carol", pledge_bytes: 0, required_pledge_bytes: 50_000_000_000, core: false, coverage: null, red: false },
       ...extra,
     ],
   };
 }
 
 /** What the node answers with, while the test lets it. */
-let answer: { status: NodeStatus; members: Members };
+let answer: { status: NodeStatus; members: Members; suspects?: Suspect[]; checked?: CheckOutcome };
+
+/** Carol, failed by this node and by Dave: red. */
+const CAROL_SUSPECTED: Suspect = {
+  member: CAROL,
+  name: "carol",
+  red: true,
+  failures: [
+    {
+      prober: DAVE,
+      prober_name: "dave",
+      item: "e".repeat(64),
+      title: null,
+      blob: "f".repeat(64),
+      chunk: 7,
+      in_a_row: 1,
+      written: FINISHED,
+    },
+    {
+      prober: ME,
+      prober_name: "",
+      item: "9".repeat(64),
+      title: "Dune",
+      blob: "8".repeat(64),
+      chunk: 500,
+      in_a_row: 2,
+      written: FINISHED,
+    },
+  ],
+};
+
+/** The suspects section's own list items, nested ones left out. */
+const suspectsListed = () => [...document.querySelectorAll("ul.suspects > li")];
 
 /** Renders the page, and hands back what it hears the node through. */
 function open() {
@@ -115,8 +156,18 @@ describe("the node page", () => {
   beforeEach(() => {
     answer = { status: STATUS, members: members() };
     vi.mocked(call).mockReset();
-    vi.mocked(call).mockImplementation((async (method: string) =>
-      method === "node.status" ? answer.status : answer.members) as typeof call);
+    vi.mocked(call).mockImplementation((async (method: string) => {
+      switch (method) {
+        case "node.status":
+          return answer.status;
+        case "group.suspects":
+          return { suspects: answer.suspects ?? [] };
+        case "group.check":
+          return { outcome: answer.checked ?? null };
+        default:
+          return answer.members;
+      }
+    }) as typeof call);
   });
 
   it("loads when it opens, and shows the node and its members", async () => {
@@ -189,7 +240,7 @@ describe("the node page", () => {
           ],
         },
       },
-      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }),
+      members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null, red: false }),
     };
     open();
 
@@ -296,7 +347,7 @@ describe("the node page", () => {
   it("shows each member's coverage once there is something to cover", async () => {
     // Not judged; three of four; judged with nothing to hold of this node's.
     const [me, carol] = members().members;
-    const dave = { member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false };
+    const dave = { member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, red: false };
     answer = {
       ...answer,
       members: {
@@ -366,7 +417,7 @@ describe("the node page", () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null, red: false }) };
     events.tell({ type: "membership.changed" });
 
     await screen.findByText("dave");
@@ -376,7 +427,7 @@ describe("the node page", () => {
     const { events } = open();
     await screen.findByText("carol");
 
-    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null }) };
+    answer = { status: STATUS, members: members({ member: DAVE, name: "dave", pledge_bytes: 0, required_pledge_bytes: 0, core: false, coverage: null, red: false }) };
     events.tell({ type: "resync" });
 
     await screen.findByText("dave");
@@ -390,6 +441,72 @@ describe("the node page", () => {
     events.tell({ type: "bookmark.changed", item_id: "x" });
 
     expect(call).toHaveBeenCalledTimes(asked);
+  });
+
+  it("marks a red member in the members list", async () => {
+    const [me, carol] = members().members;
+    answer = { ...answer, members: { ...members(), members: [me, { ...carol, red: true }] } };
+    open();
+
+    await screen.findByText("carol");
+    expect(cells().map((row) => row[0])).toEqual(["no name", "carol red"]);
+  });
+
+  it("says when no member is a suspect", async () => {
+    open();
+
+    await screen.findByText("No member has failed a probe that still counts.");
+  });
+
+  it("lists each suspect with every prober's latest failure", async () => {
+    answer = { ...answer, suspects: [CAROL_SUSPECTED, { ...CAROL_SUSPECTED, member: DAVE, name: "", red: false, failures: [CAROL_SUSPECTED.failures[0]] }] };
+    open();
+
+    await screen.findAllByRole("button", { name: "Check now" });
+    const listed = suspectsListed();
+    expect(listed.map((suspect) => suspect.querySelector("strong")?.textContent)).toEqual(["carol", `${DAVE.slice(0, 12)}…`]);
+    expect(listed.map((suspect) => suspect.querySelector(":scope > .failure")?.textContent ?? null)).toEqual(["red", null]);
+    const failures = [...listed[0].querySelectorAll("li")].map((failure) => failure.textContent?.replace(/\s+/g, " ").trim());
+    const when = new Date(FINISHED_AT).toLocaleString();
+    expect(failures).toEqual([
+      `by dave, ${when}: ${"e".repeat(12)}…, chunk 7, 1 in a row`,
+      `by ${ME.slice(0, 12)}…, ${when}: Dune, chunk 500, 2 in a row`,
+    ]);
+    expect(screen.getByRole("link", { name: "Dune" }).getAttribute("href")).toContain("9".repeat(64));
+  });
+
+  it("checks a suspect now, says how it came out, and loads again", async () => {
+    answer = { ...answer, suspects: [CAROL_SUSPECTED], checked: "failed" };
+    open();
+    await fireEvent.click(await screen.findByRole("button", { name: "Check now" }));
+
+    await screen.findByText("failed");
+    expect(call).toHaveBeenCalledWith("group.check", { member: CAROL });
+    const loads = vi.mocked(call).mock.calls.filter(([method]) => method === "group.suspects");
+    expect(loads.length).toBe(2);
+  });
+
+  it("says a check found nothing to probe, or could not be made", async () => {
+    answer = { ...answer, suspects: [CAROL_SUSPECTED], checked: null };
+    open();
+    await fireEvent.click(await screen.findByRole("button", { name: "Check now" }));
+    await screen.findByText("nothing of it held here to probe");
+
+    answer = { ...answer, checked: "unreachable" };
+    await fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    await screen.findByText("could not be reached");
+
+    vi.mocked(call).mockRejectedValueOnce(new RpcError(-32000, "the group was founded without probes"));
+    await fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    await screen.findByText("the group was founded without probes");
+  });
+
+  it("offers no check of this node itself", async () => {
+    answer = { ...answer, suspects: [{ ...CAROL_SUSPECTED, member: ME }] };
+    open();
+
+    await waitFor(() => expect(suspectsListed()).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
   });
 
   it("hands a refused token up to whoever signs the tab in", async () => {

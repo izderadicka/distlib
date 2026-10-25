@@ -4,36 +4,82 @@
   // which each connection starts with — on `membership.changed`, on
   // `sync.status`, for each member's place in the catalogue's swarm, and on
   // an item added or a download finished, which change what is kept and what
-  // is required. Custody recomputed has no news of its own, and shows at the
-  // next load.
+  // is required. Custody recomputed and probe failures have no news of their
+  // own, and show at the next load — or at once, for a check made here.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
   import { bytes, duration, instant } from "./lib/format";
   import { reloader } from "./lib/reloader";
-  import { call, type Member, type NodeStatus, Unauthorised } from "./lib/rpc";
+  import { href } from "./lib/router.svelte";
+  import {
+    call,
+    type CheckOutcome,
+    type Member,
+    type NodeStatus,
+    type Suspect,
+    Unauthorised,
+  } from "./lib/rpc";
 
   let { listen, onUnauthorised }: { listen: Listen; onUnauthorised: () => void } = $props();
 
   let status = $state<NodeStatus | null>(null);
   let members = $state<Member[]>([]);
+  let suspects = $state<Suspect[]>([]);
   let failure = $state<string | null>(null);
+  /** How the last check of each member came out, or why it could not be made. */
+  let checked = $state<Record<string, string>>({});
+  let checking = $state<string | null>(null);
+
+  function failed(error: unknown) {
+    if (error instanceof Unauthorised) {
+      onUnauthorised();
+    } else {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   async function load() {
     try {
-      const [loaded, group] = await Promise.all([
+      const [loaded, group, suspected] = await Promise.all([
         call("node.status", null),
         call("group.members", null),
+        call("group.suspects", null),
       ]);
       status = loaded;
       members = group.members;
+      suspects = suspected.suspects;
       failure = null;
+    } catch (error) {
+      failed(error);
+    }
+  }
+
+  const OUTCOMES: Record<string, string> = {
+    passed: "passed",
+    failed: "failed",
+    unreachable: "could not be reached",
+  };
+
+  function said(outcome: CheckOutcome): string {
+    return outcome === null ? "nothing of it held here to probe" : OUTCOMES[outcome];
+  }
+
+  /** Probes `member` from this node now, and loads again for what it recorded. */
+  async function check(member: string) {
+    checking = member;
+    try {
+      const { outcome } = await call("group.check", { member });
+      checked[member] = said(outcome);
+      await load();
     } catch (error) {
       if (error instanceof Unauthorised) {
         onUnauthorised();
       } else {
-        failure = error instanceof Error ? error.message : String(error);
+        checked[member] = error instanceof Error ? error.message : String(error);
       }
+    } finally {
+      checking = null;
     }
   }
 
@@ -60,6 +106,12 @@
   const neighbours = $derived(new Set(status?.sync.neighbours));
   const mine = $derived(members.find((member) => member.member === status?.member));
   const lastSync = $derived(new Map(status?.sync.last_sync.map((last) => [last.member, last])));
+  const names = $derived(new Map(members.map((member) => [member.member, member.name])));
+
+  /** A member's name, or the start of its id for one that has none. */
+  function named(member: string, name: string | null | undefined): string {
+    return name || `${member.slice(0, 12)}…`;
+  }
 
   /** A core node says what Raft makes it; a follower has no Raft to ask. */
   function role(node: NodeStatus): string {
@@ -209,7 +261,10 @@
           {@const last = lastSync.get(member.member)}
           <tr class:me={member.member === status.member}>
             <!-- A founder names nobody, themselves included. -->
-            <td>{#if member.name}{member.name}{:else}<span class="unnamed">no name</span>{/if}</td>
+            <td>
+              {#if member.name}{member.name}{:else}<span class="unnamed">no name</span>{/if}
+              {#if member.red}<span class="failure" title="Failed probes by two or more members">red</span>{/if}
+            </td>
             <td><code title={member.member}>{member.member.slice(0, 12)}…</code></td>
             <td>{member.core ? "core" : "follower"}{member.member === status.leader ? " (leader)" : ""}</td>
             <td class="number">{bytes(member.pledge_bytes)}</td>
@@ -230,5 +285,42 @@
         {/each}
       </tbody>
     </table>
+  </section>
+
+  <section>
+    <h2>Suspects <span class="count">{suspects.length}</span></h2>
+    {#if suspects.length === 0}
+      <p class="hint">No member has failed a probe that still counts.</p>
+    {:else}
+      <p class="hint">
+        Members whose probes failed, the most probers first. Red, by two or more, is a candidate for
+        expulsion: <code>distlib expel</code>.
+      </p>
+      <ul class="suspects">
+        {#each suspects as suspect (suspect.member)}
+          <li>
+            <strong>{named(suspect.member, suspect.name)}</strong>
+            {#if suspect.red}<span class="failure">red</span>{/if}
+            {#if suspect.member !== status.member}
+              <button type="button" disabled={checking !== null} onclick={() => check(suspect.member)}>
+                {checking === suspect.member ? "Checking…" : "Check now"}
+              </button>
+            {/if}
+            {#if checked[suspect.member]}<span class="checked">{checked[suspect.member]}</span>{/if}
+            <ul>
+              {#each suspect.failures as recorded (recorded.prober)}
+                {@const when = instant(recorded.written)}
+                <li>
+                  by {named(recorded.prober, recorded.prober_name ?? names.get(recorded.prober))},
+                  <time datetime={when.toISOString()}>{when.toLocaleString()}</time>:
+                  <a href={href({ page: "item", id: recorded.item })}>{recorded.title ?? `${recorded.item.slice(0, 12)}…`}</a>,
+                  chunk {recorded.chunk}, {recorded.in_a_row} in a row
+                </li>
+              {/each}
+            </ul>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 {/if}
