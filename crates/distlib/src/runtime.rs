@@ -573,6 +573,7 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
             holdings: inputs.catalogue.holdings().clone(),
             events: inputs.events.subscribe(),
             storage: storage.clone(),
+            catalogue: inputs.catalogue.clone(),
         },
         inputs.config.transfer.max_fetches,
     );

@@ -110,11 +110,13 @@ pub(crate) fn feed() -> (Pump, Feed) {
     let pending = Arc::new(Mutex::new(Batch::default()));
     let (woke, woken) = watch::channel(0);
     let (sync, synced) = watch::channel(SyncState::default());
+    let (probe_failures, probe_failures_changed) = watch::channel(());
     (
         Pump {
             news: News {
                 pending: Arc::clone(&pending),
                 woke,
+                probe_failures,
             },
             sync,
             up_since: HashMap::new(),
@@ -123,6 +125,7 @@ pub(crate) fn feed() -> (Pump, Feed) {
             pending,
             woken,
             synced,
+            probe_failures_changed,
         },
     )
 }
@@ -133,6 +136,7 @@ pub(crate) struct Feed {
     pending: Arc<Mutex<Batch>>,
     woken: watch::Receiver<u64>,
     synced: watch::Receiver<SyncState>,
+    probe_failures_changed: watch::Receiver<()>,
 }
 
 impl Feed {
@@ -150,6 +154,11 @@ impl Feed {
     /// The swarm's state, kept current for as long as the document is open.
     pub(crate) fn sync_status(&self) -> watch::Receiver<SyncState> {
         self.synced.clone()
+    }
+
+    /// Changed whenever a probe failure may have: see [`News::probe_failures`].
+    pub(crate) fn probe_failures_changed(&self) -> watch::Receiver<()> {
+        self.probe_failures_changed.clone()
     }
 }
 
@@ -205,11 +214,16 @@ impl Changes {
 pub(crate) struct News {
     pending: Arc<Mutex<Batch>>,
     woke: watch::Sender<u64>,
+    /// Sent for each probe failure written, cleared or arrived, and for any
+    /// content landing, which may be a failure's value. Not read model news:
+    /// the failures are read from the catalogue.
+    probe_failures: watch::Sender<()>,
 }
 
 impl News {
     /// Some content landed: the reader re-reads what it left incomplete.
     pub(crate) fn content_landed(&self) {
+        self.probe_failures.send_replace(());
         if self.mark_content_landed() {
             self.wake();
         }
@@ -282,10 +296,13 @@ impl Pump {
     /// Records one event, answering whether the read model has news.
     fn note(&mut self, event: LiveEvent, sync_again: &mpsc::UnboundedSender<EndpointId>) -> bool {
         match event {
-            LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. } => {
-                note(&mut self.news.batch(), entry.key())
-            }
+            LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. } => note(
+                &mut self.news.batch(),
+                &self.news.probe_failures,
+                entry.key(),
+            ),
             LiveEvent::ContentReady { .. } | LiveEvent::PendingContentReady => {
+                self.news.probe_failures.send_replace(());
                 self.news.mark_content_landed()
             }
             // Neighbours and sync rounds are the swarm's business, not the read
@@ -359,9 +376,10 @@ impl Pump {
 ///
 /// An item for one of its own keys, or a rating or review of it (D8). The
 /// item a bookmark points into, for a bookmark: it is not part of that item.
-/// The wish, for a wish entry or a comment on one. A key this build does not
-/// recognise is left alone, for the reason [`Key::parse`] gives.
-fn note(batch: &mut Batch, key: &[u8]) -> bool {
+/// The wish, for a wish entry or a comment on one. A probe failure is sent on
+/// `probe_failures` instead. A key this build does not recognise is left
+/// alone, for the reason [`Key::parse`] gives.
+fn note(batch: &mut Batch, probe_failures: &watch::Sender<()>, key: &[u8]) -> bool {
     if let Some(parsed) = Key::parse(key) {
         return batch.items.insert(parsed.item());
     }
@@ -375,8 +393,11 @@ fn note(batch: &mut Batch, key: &[u8]) -> bool {
         Some(CommunityKey::Wish { wish, .. } | CommunityKey::WishComment { wish, .. }) => {
             batch.changed_wishes.insert(wish)
         }
-        // Read from the catalogue where they are needed, not by the read model.
-        Some(CommunityKey::ProbeFailure { .. }) | None => false,
+        Some(CommunityKey::ProbeFailure { .. }) => {
+            probe_failures.send_replace(());
+            false
+        }
+        None => false,
     }
 }
 
@@ -431,6 +452,8 @@ mod tests {
     /// news of its wish; a key this build does not read is news of nothing.
     #[test]
     fn each_community_entry_is_news_of_what_it_is_about() {
+        let (probe_failures, _) = watch::channel(());
+        let note = |batch: &mut Batch, key: &[u8]| note(batch, &probe_failures, key);
         let item = ItemId::from_bytes([3; 32]);
         let member = MemberId::from(SecretKey::generate().public());
         for key in [
@@ -475,6 +498,40 @@ mod tests {
         }
     }
 
+    /// A probe failure is no news to the read model, and is sent on its own.
+    #[test]
+    fn a_probe_failure_is_sent_apart_from_the_read_models_news() {
+        let (probe_failures, mut changed) = watch::channel(());
+        let key = CommunityKey::ProbeFailure {
+            custodian: MemberId::from(SecretKey::generate().public()),
+            prober: MemberId::from(SecretKey::generate().public()),
+        };
+        let mut batch = Batch::default();
+        assert!(!note(&mut batch, &probe_failures, key.encode().as_bytes()));
+        assert!(batch.is_empty());
+        assert!(changed.has_changed().unwrap());
+        changed.mark_unchanged();
+        let rating = CommunityKey::Rating {
+            item: ItemId::from_bytes([3; 32]),
+            member: MemberId::from(SecretKey::generate().public()),
+        };
+        note(&mut batch, &probe_failures, rating.encode().as_bytes());
+        assert!(!changed.has_changed().unwrap(), "a rating is not one");
+    }
+
+    /// A probe failure's value may land after its key.
+    #[tokio::test]
+    async fn content_landing_in_the_document_may_be_a_probe_failure() {
+        let (pump, feed) = feed();
+        let _kept_open = pump.news();
+        let probe_failures = feed.probe_failures_changed();
+        let (sync_again, _asked) = mpsc::unbounded_channel();
+        let events = vec![Ok(LiveEvent::PendingContentReady)];
+        pump.run(futures_lite::stream::iter(events), &sync_again)
+            .await;
+        assert!(probe_failures.has_changed().unwrap());
+    }
+
     /// The content sweep's nudge: one wake however often it is told, until
     /// the reader takes it.
     #[tokio::test]
@@ -483,9 +540,14 @@ mod tests {
         let news = pump.news();
         let mut changes = feed.changes();
 
+        let probe_failures = feed.probe_failures_changed();
         news.content_landed();
         news.content_landed();
         assert_eq!(*feed.woken.borrow(), 1, "the second was not news");
+        assert!(
+            probe_failures.has_changed().unwrap(),
+            "the content may be a probe failure's"
+        );
         assert_eq!(
             changes.take().await,
             Some(Batch {

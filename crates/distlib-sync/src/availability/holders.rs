@@ -11,7 +11,7 @@
 //! change is undone before the new one is applied — which needs only the
 //! previous change, not a copy of the base.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use distlib_core::{ContentHash, Holdings, ItemId, MemberId};
 
@@ -20,6 +20,9 @@ use distlib_core::{ContentHash, Holdings, ItemId, MemberId};
 pub(super) struct Holders {
     index: Index,
     stated: HashMap<MemberId, Stated>,
+    /// The copies a probe found missing (phase 5's D11): held by what the
+    /// member says, but not real copies.
+    failed_copies: HashSet<(MemberId, ItemId)>,
 }
 
 /// What taking in one statement did.
@@ -177,13 +180,40 @@ impl Holders {
         self.index.holders(item)
     }
 
-    /// Every item exactly one member of `online` holds, with that member.
+    /// The members known to hold `item` whose copy has not failed a probe.
+    pub(super) fn real_holders(&self, item: &ItemId) -> Vec<MemberId> {
+        self.holders(item)
+            .iter()
+            .filter(|member| !self.failed_copies.contains(&(**member, *item)))
+            .copied()
+            .collect()
+    }
+
+    /// Replaces the copies a probe found missing, answering the members
+    /// whose failed copies changed.
+    pub(super) fn set_failed_copies(
+        &mut self,
+        failed_copies: HashSet<(MemberId, ItemId)>,
+    ) -> BTreeSet<MemberId> {
+        let changed = self
+            .failed_copies
+            .symmetric_difference(&failed_copies)
+            .map(|(member, _)| *member)
+            .collect();
+        self.failed_copies = failed_copies;
+        changed
+    }
+
+    /// Every item exactly one member of `online` holds a real copy of, with
+    /// that member.
     pub(super) fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
         self.index
             .0
             .iter()
             .filter_map(|(item, members)| {
-                let mut online_holders = members.iter().filter(|member| online.contains(member));
+                let mut online_holders = members.iter().filter(|member| {
+                    online.contains(member) && !self.failed_copies.contains(&(**member, *item))
+                });
                 match (online_holders.next(), online_holders.next()) {
                     (Some(holder), None) => Some((*item, *holder)),
                     _ => None,
@@ -374,6 +404,31 @@ mod tests {
             holders.sole_holders(&BTreeSet::from([dave])),
             [(item(3), dave)]
         );
+    }
+
+    /// A copy a probe found missing is still held, by what its member says,
+    /// but is not a real copy: an item down to one other is solely held.
+    #[test]
+    fn a_failed_copy_is_held_but_not_real() {
+        let (bob, carol) = (member(), member());
+        let mut holders = Holders::default();
+        holders.heard(bob, &stated(None, 2, &[1, 2], &[]));
+        holders.heard(carol, &stated(None, 1, &[2], &[]));
+        let online = BTreeSet::from([bob, carol]);
+
+        let failed = HashSet::from([(carol, item(2))]);
+        assert_eq!(holders.set_failed_copies(failed.clone()), [carol].into());
+        assert_eq!(holders.holders(&item(2)).len(), 2);
+        assert_eq!(holders.real_holders(&item(2)), [bob]);
+        let mut sole = holders.sole_holders(&online);
+        sole.sort_unstable();
+        let mut expected = [(item(1), bob), (item(2), bob)];
+        expected.sort_unstable();
+        assert_eq!(sole, expected);
+
+        assert!(holders.set_failed_copies(failed).is_empty(), "no change");
+        assert_eq!(holders.set_failed_copies(HashSet::new()), [carol].into());
+        assert_eq!(holders.real_holders(&item(2)).len(), 2);
     }
 
     /// Only news is news: the same statement again changes nothing a page

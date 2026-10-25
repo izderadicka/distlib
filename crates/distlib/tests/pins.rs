@@ -7,7 +7,8 @@
 //! limit evicts the oldest cached item to take on a new download or a new
 //! custody, never an own or custody item, and leaves the exported file be.
 //! 5c-1c's: custody that would not fit even so waits, evicting nothing,
-//! until letting go of another custody makes room.
+//! until letting go of another custody makes room. 5c-2b's: a copy that
+//! failed a probe does not count towards letting go.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -22,7 +23,7 @@ use std::{
 use distlib::Runtime;
 use distlib_core::{
     ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason, MemberId,
-    TransferConfig,
+    ProbeFailure, TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -309,22 +310,7 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
     let core = [founder.id, second.id, third.id];
     let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
-
-    let group = CustodyGroup::new(
-        2,
-        settings().weight_rule(),
-        core.iter().map(|id| (*id, 100 * GB)),
-    );
-    let ranked_first = group.custodians(&CustodyItem {
-        item,
-        creators: vec![founder.id],
-        size_bytes: 0,
-    })[0];
-    let (custodian, other) = if ranked_first == second.id {
-        (second, third)
-    } else {
-        (third, second)
-    };
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
     custodian
         .until_keeps(true, KeepReason::Custody, item, file)
         .await;
@@ -380,6 +366,102 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
         custodian.runtime.blobs().has(file).await.unwrap(),
         "the book was collected rather than cached"
     );
+
+    for node in [founder, custodian, other] {
+        node.stop().await;
+    }
+}
+
+/// Of the two members after the founder, all three pledging the same,
+/// `item`'s custodian and the other.
+fn custodian_and_other(founder: &Node, second: Node, third: Node, item: ItemId) -> (Node, Node) {
+    let group = CustodyGroup::new(
+        2,
+        settings().weight_rule(),
+        [founder.id, second.id, third.id].map(|id| (id, 100 * GB)),
+    );
+    let custodians = group.custodians(&CustodyItem {
+        item,
+        creators: vec![founder.id],
+        size_bytes: 0,
+    });
+    if custodians == [second.id] {
+        (second, third)
+    } else {
+        (third, second)
+    }
+}
+
+/// **A copy that failed a probe does not count** (D11) towards letting go.
+/// The other member downloads the book, and the founder records a failure
+/// of its copy. The custodian then pledges nothing: custody moves to the
+/// other, but the founder's is the only real copy elsewhere, so the
+/// custodian keeps the book until the failure is cleared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+    until_projected(&other.runtime, item, 1, "the other member").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&other.runtime, &other.key), item, &dest).await;
+    custodian.until_it_sees(other.id, item).await;
+
+    let failure = ProbeFailure {
+        item,
+        blob: file,
+        chunk: 0,
+        in_a_row: 1,
+    };
+    founder
+        .runtime
+        .catalogue()
+        .record_probe_failure(other.id, &failure)
+        .await
+        .unwrap();
+    tokio::time::timeout(SOON, async {
+        while custodian
+            .runtime
+            .availability()
+            .real_holders(&item)
+            .contains(&other.id)
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the custodian takes the failure in");
+
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+    other
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while the founder's was the only real copy elsewhere"
+    );
+
+    founder
+        .runtime
+        .catalogue()
+        .clear_probe_failure(other.id)
+        .await
+        .unwrap();
+    custodian
+        .until_keeps(false, KeepReason::Custody, item, file)
+        .await;
 
     for node in [founder, custodian, other] {
         node.stop().await;

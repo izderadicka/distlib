@@ -1003,6 +1003,12 @@ impl Catalogue {
         Ok(self.inner.feed.changes())
     }
 
+    /// Changed whenever [`Self::probe_failures`] may have: a failure written,
+    /// cleared or arrived, or content landed. Take it before reading them.
+    pub fn probe_failures_changed(&self) -> watch::Receiver<()> {
+        self.inner.feed.probe_failures_changed()
+    }
+
     /// Who this node is connected to for the catalogue, and how its last sync
     /// round with each peer went — the empty state until the document opens.
     pub fn sync_status(&self) -> watch::Receiver<SyncState> {

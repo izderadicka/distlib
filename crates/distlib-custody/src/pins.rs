@@ -14,7 +14,7 @@ use distlib_consensus::MembershipState;
 use distlib_core::{ContentHash, Event, ItemId, KeepReason, MemberId};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{Store, StoreError};
-use distlib_sync::{Availability, Holdings, SyncError, availability::ask_order};
+use distlib_sync::{Availability, Catalogue, Holdings, SyncError, availability::ask_order};
 use serde::Serialize;
 use tokio::{
     sync::{
@@ -28,6 +28,7 @@ use tokio::{
 use crate::{
     Custody, CustodyChange,
     emergency::Emergency,
+    failed_copies,
     storage::{Room, Storage, StorageError},
 };
 
@@ -54,6 +55,8 @@ pub struct PinSources {
     pub events: broadcast::Receiver<Event>,
     /// Where room is made for what custody fetches.
     pub storage: Storage,
+    /// The probe failures, which say which copies are not real.
+    pub catalogue: Catalogue,
 }
 
 /// How many items the pin manager has in each state, for `node.status`.
@@ -71,7 +74,7 @@ pub struct PinCounts {
 /// items down to their last copy (D6), in the background.
 #[derive(Debug)]
 pub struct PinManager {
-    /// Custody's task and the emergency copies'.
+    /// Custody's task, the emergency copies' and the failed copies'.
     tasks: Mutex<Vec<JoinHandle<()>>>,
     counts: watch::Receiver<PinCounts>,
 }
@@ -101,7 +104,10 @@ impl PinManager {
             holdings,
             events,
             storage,
+            catalogue,
         } = sources;
+        let following_failed_copies =
+            failed_copies::follow(catalogue, availability.clone(), membership.clone());
         let keeper = Keeper {
             me,
             membership,
@@ -128,6 +134,7 @@ impl PinManager {
             tasks: Mutex::new(vec![
                 tokio::spawn(pins.run(changes, events)),
                 tokio::spawn(emergency.run(emergency_events)),
+                tokio::spawn(following_failed_copies),
             ]),
             counts,
         }
@@ -650,10 +657,11 @@ impl Keeper {
             >= usize::from(self.membership.borrow().settings().replicas.get())
     }
 
-    /// How many members in `online`, other than this node, hold `item`.
+    /// How many members in `online`, other than this node, hold a real copy
+    /// of `item`.
     fn live_copies(&self, item: ItemId, online: &BTreeSet<MemberId>) -> usize {
         self.availability
-            .holders(&item)
+            .real_holders(&item)
             .iter()
             .filter(|member| **member != self.me && online.contains(member))
             .count()
