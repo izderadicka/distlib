@@ -2,7 +2,8 @@
 //! passes and nothing is written; one whose bytes changed underneath it fails,
 //! its key appears on every node, and its next pass clears the key; an
 //! unreachable custodian is skipped; a group founded with `probes` off makes
-//! no probes, and neither does a member below the minimum pledge.
+//! no probes, and neither does a member below the minimum pledge. 5c-2b's:
+//! a failed copy that was the item's last real one gets an emergency copy.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -19,7 +20,9 @@ use std::{
 };
 
 use distlib::Runtime;
-use distlib_core::{ContentHash, DataDir, GroupSettings, ItemId, MemberId};
+use distlib_core::{
+    ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason, MemberId,
+};
 use distlib_custody::ProbeCounts;
 use distlib_sync::RecordedFailure;
 use iroh::SecretKey;
@@ -181,6 +184,74 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
         })
         .await;
     }
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// The delay before an emergency copy, in the test below: longer than the
+/// custodian takes to fetch the book, so the founder's copy alone before
+/// that is not what makes it.
+const EMERGENCY_AFTER_SECS: u32 = 10;
+
+/// All three pledge, so the member after the custodian can keep an emergency
+/// copy. The custodian's copy fails, which leaves the founder's the book's
+/// last real one: after the delay, the other member keeps an emergency copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: EMERGENCY_AFTER_SECS,
+        ..settings()
+    };
+    let [founder, second, third] = three_nodes(dir.path(), &settings, [100 * GB; 3]).await;
+    let (book, blob) = add_a_book(&founder, &second, dir.path()).await;
+    let group = CustodyGroup::new(
+        2,
+        settings.weight_rule(),
+        [founder.id, second.id, third.id].map(|id| (id, 100 * GB)),
+    );
+    let custodians = group.custodians(&CustodyItem {
+        item: book,
+        creators: vec![founder.id],
+        size_bytes: 0,
+    });
+    let (custodian, other) = if custodians == [second.id] {
+        (&second, &third)
+    } else {
+        (&third, &second)
+    };
+    until("the custodian holds the book", || async {
+        custodian.runtime.catalogue().holdings().holds(book)
+    })
+    .await;
+    let emergency_copy = || async {
+        let blobs = other.runtime.blobs();
+        blobs
+            .kept(KeepReason::Cache)
+            .await
+            .unwrap()
+            .contains(&(book, blob))
+            && blobs.has(blob).await.unwrap()
+    };
+    assert!(
+        !emergency_copy().await,
+        "copied while the custodian was fetching: the delay is too short"
+    );
+
+    let bytes = custodian.bytes_of(blob);
+    let book_bytes = std::fs::read(&bytes).unwrap();
+    std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
+    until("the other member keeps an emergency copy", emergency_copy).await;
+    assert!(
+        founder
+            .failures()
+            .await
+            .iter()
+            .any(|recorded| recorded.custodian == custodian.id),
+        "the failure is recorded"
+    );
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;

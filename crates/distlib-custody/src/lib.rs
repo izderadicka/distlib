@@ -6,6 +6,7 @@
 
 mod coverage;
 mod emergency;
+mod failed_copies;
 mod pins;
 mod probes;
 mod service;

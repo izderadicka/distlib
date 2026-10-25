@@ -1,6 +1,7 @@
 //! The emergency copy (D6): an item down to one live copy for the group's
 //! `emergency_after_secs` is fetched, as cache, by the first member after its
-//! custodians in score order that is online and does not hold it.
+//! custodians in score order that is online and does not hold it. A copy that
+//! failed a probe is not a live one (D11).
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may

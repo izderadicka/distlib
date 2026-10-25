@@ -489,7 +489,10 @@ item's files, checked against the file's hash. A member that cannot be reached i
 skipped. One that is reached and does not send the right bytes within 30 seconds has
 failed: the prober records it in the catalogue, under `probe/<custodian>/<prober>`,
 and clears it at its next probe of that member that passes. Only a member pledging
-the group's minimum probes, since the others are not sent content.
+the group's minimum probes, since the others are not sent content. A copy that
+failed a probe within the group's `failure_window_secs` does not count as a copy:
+an item whose last real copy it was gets its emergency copy, and a custodian giving
+up its custody keeps the item until enough real copies are elsewhere.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If
