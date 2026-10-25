@@ -20,7 +20,7 @@ use distlib_core::{
 };
 use distlib_custody::{
     Coverage, Custody, PinCounts, ProbeError, Probes, Room, Storage, StorageError, Suspect,
-    suspects,
+    evidence_reason, suspects,
 };
 use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{
@@ -443,13 +443,40 @@ impl Api {
         .await
     }
 
-    /// `group.propose_expel` — remove a member (§4.4).
+    /// `group.propose_expel` — remove a member (§4.4). With `with_evidence`,
+    /// the reason names the member's probe failures that count (D12), after
+    /// the reason given, if any; the answer says the reason recorded.
     async fn propose_expel(&self, params: ProposeExpel) -> Result<Value, Error> {
-        self.propose(MembershipEvent::MemberExpelled {
-            member: params.member,
-            reason: params.reason,
-        })
-        .await
+        let ProposeExpel {
+            member,
+            reason,
+            with_evidence,
+        } = params;
+        let reason = if with_evidence {
+            let membership = self.node.membership();
+            let suspect = self
+                .suspects_now(&membership)
+                .await?
+                .into_iter()
+                .find(|suspect| suspect.member == member)
+                .ok_or_else(|| {
+                    Error::invalid_params(format!(
+                        "no probe failure of {} counts, so there is no evidence to give",
+                        member.fmt_short()
+                    ))
+                })?;
+            evidence_reason(reason.as_deref(), &suspect, &membership)
+        } else {
+            reason.ok_or_else(|| Error::invalid_params("an expulsion needs a reason"))?
+        };
+        let mut answer = self
+            .propose(MembershipEvent::MemberExpelled {
+                member,
+                reason: reason.clone(),
+            })
+            .await?;
+        answer["reason"] = json!(reason);
+        Ok(answer)
     }
 
     /// `group.propose_core` — move, add or drop one core node (§4.2).
@@ -2050,7 +2077,11 @@ struct Check {
 #[serde(deny_unknown_fields)]
 struct ProposeExpel {
     member: MemberId,
-    reason: String,
+    /// Needed, unless `with_evidence` makes one.
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    with_evidence: bool,
 }
 
 /// What `group.propose_core` is asked to do: one member, and which of the two

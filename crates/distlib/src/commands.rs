@@ -455,14 +455,25 @@ pub async fn admit(paths: &Paths, member: MemberId, name: Option<String>) -> Res
 }
 
 /// `distlib expel`
-pub async fn expel(paths: &Paths, member: MemberId, reason: String) -> Result<()> {
+pub async fn expel(
+    paths: &Paths,
+    member: MemberId,
+    reason: Option<String>,
+    with_evidence: bool,
+) -> Result<()> {
     let answer = ask(
         paths,
         "group.propose_expel",
-        json!({ "member": member, "reason": reason }),
+        json!({ "member": member, "reason": reason, "with_evidence": with_evidence }),
     )
     .await?;
     println!("{}", report("expelled", &member.to_string(), &answer));
+    if with_evidence {
+        println!(
+            "reason      {}",
+            answer["reason"].as_str().unwrap_or_default()
+        );
+    }
     Ok(())
 }
 

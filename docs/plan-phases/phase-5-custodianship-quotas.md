@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -654,9 +654,9 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   that was its last real one; its next pass clears the key; an unreachable custodian is skipped; a
   group founded with `probes` off makes no probes.
 
-- **5c-3 — the suspects view and expulsion with evidence (D12).** Red, the suspects view, check now,
+- **5c-3 — the suspects view and expulsion with evidence (D12).** *(done)* Red, the suspects view, check now,
   and `distlib expel --with-evidence`.
-  *Split in two* (P5-30): **5c-3a** *(done)* — red, the suspects view and check now; **5c-3b** —
+  *Split in two* (P5-30): **5c-3a** *(done)* — red, the suspects view and check now; **5c-3b** *(done)* —
   `distlib expel --with-evidence` and `group.propose_expel`'s `with_evidence`.
   **Acceptance:** failures from two probers turn a member red on every node; one prober's failure
   alone does not; `distlib expel --with-evidence` proposes with a reason that names the failures and

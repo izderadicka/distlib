@@ -31,7 +31,11 @@ async fn main() -> Result<()> {
         Command::Run { found_group } => commands::run(&paths, found_group).await,
         Command::Whoami => commands::whoami(&paths).await,
         Command::Admit { member, name } => commands::admit(&paths, member, name).await,
-        Command::Expel { member, reason } => commands::expel(&paths, member, reason).await,
+        Command::Expel {
+            member,
+            reason,
+            with_evidence,
+        } => commands::expel(&paths, member, reason, with_evidence).await,
         Command::Pending => commands::pending(&paths).await,
         Command::Approve { proposal } => commands::approve(&paths, proposal).await,
         Command::Withdraw { proposal } => commands::withdraw(&paths, proposal).await,

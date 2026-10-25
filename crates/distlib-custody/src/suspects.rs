@@ -8,7 +8,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use distlib_consensus::MembershipState;
+use chrono::DateTime;
+use distlib_consensus::{MAX_REASON, MembershipState};
 use distlib_core::MemberId;
 use distlib_sync::RecordedFailure;
 
@@ -38,6 +39,74 @@ impl Suspect {
             .map(|recorded| recorded.failure.in_a_row)
             .sum()
     }
+}
+
+/// A reason to expel `suspect` that names its failures (D12): `reason`, if
+/// given, then each prober's latest, cut to fit [`MAX_REASON`].
+pub fn evidence_reason(
+    reason: Option<&str>,
+    suspect: &Suspect,
+    membership: &MembershipState,
+) -> String {
+    let failures: Vec<String> = suspect
+        .failures
+        .iter()
+        .map(|recorded| {
+            let when = i64::try_from(recorded.written)
+                .ok()
+                .and_then(DateTime::from_timestamp_micros)
+                .map_or_else(
+                    || "an unknown time".to_owned(),
+                    |when| when.format("%Y-%m-%d %H:%M UTC").to_string(),
+                );
+            let item = recorded.failure.item.to_string();
+            format!(
+                "by {} at {when}: item {} chunk {}, {} in a row",
+                recorded.prober.fmt_short(),
+                item.get(..10).unwrap_or(&item),
+                recorded.failure.chunk,
+                recorded.failure.in_a_row,
+            )
+        })
+        .collect();
+    let probers = suspect.failures.len();
+    let evidence = format!(
+        "failed probes by {probers} member{} within {}: {}",
+        if probers == 1 { "" } else { "s" },
+        days_or_hours(failure_window(membership)),
+        failures.join("; ")
+    );
+    let given = reason.map(str::trim).filter(|reason| !reason.is_empty());
+    within_bytes(
+        given.map_or(evidence.clone(), |reason| format!("{reason} — {evidence}")),
+        MAX_REASON,
+    )
+}
+
+/// A window in whole days, or else whole hours.
+fn days_or_hours(window: Duration) -> String {
+    const DAY: u64 = 24 * 60 * 60;
+    let secs = window.as_secs();
+    if secs.is_multiple_of(DAY) {
+        format!("{} days", secs / DAY)
+    } else {
+        format!("{} hours", secs.div_ceil(60 * 60))
+    }
+}
+
+/// `text`, cut at a character boundary to at most `max` bytes, an ellipsis
+/// marking the cut.
+fn within_bytes(mut text: String, max: usize) -> String {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push('…');
+    text
 }
 
 /// The members `failures` that count make suspects, as of `now`: the most
@@ -168,6 +237,65 @@ mod tests {
             let found = suspects_among(failures, |_| true, WINDOW, now);
             assert_eq!(found[0].member, more);
         }
+    }
+
+    #[test]
+    fn an_evidence_reason_gives_the_reason_then_each_probers_latest() {
+        // 2026-10-25 12:34 UTC.
+        let now = UNIX_EPOCH + Duration::from_secs(1_792_931_640);
+        let (bob, carol, dave) = (member(1), member(2), member(3));
+        let suspect = Suspect {
+            member: bob,
+            failures: vec![failed(bob, carol, 3, 0, now), failed(bob, dave, 1, 60, now)],
+        };
+        let item = ItemId::from_bytes([1; 32]).to_string();
+        let evidence = format!(
+            "failed probes by 2 members within 7 days: by {} at 2026-10-25 12:34 UTC: item {} chunk 0, 3 in a row; by {} at 2026-10-25 12:33 UTC: item {} chunk 0, 1 in a row",
+            carol.fmt_short(),
+            &item[..10],
+            dave.fmt_short(),
+            &item[..10],
+        );
+        let membership = MembershipState::default();
+
+        assert_eq!(
+            evidence_reason(Some(" lost its disk "), &suspect, &membership),
+            format!("lost its disk — {evidence}")
+        );
+        assert_eq!(evidence_reason(None, &suspect, &membership), evidence);
+        assert_eq!(evidence_reason(Some("  "), &suspect, &membership), evidence);
+    }
+
+    #[test]
+    fn an_evidence_reason_too_long_is_cut_at_a_character_to_fit() {
+        let now = SystemTime::now();
+        let suspect = Suspect {
+            member: member(1),
+            failures: vec![failed(member(1), member(2), 1, 0, now)],
+        };
+        let reason = "é".repeat(MAX_REASON);
+        let cut = evidence_reason(Some(&reason), &suspect, &MembershipState::default());
+        assert!(cut.len() <= MAX_REASON, "{} bytes", cut.len());
+        assert!(cut.len() > MAX_REASON - 4, "only as much cut as must be");
+        assert!(cut.starts_with('é') && cut.ends_with('…'));
+        assert!(
+            evidence_reason(None, &suspect, &MembershipState::default())
+                .starts_with("failed probes by 1 member within 7 days: by ")
+        );
+    }
+
+    #[test]
+    fn a_window_is_said_in_days_or_else_hours() {
+        assert_eq!(days_or_hours(Duration::from_secs(7 * 86_400)), "7 days");
+        assert_eq!(days_or_hours(Duration::from_secs(36 * 3600)), "36 hours");
+        assert_eq!(days_or_hours(Duration::from_secs(90)), "1 hours");
+    }
+
+    #[test]
+    fn a_group_without_the_members_counts_none_of_their_failures() {
+        let now = SystemTime::now();
+        let failures = vec![failed(member(1), member(2), 1, 10, now)];
+        assert!(suspects(failures, &MembershipState::default(), now).is_empty());
     }
 
     #[test]

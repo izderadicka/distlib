@@ -1245,6 +1245,7 @@ dependencies = [
 name = "distlib-custody"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "distlib-consensus",
  "distlib-core",
  "distlib-net",

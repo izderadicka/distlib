@@ -2330,6 +2330,7 @@ async fn a_ticket_carries_directions_to_this_group() {
 #[tokio::test]
 async fn an_uploaded_file_becomes_an_item_and_is_not_kept() {
     let harness = Harness::start().await;
+    harness.catalogue.ready().await;
 
     let (status, uploaded) = harness
         .upload(
@@ -2440,6 +2441,7 @@ async fn an_upload_needs_a_plain_filename() {
 #[tokio::test]
 async fn library_add_takes_an_upload_once() {
     let harness = Harness::start().await;
+    harness.catalogue.ready().await;
     let upload = async |name: &str| {
         let (_, uploaded) = harness
             .upload(&format!("filename={name}"), name.as_bytes().to_vec(), false)
