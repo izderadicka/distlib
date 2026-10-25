@@ -40,8 +40,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
+use bao_tree::ChunkNum;
 use distlib_core::{ContentHash, ItemId, KeepReason, KeptBlobs, MemberId};
 use futures_lite::StreamExt as _;
 use iroh::Endpoint;
@@ -52,6 +54,7 @@ use iroh_blobs::{
         blobs::BlobStatus,
         downloader::{DownloadProgressItem, Downloader},
     },
+    get::request::get_chunk_probe,
     provider::events::{
         AbortReason, ConnectMode, EventMask, EventResult, EventSender, ProviderMessage,
         RequestMode, ThrottleMode,
@@ -73,6 +76,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Blobs {
     store: Store,
+    endpoint: Endpoint,
     downloader: Downloader,
     /// Every fetch through any clone of this paces here, so the limit is
     /// this node's, not each fetch's.
@@ -84,6 +88,7 @@ impl Blobs {
     pub fn new(store: &Store, endpoint: &Endpoint) -> Self {
         Self {
             store: store.clone(),
+            endpoint: endpoint.clone(),
             downloader: store.downloader(endpoint),
             download_pacer: Arc::new(BytePacer::new(None)),
         }
@@ -115,6 +120,50 @@ impl Blobs {
             self.status(hash).await?,
             BlobStatus::Complete { .. }
         ))
+    }
+
+    /// How many chunks `hash` has, if all of it is here: what a probe of it
+    /// picks from.
+    pub async fn chunks(&self, hash: ContentHash) -> Result<Option<u64>> {
+        Ok(match self.status(hash).await? {
+            BlobStatus::Complete { size } => Some(size.div_ceil(CHUNK_BYTES).max(1)),
+            BlobStatus::Partial { .. } | BlobStatus::NotFound => None,
+        })
+    }
+
+    /// Asks `member` for chunk `chunk` of `hash`, verified against the hash
+    /// as it arrives (phase 5's D11). Connecting and then the chunk each get
+    /// `within`.
+    pub async fn probe(
+        &self,
+        member: MemberId,
+        hash: ContentHash,
+        chunk: u64,
+        within: Duration,
+    ) -> Probed {
+        let connecting = self
+            .endpoint
+            .connect(member.endpoint_id(), iroh_blobs::ALPN);
+        let connection = match tokio::time::timeout(within, connecting).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                tracing::debug!(member = %member.fmt_short(), %error, "could not connect to probe");
+                return Probed::Unreachable;
+            }
+            Err(_) => return Probed::Unreachable,
+        };
+        let blob = to_blobs(hash);
+        let probing = get_chunk_probe(&connection, &blob, ChunkNum(chunk));
+        let probed = match tokio::time::timeout(within, probing).await {
+            Ok(Ok(_stats)) => Probed::Passed,
+            Ok(Err(error)) => {
+                tracing::debug!(member = %member.fmt_short(), %hash, chunk, %error, "a probe failed");
+                Probed::Failed
+            }
+            Err(_) => Probed::Failed,
+        };
+        connection.close(0u32.into(), b"probed");
+        probed
     }
 
     async fn status(&self, hash: ContentHash) -> Result<BlobStatus> {
@@ -369,6 +418,20 @@ impl Blobs {
         }
         copied
     }
+}
+
+/// A chunk's size, BLAKE3's: what [`Blobs::probe`] asks for one of.
+const CHUNK_BYTES: u64 = 1024;
+
+/// What one [`Blobs::probe`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probed {
+    /// The chunk arrived and was verified.
+    Passed,
+    /// Reached, but the chunk did not arrive, or arrived wrong.
+    Failed,
+    /// Not reached: availability's business, not a failure.
+    Unreachable,
 }
 
 /// How many asks about chunks and requests the serving side queues before
