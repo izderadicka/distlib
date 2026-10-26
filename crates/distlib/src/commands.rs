@@ -1,6 +1,7 @@
 //! What each subcommand actually does.
 
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
     sync::Arc,
@@ -706,15 +707,52 @@ pub async fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
 /// `distlib item`
 pub async fn item(paths: &Paths, item_id: ItemId) -> Result<()> {
     let answer = ask(paths, "library.item", json!({ "item_id": item_id })).await?;
-    print_item_description(item_id, &answer);
-    print_ratings_reviews_and_bookmarks(&answer);
-    print_item_availability(&answer["availability"]);
+    let names = MemberNames::of(&ask(paths, "group.members", Value::Null).await?);
+    print_item_description(item_id, &answer, &names);
+    print_ratings_reviews_and_bookmarks(&answer, &names);
+    print_item_availability(&answer["availability"], &names);
     print_item_files(&answer["files"]);
     Ok(())
 }
 
+/// The group's members by id, so a member is printed by name and id.
+struct MemberNames(HashMap<String, String>);
+
+impl MemberNames {
+    /// From a `group.members` answer.
+    fn of(members: &Value) -> Self {
+        let names = members["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|member| {
+                Some((
+                    member["member"].as_str()?.to_owned(),
+                    member["name"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        Self(names)
+    }
+
+    /// `member` by name and id, or by id alone when it has no name here.
+    fn named(&self, member: &Value) -> String {
+        let id = member.as_str().unwrap_or("?");
+        named(id, self.0.get(id).map_or("", String::as_str))
+    }
+
+    /// Each of `members`, named, separated by commas.
+    fn join(&self, members: &[Value]) -> String {
+        members
+            .iter()
+            .map(|member| self.named(member))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// The item's own fields: what it is, who made it, and what it is about.
-fn print_item_description(item_id: ItemId, answer: &Value) {
+fn print_item_description(item_id: ItemId, answer: &Value, names: &MemberNames) {
     println!("id          {item_id}");
     println!("kind        {}", answer["kind"].as_str().unwrap_or("?"));
     println!(
@@ -749,18 +787,18 @@ fn print_item_description(item_id: ItemId, answer: &Value) {
         .as_array()
         .filter(|list| !list.is_empty())
     {
-        println!("added by    {}", join_strings(added_by));
+        println!("added by    {}", names.join(added_by));
     }
     if let Some(custodians) = answer["custodians"]
         .as_array()
         .filter(|list| !list.is_empty())
     {
-        println!("custodians  {}", join_strings(custodians));
+        println!("custodians  {}", names.join(custodians));
     }
 }
 
 /// What members have said about the item.
-fn print_ratings_reviews_and_bookmarks(answer: &Value) {
+fn print_ratings_reviews_and_bookmarks(answer: &Value, names: &MemberNames) {
     let ratings = &answer["ratings"];
     match ratings["average"].as_f64() {
         Some(average) => println!(
@@ -777,7 +815,7 @@ fn print_ratings_reviews_and_bookmarks(answer: &Value) {
     for review in reviews {
         println!(
             "  {}  {}",
-            review["member"].as_str().unwrap_or("?"),
+            names.named(&review["member"]),
             review["review"].as_str().unwrap_or("?")
         );
     }
@@ -787,7 +825,7 @@ fn print_ratings_reviews_and_bookmarks(answer: &Value) {
     for bookmark in bookmarks {
         println!(
             "  {}  at {}  {}  ({})",
-            bookmark["member"].as_str().unwrap_or("?"),
+            names.named(&bookmark["member"]),
             bookmark["position"].as_str().unwrap_or("?"),
             bookmark["note"].as_str().unwrap_or(""),
             bookmark["bookmark_id"].as_str().unwrap_or("?")
@@ -796,7 +834,7 @@ fn print_ratings_reviews_and_bookmarks(answer: &Value) {
 }
 
 /// Who holds the item's content, online or not known to be.
-fn print_item_availability(found: &Value) {
+fn print_item_availability(found: &Value, names: &MemberNames) {
     println!(
         "available   {}",
         availability(&found["held"], &found["providers"])
@@ -806,7 +844,7 @@ fn print_item_availability(found: &Value) {
         ("unknown", &found["unknown"]),
     ] {
         for member in members.as_array().map_or(&[][..], |members| members) {
-            println!("  {label:<9} {}", member.as_str().unwrap_or("?"));
+            println!("  {label:<9} {}", names.named(member));
         }
     }
 }
@@ -1142,11 +1180,12 @@ pub async fn download(
         .context("the node answered without a task id")?;
     let state = client.until_ended(events, task_id).await.map_err(advice)?;
 
+    let files = written(state.outcome)?;
     println!(
         "downloaded  {item_id}  {}",
         state.title.as_deref().unwrap_or("(no title)")
     );
-    for file in written(state.outcome)? {
+    for file in files {
         println!(
             "  {}  {}",
             // A file that was already here is said so rather than passed off
@@ -2052,6 +2091,20 @@ mod tests {
         assert_eq!(
             member_line(&red),
             "  abc  red: failed probes by two or more members"
+        );
+    }
+
+    #[test]
+    fn an_item_names_its_members_and_gives_the_id_of_one_it_does_not_know() {
+        let names = MemberNames::of(&json!({ "members": [
+            { "member": "abc", "name": "dave" },
+            { "member": "def", "name": "erin" },
+        ] }));
+        assert_eq!(names.named(&json!("abc")), "dave (abc)");
+        assert_eq!(names.named(&json!("xyz")), "xyz");
+        assert_eq!(
+            names.join(&[json!("def"), json!("abc")]),
+            "erin (def), dave (abc)"
         );
     }
 

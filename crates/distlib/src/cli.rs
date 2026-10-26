@@ -185,9 +185,9 @@ pub enum Command {
 
     /// List the members of this node's group.
     ///
-    /// Reads the local database, so it needs the node stopped: a running node
-    /// holds that file exclusively. While it runs, its log reports every
-    /// membership change instead.
+    /// Asks the running node, which also says who is red and how much of
+    /// its custody each member announces; with the node stopped, reads its
+    /// database instead.
     Members,
 
     /// Print this node's identity and where its data lives.
