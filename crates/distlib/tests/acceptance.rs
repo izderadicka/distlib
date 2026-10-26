@@ -371,6 +371,8 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
 
     // A book whose bytes are gone from the store, which still calls them
     // complete: the download fails, and does not first say it downloaded.
+    // Deleted rather than emptied: where the filesystem clones files (APFS),
+    // an emptied one is cloned as it is and the export passes (C41).
     let lost = alice.dir.path().join("lost.epub");
     std::fs::write(&lost, "Lost, in full\n".repeat(10_000)).unwrap();
     let added = run_command(
@@ -399,7 +401,7 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
         .path()
         .join("blobs/data")
         .join(format!("{blob}.data"));
-    std::fs::write(bytes, b"").unwrap();
+    std::fs::remove_file(bytes).unwrap();
     let failed = distlib(alice.dir.path())
         .args(["download", &lost_id, "--dest", dest.to_str().unwrap()])
         .output()
