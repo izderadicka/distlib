@@ -25,7 +25,7 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use distlib_net::{Connections, NOT_A_VOTER_REASON, alpn, close_code};
+use distlib_net::{Connections, IsRejection, NOT_A_VOTER_REASON, NetError, alpn, close_code};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
     endpoint::Connection,
@@ -62,6 +62,8 @@ enum Request {
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
     /// Read-only acknowledgment used before forgetting a retired learner.
     Retired,
+    /// An expelled, durably retired node asks the leader to commit its cleanup.
+    ForgetMe,
 }
 
 /// What it answers.
@@ -78,6 +80,7 @@ enum Response {
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
     Retired(bool),
+    Forgotten(bool),
 }
 
 /// Who this node will speak consensus with while it holds no voter set of its
@@ -192,6 +195,7 @@ impl RaftProtocol {
     async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
             Request::Retired => Response::Retired(self.seat.raft().is_none()),
+            Request::ForgetMe => Response::Forgotten(false),
             Request::AppendEntries(rpc) => Response::AppendEntries(raft.append_entries(rpc).await),
             Request::Vote(rpc) => Response::Vote(raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
@@ -202,8 +206,11 @@ impl RaftProtocol {
 
     /// Whether `peer` may take part in this node's consensus.
     ///
-    /// Once Raft knows its voters they are the whole answer. Before that — the
-    /// founding window — it does not, and something has to stand in, because a
+    /// During promotion, persisted replay authority also admits the voters
+    /// captured from the followed log, until an applied Raft configuration
+    /// reaches that promotion's index. Old log replay cannot close it early.
+    /// Outside that window, Raft's applied and effective voters decide. During
+    /// founding, the configured core stands in for the missing voter set: a
     /// founder sends `Vote` to peers whose Raft membership is still empty and
     /// founding could never happen if they refused it.
     ///
@@ -228,6 +235,13 @@ impl RaftProtocol {
     /// through follower mode while never being a voter — and would otherwise go
     /// on serving consensus to whoever that stale config names.
     fn may_speak_raft(&self, raft: &Raft<TypeConfig>, peer: MemberId) -> bool {
+        if self
+            .state_machine
+            .promotion()
+            .is_some_and(|promotion| promotion.voters.contains(&peer))
+        {
+            return true;
+        }
         if self.applied_voter(peer) {
             return true;
         }
@@ -243,6 +257,51 @@ impl RaftProtocol {
 
         self.state_machine.membership().group_id().is_none() && self.trusted.contains(&peer)
     }
+    /// Learners may request their own cleanup. A retired node also answers a
+    /// current core learned through the memberlog, even after voter turnover.
+    /// This does not authorize consensus mutations from those extra peers.
+    fn may_query_retirement(&self, peer: MemberId) -> bool {
+        self.seat
+            .raft()
+            .as_ref()
+            .is_some_and(|raft| self.may_speak_raft(raft, peer))
+            || self.state_machine.membership().is_core(&peer)
+            || self
+                .state_machine
+                .raft_membership()
+                .borrow()
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(peer))
+    }
+
+    /// The caller may remove only itself, only after expulsion and committed
+    /// uniform voter removal. The reply follows the cleanup commit, so an
+    /// orderly exiting process cannot leave an unreachable retained learner.
+    async fn forget_retired(&self, peer: MemberId) -> bool {
+        let Some(raft) = self.seat.raft() else {
+            return false;
+        };
+        let applied = self.state_machine.raft_membership().borrow().clone();
+        let id = RawMemberId::from(peer);
+        if self.state_machine.membership().is_member(&peer)
+            || applied.membership().get_joint_config().len() != 1
+            || applied.voter_ids().any(|voter| voter == id)
+        {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                raft.change_membership(
+                    openraft::ChangeMembers::RemoveNodes(BTreeSet::from([id])),
+                    true
+                )
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    }
+
     fn applied_voter(&self, peer: MemberId) -> bool {
         self.state_machine
             .raft_membership()
@@ -262,11 +321,7 @@ impl ProtocolHandler for RaftProtocol {
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
         loop {
-            let admitted = self.seat.raft().as_ref().map_or_else(
-                || self.applied_voter(peer),
-                |raft| self.may_speak_raft(raft, peer),
-            );
-            if !admitted {
+            if !self.may_query_retirement(peer) {
                 connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
                 return Ok(());
             }
@@ -287,13 +342,19 @@ impl ProtocolHandler for RaftProtocol {
                 || self.applied_voter(peer),
                 |raft| self.may_speak_raft(raft, peer),
             );
-            let response = if authorized && matches!(request, Request::Retired) {
-                Response::Retired(self.seat.raft().is_none())
-            } else if let Some(raft) = raft.filter(|_| authorized) {
-                self.answer(&raft, request).await
-            } else {
-                connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
-                return Ok(());
+            let may_query = self.may_query_retirement(peer);
+            let response = match request {
+                Request::Retired if may_query => Response::Retired(self.seat.raft().is_none()),
+                Request::ForgetMe if may_query => {
+                    Response::Forgotten(self.forget_retired(peer).await)
+                }
+                request => {
+                    let Some(raft) = raft.filter(|_| authorized) else {
+                        connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                        return Ok(());
+                    };
+                    self.answer(&raft, request).await
+                }
             };
             let encoded = postcard::to_stdvec(&response).accepting()?;
 
@@ -402,6 +463,32 @@ impl RaftClient {
             Response::Retired(retired) => Ok(retired),
             other => Err(mismatched(self.target, &other)),
         }
+    }
+
+    /// A committed cleanup response, or revocation of the temporary Raft
+    /// transport exception, lets an expelled node exit. Silence never does.
+    pub(crate) async fn forget_me(&self) -> bool {
+        let Ok(peer) = MemberId::try_from(self.target) else {
+            return false;
+        };
+        let Ok(addr) = self.endpoint_addr::<RaftError<NodeId>>() else {
+            return false;
+        };
+        let connection = match self
+            .connections
+            .get_or_connect(&self.endpoint, peer, addr, alpn::RAFT)
+            .await
+        {
+            Ok(connection) => connection,
+            Err(NetError::Rejected { .. }) => return true,
+            Err(_) => return false,
+        };
+        matches!(
+            self.call::<RaftError<NodeId>>(Request::ForgetMe).await,
+            Ok(Response::Forgotten(true))
+        ) || connection
+            .close_reason()
+            .is_some_and(|error| error.is_rejection())
     }
 
     /// Where to dial, from the addressing Raft carries in its membership.

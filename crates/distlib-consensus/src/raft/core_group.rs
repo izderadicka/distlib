@@ -463,6 +463,84 @@ mod tests {
 
     use super::*;
 
+    /// A leader can restart with only the joint entry committed. Its next
+    /// reconciliation must complete that entry's target, even without a newer
+    /// application event to wake it. The old peer is deliberately offline.
+    #[tokio::test]
+    async fn a_restarted_leader_completes_the_recorded_joint_target() {
+        use openraft::{
+            CommittedLeaderId, Entry, EntryPayload, LogId, Membership, Vote,
+            storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
+        };
+        use std::sync::Arc;
+
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let me = RawMemberId::from(MemberId::from(endpoint.id()));
+        let old = raw(99);
+        let nodes = BTreeMap::from([(me, at(1)), (old, at(2))]);
+        let old_voters = BTreeSet::from([me, old]);
+        let target = BTreeSet::from([me]);
+        let entries: Vec<Entry<TypeConfig>> = [
+            Membership::new(vec![old_voters.clone()], nodes.clone()),
+            Membership::new(vec![old_voters, target.clone()], nodes),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, membership)| Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, me), index as u64),
+            payload: EntryPayload::Membership(membership),
+        })
+        .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("joint.redb")).unwrap());
+        let mut log = crate::LogStore::from_database(Arc::clone(&db)).unwrap();
+        let mut state = StateMachineStore::from_database(db).unwrap();
+        log.save_vote(&Vote::new_committed(1, me)).await.unwrap();
+        log.blocking_append(entries.clone()).await.unwrap();
+        log.save_committed(Some(entries[1].log_id)).await.unwrap();
+        state.apply(entries).await.unwrap();
+        let mut network =
+            RaftNetworkFactoryImpl::new(endpoint.clone(), distlib_net::Connections::new());
+        let config = Arc::new(
+            openraft::Config {
+                enable_tick: false,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap(),
+        );
+        let raft = Raft::new(me, config, network.clone(), log, state.clone())
+            .await
+            .unwrap();
+        raft.wait(Some(Duration::from_secs(5)))
+            .state(ServerState::Leader, "restored leader")
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), pass(&raft, &state, &mut network))
+                .await
+                .unwrap()
+                .unwrap(),
+            Pass::Changed
+        );
+        assert_eq!(
+            raft.metrics()
+                .borrow()
+                .membership_config
+                .membership()
+                .get_joint_config(),
+            &vec![target]
+        );
+        raft.shutdown().await.unwrap();
+        endpoint.close().await;
+    }
+
     fn member(seed: u8) -> MemberId {
         MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public())
     }

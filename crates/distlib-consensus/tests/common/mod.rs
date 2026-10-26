@@ -81,6 +81,23 @@ impl Peer {
         Self::start_in(_dir, secret, bootstrap, core).await
     }
 
+    /// Restarts with an explicitly selected core, preserving storage.
+    #[allow(dead_code)]
+    pub async fn restart_with_core(self, core: Vec<(MemberId, NodeAddr)>) -> Self {
+        self.shutdown().await;
+        let Self {
+            secret,
+            _dir,
+            node,
+            router,
+            ..
+        } = self;
+        drop((node, router));
+        until_released(&_dir.path().join(distlib_consensus::RAFT_DB)).await;
+        let bootstrap = core.iter().map(|(id, _)| *id).collect();
+        Self::start_in(_dir, secret, bootstrap, core).await
+    }
+
     /// Starts a node whose founding core group is stated separately.
     ///
     /// The two sets are not the same thing, and a node that conflates them

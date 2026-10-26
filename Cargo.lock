@@ -1245,11 +1245,13 @@ dependencies = [
 name = "distlib-custody"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "distlib-consensus",
  "distlib-core",
  "distlib-net",
  "distlib-store",
  "distlib-sync",
+ "getrandom 0.3.4",
  "iroh",
  "serde",
  "thiserror 2.0.20",
@@ -1261,6 +1263,7 @@ dependencies = [
 name = "distlib-net"
 version = "0.1.0"
 dependencies = [
+ "bao-tree",
  "distlib-core",
  "futures-lite",
  "iroh",

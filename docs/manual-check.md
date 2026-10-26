@@ -2,8 +2,9 @@
 
 One story, start to finish. Three friends found a group, two more people join, they share
 books and a lecture, find and download each other's things through the command line and
-the browser, someone leaves, someone is trusted with a vote, someone steps back, and the
-node holding the group together goes away.
+the browser, the group keeps its copies through a member going away and a file going
+missing, someone leaves, someone is trusted with a vote, someone steps back, and the node
+holding the group together goes away.
 
 This is not where edge cases are tested — the automated suites do that on every commit.
 What a test cannot tell you is whether a **person** can do all this: whether the output
@@ -57,7 +58,8 @@ echo $A $B $C $D $E $F
 ```
 
 Write their configuration. Alice, bob and carol get the same founding core group; dave
-and erin get an empty one, which `join` fills in for them later.
+and erin get an empty one, which `join` fills in for them later. Every node beats every
+five seconds, so the others notice within seconds when it goes away.
 
 ```sh
 CORE="core = [
@@ -81,20 +83,44 @@ $core
 [api]
 enabled = true
 bind_addr = "127.0.0.1:1128$((i-4))"
+
+[availability]
+beat_interval_secs = 5
 EOF
   i=$((i+1))
 done
 ```
 
-Something to share: three small books, a fourth by somebody else, and one **1 GB**
-recording — big enough that a download takes long enough to watch.
+Alice founds the group, so her file also says how it keeps things: two copies of everything,
+the adder's one of them; pledges in megabytes rather than the default 100 GB; and custody,
+emergency copies and probes that act in seconds rather than hours, so this takes minutes.
+These are written into the founding entry and are fixed from then on.
+
+```sh
+cat >> $DL/a/config.toml <<EOF
+
+[group]
+replicas = 2
+min_pledge_bytes = 10000000
+weight_step_bytes = 1000000
+settle_secs = 5
+emergency_after_secs = 30
+probe_every_secs = 5
+EOF
+```
+
+Something to share: three small books, a fourth by somebody else, a fifth for dave, one
+**1 GB** recording — big enough that a download takes long enough to watch — and two of
+erin's files, larger than she will pledge for.
 
 ```sh
 mkdir -p $DL/files
-for f in dune dune-messiah children-of-dune left-hand; do
+for f in dune dune-messiah children-of-dune left-hand earthsea; do
   yes "$f, in full" | head -20000 > $DL/files/$f.epub
 done
 head -c 1G /dev/urandom > $DL/files/lectures.mkv
+head -c 15M /dev/urandom > $DL/files/erin-notes.pdf
+head -c 60M /dev/urandom > $DL/files/erin-photos.zip
 ```
 
 **On WSL** a Windows browser reaches the nodes on `127.0.0.1` as usual, and its file
@@ -121,7 +147,15 @@ means the file is not where the node looked.
 told nothing, they received it.
 
 ```sh
-dl -d $DL/b status       # group; role core member; a Raft leader
+dl -d $DL/b status       # group; role core member; a Raft leader; settings … replicas = 2
+```
+
+**Pass:** bob's `settings` are alice's `[group]` — he received them with the group.
+
+Each of them pledges space for the group, 5 GB:
+
+```sh
+for n in a b c; do dl -d $DL/$n pledge 5000000000; done     # pledged  5000000000 bytes
 ```
 
 ---
@@ -165,6 +199,15 @@ dl -d $DL/d status       # role member; "follows the log to index N"; no Raft li
 dl -d $DL/d members      # five, three of them core
 ```
 
+Dave pledges as the founders did. Erin tries less than the group's minimum, then pledges
+the minimum:
+
+```sh
+dl -d $DL/d pledge 5000000000
+dl -d $DL/e pledge 5000000       # refused: below the group's minimum of 10000000 bytes
+dl -d $DL/e pledge 10000000      # pledged  10000000 bytes
+```
+
 ---
 
 ## 4. Alice and bob share things
@@ -178,11 +221,40 @@ dl -d $DL/b add $DL/files/left-hand.epub \
   --kind ebook --title "The Left Hand of Darkness" --author "Ursula K. Le Guin"
 ```
 
-**Pass:** `added  <id>  Dune`, and the same for bob's.
+**Pass:** `added  <id>  Dune`, and the same for bob's. Each has one custodian, another
+member, which fetched it without being asked:
+
+```sh
+DUNE=$(dl -d $DL/a search herbert | awk '{print $1; exit}')
+LEFT=$(dl -d $DL/a search darkness | awk '{print $1; exit}')
+dl -d $DL/a item $DUNE    # added by alice (…); custodians <a name> (…); held here, 1 online
+dl -d $DL/<that custodian> status    # custody 1 items, 1240000 bytes (or more)
+```
 
 And from alice's page: **Add**, choose `lectures.mkv`, title **Lectures**, type video,
 **Add**. **Pass:** the bar moves steadily — the gigabyte is written twice, once as it
-arrives and once into the store, so it takes a while — and the item's page opens.
+arrives and once into the store, so it takes a while — and the item's page opens, naming
+its custodian, who fetches the gigabyte in turn.
+
+```sh
+LECTURES=$(dl -d $DL/a search lectures | awk '{print $1; exit}')
+```
+
+Erin adds her notes, from her own page in a third window:
+
+```sh
+dl -d $DL/e ui
+```
+
+**Add**, choose `erin-notes.pdf`, title **Erin's notes**, type other, **Add**. **Pass:** the
+page stays, with a red warning: her pledge of 10 MB is below the 15.7 MB her adds now
+require; raise it with `distlib pledge`. Then the photos, from the command line:
+
+```sh
+dl -d $DL/e add $DL/files/erin-photos.zip --kind other --title "Erin's photos"
+```
+
+**Pass:** refused, naming the pledge it would need, and nothing is added.
 
 ---
 
@@ -223,7 +295,85 @@ already — **Pass:** the year appears without a reload, a moment later.
 
 ---
 
-## 7. Erin leaves
+## 7. A custodian goes away
+
+Dave adds a book of his own:
+
+```sh
+EARTHSEA=$(dl -d $DL/d add $DL/files/earthsea.epub --kind ebook \
+  --title "A Wizard of Earthsea" --author "Ursula K. Le Guin" | awk '/^added/{print $2}')
+dl -d $DL/d item $EARTHSEA     # added by dave; custodians <X>; held here, none online
+```
+
+**Pass:** within seconds `item` says `held here, 1 online`: its custodian fetched it.
+Call the custodian X — erin pledges so little that it is all but certainly alice, bob or
+carol — and note its letter and id:
+
+```sh
+X=b; XID=$B        # if it is bob
+```
+
+Ctrl-C X's terminal, and ask every few seconds:
+
+```sh
+dl -d $DL/d item $EARTHSEA | grep -A3 ^available
+```
+
+**Pass:** for about half a minute it says `none online`, and nothing moves — the group does
+not hand X's items to somebody else because X is offline. Then, after `emergency_after_secs`,
+one other member's terminal says `one copy left for too long; keeping an emergency copy`,
+and `item` says `1 online` again. Any other item X kept with only one copy left gets one
+too. If X is alice, her page says **Cannot reach the node** meanwhile.
+
+Start X again (`dl -d $DL/$X run`). **Pass:** `2 online`; X is still the custodian, and
+nothing else moves — the emergency copy stays where it was, as cache.
+
+---
+
+## 8. A copy goes missing
+
+X loses its copy of dave's book — moved out of its store, as a disk losing a file would:
+
+```sh
+BLOB=$(dl -d $DL/d item $EARTHSEA | awk '/earthsea.epub/{print $1}')
+mkdir -p $DL/aside
+mv $DL/$X/blobs/data/$BLOB.data $DL/aside/
+```
+
+**Pass:** within a minute other members' terminals say `a custodian failed a probe`, and X
+is red everywhere:
+
+- `dl -d $DL/d members` marks X `red: failed probes by two or more members`;
+- alice's **Node** page marks X red, without a reload, and lists X under **Suspects**: who
+  failed it, at which chunk, and when;
+- **Check now** on X's row there probes it at once, and says it failed.
+
+A voter other than X proposes the expulsion, with the evidence as its reason:
+
+```sh
+dl -d $DL/<a voter, not X> expel $XID --with-evidence
+```
+
+**Pass:** `proposed … waiting for core approval — 1 of 2 so far` — X is a voter — and
+`reason  failed probes by N members within 7 days: by … at … UTC: item … chunk …`. Nobody
+approves it; the same voter takes it back:
+
+```sh
+dl -d $DL/<that voter> withdraw <N>     # withdrew  <N>
+```
+
+The file is found and put back:
+
+```sh
+mv $DL/aside/$BLOB.data $DL/$X/blobs/data/
+```
+
+**Pass:** within a minute X is no longer red, on the page or in `members` — the probes
+that failed it pass again.
+
+---
+
+## 9. Erin leaves
 
 Bob takes her out. She is not a voter, so one core member decides it:
 
@@ -241,7 +391,7 @@ dl -d $DL/b expel $E --reason "moved away"        # expelled  <erin's id>
 
 ---
 
-## 8. Dave is trusted with a vote
+## 10. Dave is trusted with a vote
 
 Adding a voter changes who decides things, so it takes a majority of the voters — two of
 the three. Alice proposes, and that is her approval:
@@ -267,7 +417,7 @@ dl -d $DL/d status               # role core member; Raft role Follower (or Lead
 
 ---
 
-## 9. Carol steps back
+## 11. Carol steps back
 
 Removing a voter also takes a majority — now three of the four. Dave proposes it, and his
 own approval counts:
@@ -294,9 +444,18 @@ dl -d $DL/a members              # three, all core: alice, bob, dave
 Carol's terminal first gives up her seat — `this node is now a follower` — then says it
 has been expelled, as erin's did, and shuts down.
 
+**Pass:** whatever carol was custodian of now names somebody else, who fetches it:
+
+```sh
+for i in $DUNE $LEFT $LECTURES $EARTHSEA; do
+  dl -d $DL/a item $i | grep -E '^(title|custodians)'
+done                             # no carol
+dl -d $DL/<a new custodian> status    # custody counts the items it took over
+```
+
 ---
 
-## 10. The leader goes down
+## 12. The leader goes down
 
 ```sh
 dl -d $DL/b status               # the "Raft leader" line names it
@@ -325,7 +484,7 @@ seconds, answering clicks again.
 
 ---
 
-## 11. Afterwards
+## 13. Afterwards
 
 Ctrl-C every terminal, then:
 
@@ -341,7 +500,7 @@ rm -rf $DL
 - Does any error leave you without a next step?
 - Is it obvious from `admit`, `expel` and `approve` alone whether anything happened yet?
 - Does `pending` tell you enough to decide, without going to a log?
-- Is a node taking its seat (§8) alarming to watch? It goes quiet for a moment.
+- Is a node taking its seat (§10) alarming to watch? It goes quiet for a moment.
 - How long does a change take to show up on another node — on the command line, and in
   the other browser window?
 - Does an item that arrives field by field look broken while it does?
@@ -350,6 +509,10 @@ rm -rf $DL
 - Is it clear, after an upload's bar is full, that the node is still adding it?
 - Is there anything that tells you a core node is unreachable *before* you notice it has
   stopped keeping up?
+- Is it clear from `item` and `status` who keeps what for the group, and why?
+- While its file was gone, did X's own node say anything? Today it does not: its `status`
+  still counts the item kept, and nothing repairs it (C41).
+- Does red, and the evidence behind it, tell whoever sees it what to do next?
 - Anything the README's quickstart gets wrong.
 
 Write what you find down; it becomes the next round of fixes.

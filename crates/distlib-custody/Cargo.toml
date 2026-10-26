@@ -17,6 +17,9 @@ distlib-store = { workspace = true }
 # The pin manager: the blob store's tags, fetching, and who holds what.
 distlib-net = { workspace = true }
 distlib-sync = { workspace = true }
+# A probe's item, custodian, file and chunk, chosen at random.
+getrandom = { workspace = true, features = ["std"] }
+chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

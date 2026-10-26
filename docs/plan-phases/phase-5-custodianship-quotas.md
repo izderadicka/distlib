@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -476,7 +476,7 @@ The design is agreed; these numbers are guesses until something is measured:
 
 ## Sub-phases
 
-Twenty-three PRs — fourteen planned, 5a-3 and 5b-1 each split in two, 5b-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
+Twenty-six PRs — fourteen planned, 5a-3, 5b-1 and 5c-3 each split in two, 5b-2 and 5c-2 in three, 5c-1 in four, and 5c-0 and 5b-7 added in review. Each ends compiling,
 tested, and demonstrable by hand with the CLI or a page. One PR at a time, review before the next.
 
 ### 5a — foundations (4 PRs)
@@ -617,7 +617,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   **Acceptance:** a node pledging room for one of two books fetches the one it scores higher, says
   the other is over its pledge, and never tags it.
 
-### 5c — checking custody (9 PRs)
+### 5c — checking custody (12 PRs)
 
 - **5c-0 — the whole log, kept (C43).** *(done; delta P5-23)* The log is never purged: `max_in_snapshot_log_to_keep` at
   `u64::MAX`, so openraft still snapshots but deletes nothing. Every signed event, approval and
@@ -633,37 +633,45 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   in an answer at all; it now holds a thousand events or 4 MiB of them, whichever comes first, and
   a follower asks for the next at once.
 
-- **5c-1 — coverage from heartbeats (D10).** Per member, of the items this node holds and that member
+- **5c-1 — coverage from heartbeats (D10).** *(done)* Per member, of the items this node holds and that member
   should hold too, the share it announces; shown in the members list.
   *Split in four* (P5-24, P5-25): **5c-1a** *(done)* — coverage worked out and in `group.members`;
   **5c-1b** *(done)* — 5b-7's cut undone, so *should hold* is everything a member is custodian of,
   and the heartbeat's count over the pledge goes with it; **5c-1c** *(done)* — custody fetches
-  stop at the storage limit rather than going past it; **5c-1d** — the members list on the Node page and in
+  stop at the storage limit rather than going past it; **5c-1d** *(done)* — the members list on the Node page and in
   `distlib members`.
   **Acceptance:** a custodian that holds its items shows full coverage; one whose pin manager is
   stopped falls behind once its assignments are older than `max_settle_secs`; one still within that
   time is not blamed.
 
-- **5c-2 — probes (D11), and failures in the catalogue (D12).** Random sampling with the suspect
+- **5c-2 — probes (D11), and failures in the catalogue (D12).** *(done)* Random sampling with the suspect
   share, the repair hook, failure keys written and cleared; off when the group says so.
+  *Split in three* (P5-27, P5-28): **5c-2a** *(done)* — random probes, and failure keys written and cleared;
+  **5c-2b** *(done)* — the failed copy counted as missing, for the emergency copy and for letting go of
+  custody; **5c-2c** *(done)* — one probe in four re-checking a suspect.
   **Acceptance:** a custodian holding the item passes and nothing is written; one whose blob was
   deleted underneath it fails, its key appears on every node, and the item gets its emergency copy if
   that was its last real one; its next pass clears the key; an unreachable custodian is skipped; a
   group founded with `probes` off makes no probes.
 
-- **5c-3 — the suspects view and expulsion with evidence (D12).** Red, the suspects view, check now,
+- **5c-3 — the suspects view and expulsion with evidence (D12).** *(done)* Red, the suspects view, check now,
   and `distlib expel --with-evidence`.
+  *Split in two* (P5-30): **5c-3a** *(done)* — red, the suspects view and check now; **5c-3b** *(done)* —
+  `distlib expel --with-evidence` and `group.propose_expel`'s `with_evidence`.
   **Acceptance:** failures from two probers turn a member red on every node; one prober's failure
   alone does not; `distlib expel --with-evidence` proposes with a reason that names the failures and
   fits `MAX_REASON`. Vitest per view.
 
-- **5c-4 — §9's acceptance, as one test, reworded (P5-1).** Five nodes, `replicas = 3`: an expelled
+- **5c-4 — §9's acceptance, as one test, reworded (P5-1).** *(done)* Five nodes, `replicas = 3`: an expelled
   custodian's items are fetched by the next-ranked member; an item down to one holder gets an
   emergency copy after the delay; a node whose pinned blob is deleted fails probes from two peers and
-  is red everywhere.
+  is red everywhere. *As one story* (P5-1): the custodian whose data is gone is red, and is the one
+  expelled, with the evidence; its data is emptied in place rather than deleted.
 
 - **5c-5 — by-hand check.** [`manual-check.md`](../manual-check.md) grows within its one story, and
   what it finds is fixed before the phase is called done.
+  *Split in two* (P5-32): **5c-5a** *(done)* — the check written, its command-line half run end to
+  end first, and what that found fixed; **5c-5b** — what Ivan's run of the whole check finds.
 
 ---
 
@@ -675,7 +683,7 @@ Every open C-number appears here once.
 |---|---|---|
 | **C1** | A full peer offer is O(N²) dials | **Unchanged** — and worth measuring at the thousands of members this phase targets. |
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
-| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged.** |
+| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged**, and probe failures blink too: a prober's newer failure is left out of `probe_failures()` until its content arrives, so for a moment a member can be listed with one prober fewer, or not red (seen on CI in 5c-5a, where the evidence named one prober of two). |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
 | **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas — the read model's `file_authors`, shown as `added_by` (5b-1a, P5-8). `created` and `modified_by` stay open. |
 | **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3a.** |
@@ -700,10 +708,11 @@ Every open C-number appears here once.
 | **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase** (Ivan, P5-25). The load factor warns first, a node says when its custody is past its pledge, coverage shows a custodian that cannot keep up, and an item down to its last copy gets D6's emergency copy. |
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
-| **C41** | **Nothing scrubs a node's own custody** for bitrot | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged. |
+| **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **Closed by 5c-0** (P5-23): never purged, and served a page at a time. |
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 | **C44** | **The emergency copy fires only at the last live copy** (D6) | **A later version** (Ivan, P5-25). A group setting `emergency_at_copies`, 1 by default and at most `replicas − 1`, checked at founding: an item that has had at most that many live copies for `emergency_after_secs` gets emergency copies, one after another by the same first-after-the-custodians rule, the delay running from when it first fell to the threshold. It would make up for the overflow left out (C38). |
+| **C45** | **A clock that steps back makes a node's own catalogue writes fail** — iroh-docs stamps each entry with the wall clock and refuses one older than the entry already at its key (`NewerEntryExists`), which reaches the caller as "the catalogue could not be written to", its cause dropped; seen once in a local `cargo test-all` on WSL, whose clock jumps back after a sleep (found in 5c-4) | **Phase 6**, with hardening: at least name the cause; perhaps stamp no earlier than the entry being replaced. |
 
 ---
 
@@ -764,9 +773,11 @@ on the phase's diff), and [`manual-check.md`](../manual-check.md) grows within i
 
 - the group is founded with `replicas = 2`, and a short settle and emergency delay;
 - dave adds a book: it is his own, and one more member is its custodian and fetched it unasked;
-- bob, its custodian, is stopped: nothing moves; dave stopped too, after the delay a third member
-  fetches an emergency copy; both back, nothing moves;
+- its custodian is stopped: nothing moves until the delay, then a third member fetches an
+  emergency copy; the custodian back, nothing moves *(P5-32: dave's copy is then the last
+  live one)*;
 - erin, under-pledged, sees a red warning on an add, then is refused a much larger one, and is told
   the pledge needed both times;
 - bob deletes a pinned file by hand: probes from two members fail, he is red on the Node page and in
-  the suspects view, and `distlib expel bob --with-evidence` proposes with the evidence as its reason.
+  the suspects view, and `distlib expel bob --with-evidence` proposes with the evidence as its reason
+  *(P5-32: the custodian, whoever it is, moves the file aside and back, and the red clears)*.

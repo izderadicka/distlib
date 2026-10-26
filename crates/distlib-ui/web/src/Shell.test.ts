@@ -63,6 +63,8 @@ describe("the shell", () => {
           return STATUS;
         case "group.members":
           return MEMBERS;
+        case "group.suspects":
+          return { suspects: [] };
         default:
           return { results: [], total: 0 };
       }

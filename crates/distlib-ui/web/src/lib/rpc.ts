@@ -110,7 +110,43 @@ export interface Member {
   /** What it added requires it to pledge, and never less than the group's minimum (D8). */
   required_pledge_bytes: number;
   core: boolean;
+  /** `null` while this node does not judge it: offline, or what it holds not known yet (D10). */
+  coverage: MemberCoverage | null;
+  /** Failed by at least two probers within the group's window (D12). */
+  red: boolean;
 }
+
+/** Of the items this node holds that a member should hold too, how many it announces. */
+export interface MemberCoverage {
+  expected: number;
+  announced: number;
+}
+
+/** One prober's latest failure of a suspect (D12). */
+export interface RecordedFailure {
+  prober: string;
+  prober_name: string | null;
+  item: string;
+  /** `null` while the item is not in this node's catalogue. */
+  title: string | null;
+  blob: string;
+  chunk: number;
+  in_a_row: number;
+  /** Microseconds since the epoch, by the prober's clock. */
+  written: number;
+}
+
+/** A member with probe failures that count: the most probers first. */
+export interface Suspect {
+  member: string;
+  name: string | null;
+  red: boolean;
+  /** One per prober, the latest first. */
+  failures: RecordedFailure[];
+}
+
+/** How a probe came out; `null` with nothing of the member to probe. */
+export type CheckOutcome = "passed" | "failed" | "unreachable" | null;
 
 /** `group.members`. */
 export interface Members {
@@ -282,6 +318,8 @@ export interface ItemPage {
 interface Methods {
   "node.status": { params: null; result: NodeStatus };
   "group.members": { params: null; result: Members };
+  "group.suspects": { params: null; result: { suspects: Suspect[] } };
+  "group.check": { params: { member: string }; result: { outcome: CheckOutcome } };
   "library.list": { params: { offset: number; limit: number }; result: ItemPage };
   "library.search": {
     params: { query: string; offset: number; limit: number };

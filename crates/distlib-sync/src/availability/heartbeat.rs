@@ -10,7 +10,7 @@
 //! beat names one it does not have.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -103,6 +103,8 @@ struct Inner {
     online: watch::Receiver<BTreeSet<MemberId>>,
     /// Shared with the listening half, which fills it.
     holders: Arc<Mutex<Holders>>,
+    /// Where a change to the failed copies is told.
+    events: broadcast::Sender<Event>,
     /// The last beat sent, and where — what a goodbye follows. `None` until
     /// the first beat. Shared with the beating half, which records it.
     said: Arc<Mutex<Option<Said>>>,
@@ -162,7 +164,7 @@ impl Availability {
                 epoch,
                 published,
                 holders: holders.clone(),
-                events,
+                events: events.clone(),
                 said: said.clone(),
             })
             .instrument(span),
@@ -172,6 +174,7 @@ impl Availability {
                 secret: secret.clone(),
                 online,
                 holders,
+                events,
                 said,
                 task: Mutex::new(Some(task)),
             }),
@@ -189,8 +192,23 @@ impl Availability {
         lock(&self.inner.holders).holders(item).to_vec()
     }
 
-    /// Every item exactly one member of `online` is known to hold, with that
-    /// member.
+    /// The other members known to hold `item` whose copy has not failed a
+    /// probe (phase 5's D11): its real copies.
+    pub fn real_holders(&self, item: &ItemId) -> Vec<MemberId> {
+        lock(&self.inner.holders).real_holders(item)
+    }
+
+    /// Replaces the copies probes found missing, `(member, item)`, telling
+    /// `availability.changed` for each member whose changed.
+    pub fn set_failed_copies(&self, failed_copies: HashSet<(MemberId, ItemId)>) {
+        let changed = lock(&self.inner.holders).set_failed_copies(failed_copies);
+        for member in changed {
+            tell(&self.inner.events, member);
+        }
+    }
+
+    /// Every item exactly one member of `online` is known to hold a real copy
+    /// of, with that member.
     pub fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
         lock(&self.inner.holders).sole_holders(online)
     }

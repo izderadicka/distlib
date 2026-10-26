@@ -35,7 +35,7 @@ sequencing plan of the phase currently being built.
 >   rate, review and bookmark it, add an item from files chosen in the browser, search
 >   everybody's bookmarks, and make, comment on and fulfil wishes. An item's page shows who
   keeps it for the group, online or not; the Node page shows this node's pledge against
-  what its adds require, and the group's load. Release builds and a Dockerfile exist.
+  what its adds require, the group's load, and each member's coverage of what this node holds. Release builds and a Dockerfile exist.
 >
 > Next, phase 4: who is online and holds what, ratings, reviews, bookmarks and wishes —
 > see [its plan](docs/plan-phases/phase-4-availability-community.md). Custodianship and
@@ -331,7 +331,7 @@ them hold for every protocol added later.
 | `distlib run` | Run the node until `Ctrl-C` or `SIGTERM` — or until the group expels it, which a non-voting member finds out by being refused, and which it reports before exiting. Stop it with one of those rather than `kill -9`: the shutdown is what commits the blob store's record of the files this node has fetched. |
 | `distlib run --found-group` | Run, founding the group in `[consensus] core` first. One founder, once. |
 | `distlib admit <member> [--name]` | Admit a member. Needs the node running. |
-| `distlib expel <member> --reason` | Remove one, recording why. Needs the node running. |
+| `distlib expel <member> --reason` | Remove one, recording why. `--with-evidence` adds its probe failures to the reason, and makes `--reason` optional. Needs the node running. |
 | `distlib pending` | List the changes waiting for approvals. |
 | `distlib approve <proposal>` | Approve a pending change. |
 | `distlib withdraw <proposal>` | Take back a change you proposed. |
@@ -342,7 +342,7 @@ them hold for every protocol added later.
 | `distlib ui [--base-url]` | Print the link that opens this node's web UI, signed in. |
 | `distlib add <files>... --kind [--title] [--author]...` | Add a file set to the catalogue as one item. |
 | `distlib search <query> [--limit]` | Search the catalogue. |
-| `distlib item <item_id>` | Print one item's record, with its ratings, reviews and bookmarks. |
+| `distlib item <item_id>` | Print one item's record, with its ratings, reviews and bookmarks, its custodians and who holds it online; members by name and id. |
 | `distlib rate <item_id> <1-5>` / `rate <item_id> --clear` | Rate an item as this node's member, or clear the rating. |
 | `distlib review <item_id> <text>` / `review <item_id> --clear` | Review an item, or clear the review. |
 | `distlib bookmark <item_id> <position> [--note] [--edit <id>]` / `bookmark <item_id> --delete <id>` | Leave a bookmark on an item, edit one of yours, or delete one. |
@@ -353,7 +353,7 @@ them hold for every protocol added later.
 | `distlib wish fulfill <wish_id> <item_id>` | Say that an item in the catalogue answers a wish. |
 | `distlib download <item_id> [--dest] [--file]` | Fetch an item's files from the group and write them out. |
 | `distlib admin reindex` | Rebuild the read model and search index from the catalogue. |
-| `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. |
+| `distlib members` | List the group. Asks the running node, or reads its log if it is stopped. A running node adds each member's coverage, "coverage 3 of 4", once there is something to cover. |
 | `distlib status [--online]` | Identity, paths, relay mode, group and role — plus Raft role and leader while the node runs. `--online` also binds and prints the dialable address. |
 | `distlib ping <member> [--addr] [--relay]` | Send a ping and wait for the echo. |
 
@@ -482,6 +482,31 @@ the limit.
 Custody follows weight, not the pledge exactly, so a node can be custodian of more
 than it pledged. It keeps all of it even so; `distlib status` and the Node page say
 so, and raising the pledge with `distlib pledge` tells the group the room it takes.
+
+Unless the group was founded with `probes` off, every `probe_every_secs` a node asks
+one of the other custodians of an item it holds for a random 1 KiB of one of the
+item's files, checked against the file's hash. A member that cannot be reached is
+skipped. One that is reached and does not send the right bytes within 30 seconds has
+failed: the prober records it in the catalogue, under `probe/<custodian>/<prober>`,
+and clears it at its next probe of that member that passes. Only a member pledging
+the group's minimum probes, since the others are not sent content. A copy that
+failed a probe within the group's `failure_window_secs` does not count as a copy:
+an item whose last real copy it was gets its emergency copy, and a custodian giving
+up its custody keeps the item until enough real copies are elsewhere. One probe in
+four re-checks a suspect instead: a failure this node recorded, then one another
+member recorded, each at the chunk it failed at, then a member announcing less than
+it should hold.
+
+A member with failures from at least two probers, each within `failure_window_secs`
+and each prober still a member, is red: in `distlib members`, and in the Node page's
+members list. The Node page's Suspects section lists every member with failures that
+count, the most probers first, with each prober's latest failure, and **Check now**
+probes one at once from this node: at its latest failure's chunk if it still announces
+that item. The outcome is recorded like any probe's.
+`distlib expel <member> --with-evidence [--reason "..."]` proposes expelling a
+suspect with a reason that names its failures, after the reason given: each prober,
+when, the item, the chunk and how many in a row, cut to fit the log's 512 bytes. It
+is refused for a member with no failures that count.
 
 `[storage] gc_interval_secs` is how often what nothing keeps any more is deleted from
 disk, every ten minutes unless set. `node.status` says when the last pass began. If

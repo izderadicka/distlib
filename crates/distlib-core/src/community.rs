@@ -19,13 +19,14 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{CoreError, ItemId, ItemKind, MemberId};
+use crate::{ContentHash, CoreError, ItemId, ItemKind, MemberId};
 
 const RATING: &str = "rating";
 const REVIEW: &str = "review";
 const BOOKMARK: &str = "bookmark";
 const WISH: &str = "wish";
 const WISH_COMMENT: &str = "wish_comment";
+const PROBE: &str = "probe";
 
 /// The longest review there may be, in bytes of UTF-8: 16 KiB.
 pub const REVIEW_MAX_BYTES: usize = 16 * 1024;
@@ -61,6 +62,12 @@ pub enum CommunityKey {
     Wish { wish: WishId, member: MemberId },
     /// `wish_comment/{wish_id}/{member_id}`
     WishComment { wish: WishId, member: MemberId },
+    /// `probe/{custodian}/{prober}`: the prober's probes of the custodian
+    /// fail (phase 5's D12).
+    ProbeFailure {
+        custodian: MemberId,
+        prober: MemberId,
+    },
 }
 
 impl CommunityKey {
@@ -76,6 +83,7 @@ impl CommunityKey {
             } => format!("{BOOKMARK}/{item}/{member}/{bookmark}"),
             Self::Wish { wish, member } => format!("{WISH}/{wish}/{member}"),
             Self::WishComment { wish, member } => format!("{WISH_COMMENT}/{wish}/{member}"),
+            Self::ProbeFailure { custodian, prober } => format!("{PROBE}/{custodian}/{prober}"),
         }
     }
 
@@ -113,6 +121,10 @@ impl CommunityKey {
                 wish: segment(parts)?,
                 member: segment(parts)?,
             },
+            PROBE => Self::ProbeFailure {
+                custodian: segment(parts)?,
+                prober: segment(parts)?,
+            },
             _ => return None,
         };
         (parsed.encode().as_bytes() == key).then_some(parsed)
@@ -125,7 +137,8 @@ impl CommunityKey {
             | Self::Review { member, .. }
             | Self::Bookmark { member, .. }
             | Self::Wish { member, .. }
-            | Self::WishComment { member, .. } => *member,
+            | Self::WishComment { member, .. }
+            | Self::ProbeFailure { prober: member, .. } => *member,
         }
     }
 
@@ -162,6 +175,11 @@ impl CommunityKey {
     /// Every entry of every wish, as a prefix to read.
     pub fn all_wish_entries() -> String {
         format!("{WISH}/")
+    }
+
+    /// Every prober's failures of every custodian, as a prefix to read.
+    pub fn all_probe_failures() -> String {
+        format!("{PROBE}/")
     }
 }
 
@@ -249,6 +267,28 @@ random_id!(
     32,
     "wish id"
 );
+
+/// The latest of a prober's failed probes of one custodian, and how many have
+/// failed in a row (phase 5's D12). When it failed is the entry's own time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeFailure {
+    pub item: ItemId,
+    pub blob: ContentHash,
+    pub chunk: u64,
+    pub in_a_row: u32,
+}
+
+impl ProbeFailure {
+    /// The value as it is written in the document: a JSON object.
+    pub fn encode(&self) -> Vec<u8> {
+        to_json(self)
+    }
+
+    /// Reads a value back, or `None` if it is not a probe failure.
+    pub fn decode(value: &[u8]) -> Option<Self> {
+        from_json(value)
+    }
+}
 
 /// A member's rating of an item: one to five.
 ///

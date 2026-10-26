@@ -40,6 +40,12 @@ iroh-blobs = { version = "=0.103.1", default-features = false, features = [
     "fs-store",
     "hide-proto-docs",
 ] }
+# For `ChunkNum`, which a probe (phase 5's D11) names and iroh-blobs does not re-export:
+# the version iroh-blobs itself uses.
+bao-tree = { version = "=0.16.1", default-features = false }
+# When each probe failure was, in the reason an expulsion with evidence records
+# (phase 5's D12): the version iroh-blobs already builds.
+chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
 iroh-docs = { version = "=0.101.0", default-features = false, features = [
     "fs-store",
     "metrics",

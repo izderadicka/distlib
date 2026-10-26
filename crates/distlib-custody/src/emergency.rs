@@ -1,6 +1,7 @@
 //! The emergency copy (D6): an item down to one live copy for the group's
 //! `emergency_after_secs` is fetched, as cache, by the first member after its
-//! custodians in score order that is online and does not hold it.
+//! custodians in score order that is online and does not hold it. A copy that
+//! failed a probe is not a live one (D11).
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may
@@ -221,11 +222,11 @@ impl Emergency {
     }
 }
 
-/// Keeps `item` as cache, counted as used now so it is not the first to go.
+/// Keeps `item` as cache, counted as used first so it is never the first to
+/// go, not even just after it lands.
 async fn copy(keeper: &Keeper, item: ItemId) -> Result<(), KeepError> {
-    keeper.keep(item, KeepReason::Cache).await?;
     keeper.store.mark_used(item, SystemTime::now()).await?;
-    Ok(())
+    keeper.keep(item, KeepReason::Cache).await
 }
 
 #[cfg(test)]

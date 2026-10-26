@@ -16,6 +16,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
+    collections::BTreeSet,
     io::Cursor,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -50,6 +51,14 @@ const SM: KeyValueTable = TableDefinition::new("raft_state_machine");
 
 const APPLIED: &str = "applied";
 const SNAPSHOT: &str = "snapshot";
+const PROMOTION: &str = "promotion";
+
+/// Local replay authority, kept outside snapshots and restored after a crash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Promotion {
+    pub at: u64,
+    pub voters: BTreeSet<MemberId>,
+}
 
 type Entry = openraft::impls::Entry<TypeConfig>;
 
@@ -106,6 +115,7 @@ struct Inner {
     membership: watch::Sender<MembershipState>,
     /// Published only after the corresponding state-machine transaction commits.
     raft_membership: watch::Sender<StoredMembership<NodeId, NodeAddr>>,
+    promotion: Mutex<Option<Promotion>>,
 }
 
 /// The membership state machine, persisted in redb.
@@ -130,6 +140,7 @@ impl StateMachineStore {
                 snapshot_seq: AtomicU64::new(0),
                 membership: watch::channel(MembershipState::new()).0,
                 raft_membership: watch::channel(StoredMembership::default()).0,
+                promotion: Mutex::new(None),
             }),
         };
         if let Some(applied) =
@@ -142,6 +153,17 @@ impl StateMachineStore {
                 .send_replace(applied.membership.clone());
             *store.lock()? = applied;
         }
+        *store
+            .inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = read_key::<Option<Promotion>>(
+            &store.inner.db,
+            SM,
+            PROMOTION,
+            ErrorSubject::StateMachine,
+        )?
+        .flatten();
         Ok(store)
     }
 
@@ -287,6 +309,36 @@ impl StateMachineStore {
     /// Clear the old snapshot and follower cursor with the projection. The
     /// endpoint keeps its last application allowlist during the blank window.
     pub async fn reset_for_promotion(&self) -> StorageResult<()> {
+        self.reset_projection(None).await
+    }
+
+    pub(crate) async fn prepare_promotion(&self, voters: BTreeSet<MemberId>) -> StorageResult<()> {
+        self.reset_projection(Some(Promotion {
+            at: self.membership().changed_at(),
+            voters,
+        }))
+        .await
+    }
+
+    /// Trust expires only when Raft itself reaches the promotion's boundary.
+    /// Replaying an older founded projection must not close this window.
+    pub(crate) fn promotion(&self) -> Option<Promotion> {
+        self.inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .filter(|promotion| {
+                self.inner
+                    .raft_membership
+                    .borrow()
+                    .log_id()
+                    .is_none_or(|id| id.index < promotion.at)
+            })
+    }
+
+    async fn reset_projection(&self, promotion: Option<Promotion>) -> StorageResult<()> {
+        let authority = encode(&promotion, ErrorSubject::StateMachine)?;
         let encoded = {
             let mut applied = self.lock()?;
             *applied = Applied::default();
@@ -302,9 +354,18 @@ impl StateMachineStore {
                 .insert(APPLIED, encoded.as_slice())
                 .map_err(|source| fail(&source))?;
             table.remove(SNAPSHOT).map_err(|source| fail(&source))?;
+            table
+                .insert(PROMOTION, authority.as_slice())
+                .map_err(|source| fail(&source))?;
             Ok(())
         })
         .await?;
+
+        *self
+            .inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = promotion;
 
         // Announced like any other change, and this one matters more than most:
         // it is what tells the allowlist task to stop publishing and hold what

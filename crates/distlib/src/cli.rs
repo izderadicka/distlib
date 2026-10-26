@@ -99,8 +99,13 @@ pub enum Command {
         member: MemberId,
 
         /// Why. Kept in the log as the record of the decision.
+        #[arg(long, required_unless_present = "with_evidence")]
+        reason: Option<String>,
+
+        /// Add the member's probe failures that count to the reason: each
+        /// prober's latest, cut to fit the log's 512 bytes.
         #[arg(long)]
-        reason: String,
+        with_evidence: bool,
     },
 
     /// List the changes waiting for approvals.
@@ -180,9 +185,9 @@ pub enum Command {
 
     /// List the members of this node's group.
     ///
-    /// Reads the local database, so it needs the node stopped: a running node
-    /// holds that file exclusively. While it runs, its log reports every
-    /// membership change instead.
+    /// Asks the running node, which also says who is red and how much of
+    /// its custody each member announces; with the node stopped, reads its
+    /// database instead.
     Members,
 
     /// Print this node's identity and where its data lives.
@@ -544,4 +549,20 @@ pub enum CoreCommand {
         /// The member to stop counting as a voter.
         member: MemberId,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_expulsion_needs_a_reason_unless_it_gives_the_evidence() {
+        let member = MemberId::from(iroh::SecretKey::from_bytes(&[1; 32]).public()).to_string();
+        let parsed =
+            |args: &[&str]| Cli::try_parse_from([&["distlib", "expel", &member], args].concat());
+        assert!(parsed(&[]).is_err());
+        assert!(parsed(&["--reason", "gone"]).is_ok());
+        assert!(parsed(&["--with-evidence"]).is_ok());
+        assert!(parsed(&["--with-evidence", "--reason", "lost its disk"]).is_ok());
+    }
 }

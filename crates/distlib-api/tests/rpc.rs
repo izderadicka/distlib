@@ -25,7 +25,9 @@ use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
 };
-use distlib_custody::{Coverage, CoverageSources, Custody, CustodySources, PinCounts, Storage};
+use distlib_custody::{
+    Coverage, CoverageSources, Custody, CustodySources, PinCounts, ProbeSources, Probes, Storage,
+};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
     ReindexHandle, SearchIndex, Store, StoredBookmark, StoredItem, StoredMember, StoredWish,
@@ -89,15 +91,17 @@ fn availability(
     .unwrap()
 }
 
-/// The coverage `Api` reports, from `custody`.
-fn coverage(
+/// The coverage `Api` reports, from `custody`, and the probes `group.check`
+/// makes.
+fn coverage_and_probes(
     custody: &Custody,
     node: &MembershipNode,
     store: &Store,
+    blobs: &distlib_net::Blobs,
     availability: &Availability,
     catalogue: &Catalogue,
-) -> Coverage {
-    Coverage::start(
+) -> (Coverage, Probes) {
+    let coverage = Coverage::start(
         CoverageSources {
             custody: custody.clone(),
             membership: node.subscribe(),
@@ -106,7 +110,19 @@ fn coverage(
             holdings: catalogue.holdings().clone(),
         },
         Duration::from_secs(1),
-    )
+    );
+    let probes = Probes::start(ProbeSources {
+        me: node.id(),
+        custody: custody.clone(),
+        coverage: coverage.clone(),
+        membership: node.subscribe(),
+        store: store.clone(),
+        blobs: blobs.clone(),
+        availability: availability.clone(),
+        holdings: catalogue.holdings().clone(),
+        catalogue: catalogue.clone(),
+    });
+    (coverage, probes)
 }
 
 /// The custody `Api` reports. No projection runs here, so nothing replays.
@@ -265,7 +281,8 @@ impl Harness {
         let tasks = Tasks::new(distlib_api::events::bus());
         let availability = availability(&transport, &secret, &node, &catalogue, &tasks);
         let custody = custody(&node, &store, &tasks);
-        let coverage = coverage(&custody, &node, &store, &availability, &catalogue);
+        let (coverage, probes) =
+            coverage_and_probes(&custody, &node, &store, &blobs, &availability, &catalogue);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -283,6 +300,7 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody,
                 coverage,
+                probes,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage: Storage::new(
                     None,
@@ -452,7 +470,14 @@ impl Harness {
         let blobs = blobs.expect("node 0 built one above");
         let availability = heartbeat.expect("node 0 built one above");
         let custody = custody(&nodes[0], &store, &tasks);
-        let coverage = coverage(&custody, &nodes[0], &store, &availability, &catalogue);
+        let (coverage, probes) = coverage_and_probes(
+            &custody,
+            &nodes[0],
+            &store,
+            &blobs,
+            &availability,
+            &catalogue,
+        );
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -470,6 +495,7 @@ impl Harness {
                 uploads: Uploads::open(dir.path().join("uploads"), MAX_UPLOAD).unwrap(),
                 custody,
                 coverage,
+                probes,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage: Storage::new(
                     None,
@@ -2304,6 +2330,7 @@ async fn a_ticket_carries_directions_to_this_group() {
 #[tokio::test]
 async fn an_uploaded_file_becomes_an_item_and_is_not_kept() {
     let harness = Harness::start().await;
+    harness.catalogue.ready().await;
 
     let (status, uploaded) = harness
         .upload(
@@ -2414,6 +2441,7 @@ async fn an_upload_needs_a_plain_filename() {
 #[tokio::test]
 async fn library_add_takes_an_upload_once() {
     let harness = Harness::start().await;
+    harness.catalogue.ready().await;
     let upload = async |name: &str| {
         let (_, uploaded) = harness
             .upload(&format!("filename={name}"), name.as_bytes().to_vec(), false)
