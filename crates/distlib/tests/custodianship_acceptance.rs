@@ -1,8 +1,8 @@
 //! §9's Phase 5 acceptance, reworded (P5-1): five nodes, `replicas = 3`; a
-//! node whose pinned data is gone fails probes from two peers and is red on
-//! every node; expelled, the next-ranked member fetches its item; with all but
-//! one copy's holder stopped, another member fetches an emergency copy after
-//! the delay.
+//! node whose pinned data is gone fails probes from at least two peers and is
+//! red on every node; expelled, the next-ranked member fetches its item; with
+//! all but one copy's holder stopped, another member fetches an emergency copy
+//! after the delay.
 //!
 //! One story, one book: the founder adds it, and its copy is one of the three.
 
@@ -195,8 +195,8 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     }
 
     // A custodian's pinned data is gone, while its store still calls the
-    // blob complete: the two other holders' probes fail, and it is red on
-    // every node.
+    // blob complete: the other holders' probes fail, the members re-checking
+    // their failures fail it too, and it is red on every node.
     std::fs::write(lost.bytes_of(blob), b"").unwrap();
     for node in [&founder, &lost, &custodian, &next, &last] {
         until("the custodian is red on every node", || {
@@ -214,7 +214,13 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
         )
         .await;
     let reason = proposed["reason"].as_str().unwrap();
-    assert!(reason.starts_with("failed probes by 2 members"), "{reason}");
+    // Two probers or more: who re-checks first is a matter of timing.
+    let probers: usize = reason
+        .strip_prefix("failed probes by ")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(count, _)| count.parse().ok())
+        .unwrap_or_else(|| panic!("{reason}"));
+    assert!(probers >= 2, "{reason}");
     for approver in [&next, &last] {
         approver
             .call("group.approve", json!({ "proposal": proposed["proposal"] }))
