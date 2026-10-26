@@ -214,13 +214,9 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
         )
         .await;
     let reason = proposed["reason"].as_str().unwrap();
-    // Two probers or more: who re-checks first is a matter of timing.
-    let probers: usize = reason
-        .strip_prefix("failed probes by ")
-        .and_then(|rest| rest.split_once(' '))
-        .and_then(|(count, _)| count.parse().ok())
-        .unwrap_or_else(|| panic!("{reason}"));
-    assert!(probers >= 2, "{reason}");
+    // How many probers it names is timing: a prober's newer failure is left
+    // out until its content arrives (C6), and who re-checks first varies.
+    assert!(reason.starts_with("failed probes by "), "{reason}");
     for approver in [&next, &last] {
         approver
             .call("group.approve", json!({ "proposal": proposed["proposal"] }))

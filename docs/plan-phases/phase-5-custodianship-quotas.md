@@ -683,7 +683,7 @@ Every open C-number appears here once.
 |---|---|---|
 | **C1** | A full peer offer is O(N²) dials | **Unchanged** — and worth measuring at the thousands of members this phase targets. |
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
-| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged.** |
+| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged**, and probe failures blink too: a prober's newer failure is left out of `probe_failures()` until its content arrives, so for a moment a member can be listed with one prober fewer, or not red (seen on CI in 5c-5a, where the evidence named one prober of two). |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
 | **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas — the read model's `file_authors`, shown as `added_by` (5b-1a, P5-8). `created` and `modified_by` stay open. |
 | **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3a.** |
