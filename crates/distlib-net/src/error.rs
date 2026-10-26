@@ -37,10 +37,16 @@ pub enum NetError {
 
     /// Refused by an allowlist — ours or the peer's.
     ///
-    /// Distinct from a network failure because the caller should stop rather
-    /// than retry: nothing about waiting or trying another path will help.
+    /// A remote refusal may signal expulsion. A local refusal may instead be
+    /// a lagging allowlist observer after a newly followed admission; callers
+    /// must not interpret that as the remote rejecting this node.
     #[error("{peer} is not a member, or does not consider us one")]
-    Rejected { peer: MemberId },
+    Rejected {
+        peer: MemberId,
+        /// False when our own outgoing hook refused to dial. That says
+        /// nothing about whether the remote still admits us.
+        by_remote: bool,
+    },
 
     /// The peer did not answer in time.
     #[error("{peer} did not answer within {timeout:?}")]
@@ -166,7 +172,10 @@ impl NetError {
         E: IsRejection + std::error::Error + Send + Sync + 'static,
     {
         if source.is_rejection() {
-            Self::Rejected { peer }
+            Self::Rejected {
+                peer,
+                by_remote: source.is_remote_rejection(),
+            }
         } else {
             Self::Peer {
                 peer,
@@ -182,7 +191,8 @@ impl NetError {
 /// `before_connect` hook refuses to dial before a packet leaves the machine; a
 /// remote's `after_handshake` hook closes the connection *after* it looks
 /// established, so the initiator may well see `connect` succeed and fail on its
-/// first stream operation instead. Callers should not have to know which.
+/// first stream operation instead. `is_rejection` covers both; callers deciding
+/// whether the remote expelled them must use `is_remote_rejection` instead.
 ///
 /// Implemented per concrete error type rather than by downcasting an
 /// `Error` chain, so that a change in iroh's error shape breaks the build
@@ -190,6 +200,12 @@ impl NetError {
 /// leave enforcement working while its reporting quietly degraded.
 pub trait IsRejection {
     fn is_rejection(&self) -> bool;
+
+    /// Whether the refusal came from the remote endpoint, rather than our
+    /// own outgoing allowlist. Only a remote refusal can imply expulsion.
+    fn is_remote_rejection(&self) -> bool {
+        self.is_rejection()
+    }
 }
 
 /// The base case: every other implementation eventually delegates here.
@@ -208,12 +224,24 @@ impl IsRejection for ConnectError {
             _ => false,
         }
     }
+
+    fn is_remote_rejection(&self) -> bool {
+        match self {
+            Self::Connect { source, .. } => source.is_remote_rejection(),
+            Self::Connection { source, .. } => source.is_remote_rejection(),
+            _ => false,
+        }
+    }
 }
 
 impl IsRejection for ConnectWithOptsError {
     fn is_rejection(&self) -> bool {
         // Our own hook declined to dial a non-member.
         matches!(self, Self::LocallyRejected { .. })
+    }
+
+    fn is_remote_rejection(&self) -> bool {
+        false
     }
 }
 

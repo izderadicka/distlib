@@ -764,7 +764,13 @@ impl MemberlogClient {
             .await
             .map_err(|_| format!("connecting: no answer within {CONNECT_TIMEOUT:?}"))?
             .map_err(|error| Rebuffed {
-                refused: matches!(error, NetError::Rejected { .. }),
+                refused: matches!(
+                    error,
+                    NetError::Rejected {
+                        by_remote: true,
+                        ..
+                    }
+                ),
                 message: format!("connecting: {error}"),
             })?;
 
@@ -857,7 +863,13 @@ impl Rebuffed {
         move |error| {
             let error = NetError::peer(member, error);
             Self {
-                refused: matches!(error, NetError::Rejected { .. }),
+                refused: matches!(
+                    error,
+                    NetError::Rejected {
+                        by_remote: true,
+                        ..
+                    }
+                ),
                 message: format!("{what}: {error}"),
             }
         }

@@ -1638,6 +1638,24 @@ async fn a_follower_hears_a_refusal_as_a_refusal() {
     founder.shutdown().await;
 }
 
+/// The allowlist observer may lag a freshly followed admission. Refusing our
+/// own dial is not evidence that the remote core expelled this follower.
+#[tokio::test]
+async fn a_local_allowlist_refusal_is_not_a_remote_expulsion() {
+    let source = Peer::start(SecretKey::generate(), vec![]).await;
+    let follower = Peer::start(SecretKey::generate(), vec![]).await;
+    let client = distlib_consensus::MemberlogClient::new(
+        follower.node.endpoint().clone(),
+        follower.node.connections().clone(),
+        distlib_net::AddressBook::default(),
+        distlib_net::Directory::default(),
+    );
+    let error = client.fetch(source.id, &source.addr, 0).await.unwrap_err();
+    assert!(!error.refused, "a local deny must be retryable: {error}");
+    follower.shutdown().await;
+    source.shutdown().await;
+}
+
 // Six seconds: it waits out connect timeouts against a core node that is gone.
 #[cfg(feature = "slow-tests")]
 #[tokio::test]

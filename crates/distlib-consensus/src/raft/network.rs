@@ -480,7 +480,9 @@ impl RaftClient {
             .await
         {
             Ok(connection) => connection,
-            Err(NetError::Rejected { .. }) => return true,
+            Err(NetError::Rejected {
+                by_remote: true, ..
+            }) => return true,
             Err(_) => return false,
         };
         matches!(
