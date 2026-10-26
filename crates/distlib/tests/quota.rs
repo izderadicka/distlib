@@ -110,7 +110,10 @@ async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it()
     until_required(&api, 120).await;
 
     let refused = add_a_file(&api, dir.path(), 2, 50).await.unwrap_err();
-    assert!(refused.contains("a pledge of 220 bytes"), "{refused}");
+    assert!(
+        refused.contains("a pledge of 220 bytes would be enough"),
+        "{refused}"
+    );
     assert_eq!(listed(&api).await.1, json!(120), "nothing added");
 
     let enough = pledge(&api, 120).await.unwrap();

@@ -1755,8 +1755,9 @@ impl Requirement {
     /// Why `what` is refused.
     fn far_under(self, what: &str) -> String {
         format!(
-            "{what} would require a pledge of {} bytes, more than twice the pledge of {} bytes",
-            self.required_pledge_bytes, self.pledge_bytes
+            "{what} would require a pledge of {} bytes, more than twice the pledge of {} bytes; \
+             a pledge of {} bytes would be enough",
+            self.required_pledge_bytes, self.pledge_bytes, self.required_pledge_bytes
         )
     }
 

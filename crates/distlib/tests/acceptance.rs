@@ -293,6 +293,7 @@ fn a_fresh_member_syncs_searches_downloads_and_still_serves_after_a_restart() {
 ///
 /// Both refusals are the ones an operator meets first: a second download over
 /// a file that is already there, and an item this node has never heard of.
+/// And a download that fails once started, from a store that lost its bytes.
 #[test]
 fn download_refuses_what_it_cannot_do_without_losing_anything() {
     let alice = Friend::introduce();
@@ -367,6 +368,50 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
         "{}",
         String::from_utf8_lossy(&unknown.stderr)
     );
+
+    // A book whose bytes are gone from the store, which still calls them
+    // complete: the download fails, and does not first say it downloaded.
+    let lost = alice.dir.path().join("lost.epub");
+    std::fs::write(&lost, "Lost, in full\n".repeat(10_000)).unwrap();
+    let added = run_command(
+        alice.dir.path(),
+        &[
+            "add",
+            lost.to_str().unwrap(),
+            "--kind",
+            "ebook",
+            "--title",
+            "Lost",
+        ],
+    );
+    // `added       {item}  {title}`
+    let lost_id = added.split_whitespace().nth(1).unwrap().to_owned();
+    until_files_are_projected(alice.dir.path(), &lost_id);
+    let listed = run_command(alice.dir.path(), &["item", &lost_id]);
+    // `  {blob}  lost.epub ({size} bytes)`
+    let blob = listed
+        .lines()
+        .find(|line| line.contains("lost.epub"))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap();
+    let bytes = alice
+        .dir
+        .path()
+        .join("blobs/data")
+        .join(format!("{blob}.data"));
+    std::fs::write(bytes, b"").unwrap();
+    let failed = distlib(alice.dir.path())
+        .args(["download", &lost_id, "--dest", dest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("the download failed"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let said = String::from_utf8_lossy(&failed.stdout);
+    assert!(!said.contains("downloaded"), "{said}");
 
     alice_node.stop();
 }

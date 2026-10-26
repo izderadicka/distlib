@@ -342,7 +342,7 @@ them hold for every protocol added later.
 | `distlib ui [--base-url]` | Print the link that opens this node's web UI, signed in. |
 | `distlib add <files>... --kind [--title] [--author]...` | Add a file set to the catalogue as one item. |
 | `distlib search <query> [--limit]` | Search the catalogue. |
-| `distlib item <item_id>` | Print one item's record, with its ratings, reviews and bookmarks. |
+| `distlib item <item_id>` | Print one item's record, with its ratings, reviews and bookmarks, its custodians and who holds it online; members by name and id. |
 | `distlib rate <item_id> <1-5>` / `rate <item_id> --clear` | Rate an item as this node's member, or clear the rating. |
 | `distlib review <item_id> <text>` / `review <item_id> --clear` | Review an item, or clear the review. |
 | `distlib bookmark <item_id> <position> [--note] [--edit <id>]` / `bookmark <item_id> --delete <id>` | Leave a bookmark on an item, edit one of yours, or delete one. |
