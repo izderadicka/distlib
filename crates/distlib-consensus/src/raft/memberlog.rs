@@ -160,6 +160,9 @@ pub enum Fetched {
 
     /// The serving node has no group yet, so there is nothing to hand over.
     NoGroup,
+
+    /// A retired voter points callers at the core its committed projection names.
+    Redirect(Source),
 }
 
 /// The most events one answer holds. The log is never purged (C43), so a
@@ -316,7 +319,7 @@ impl MemberlogProtocol {
     ) -> Response {
         match request {
             Request::Propose(event) => Response::Proposed(self.propose(raft, sender, event).await),
-            Request::From { cursor } => Response::Fetched(self.fetch(raft, cursor)),
+            Request::From { cursor } => Response::Fetched(self.fetch(Some(raft), cursor)),
             Request::Directory => Response::Directory(self.serve_directory()),
         }
     }
@@ -344,7 +347,7 @@ impl MemberlogProtocol {
     }
 
     /// What is committed since `cursor`, a page at a time.
-    fn fetch(&self, raft: &Raft<TypeConfig>, cursor: u64) -> Fetched {
+    fn fetch(&self, raft: Option<&Raft<TypeConfig>>, cursor: u64) -> Fetched {
         if self.state_machine.membership().group_id().is_none() {
             return Fetched::NoGroup;
         }
@@ -367,7 +370,24 @@ impl MemberlogProtocol {
                     up_to,
                     events,
                     more: up_to < applied,
-                    source: source(raft),
+                    source: raft.map_or_else(
+                        || {
+                            let applied = self.state_machine.raft_membership().borrow().clone();
+                            Source {
+                                core: applied
+                                    .voter_ids()
+                                    .filter_map(|id| {
+                                        Some((
+                                            MemberId::try_from(id).ok()?,
+                                            applied.membership().get_node(&id)?.clone(),
+                                        ))
+                                    })
+                                    .collect(),
+                                leader: None,
+                            }
+                        },
+                        source,
+                    ),
                 }
             }
             Err(error) => {
@@ -465,8 +485,17 @@ fn source(raft: &Raft<TypeConfig>) -> Source {
         Source {
             core: metrics
                 .membership_config
-                .nodes()
-                .filter_map(|(id, addr)| Some((MemberId::try_from(*id).ok()?, addr.clone())))
+                .voter_ids()
+                .filter_map(|id| {
+                    Some((
+                        MemberId::try_from(id).ok()?,
+                        metrics
+                            .membership_config
+                            .membership()
+                            .get_node(&id)?
+                            .clone(),
+                    ))
+                })
                 .collect(),
             leader: metrics
                 .current_leader
@@ -482,24 +511,6 @@ impl ProtocolHandler for MemberlogProtocol {
         // `MembershipState::apply`, which every node runs identically. A check
         // here would be a second opinion that only this node holds.
         loop {
-            // What *is* decided here is whether this node can answer at all.
-            // Both halves of this protocol need a Raft — one commits, the other
-            // reads Raft's view of the group to say who to ask next — and a
-            // node that does not vote has none. Refused with the same code a
-            // non-voter gets on `distlib/raft/0`, and for the same reason: the
-            // router serves this on every node because its protocols are fixed
-            // when it spawns, so the answer has to be given per connection
-            // rather than by what the endpoint advertises.
-            //
-            // Re-read each time round, not once: a follower promoted mid
-            // connection starts being able to answer without the peer having to
-            // dial again.
-            let Some(raft) = self.seat.raft() else {
-                tracing::debug!("refused a memberlog request; this node does not vote");
-                connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
-                return Ok(());
-            };
-
             let Ok((mut send, mut recv)) = connection.accept_bi().await else {
                 // The peer closed the connection: the normal way this ends.
                 return Ok(());
@@ -512,8 +523,36 @@ impl ProtocolHandler for MemberlogProtocol {
             let request: Request = postcard::from_bytes(&encoded).map_err(AcceptError::from_err)?;
 
             let sender = MemberId::from(connection.remote_id());
-            let encoded = postcard::to_stdvec(&self.answer(&raft, sender, request).await)
-                .map_err(AcceptError::from_err)?;
+            // Re-read the seat after receiving: it may change on an idle connection.
+            let response = if let Some(raft) = self.seat.raft() {
+                self.answer(&raft, sender, request).await
+            } else {
+                match request {
+                    Request::From { cursor }
+                        if cursor < self.state_machine.last_applied_index() =>
+                    {
+                        // A stale member must learn signed admissions before it
+                        // can dial a newly admitted successor. Serve the retained
+                        // committed prefix, with the voters at its retirement.
+                        Response::Fetched(self.fetch(None, cursor))
+                    }
+                    Request::From { .. } => Response::Fetched(Fetched::Redirect(Source {
+                        core: self
+                            .state_machine
+                            .membership()
+                            .core()
+                            .iter()
+                            .map(|(id, addr)| (*id, addr.clone()))
+                            .collect(),
+                        leader: None,
+                    })),
+                    _ => {
+                        connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                        return Ok(());
+                    }
+                }
+            };
+            let encoded = postcard::to_stdvec(&response).map_err(AcceptError::from_err)?;
 
             send.write_all(&encoded)
                 .await
@@ -641,7 +680,7 @@ impl MemberlogClient {
                 // learn them here rather than at each caller: this is where they
                 // arrive, and a caller that forgot would leave the group
                 // unreachable by id for no visible reason.
-                if let Fetched::Entries { source, .. } = &fetched {
+                if let Fetched::Entries { source, .. } | Fetched::Redirect(source) = &fetched {
                     self.addresses
                         .learn_all(source.core.iter().map(|(member, addr)| (*member, addr)));
                 }
@@ -725,7 +764,13 @@ impl MemberlogClient {
             .await
             .map_err(|_| format!("connecting: no answer within {CONNECT_TIMEOUT:?}"))?
             .map_err(|error| Rebuffed {
-                refused: matches!(error, NetError::Rejected { .. }),
+                refused: matches!(
+                    error,
+                    NetError::Rejected {
+                        by_remote: true,
+                        ..
+                    }
+                ),
                 message: format!("connecting: {error}"),
             })?;
 
@@ -818,7 +863,13 @@ impl Rebuffed {
         move |error| {
             let error = NetError::peer(member, error);
             Self {
-                refused: matches!(error, NetError::Rejected { .. }),
+                refused: matches!(
+                    error,
+                    NetError::Rejected {
+                        by_remote: true,
+                        ..
+                    }
+                ),
                 message: format!("{what}: {error}"),
             }
         }
@@ -845,6 +896,25 @@ mod tests {
     use super::*;
     use iroh::SecretKey;
     use std::net::{Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn redirect_encoding_is_stable() {
+        let redirect = Fetched::Redirect(Source {
+            core: Vec::new(),
+            leader: None,
+        });
+        assert_eq!(
+            postcard::to_stdvec(&redirect).expect("encode redirect"),
+            [2, 0, 0]
+        );
+        assert_eq!(
+            postcard::to_stdvec(&Response::Fetched(redirect)).expect("encode response"),
+            [1, 2, 0, 0]
+        );
+        assert!(
+            matches!(postcard::from_bytes::<Fetched>(&[2, 0, 0]).expect("decode redirect"), Fetched::Redirect(source) if source.core.is_empty() && source.leader.is_none())
+        );
+    }
 
     fn somewhere(port: u16) -> NodeAddr {
         NodeAddr {

@@ -14,6 +14,12 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
+Membership lifecycle correction in **#160**: preserve quorum through durable retirement,
+preserve acknowledged logs on re-promotion, derive replay authority only from signed core
+transitions, and let seatless sources serve history/referrals. See **P5-33–P5-37** in
+[`plan-deltas.md`](../plan-deltas.md); these supersede the promotion/log-clearing and blanket
+seatless-refusal assumptions in P2-8 and P3-25.
+
 Phase 4 is complete and merged, and so is the refactor series that followed it
 ([`plan-refactor-complexity.md`](../plan-refactor-complexity.md)). Every member says what it holds in
 a heartbeat, the library shows who is online with an item, and ratings, reviews, bookmarks and
@@ -713,6 +719,7 @@ Every open C-number appears here once.
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 | **C44** | **The emergency copy fires only at the last live copy** (D6) | **A later version** (Ivan, P5-25). A group setting `emergency_at_copies`, 1 by default and at most `replicas − 1`, checked at founding: an item that has had at most that many live copies for `emergency_after_secs` gets emergency copies, one after another by the same first-after-the-custodians rule, the delay running from when it first fell to the threshold. It would make up for the overflow left out (C38). |
 | **C45** | **A clock that steps back makes a node's own catalogue writes fail** — iroh-docs stamps each entry with the wall clock and refuses one older than the entry already at its key (`NewerEntryExists`), which reaches the caller as "the catalogue could not be written to", its cause dropped; seen once in a local `cargo test-all` on WSL, whose clock jumps back after a sleep (found in 5c-4) | **Phase 6**, with hardening: at least name the cause; perhaps stamp no earlier than the entry being replaced. |
+| **C46** | **Promotion cancelled before learner admission** — a promotion followed by demotion before replication starts can leave the node seated, with its allowlist held and persisted replay authority unexpired; restart resumes the same promotion | **Phase 6.** A retained learner normally catches up, but the never-added case needs an authenticated cancellation/recovery path (P5-33–P5-34). Timeout alone is not authority to reset acknowledged state. |
 
 ---
 

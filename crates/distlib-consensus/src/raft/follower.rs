@@ -30,6 +30,7 @@
 //! member keeps what they downloaded, by design.
 
 use std::{
+    collections::{BTreeSet, VecDeque},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -73,9 +74,9 @@ const REFUSED_BACKOFF: Duration = Duration::from_secs(60);
 pub struct Sources {
     /// The core group, each with somewhere to reach them.
     ///
-    /// Seeded from `[consensus] core` and replaced by what the log's own
-    /// answers carry, so a follower keeps up with a core group that changes
-    /// without being reconfigured.
+    /// Seeded from persisted core membership (configuration before founding)
+    /// and updated from log answers and seatless referrals. These are routing
+    /// hints only: they never authorize a peer to take part in consensus.
     pub core: Vec<(MemberId, NodeAddr)>,
 
     /// The leader, when a source last named one.
@@ -345,7 +346,16 @@ async fn fetch_log_from_core_nodes(
     // whole log every poll and log a refusal for each entry. Worth saying
     // because mutating this to zero breaks no test.
     let cursor = state_machine.followed_upto();
-    let candidates = read(sources).candidates(me);
+    let mut candidates: VecDeque<_> = read(sources).candidates(me).into();
+    candidates.extend(
+        state_machine
+            .membership()
+            .core()
+            .iter()
+            .filter(|(id, _)| **id != me)
+            .map(|(id, addr)| (*id, addr.clone())),
+    );
+    let mut visited = BTreeSet::new();
 
     if candidates.is_empty() {
         tracing::warn!("no core node to follow; check `[consensus] core`");
@@ -358,7 +368,14 @@ async fn fetch_log_from_core_nodes(
     let mut refusals = 0usize;
     let mut answered_otherwise = 0usize;
 
-    for (member, addr) in candidates {
+    while let Some((member, addr)) = candidates.pop_front() {
+        // Bound referral chains, including cycles and dishonest fresh IDs.
+        if visited.len() >= 32 {
+            break;
+        }
+        if member == me || !visited.insert(member) {
+            continue;
+        }
         match client.fetch(member, &addr, cursor).await {
             Ok(Fetched::Entries {
                 up_to,
@@ -382,6 +399,16 @@ async fn fetch_log_from_core_nodes(
                 }
                 tracing::debug!(count = events.len(), up_to, from = %member, "followed the log");
                 return Progress::Fetched { more };
+            }
+
+            Ok(Fetched::Redirect(source)) => {
+                answered_otherwise += 1;
+                let redirected = Sources {
+                    core: source.core,
+                    leader: source.leader,
+                };
+                candidates.extend(redirected.candidates(me));
+                *sources.lock().unwrap_or_else(PoisonError::into_inner) = redirected;
             }
 
             // Reachable, but with nothing to give: a core node that has not

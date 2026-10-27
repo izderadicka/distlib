@@ -39,7 +39,13 @@ async fn unknown_peer_refused() {
     .unwrap_err();
 
     assert!(
-        matches!(error, NetError::Rejected { .. }),
+        matches!(
+            error,
+            NetError::Rejected {
+                by_remote: true,
+                ..
+            }
+        ),
         "a non-member must be refused, not merely time out; got {error:?}"
     );
     node.shutdown().await;
@@ -66,7 +72,13 @@ async fn outgoing_to_unknown_refused() {
         .unwrap_err();
 
     assert!(
-        matches!(error, NetError::Rejected { .. }),
+        matches!(
+            error,
+            NetError::Rejected {
+                by_remote: false,
+                ..
+            }
+        ),
         "expected our own allowlist to refuse the dial; got {error:?}"
     );
     node.shutdown().await;

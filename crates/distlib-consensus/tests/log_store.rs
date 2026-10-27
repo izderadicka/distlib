@@ -309,3 +309,37 @@ async fn events_are_served_a_page_at_a_time_by_count_and_by_bytes_and_blanks_are
     assert_eq!(served(0, 10, 1), (vec![1], true));
     assert_eq!(served(4, 10, 1), (vec![5], false));
 }
+
+/// Re-promotion can race cleanup of a retained learner. The leader may still
+/// remember every entry this node acknowledged before retirement, so resetting
+/// the derived projection must not discard that Raft history or its metadata.
+#[tokio::test]
+async fn promotion_preserves_acknowledged_log_and_commit_after_restart() {
+    use distlib_consensus::StateMachineStore;
+    use openraft::{RaftLogReader, storage::RaftStateMachine};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("raft.redb");
+    let db = Arc::new(Database::create(&path).unwrap());
+    let mut log = LogStore::from_database(Arc::clone(&db)).unwrap();
+    let mut sm = StateMachineStore::from_database(db).unwrap();
+    let entries = vec![entry(1, 0), entry(1, 1), entry(1, 2)];
+    let vote = Vote::new_committed(1, RawMemberId::default());
+    log.save_vote(&vote).await.unwrap();
+    log.blocking_append(entries.clone()).await.unwrap();
+    log.save_committed(Some(log_id(1, 2))).await.unwrap();
+    sm.apply(entries.clone()).await.unwrap();
+
+    sm.reset_for_promotion().await.unwrap();
+    assert_eq!(sm.applied_state().await.unwrap().0, None);
+    drop((log, sm));
+
+    let mut log = LogStore::open(&path).unwrap();
+    assert_eq!(log.try_get_log_entries(..).await.unwrap(), entries);
+    assert_eq!(log.read_committed().await.unwrap(), Some(log_id(1, 2)));
+    assert_eq!(log.read_vote().await.unwrap(), Some(vote));
+    assert_eq!(
+        log.get_log_state().await.unwrap().last_log_id,
+        Some(log_id(1, 2))
+    );
+}
