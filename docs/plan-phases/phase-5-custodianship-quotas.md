@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d planned, before 5c-5b.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -19,6 +19,10 @@ preserve acknowledged logs on re-promotion, derive replay authority only from si
 transitions, and let seatless sources serve history/referrals. See **P5-33–P5-37** in
 [`plan-deltas.md`](../plan-deltas.md); these supersede the promotion/log-clearing and blanket
 seatless-refusal assumptions in P2-8 and P3-25.
+
+**5d** finishes what #154 still asks for and adds the hooks v1 needs so that live groups can be
+upgraded later ([`plan-upgrades.md`](../plan-upgrades.md)); it goes before 5c-5b, so that Ivan's
+manual run checks the final rules (P5-38).
 
 Phase 4 is complete and merged, and so is the refactor series that followed it
 ([`plan-refactor-complexity.md`](../plan-refactor-complexity.md)). Every member says what it holds in
@@ -677,7 +681,37 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 - **5c-5 — by-hand check.** [`manual-check.md`](../manual-check.md) grows within its one story, and
   what it finds is fixed before the phase is called done.
   *Split in two* (P5-32): **5c-5a** *(done)* — the check written, its command-line half run end to
-  end first, and what that found fixed; **5c-5b** — what Ivan's run of the whole check finds.
+  end first, and what that found fixed; **5c-5b** — what Ivan's run of the whole check finds,
+  run after 5d (P5-38).
+
+### 5d — v1 readiness: the rest of #154, and upgrade hooks (8 PRs)
+
+#160 fixed #154's findings 1, 2 and 7. What is left, and what v1 needs so that a group can later
+run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)):
+
+- **5d-1 — the plan.** The upgrade note, its questions decided (Ivan), and this section.
+- **5d-2 — fold rules (#154's 8 and expiry).** A member is admitted with pledge 0, and at founding
+  only the signing founder may give a pledge, its own: a pledge is set only by its owner (D8).
+  A proposal expires by log index (Ivan): it cannot be approved at an index past where it was made
+  plus its expiry, whatever came between. Both change what the fold accepts, so they go in before
+  v1, when that would need a raise.
+- **5d-3 — node-local fixes.** A retried `CoreGroupChanged` is rebuilt against the refreshed state,
+  so it cannot undo a change made in between (#154's stale retry). A snapshot built before a
+  promotion's reset cannot be written after it (#154's 5): a generation checked in the writing
+  transaction.
+- **5d-4 — golden encoding tests.** Fixed bytes for every type that goes on the wire or to disk,
+  so that a change to an encoding fails a test rather than a live group.
+- **5d-5 — the custody score through `libm::log`.** The same ranking on every platform, fixed
+  before v1 freezes it.
+- **5d-6 — a data-dir format version.** A binary refuses a data dir newer than it knows, and has a
+  place for migrations; none at v1.
+- **5d-7 — the group protocol version.** `protocol` in the membership state, founded at 1;
+  `ProtocolSupported { max }`, which each node writes for itself; `ProtocolRaised { to }`, proposed
+  by hand (`distlib group raise-protocol`) and approved by a core majority, refused unless every
+  core member supports it. Shown in status and the UI.
+- **5d-8 — "upgrade required".** A node below the group's protocol, or meeting a log entry it
+  cannot decode, stops following the log, keeps serving blobs and its custody, releases nothing,
+  and says "upgrade required" in status, the CLI and the UI (Ivan, Q1 and Q2).
 
 ---
 

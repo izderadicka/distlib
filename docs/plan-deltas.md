@@ -313,6 +313,12 @@ returning to following. A retained learner normally receives replication and rec
 is the narrower never-added case. Recovery needs an authenticated cancellation/catch-up path;
 a timeout or an untrusted referral must not discard acknowledged Raft state or invent authority.
 
+### 5d — v1 readiness
+
+| # | §  | Doc says | We do | Why |
+|---|---|---|---|---|
+| P5-38 | phase 5's sub-phases; 5c-5b; #154; §9 phase 6 | Phase 5 ends with 5c-5b, Ivan's manual run; upgrades are not planned | **A sub-phase 5d before 5c-5b** (Ivan): the rest of #154 (findings 5 and 8, the expiry boundary, the stale core retry) and the hooks v1 needs so that a group can upgrade while old and new versions run together, as [`plan-upgrades.md`](plan-upgrades.md) sets out. **Decided** (Ivan): a proposal expires by log index; the protocol is raised by hand and needs only the core's support; a member left behind stays in the group, serving blobs and its custody, releasing nothing, its allowlist frozen; a release talks the latest protocol and the one before it; no downgrades; heartbeats stay strict. | After v1, any change to what the fold accepts or how something is encoded is a protocol change, and an old node can only react to what it already has code for. So the fold rules are fixed and the hooks are built before v1, and the manual run checks the result. Serving custodied content matters more than a laggard's allowlist being exact (Ivan). |
+
 ## Phase 6 — Hardening & release
 
 *Not started.*
