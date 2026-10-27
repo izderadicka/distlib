@@ -1,7 +1,7 @@
-# Upgrading live groups (design note, draft)
+# Upgrading live groups (design note)
 
-**Status:** draft for discussion; nothing decided. **Goal:** from v1 on, a group keeps working
-while its members upgrade one by one, over weeks or months, and some never do.
+**Status:** agreed with Ivan (§7); the v1 hooks are built in phase 5's 5d. **Goal:** from v1 on, a
+group keeps working while its members upgrade one by one, over weeks or months, and some never do.
 
 ## 1. The constraint
 
@@ -60,15 +60,22 @@ change once v1 is out. It should be fixed before v1.
 - **Each member says what it supports, in the log.** A self-signed event, owner-only like a pledge:
   `ProtocolSupported { max }`. Every node then sees the same picture, so the raise can be decided by
   the fold. A version shown from heartbeats couldn't be.
-- **The raise.** `ProtocolRaised { to }` needs a majority of the core, like any core decision.
+- **The raise.** `ProtocolRaised { to }` needs a majority of the core, like any core decision, and
+  is proposed by hand (`distlib group raise-protocol`, Q3).
   - The fold refuses it unless every core member supports `to`. The core runs consensus, so the
     core has to be upgraded first.
-  - What happens to followers that lag is open question Q1.
+  - Followers need not support it (Q1); those that don't are left behind, below.
+  - Once raised, the fold also refuses to make a member core if it does not support the group's
+    protocol.
 - **Rules are switched by version:** `if self.protocol >= 2 { new } else { old }`. The raise sits
   at a fixed index, so a replay gives the same answer on every node.
-- **A node below the active protocol** stops applying and following, and keeps refusing to.
-  - Status, CLI and UI say "upgrade required"; the process exits non-zero, or stays up read-only,
-    per Q2.
+- **A node below the active protocol is in "upgrade required" mode** (Q1, Q2). So is a node that
+  meets a log entry it cannot decode.
+  - It stops applying the membership log at that entry, so its allowlist freezes: it may go on
+    admitting a member expelled after the raise, which is accepted (Q2).
+  - It keeps serving blobs and the copies it is custodian of, and may still fetch, but **releases
+    nothing** until it upgrades (principle 4).
+  - Status, CLI and UI say "upgrade required". The process stays up.
   - Upgrading the binary resumes from where it stopped.
 - **Upgrading the core.** One node at a time while the rest still form a majority. Until a raise,
   old and new run the same rules, so a mixed core is fine.
@@ -85,10 +92,9 @@ change once v1 is out. It should be fixed before v1.
     member speaks `/0`, dialling `/1` first and falling back;
   - the serve-both code is built only when it is first needed.
 - **Heartbeats and address statements**, which are frequent and matter for availability:
-  - new nodes send the old format until a raise;
-  - optional, for v1: **verify the signature over the exact bytes received, then decode**;
-  - postcard ignores trailing bytes, so a field appended at the end could then be read by old
-    nodes with no raise needed (Q6).
+  - new nodes send the old format until a raise, and go on reading the previous one (Q4);
+  - strict, like everything else (Q6). Verifying the signature over the exact bytes received
+    would let a field appended at the end need no raise; it is not needed, so it is not built.
 - **Catalogue:**
   - add keys and `#[serde(default)]` fields;
   - give a key a new meaning only behind a raise, and then only by writing a **new** key;
@@ -112,42 +118,36 @@ change once v1 is out. It should be fixed before v1.
 **Must be in v1.** These are the hooks old nodes need in order to react, and an old node can't
 learn them later:
 
-1. `protocol` in the membership state, with `ProtocolSupported` and `ProtocolRaised` and their
-   fold rules.
-2. The "upgrade required" stop: on a raise beyond `max`, and on an undecodable log entry, Raft RPC,
-   memberlog page or heartbeat. Shown in `status`, the CLI and the UI.
-3. A data-dir format version: refuse newer; a migration hook (empty at v1).
-4. **Golden encoding tests**: fixed bytes for every wire and stored type, which fail when an
-   encoding changes. This is the cheapest guard against an accidental protocol change.
-5. Fix the custody score's `ln` before the ranking is frozen.
-6. Optional: exact-bytes signature checks for heartbeats and address statements (Q6).
+1. **Golden encoding tests**: fixed bytes for every wire and stored type, which fail when an
+   encoding changes. This is the cheapest guard against an accidental protocol change. *(5d-4)*
+2. Fix the custody score's `ln` before the ranking is frozen. *(5d-5)*
+3. A data-dir format version: refuse newer; a migration hook (empty at v1). *(5d-6)*
+4. `protocol` in the membership state, with `ProtocolSupported` and `ProtocolRaised`, their fold
+   rules, and the manual raise. *(5d-7)*
+5. "Upgrade required" mode: on a raise beyond `max`, and on an undecodable log entry or memberlog
+   page. Shown in `status`, the CLI and the UI. *(5d-8)*
+
+Heartbeats stay strict (Q6), so exact-bytes signatures are not needed. The fold rules #154 still
+asks for (pledge 0 on admission, expiry by log index) also go in before v1 *(5d-2)*: after v1, a
+change to what the fold accepts is a protocol change.
 
 **Can wait** until the first change that needs it:
 - serving two ALPN versions;
 - actual migrations;
 - keeping the previous release's binary in CI for mixed-version tests, from v1.1 on.
 
-## 7. Open questions
+## 7. Decisions (Ivan)
 
-- **Q1. Laggard followers at a raise:**
-  - (a) the raise needs every member's support, so one absent member blocks it until expelled;
-  - (b) the raise needs only the core's support, and laggards get "upgrade required". *Leaning (b).*
-  - A: Agree that all core members must upgrade,  followers can required to upgrade, however we must consider impact on data custodianship -  if many nodes will become unavailable -  so I think older nodes should still serve blobs, if possible?
-- **Q2. What a stopped laggard does.** It can no longer follow the log, so its allowlist freezes:
-  it would go on admitting members expelled after the raise.
-  - *Leaning:* it stops talking to the group altogether, keeps its data, and resumes after upgrading.
-  - A: I think admitting expelled would be OK, more important is that it can serve custoded content
-- **Q3. Who raises:**
-  - manual, with a command such as `distlib group raise-protocol` that core members approve;
-  - or automatic, once the whole core supports the new version.
-  - *Leaning:* manual for v1, since it is visible and simple.
-  - A: agree manual
-- **Q4. Support window:** how many protocol versions a release must speak. The log needs every old
-  rule regardless, so this concerns talking only (ALPNs, heartbeats).
-  - A: latest and previous, maybe also one version back? I would rather just have some path to upgrade - it's then responsibility of group users  to do it in timely manner
-- **Q5. Downgrades:** not supported once a data dir is migrated, or once the group is raised?
-  *Leaning:* not supported; back up before migrating.
-  - A: yes no downgrade now
-- **Q6. Heartbeats:** strict and gated like everything else, or exact-bytes signatures so that
-  fields appended at the end need no raise?
-  - A: whatever is easier 
+- **Q1. Laggard followers at a raise.** The raise needs only the core's support: every core member
+  must upgrade first, followers may be left behind. Because many members may lag for a while, a
+  laggard must go on serving blobs and the copies it keeps, so custody does not suffer (§4).
+- **Q2. What a laggard does.** It stays in the group, serving and keeping content; its frozen
+  allowlist admitting a member expelled after the raise is accepted. Serving custodied content
+  matters more.
+- **Q3. Who raises.** By hand, `distlib group raise-protocol`, approved by the core like any core
+  decision.
+- **Q4. Support window.** A release talks the latest protocol and the one before it. Upgrading in
+  time is the group's responsibility; the software gives the path, not a longer window.
+- **Q5. Downgrades.** Not supported, neither after a data-dir migration nor after a raise.
+- **Q6. Heartbeats.** Whichever is easier: strict and gated like everything else, which needs no
+  code now.
