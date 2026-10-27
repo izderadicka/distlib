@@ -99,8 +99,10 @@ enum Response {
 ///   into "no group, no voters" for as long as it takes the leader to catch it
 ///   up. Configuration is the *wrong* answer there: a node that joined by
 ///   ticket has whatever core group that ticket named, which may be years out
-///   of date. The right answer is the core group the log itself gave, captured
-///   the moment before it was blanked.
+///   of date. The right answer is the signed desired core plus the core just
+///   before this node was promoted, excluding members since expelled. Routing
+///   referrals never contribute. Persisted promotion authority keeps this
+///   trust available through historical replay until Raft reaches its boundary.
 ///
 /// Getting this wrong is not cosmetic. The window is where a node can be
 /// talked into applying a `GroupFounded` naming somebody else and rebuilding
@@ -115,7 +117,7 @@ impl TrustedCore {
     }
 
     /// Whether `peer` is one of them.
-    fn contains(&self, peer: &MemberId) -> bool {
+    pub(crate) fn contains(&self, peer: &MemberId) -> bool {
         self.lock().contains(peer)
     }
 
@@ -291,7 +293,7 @@ impl RaftProtocol {
         }
         matches!(
             tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                crate::raft::core_group::RETRY,
                 raft.change_membership(
                     openraft::ChangeMembers::RemoveNodes(BTreeSet::from([id])),
                     true
@@ -630,4 +632,167 @@ fn mismatched<E: std::error::Error>(
     RPCError::Network(NetworkError::new(&std::io::Error::other(format!(
         "member {target} answered a different request than it was asked: {response:?}"
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{MemberRecord, MembershipEvent, SignedEvent, Timestamp};
+    use openraft::{
+        CommittedLeaderId, Entry, EntryPayload, LogId, Membership, Vote,
+        storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
+    };
+    use std::{collections::BTreeMap, time::Duration};
+
+    #[test]
+    fn retirement_rpc_encodings_are_stable() {
+        assert_eq!(postcard::to_stdvec(&Request::Retired).unwrap(), [3]);
+        assert_eq!(postcard::to_stdvec(&Request::ForgetMe).unwrap(), [4]);
+        assert!(matches!(
+            postcard::from_bytes::<Request>(&[4]).unwrap(),
+            Request::ForgetMe
+        ));
+        for value in [false, true] {
+            assert_eq!(
+                postcard::to_stdvec(&Response::Retired(value)).unwrap(),
+                [3, u8::from(value)]
+            );
+            assert_eq!(
+                postcard::to_stdvec(&Response::Forgotten(value)).unwrap(),
+                [4, u8::from(value)]
+            );
+            assert!(
+                matches!(postcard::from_bytes::<Response>(&[4, u8::from(value)]).unwrap(), Response::Forgotten(decoded) if decoded == value)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_current_member_cannot_request_learner_cleanup() {
+        let key = iroh::SecretKey::from_bytes(&[31; 32]);
+        let me = MemberId::from(key.public());
+        let learner = MemberId::from(iroh::SecretKey::from_bytes(&[32; 32]).public());
+        let raw = RawMemberId::from(me);
+        let record = |member_id| MemberRecord {
+            member_id,
+            display_name: "member".into(),
+            pledge_bytes: 0,
+        };
+        let found = MembershipEvent::found(
+            vec![(record(me), NodeAddr::default())],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap();
+        let sign = |event, nonce| {
+            SignedEvent::sign(&key, event, Timestamp::from_millis(nonce), nonce - 1).unwrap()
+        };
+        let membership = Membership::new(
+            vec![BTreeSet::from([raw])],
+            BTreeMap::from([
+                (raw, NodeAddr::default()),
+                (RawMemberId::from(learner), NodeAddr::default()),
+            ]),
+        );
+        let entries: Vec<Entry<TypeConfig>> = [
+            EntryPayload::Membership(membership),
+            EntryPayload::Normal(sign(found, 1)),
+            EntryPayload::Normal(sign(
+                MembershipEvent::MemberAdded {
+                    member: record(learner),
+                },
+                2,
+            )),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, raw), index as u64),
+            payload,
+        })
+        .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("cleanup.redb")).unwrap());
+        let mut state = StateMachineStore::from_database(Arc::clone(&db)).unwrap();
+        let mut log = crate::LogStore::from_database(db).unwrap();
+        log.save_vote(&Vote::new_committed(1, raw)).await.unwrap();
+        log.blocking_append(entries.clone()).await.unwrap();
+        log.save_committed(Some(entries[2].log_id)).await.unwrap();
+        assert!(
+            state
+                .apply(entries)
+                .await
+                .unwrap()
+                .iter()
+                .all(Result::is_ok)
+        );
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(key.clone())
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let config = Arc::new(
+            openraft::Config {
+                enable_tick: false,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap(),
+        );
+        let raft = Raft::new(
+            raw,
+            config,
+            RaftNetworkFactoryImpl::new(endpoint.clone(), Connections::new()),
+            log,
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        raft.wait(Some(Duration::from_secs(5)))
+            .state(openraft::ServerState::Leader, "restored singleton")
+            .await
+            .unwrap();
+        let protocol = RaftProtocol::serving(raft.clone(), state, BTreeSet::from([me]));
+        assert!(
+            !protocol.forget_retired(learner).await,
+            "membership still admits this learner"
+        );
+        assert!(
+            raft.metrics()
+                .borrow()
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(learner))
+        );
+        raft.client_write(sign(
+            MembershipEvent::MemberExpelled {
+                member: learner,
+                reason: "expelled".into(),
+            },
+            3,
+        ))
+        .await
+        .unwrap()
+        .data
+        .unwrap();
+        assert!(
+            protocol.forget_retired(learner).await,
+            "cleanup becomes valid after expulsion"
+        );
+        assert!(
+            !raft
+                .metrics()
+                .borrow()
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(learner))
+        );
+        raft.shutdown().await.unwrap();
+        endpoint.close().await;
+    }
 }

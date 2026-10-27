@@ -16,7 +16,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::Cursor,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -52,6 +52,11 @@ const SM: KeyValueTable = TableDefinition::new("raft_state_machine");
 const APPLIED: &str = "applied";
 const SNAPSHOT: &str = "snapshot";
 const PROMOTION: &str = "promotion";
+const PROMOTION_PREDECESSORS: &str = "promotion_predecessors";
+
+/// For each desired voter, the signed core immediately before its admission
+/// to that core. Local follower metadata, deliberately outside wire snapshots.
+type PromotionPredecessors = BTreeMap<MemberId, BTreeSet<MemberId>>;
 
 /// Local replay authority, kept outside snapshots and restored after a crash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,15 +263,32 @@ impl StateMachineStore {
         events: &[(u64, SignedEvent)],
     ) -> StorageResult<Vec<Result<(), ConsensusError>>> {
         let mut verdicts = Vec::with_capacity(events.len());
+        let mut predecessors = read_key::<PromotionPredecessors>(
+            &self.inner.db,
+            SM,
+            PROMOTION_PREDECESSORS,
+            ErrorSubject::StateMachine,
+        )?
+        .unwrap_or_default();
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is held across an await.
         let (encoded, derived) = {
             let mut applied = self.lock()?;
             for (index, event) in events {
+                let before: BTreeSet<_> = applied.state.core().keys().copied().collect();
                 let verdict = applied.state.apply(*index, event);
                 if let Err(error) = &verdict {
                     tracing::error!(%index, %error, "a followed event was refused; skipping it");
+                }
+                // Observe the result of the signed fold, including approvals
+                // that enact a pending core change. Address-only changes and
+                // later events must not lose the leader that taught this seat.
+                predecessors.retain(|member, _| applied.state.is_core(member));
+                for member in applied.state.core().keys() {
+                    if !before.contains(member) {
+                        predecessors.insert(*member, before.clone());
+                    }
                 }
                 verdicts.push(verdict);
             }
@@ -275,13 +297,18 @@ impl StateMachineStore {
             (encoded, applied.state.clone())
         };
 
-        write_key(
-            &self.inner.db,
-            SM,
-            APPLIED,
-            encoded,
-            ErrorSubject::StateMachine,
-        )
+        let predecessors = encode(&predecessors, ErrorSubject::StateMachine)?;
+        write_txn(&self.inner.db, ErrorSubject::StateMachine, move |txn| {
+            let fail = writing(ErrorSubject::StateMachine);
+            let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
+            table
+                .insert(APPLIED, encoded.as_slice())
+                .map_err(|source| fail(&source))?;
+            table
+                .insert(PROMOTION_PREDECESSORS, predecessors.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
         .await?;
 
         // After the commit, for the reason openraft's `apply` does the same: an
@@ -312,12 +339,28 @@ impl StateMachineStore {
         self.reset_projection(None).await
     }
 
-    pub(crate) async fn prepare_promotion(&self, voters: BTreeSet<MemberId>) -> StorageResult<()> {
-        self.reset_projection(Some(Promotion {
-            at: self.membership().changed_at(),
+    pub(crate) async fn prepare_promotion(&self, me: MemberId) -> StorageResult<Promotion> {
+        let mut predecessors = read_key::<PromotionPredecessors>(
+            &self.inner.db,
+            SM,
+            PROMOTION_PREDECESSORS,
+            ErrorSubject::StateMachine,
+        )?
+        .unwrap_or_default();
+        let membership = self.membership();
+        let voters = membership
+            .core()
+            .keys()
+            .copied()
+            .chain(predecessors.remove(&me).into_iter().flatten())
+            .filter(|member| membership.is_member(member))
+            .collect();
+        let promotion = Promotion {
+            at: membership.changed_at(),
             voters,
-        }))
-        .await
+        };
+        self.reset_projection(Some(promotion.clone())).await?;
+        Ok(promotion)
     }
 
     /// Trust expires only when Raft itself reaches the promotion's boundary.

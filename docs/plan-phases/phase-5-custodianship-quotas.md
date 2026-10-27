@@ -14,6 +14,12 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
+Membership lifecycle correction in **#160**: preserve quorum through durable retirement,
+preserve acknowledged logs on re-promotion, derive replay authority only from signed core
+transitions, and let seatless sources serve history/referrals. See **P5-33–P5-37** in
+[`plan-deltas.md`](../plan-deltas.md); these supersede the promotion/log-clearing and blanket
+seatless-refusal assumptions in P2-8 and P3-25.
+
 Phase 4 is complete and merged, and so is the refactor series that followed it
 ([`plan-refactor-complexity.md`](../plan-refactor-complexity.md)). Every member says what it holds in
 a heartbeat, the library shows who is online with an item, and ratings, reviews, bookmarks and
@@ -715,6 +721,12 @@ Every open C-number appears here once.
 | **C45** | **A clock that steps back makes a node's own catalogue writes fail** — iroh-docs stamps each entry with the wall clock and refuses one older than the entry already at its key (`NewerEntryExists`), which reaches the caller as "the catalogue could not be written to", its cause dropped; seen once in a local `cargo test-all` on WSL, whose clock jumps back after a sleep (found in 5c-4) | **Phase 6**, with hardening: at least name the cause; perhaps stamp no earlier than the entry being replaced. |
 
 ---
+
+**C46 — promotion cancelled before learner admission:** deferred to phase 6. A promotion followed
+by demotion before replication starts can leave the node seated, with its allowlist held and
+persisted replay authority unexpired; restart resumes the same promotion. A retained learner
+normally catches up, but the never-added case needs an authenticated cancellation/recovery path
+(P5-33–P5-34). Timeout alone is not authority to reset acknowledged state.
 
 ## Testing and the lanes
 

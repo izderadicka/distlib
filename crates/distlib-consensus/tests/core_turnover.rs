@@ -1,4 +1,4 @@
-//! Regression scenarios from the review of PR #160.
+//! Voter retirement, core turnover, re-promotion and expulsion cleanup.
 
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)]
@@ -150,7 +150,8 @@ async fn core_turnover(restart: bool) {
         )
         .await
         .unwrap();
-    // c's only sources (a, b) have retired; point it at d by restarting.
+    // C's remembered sources A/B have retired. Even after restart the persisted
+    // sources win over configured D, so C must follow their history/referrals.
     let c_peer = if restart {
         c_peer.restart_with_core(vec![(d.id, d.addr.clone())]).await
     } else {

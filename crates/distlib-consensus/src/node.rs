@@ -7,7 +7,7 @@
 //! invalidates (§4.4).
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -63,13 +63,10 @@ pub const RAFT_DB: &str = "raft.redb";
 /// protocol later. A follower that may be promoted therefore has to be
 /// listening before it has anything to answer with.
 ///
-/// What replaces the old guarantee is a refusal with a reason. Both handlers
-/// check [`crate::raft::Seat`] per connection and close a non-voter's with
-/// `NOT_A_VOTER` — which is what a demoted voter already got (P1-22), so the
-/// behaviour is not new, only the range of nodes it applies to. A peer learns
-/// "you are not a voter" rather than "no such protocol", which is the more
-/// useful of the two answers and the only one that can change without a
-/// restart.
+/// Handlers check [`crate::raft::Seat`] for each operation. Consensus mutations,
+/// proposals and directory requests require a seat; a seatless member can still
+/// serve retained memberlog history, refer a follower to its current core, or
+/// acknowledge retirement. Those read-only operations grant no voter authority.
 pub fn alpns() -> Vec<Vec<u8>> {
     vec![
         alpn::PING.to_vec(),
@@ -1376,12 +1373,13 @@ async fn finish_expulsion(role: &Role) {
     loop {
         for (id, addr) in follower::read(&role.sources).candidates(role.me) {
             let client = network.new_client(RawMemberId::from(id), &addr).await;
-            if tokio::time::timeout(Duration::from_secs(2), client.forget_me()).await == Ok(true) {
+            if tokio::time::timeout(core_group::RETRY, client.forget_me()).await == Ok(true) {
                 role.expelled.send_replace(true);
                 return;
             }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tracing::warn!(member = %role.me, "this node was expelled; waiting for a voter to confirm Raft learner cleanup before exiting");
+        tokio::time::sleep(core_group::RETRY).await;
     }
 }
 
@@ -1444,8 +1442,9 @@ async fn new_raft(
 ///
 /// 1. **Stop following.** The follow loop and a Raft both write the state
 ///    machine; leaving both running would interleave two pictures of the log.
-/// 2. **Say who to trust in the blank window**, from the core group the log
-///    gives *now* — because step 3 takes that knowledge away, and step 4
+/// 2. **Persist who to trust during replay**, from the signed desired core and
+///    the core immediately before this node was promoted — step 3 resets that
+///    projection, and step 4
 ///    leaves a node with no voters of its own for as long as it takes to be
 ///    caught up. See [`TrustedCore`].
 /// 3. **Blank the state machine, preserving the Raft log.** The leader may
@@ -1488,30 +1487,23 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
     tracing::info!("the log says this node votes now; taking a seat in consensus");
 
     stop(follow);
-    // A disjoint replacement is taught by the old leader, which the desired
-    // core no longer names. Keep the authenticated follower sources trusted
-    // during replay as well as the requested new core.
-    let mut voters: BTreeSet<_> = state_machine.membership().core().keys().copied().collect();
-    voters.extend(
-        role.sources
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .core
-            .iter()
-            .map(|(id, _)| *id),
-    );
-    trusted.replace(voters.clone());
-
-    if let Err(error) = state_machine.prepare_promotion(voters).await {
-        // Left a follower, and a working one: the seat stays empty, so the
-        // protocols go on refusing and the projection is whatever was last
-        // written. What is lost is the follow loop, which has already been
-        // stopped — so this node is frozen at the membership it holds until it
-        // is restarted, which is the honest outcome of a disk that will not
-        // take a write.
-        tracing::error!(%error, "could not clear this node's state to be promoted");
-        return None;
-    }
+    // A disjoint replacement still needs its old leader, but referrals only
+    // locate log sources. Authority comes exclusively from the signed fold:
+    // the desired core and the core immediately before this node's promotion.
+    let promotion = match state_machine.prepare_promotion(*me).await {
+        Ok(promotion) => promotion,
+        Err(error) => {
+            // Left a follower, and a working one: the seat stays empty, so the
+            // protocols go on refusing and the projection is whatever was last
+            // written. What is lost is the follow loop, which has already been
+            // stopped — so this node is frozen at the membership it holds until it
+            // is restarted, which is the honest outcome of a disk that will not
+            // take a write.
+            tracing::error!(%error, "could not clear this node's state to be promoted");
+            return None;
+        }
+    };
+    trusted.replace(promotion.voters);
 
     let raft = match new_raft(role).await {
         Ok(raft) => raft,
@@ -1715,11 +1707,12 @@ async fn follow_membership(
             tracing::debug!(count = members.len(), "allowlist derived from the log");
             writer.replace(members);
         } else {
-            // No `GroupFounded` yet, so the log has nothing to say about who
-            // belongs. Publishing its empty membership here would wipe the
-            // bootstrap seed and leave core nodes unable to reach each other —
-            // which is precisely how they would replicate the founding entry.
-            tracing::debug!("no group founded yet; leaving the bootstrap allowlist in place");
+            // A blank or historically replayed projection must not replace
+            // either bootstrap membership or the newer pre-promotion allowlist.
+            tracing::debug!(
+                replaying,
+                "holding the allowlist until the membership projection is current"
+            );
         }
         // Only now: whoever reads the membership can rely on it being enforced.
         if !replaying {
@@ -1784,6 +1777,202 @@ mod retirement_tests {
         CommittedLeaderId, Entry, EntryPayload, LogId, Membership, StoredMembership,
         storage::RaftStateMachine,
     };
+    use std::collections::BTreeSet;
+
+    fn promotion_history() -> (SecretKey, MemberId, MemberId, Vec<(u64, SignedEvent)>) {
+        let old = SecretKey::from_bytes(&[21; 32]);
+        let promoted = SecretKey::from_bytes(&[22; 32]);
+        let teacher = MemberId::from(old.public());
+        let me = MemberId::from(promoted.public());
+        let expelled = MemberId::from(SecretKey::from_bytes(&[23; 32]).public());
+        let record = |member_id| MemberRecord {
+            member_id,
+            display_name: "member".into(),
+            pledge_bytes: 0,
+        };
+        let founding = MembershipEvent::found(
+            vec![(record(teacher), NodeAddr::default())],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap();
+        let events = vec![
+            (&old, founding),
+            (&old, MembershipEvent::MemberAdded { member: record(me) }),
+            (
+                &old,
+                MembershipEvent::MemberAdded {
+                    member: record(expelled),
+                },
+            ),
+            (
+                &old,
+                MembershipEvent::MemberExpelled {
+                    member: expelled,
+                    reason: "removed".into(),
+                },
+            ),
+            (
+                &old,
+                MembershipEvent::CoreGroupChanged {
+                    core: vec![(me, NodeAddr::default())],
+                },
+            ),
+            // A later address change must not replace the predecessor of this
+            // promotion with the newly promoted node itself.
+            (
+                &promoted,
+                MembershipEvent::CoreGroupChanged {
+                    core: vec![(
+                        me,
+                        NodeAddr::default().with_direct(([127, 0, 0, 1], 1234).into()),
+                    )],
+                },
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (key, event))| {
+            let at = i as u64 + 1;
+            (
+                at,
+                SignedEvent::sign(key, event, Timestamp::from_millis(at), at - 1).unwrap(),
+            )
+        })
+        .collect();
+        (promoted, teacher, expelled, events)
+    }
+
+    #[tokio::test]
+    async fn promotion_trust_ignores_referrals_and_keeps_the_signed_predecessor_after_restart() {
+        let (key, teacher, expelled, events) = promotion_history();
+        let me = MemberId::from(key.public());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("authority.redb");
+        let state = StateMachineStore::open(&path).unwrap();
+        assert!(
+            state
+                .apply_followed(6, &events)
+                .await
+                .unwrap()
+                .iter()
+                .all(|v| v.is_ok())
+        );
+        drop(state);
+        let db = Arc::new(Database::create(&path).unwrap());
+        let state = StateMachineStore::from_database(Arc::clone(&db)).unwrap();
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(key)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let connections = Connections::new();
+        let role = Role {
+            me,
+            config: Arc::new(
+                Config {
+                    enable_tick: false,
+                    ..Default::default()
+                }
+                .validate()
+                .unwrap(),
+            ),
+            network: RaftNetworkFactoryImpl::new(endpoint.clone(), connections.clone()),
+            log: LogStore::from_database(db).unwrap(),
+            state_machine: state.clone(),
+            client: MemberlogClient::new(
+                endpoint.clone(),
+                connections,
+                AddressBook::default(),
+                Directory::default(),
+            ),
+            // A stale seatless source referred us to an expelled peer, and
+            // omitted the legitimate old leader. Neither fact is authority.
+            sources: Arc::new(Mutex::new(Sources {
+                core: vec![(expelled, NodeAddr::default())],
+                leader: Some(expelled),
+            })),
+            expelled: watch::channel(false).0,
+            listens: watch::channel(gossip::Hint::MayHaveMissed).1,
+            seat: Seat::default(),
+            trusted: TrustedCore::default(),
+            follow: RoleTask::default(),
+            core_group: RoleTask::default(),
+        };
+        assert_eq!(take_the_seat(&role).await, Some(6));
+        assert_eq!(
+            state.promotion().unwrap().voters,
+            BTreeSet::from([me, teacher])
+        );
+        assert!(role.trusted.contains(&teacher));
+        assert!(
+            !role.trusted.contains(&expelled),
+            "referrals cannot grant bootstrap consensus authority"
+        );
+        stop(&role.core_group);
+        role.seat.vacate().unwrap().shutdown().await.unwrap();
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn promotion_replay_preserves_the_enforced_allowlist_until_the_boundary() {
+        let (key, _, expelled, events) = promotion_history();
+        let me = MemberId::from(key.public());
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateMachineStore::open(dir.path().join("replay.redb")).unwrap();
+        assert!(
+            state
+                .apply_followed(6, &events)
+                .await
+                .unwrap()
+                .iter()
+                .all(|v| v.is_ok())
+        );
+        let current = state.membership();
+        state.prepare_promotion(me).await.unwrap();
+        let entries: Vec<Entry<TypeConfig>> = events
+            .into_iter()
+            .map(|(at, event)| Entry {
+                log_id: LogId::new(CommittedLeaderId::new(1, RawMemberId::from(me)), at),
+                payload: EntryPayload::Normal(event),
+            })
+            .collect();
+        // The replayed historical projection still admits the expelled key.
+        state.apply(entries[..3].to_vec()).await.unwrap();
+        let (writer, mut allowlist) = distlib_net::allowlist(me, current.allowlist());
+        let hooks = AllowlistHooks::new(allowlist.clone());
+        let (published, mut enforced) = watch::channel(current.clone());
+        let observer = tokio::spawn(follow_membership(
+            state.clone(),
+            writer,
+            AddressBook::default(),
+            hooks,
+            published,
+        ));
+        // Either publication is observable, including an unchanged allowlist
+        // replacement. This also catches the two suppression mutations separately.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {
+                tokio::select! { _ = allowlist.changed() => {}, _ = enforced.changed() => {} }
+            })
+            .await
+            .is_err(),
+            "historical replay must not publish membership or its allowlist"
+        );
+        assert!(!allowlist.is_allowed(&expelled));
+        assert_eq!(*enforced.borrow(), current);
+        state.apply(entries[3..].to_vec()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), enforced.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*enforced.borrow(), current);
+        assert!(!allowlist.is_allowed(&expelled));
+        observer.abort();
+    }
 
     #[tokio::test]
     async fn promotion_authority_survives_restart_and_expires_after_raft_catches_up() {
@@ -1812,10 +2001,7 @@ mod retirement_tests {
             payload: EntryPayload::Normal(signed),
         };
         store.apply([founded.clone()]).await.unwrap();
-        store
-            .prepare_promotion(BTreeSet::from([teacher]))
-            .await
-            .unwrap();
+        store.prepare_promotion(me).await.unwrap();
         drop(store);
         let mut store = StateMachineStore::open(&path).unwrap();
         assert!(
@@ -1824,7 +2010,7 @@ mod retirement_tests {
         );
         let promotion = store.promotion().unwrap();
         assert_eq!(promotion.at, 10);
-        assert_eq!(promotion.voters, BTreeSet::from([teacher]));
+        assert_eq!(promotion.voters, BTreeSet::from([me]));
         store.apply([founded]).await.unwrap();
         assert!(store.membership().group_id().is_some());
         assert!(

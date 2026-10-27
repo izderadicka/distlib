@@ -74,9 +74,9 @@ const REFUSED_BACKOFF: Duration = Duration::from_secs(60);
 pub struct Sources {
     /// The core group, each with somewhere to reach them.
     ///
-    /// Seeded from `[consensus] core` and replaced by what the log's own
-    /// answers carry, so a follower keeps up with a core group that changes
-    /// without being reconfigured.
+    /// Seeded from persisted core membership (configuration before founding)
+    /// and updated from log answers and seatless referrals. These are routing
+    /// hints only: they never authorize a peer to take part in consensus.
     pub core: Vec<(MemberId, NodeAddr)>,
 
     /// The leader, when a source last named one.

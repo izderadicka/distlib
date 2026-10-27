@@ -52,7 +52,7 @@ use crate::raft::{
 /// The common reason is losing leadership mid-change, and the node that took
 /// over reconciles anyway — so this is a backstop rather than the mechanism,
 /// and it is sized to stay quiet rather than to be prompt.
-const RETRY: Duration = Duration::from_secs(2);
+pub(crate) const RETRY: Duration = Duration::from_secs(2);
 
 /// What one pass found to do.
 #[derive(Debug, PartialEq, Eq)]

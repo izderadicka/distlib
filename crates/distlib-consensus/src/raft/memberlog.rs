@@ -897,6 +897,25 @@ mod tests {
     use iroh::SecretKey;
     use std::net::{Ipv4Addr, SocketAddr};
 
+    #[test]
+    fn redirect_encoding_is_stable() {
+        let redirect = Fetched::Redirect(Source {
+            core: Vec::new(),
+            leader: None,
+        });
+        assert_eq!(
+            postcard::to_stdvec(&redirect).expect("encode redirect"),
+            [2, 0, 0]
+        );
+        assert_eq!(
+            postcard::to_stdvec(&Response::Fetched(redirect)).expect("encode response"),
+            [1, 2, 0, 0]
+        );
+        assert!(
+            matches!(postcard::from_bytes::<Fetched>(&[2, 0, 0]).expect("decode redirect"), Fetched::Redirect(source) if source.core.is_empty() && source.leader.is_none())
+        );
+    }
+
     fn somewhere(port: u16) -> NodeAddr {
         NodeAddr {
             relay: None,
