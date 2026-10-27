@@ -25,7 +25,7 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use distlib_net::{Connections, NOT_A_VOTER_REASON, alpn, close_code};
+use distlib_net::{Connections, IsRejection, NOT_A_VOTER_REASON, NetError, alpn, close_code};
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl,
     endpoint::Connection,
@@ -60,6 +60,10 @@ enum Request {
     AppendEntries(AppendEntriesRequest<TypeConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<TypeConfig>),
+    /// Read-only acknowledgment used before forgetting a retired learner.
+    Retired,
+    /// An expelled, durably retired node asks the leader to commit its cleanup.
+    ForgetMe,
 }
 
 /// What it answers.
@@ -75,6 +79,8 @@ enum Response {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
+    Retired(bool),
+    Forgotten(bool),
 }
 
 /// Who this node will speak consensus with while it holds no voter set of its
@@ -93,8 +99,10 @@ enum Response {
 ///   into "no group, no voters" for as long as it takes the leader to catch it
 ///   up. Configuration is the *wrong* answer there: a node that joined by
 ///   ticket has whatever core group that ticket named, which may be years out
-///   of date. The right answer is the core group the log itself gave, captured
-///   the moment before it was blanked.
+///   of date. The right answer is the signed desired core plus the core just
+///   before this node was promoted, excluding members since expelled. Routing
+///   referrals never contribute. Persisted promotion authority keeps this
+///   trust available through historical replay until Raft reaches its boundary.
 ///
 /// Getting this wrong is not cosmetic. The window is where a node can be
 /// talked into applying a `GroupFounded` naming somebody else and rebuilding
@@ -109,7 +117,7 @@ impl TrustedCore {
     }
 
     /// Whether `peer` is one of them.
-    fn contains(&self, peer: &MemberId) -> bool {
+    pub(crate) fn contains(&self, peer: &MemberId) -> bool {
         self.lock().contains(peer)
     }
 
@@ -188,6 +196,8 @@ impl RaftProtocol {
 
     async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
+            Request::Retired => Response::Retired(self.seat.raft().is_none()),
+            Request::ForgetMe => Response::Forgotten(false),
             Request::AppendEntries(rpc) => Response::AppendEntries(raft.append_entries(rpc).await),
             Request::Vote(rpc) => Response::Vote(raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
@@ -198,8 +208,11 @@ impl RaftProtocol {
 
     /// Whether `peer` may take part in this node's consensus.
     ///
-    /// Once Raft knows its voters they are the whole answer. Before that — the
-    /// founding window — it does not, and something has to stand in, because a
+    /// During promotion, persisted replay authority also admits the voters
+    /// captured from the followed log, until an applied Raft configuration
+    /// reaches that promotion's index. Old log replay cannot close it early.
+    /// Outside that window, Raft's applied and effective voters decide. During
+    /// founding, the configured core stands in for the missing voter set: a
     /// founder sends `Vote` to peers whose Raft membership is still empty and
     /// founding could never happen if they refused it.
     ///
@@ -224,6 +237,16 @@ impl RaftProtocol {
     /// through follower mode while never being a voter — and would otherwise go
     /// on serving consensus to whoever that stale config names.
     fn may_speak_raft(&self, raft: &Raft<TypeConfig>, peer: MemberId) -> bool {
+        if self
+            .state_machine
+            .promotion()
+            .is_some_and(|promotion| promotion.voters.contains(&peer))
+        {
+            return true;
+        }
+        if self.applied_voter(peer) {
+            return true;
+        }
         {
             let metrics = raft.metrics();
             let membership = &metrics.borrow().membership_config;
@@ -235,6 +258,58 @@ impl RaftProtocol {
         }
 
         self.state_machine.membership().group_id().is_none() && self.trusted.contains(&peer)
+    }
+    /// Learners may request their own cleanup. A retired node also answers a
+    /// current core learned through the memberlog, even after voter turnover.
+    /// This does not authorize consensus mutations from those extra peers.
+    fn may_query_retirement(&self, peer: MemberId) -> bool {
+        self.seat
+            .raft()
+            .as_ref()
+            .is_some_and(|raft| self.may_speak_raft(raft, peer))
+            || self.state_machine.membership().is_core(&peer)
+            || self
+                .state_machine
+                .raft_membership()
+                .borrow()
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(peer))
+    }
+
+    /// The caller may remove only itself, only after expulsion and committed
+    /// uniform voter removal. The reply follows the cleanup commit, so an
+    /// orderly exiting process cannot leave an unreachable retained learner.
+    async fn forget_retired(&self, peer: MemberId) -> bool {
+        let Some(raft) = self.seat.raft() else {
+            return false;
+        };
+        let applied = self.state_machine.raft_membership().borrow().clone();
+        let id = RawMemberId::from(peer);
+        if self.state_machine.membership().is_member(&peer)
+            || applied.membership().get_joint_config().len() != 1
+            || applied.voter_ids().any(|voter| voter == id)
+        {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(
+                crate::raft::core_group::RETRY,
+                raft.change_membership(
+                    openraft::ChangeMembers::RemoveNodes(BTreeSet::from([id])),
+                    true
+                )
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    }
+
+    fn applied_voter(&self, peer: MemberId) -> bool {
+        self.state_machine
+            .raft_membership()
+            .borrow()
+            .voter_ids()
+            .any(|id| id == RawMemberId::from(peer))
     }
 }
 
@@ -248,32 +323,10 @@ impl ProtocolHandler for RaftProtocol {
         // answering heartbeats continuously, so tearing the connection down
         // after one exchange would mean a handshake per heartbeat.
         loop {
-            // Re-checked every time rather than once at accept, and both
-            // halves can move under a long-lived connection. Whether this node
-            // has a Raft at all now changes — a follower is promoted and takes
-            // its seat without restarting — and so does who may speak to it:
-            // founding ends, and later a `CoreGroupChanged` demotes somebody. A
-            // check made only at accept would keep serving whoever got in
-            // before either moved. §4.4 makes the same argument for the
-            // allowlist: refusing the *next* connection is not enough when the
-            // current one is still open. One lock and one watch borrow per RPC
-            // is not worth optimising away.
-            //
-            // An empty seat is refused as a non-voter, because that is what
-            // this node is. It is not an error and not a protocol failure: every
-            // node serves this ALPN now, since a router cannot be given a
-            // protocol after it spawns and a node that may be promoted has to be
-            // listening before it has anything to answer with.
-            let Some(raft) = self
-                .seat
-                .raft()
-                .filter(|raft| self.may_speak_raft(raft, peer))
-            else {
-                tracing::info!(%peer, "refused raft rpc from a non-voter");
+            if !self.may_query_retirement(peer) {
                 connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
                 return Ok(());
-            };
-
+            }
             let (mut send, mut recv) = match connection.accept_bi().await {
                 Ok(streams) => streams,
                 // The peer closed the connection: the normal way this ends.
@@ -283,7 +336,28 @@ impl ProtocolHandler for RaftProtocol {
             let encoded = recv.read_to_end(MAX_RPC_BYTES).await.accepting()?;
             let request: Request = postcard::from_bytes(&encoded).accepting()?;
 
-            let response = self.answer(&raft, request).await;
+            // Authorize after receiving each request: the seat and membership
+            // may change while accept_bi() waits. A retired node still answers
+            // the read-only acknowledgment, but never a consensus mutation.
+            let raft = self.seat.raft();
+            let authorized = raft.as_ref().map_or_else(
+                || self.applied_voter(peer),
+                |raft| self.may_speak_raft(raft, peer),
+            );
+            let may_query = self.may_query_retirement(peer);
+            let response = match request {
+                Request::Retired if may_query => Response::Retired(self.seat.raft().is_none()),
+                Request::ForgetMe if may_query => {
+                    Response::Forgotten(self.forget_retired(peer).await)
+                }
+                request => {
+                    let Some(raft) = raft.filter(|_| authorized) else {
+                        connection.close(close_code::NOT_A_VOTER, NOT_A_VOTER_REASON);
+                        return Ok(());
+                    };
+                    self.answer(&raft, request).await
+                }
+            };
             let encoded = postcard::to_stdvec(&response).accepting()?;
 
             send.write_all(&encoded).await.accepting()?;
@@ -382,6 +456,45 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
+    /// True only after the remote has vacated its Raft seat. Silence or an
+    /// older peer that does not recognize this query is never an acknowledgment.
+    pub(crate) async fn retired(
+        &self,
+    ) -> Result<bool, RPCError<NodeId, NodeAddr, RaftError<NodeId>>> {
+        match self.call(Request::Retired).await? {
+            Response::Retired(retired) => Ok(retired),
+            other => Err(mismatched(self.target, &other)),
+        }
+    }
+
+    /// A committed cleanup response, or revocation of the temporary Raft
+    /// transport exception, lets an expelled node exit. Silence never does.
+    pub(crate) async fn forget_me(&self) -> bool {
+        let Ok(peer) = MemberId::try_from(self.target) else {
+            return false;
+        };
+        let Ok(addr) = self.endpoint_addr::<RaftError<NodeId>>() else {
+            return false;
+        };
+        let connection = match self
+            .connections
+            .get_or_connect(&self.endpoint, peer, addr, alpn::RAFT)
+            .await
+        {
+            Ok(connection) => connection,
+            Err(NetError::Rejected {
+                by_remote: true, ..
+            }) => return true,
+            Err(_) => return false,
+        };
+        matches!(
+            self.call::<RaftError<NodeId>>(Request::ForgetMe).await,
+            Ok(Response::Forgotten(true))
+        ) || connection
+            .close_reason()
+            .is_some_and(|error| error.is_rejection())
+    }
+
     /// Where to dial, from the addressing Raft carries in its membership.
     ///
     /// An empty [`NodeAddr`] is meaningful rather than broken: it means "find
@@ -519,4 +632,167 @@ fn mismatched<E: std::error::Error>(
     RPCError::Network(NetworkError::new(&std::io::Error::other(format!(
         "member {target} answered a different request than it was asked: {response:?}"
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{MemberRecord, MembershipEvent, SignedEvent, Timestamp};
+    use openraft::{
+        CommittedLeaderId, Entry, EntryPayload, LogId, Membership, Vote,
+        storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
+    };
+    use std::{collections::BTreeMap, time::Duration};
+
+    #[test]
+    fn retirement_rpc_encodings_are_stable() {
+        assert_eq!(postcard::to_stdvec(&Request::Retired).unwrap(), [3]);
+        assert_eq!(postcard::to_stdvec(&Request::ForgetMe).unwrap(), [4]);
+        assert!(matches!(
+            postcard::from_bytes::<Request>(&[4]).unwrap(),
+            Request::ForgetMe
+        ));
+        for value in [false, true] {
+            assert_eq!(
+                postcard::to_stdvec(&Response::Retired(value)).unwrap(),
+                [3, u8::from(value)]
+            );
+            assert_eq!(
+                postcard::to_stdvec(&Response::Forgotten(value)).unwrap(),
+                [4, u8::from(value)]
+            );
+            assert!(
+                matches!(postcard::from_bytes::<Response>(&[4, u8::from(value)]).unwrap(), Response::Forgotten(decoded) if decoded == value)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_current_member_cannot_request_learner_cleanup() {
+        let key = iroh::SecretKey::from_bytes(&[31; 32]);
+        let me = MemberId::from(key.public());
+        let learner = MemberId::from(iroh::SecretKey::from_bytes(&[32; 32]).public());
+        let raw = RawMemberId::from(me);
+        let record = |member_id| MemberRecord {
+            member_id,
+            display_name: "member".into(),
+            pledge_bytes: 0,
+        };
+        let found = MembershipEvent::found(
+            vec![(record(me), NodeAddr::default())],
+            Default::default(),
+            Timestamp::from_millis(1),
+        )
+        .unwrap();
+        let sign = |event, nonce| {
+            SignedEvent::sign(&key, event, Timestamp::from_millis(nonce), nonce - 1).unwrap()
+        };
+        let membership = Membership::new(
+            vec![BTreeSet::from([raw])],
+            BTreeMap::from([
+                (raw, NodeAddr::default()),
+                (RawMemberId::from(learner), NodeAddr::default()),
+            ]),
+        );
+        let entries: Vec<Entry<TypeConfig>> = [
+            EntryPayload::Membership(membership),
+            EntryPayload::Normal(sign(found, 1)),
+            EntryPayload::Normal(sign(
+                MembershipEvent::MemberAdded {
+                    member: record(learner),
+                },
+                2,
+            )),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, raw), index as u64),
+            payload,
+        })
+        .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("cleanup.redb")).unwrap());
+        let mut state = StateMachineStore::from_database(Arc::clone(&db)).unwrap();
+        let mut log = crate::LogStore::from_database(db).unwrap();
+        log.save_vote(&Vote::new_committed(1, raw)).await.unwrap();
+        log.blocking_append(entries.clone()).await.unwrap();
+        log.save_committed(Some(entries[2].log_id)).await.unwrap();
+        assert!(
+            state
+                .apply(entries)
+                .await
+                .unwrap()
+                .iter()
+                .all(Result::is_ok)
+        );
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(key.clone())
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let config = Arc::new(
+            openraft::Config {
+                enable_tick: false,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap(),
+        );
+        let raft = Raft::new(
+            raw,
+            config,
+            RaftNetworkFactoryImpl::new(endpoint.clone(), Connections::new()),
+            log,
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        raft.wait(Some(Duration::from_secs(5)))
+            .state(openraft::ServerState::Leader, "restored singleton")
+            .await
+            .unwrap();
+        let protocol = RaftProtocol::serving(raft.clone(), state, BTreeSet::from([me]));
+        assert!(
+            !protocol.forget_retired(learner).await,
+            "membership still admits this learner"
+        );
+        assert!(
+            raft.metrics()
+                .borrow()
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(learner))
+        );
+        raft.client_write(sign(
+            MembershipEvent::MemberExpelled {
+                member: learner,
+                reason: "expelled".into(),
+            },
+            3,
+        ))
+        .await
+        .unwrap()
+        .data
+        .unwrap();
+        assert!(
+            protocol.forget_retired(learner).await,
+            "cleanup becomes valid after expulsion"
+        );
+        assert!(
+            !raft
+                .metrics()
+                .borrow()
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == RawMemberId::from(learner))
+        );
+        raft.shutdown().await.unwrap();
+        endpoint.close().await;
+    }
 }

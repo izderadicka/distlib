@@ -16,6 +16,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io::Cursor,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -39,7 +40,6 @@ use crate::{
             KeyValueTable, NodeId, StorageResult, encode, ensure_tables, read_key, reading,
             write_key, write_txn, writing,
         },
-        log_store,
         types::TypeConfig,
     },
     signed::SignedEvent,
@@ -51,6 +51,19 @@ const SM: KeyValueTable = TableDefinition::new("raft_state_machine");
 
 const APPLIED: &str = "applied";
 const SNAPSHOT: &str = "snapshot";
+const PROMOTION: &str = "promotion";
+const PROMOTION_PREDECESSORS: &str = "promotion_predecessors";
+
+/// For each desired voter, the signed core immediately before its admission
+/// to that core. Local follower metadata, deliberately outside wire snapshots.
+type PromotionPredecessors = BTreeMap<MemberId, BTreeSet<MemberId>>;
+
+/// Local replay authority, kept outside snapshots and restored after a crash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Promotion {
+    pub at: u64,
+    pub voters: BTreeSet<MemberId>,
+}
 
 type Entry = openraft::impls::Entry<TypeConfig>;
 
@@ -105,6 +118,9 @@ struct Inner {
     /// published by the caller, so nothing can apply an entry and forget to say
     /// so.
     membership: watch::Sender<MembershipState>,
+    /// Published only after the corresponding state-machine transaction commits.
+    raft_membership: watch::Sender<StoredMembership<NodeId, NodeAddr>>,
+    promotion: Mutex<Option<Promotion>>,
 }
 
 /// The membership state machine, persisted in redb.
@@ -128,14 +144,31 @@ impl StateMachineStore {
                 applied: Mutex::new(Applied::default()),
                 snapshot_seq: AtomicU64::new(0),
                 membership: watch::channel(MembershipState::new()).0,
+                raft_membership: watch::channel(StoredMembership::default()).0,
+                promotion: Mutex::new(None),
             }),
         };
         if let Some(applied) =
             read_key::<Applied>(&store.inner.db, SM, APPLIED, ErrorSubject::StateMachine)?
         {
             store.inner.membership.send_replace(applied.state.clone());
+            store
+                .inner
+                .raft_membership
+                .send_replace(applied.membership.clone());
             *store.lock()? = applied;
         }
+        *store
+            .inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = read_key::<Option<Promotion>>(
+            &store.inner.db,
+            SM,
+            PROMOTION,
+            ErrorSubject::StateMachine,
+        )?
+        .flatten();
         Ok(store)
     }
 
@@ -157,6 +190,23 @@ impl StateMachineStore {
     /// allowlist, rather than anything in a config file.
     pub fn membership(&self) -> MembershipState {
         self.peek().state.clone()
+    }
+
+    /// The durable, applied Raft configuration, including changes that do not
+    /// alter application membership. Effective (uncommitted) configurations
+    /// must never authorize retirement.
+    pub(crate) fn raft_membership(&self) -> watch::Receiver<StoredMembership<NodeId, NodeAddr>> {
+        self.inner.raft_membership.subscribe()
+    }
+
+    fn announce_raft(&self, membership: StoredMembership<NodeId, NodeAddr>) {
+        self.inner.raft_membership.send_if_modified(|current| {
+            if *current == membership {
+                return false;
+            }
+            *current = membership;
+            true
+        });
     }
 
     /// The last log index this node has applied.
@@ -213,15 +263,32 @@ impl StateMachineStore {
         events: &[(u64, SignedEvent)],
     ) -> StorageResult<Vec<Result<(), ConsensusError>>> {
         let mut verdicts = Vec::with_capacity(events.len());
+        let mut predecessors = read_key::<PromotionPredecessors>(
+            &self.inner.db,
+            SM,
+            PROMOTION_PREDECESSORS,
+            ErrorSubject::StateMachine,
+        )?
+        .unwrap_or_default();
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is held across an await.
         let (encoded, derived) = {
             let mut applied = self.lock()?;
             for (index, event) in events {
+                let before: BTreeSet<_> = applied.state.core().keys().copied().collect();
                 let verdict = applied.state.apply(*index, event);
                 if let Err(error) = &verdict {
                     tracing::error!(%index, %error, "a followed event was refused; skipping it");
+                }
+                // Observe the result of the signed fold, including approvals
+                // that enact a pending core change. Address-only changes and
+                // later events must not lose the leader that taught this seat.
+                predecessors.retain(|member, _| applied.state.is_core(member));
+                for member in applied.state.core().keys() {
+                    if !before.contains(member) {
+                        predecessors.insert(*member, before.clone());
+                    }
                 }
                 verdicts.push(verdict);
             }
@@ -230,13 +297,18 @@ impl StateMachineStore {
             (encoded, applied.state.clone())
         };
 
-        write_key(
-            &self.inner.db,
-            SM,
-            APPLIED,
-            encoded,
-            ErrorSubject::StateMachine,
-        )
+        let predecessors = encode(&predecessors, ErrorSubject::StateMachine)?;
+        write_txn(&self.inner.db, ErrorSubject::StateMachine, move |txn| {
+            let fail = writing(ErrorSubject::StateMachine);
+            let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
+            table
+                .insert(APPLIED, encoded.as_slice())
+                .map_err(|source| fail(&source))?;
+            table
+                .insert(PROMOTION_PREDECESSORS, predecessors.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
+        })
         .await?;
 
         // After the commit, for the reason openraft's `apply` does the same: an
@@ -246,78 +318,78 @@ impl StateMachineStore {
         Ok(verdicts)
     }
 
-    /// Empties everything this node has applied, so a Raft can fill it in.
+    /// Resets the derived projection before a follower resumes Raft replay.
     ///
-    /// **Only for a follower being promoted**, and it is why promotion touches
-    /// storage rather than only plumbing. There are two reasons for it, and
-    /// they are worth keeping apart because only one of them is load-bearing.
+    /// A never-voting follower has no Raft membership of its own. Clearing its
+    /// projection opens the bounded bootstrap window in `RaftProtocol`, whose
+    /// trusted voters are captured before this call. It also prevents folding
+    /// fetched events a second time over a projection already ahead of Raft.
     ///
-    /// **The one that is: it is what lets the leader reach this node at all.**
-    /// A node with a founded log and an empty Raft voter set is, to
-    /// [`crate::raft::RaftProtocol`], a node that is not a voter and must not
-    /// be talked into behaving like one — the P1-22 rule, and a deliberate
-    /// one. A follower that seats a Raft without clearing its projection is
-    /// exactly that shape, so it refuses the very `AppendEntries` that would
-    /// catch it up, and the promotion never completes. Mutation-checked: skip
-    /// this call and the node takes its seat and is never made a voter.
-    /// Blanking the projection puts it back into the "no group yet" window
-    /// where [`crate::raft::network::TrustedCore`] answers instead — which is
-    /// why that type holds the core group the log gave rather than
-    /// configuration.
+    /// The Raft log, committed pointer and vote must survive. A demoted node
+    /// can still be a retained learner at its leader when promotion starts;
+    /// clearing entries it acknowledged would violate OpenRaft's monotonic
+    /// replication progress and can panic the leader. With whole-log retention,
+    /// `Raft::new` can rebuild the projection from the preserved committed log.
+    /// The role's `seated_at` boundary prevents historical replay of a demotion
+    /// from retiring this new seat before the promotion has been replayed.
     ///
-    /// **The one that is not, or not demonstrably: folding exactly once.** A
-    /// follower's projection is already complete — it has folded every event
-    /// fetched over `distlib/memberlog/0` — but its *Raft* log is empty,
-    /// because it never ran one or because this emptied it. So the leader
-    /// replicates from the beginning
-    /// and the fold would run a second time over events it has already folded.
-    /// Tried, out of curiosity: the second fold converges on the same
-    /// membership, because most of it is refused the second time — a member
-    /// already added, a group already founded — and refusals leave the state
-    /// alone. So this is not fixing a corruption anybody has seen. It makes
-    /// once-only true by construction rather than by case analysis over log
-    /// shapes, which is the weaker claim and the honest one.
-    ///
-    /// **The allowlist survives this**, which is what makes it safe: with no
-    /// `GroupFounded` applied, [`crate::MembershipNode`]'s allowlist task
-    /// leaves the last set in place rather than publishing an empty one — the
-    /// same rule that lets a founding node connect before there is a log. So
-    /// this node keeps talking to exactly whom it was talking to, and the log
-    /// replaces that picture when it arrives.
-    ///
-    /// `followed_upto` goes with the rest. It is a cursor into a log this node
-    /// no longer fetches, and leaving it set would strand a value that means
-    /// nothing to a voter.
-    ///
-    /// **So does the Raft log**, in the same transaction — which is the part a
-    /// node that voted before needs (C12). Its log still holds what it had
-    /// when it was demoted, and `Raft::new` re-applies that up to the stored
-    /// committed pointer, undoing the blanking above: the projection comes
-    /// back as it stood at the demotion, a core group without this node in
-    /// it, and the node stands down as soon as it has sat down. See
-    /// [`crate::raft::log_store::clear_for_promotion`], which keeps the vote.
-    ///
-    /// **So does the snapshot**, in the same transaction, because it is the
-    /// one piece of this store keyed to a log index rather than derived from
-    /// the state: a snapshot built at index 200 of the log this node followed
-    /// outlives a reset that puts `last_applied` back to nothing. Leaving it
-    /// costs twice. `get_current_snapshot` would hand the leader a picture of
-    /// a group this node is no longer in, and — worse — `build_snapshot`
-    /// refuses to persist anything older than what is stored, so every
-    /// snapshot this node ever built again would be silently dropped and its
-    /// log would never compact. Reachable by demote, restart as a follower,
-    /// promote again.
+    /// Clear the old snapshot and follower cursor with the projection. The
+    /// endpoint keeps its last application allowlist during the blank window.
     pub async fn reset_for_promotion(&self) -> StorageResult<()> {
+        self.reset_projection(None).await
+    }
+
+    pub(crate) async fn prepare_promotion(&self, me: MemberId) -> StorageResult<Promotion> {
+        let mut predecessors = read_key::<PromotionPredecessors>(
+            &self.inner.db,
+            SM,
+            PROMOTION_PREDECESSORS,
+            ErrorSubject::StateMachine,
+        )?
+        .unwrap_or_default();
+        let membership = self.membership();
+        let voters = membership
+            .core()
+            .keys()
+            .copied()
+            .chain(predecessors.remove(&me).into_iter().flatten())
+            .filter(|member| membership.is_member(member))
+            .collect();
+        let promotion = Promotion {
+            at: membership.changed_at(),
+            voters,
+        };
+        self.reset_projection(Some(promotion.clone())).await?;
+        Ok(promotion)
+    }
+
+    /// Trust expires only when Raft itself reaches the promotion's boundary.
+    /// Replaying an older founded projection must not close this window.
+    pub(crate) fn promotion(&self) -> Option<Promotion> {
+        self.inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .filter(|promotion| {
+                self.inner
+                    .raft_membership
+                    .borrow()
+                    .log_id()
+                    .is_none_or(|id| id.index < promotion.at)
+            })
+    }
+
+    async fn reset_projection(&self, promotion: Option<Promotion>) -> StorageResult<()> {
+        let authority = encode(&promotion, ErrorSubject::StateMachine)?;
         let encoded = {
             let mut applied = self.lock()?;
             *applied = Applied::default();
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
-        // One transaction: an applied cursor at nothing beside a snapshot at
-        // index 200, or beside a log that re-applies up to it, is exactly the
-        // disagreement this is clearing, and a crash between two writes would
-        // persist it.
+        // The projection and its snapshot reset together. Raft history is
+        // deliberately untouched, including its durable commit and vote.
         write_txn(&self.inner.db, ErrorSubject::StateMachine, move |txn| {
             let fail = writing(ErrorSubject::StateMachine);
             let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
@@ -325,13 +397,23 @@ impl StateMachineStore {
                 .insert(APPLIED, encoded.as_slice())
                 .map_err(|source| fail(&source))?;
             table.remove(SNAPSHOT).map_err(|source| fail(&source))?;
-            log_store::clear_for_promotion(txn)
+            table
+                .insert(PROMOTION, authority.as_slice())
+                .map_err(|source| fail(&source))?;
+            Ok(())
         })
         .await?;
+
+        *self
+            .inner
+            .promotion
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = promotion;
 
         // Announced like any other change, and this one matters more than most:
         // it is what tells the allowlist task to stop publishing and hold what
         // it has.
+        self.announce_raft(StoredMembership::default());
         self.announce(&MembershipState::new());
         Ok(())
     }
@@ -473,7 +555,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // The lock covers in-memory mutation and encoding only; the commit
         // happens after it is dropped, so no lock is ever held across an await.
-        let (encoded, derived) = {
+        let (encoded, derived, raft_membership) = {
             let mut applied = self.lock()?;
             for entry in entries {
                 let index = entry.log_id.index;
@@ -531,7 +613,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 }
             }
             let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
-            (encoded, applied.state.clone())
+            (encoded, applied.state.clone(), applied.membership.clone())
         };
 
         write_key(
@@ -545,6 +627,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // After the commit: an observer told about a membership the node could
         // still lose to a crash would be enforcing one that never happened.
+        self.announce_raft(raft_membership);
         self.announce(&derived);
         Ok(responses)
     }
@@ -584,6 +667,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         )?;
 
         let membership = applied.state.clone();
+        let raft_membership = applied.membership.clone();
         *self.lock()? = applied;
 
         // Both keys in one transaction. The applied state and the snapshot it
@@ -612,6 +696,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // about an expulsion. Without this the allowlist would keep admitting a
         // member the group removed while that node was away, until some later
         // entry happened to change the membership again.
+        self.announce_raft(raft_membership);
         self.announce(&membership);
         Ok(())
     }
