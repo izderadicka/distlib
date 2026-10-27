@@ -189,3 +189,9 @@ Not sure if detection if done efficiently  -  I think we have two loops/tasks wh
 
 ## Content files concept 
 The whole content files concept is bit overkill for this solution.  Sounds nice, but doubt how it can be really used.  Just bring complexity to code.
+
+## Possible refactorings
+- Use RWLock instead of Mutex where appropriate
+- some functions in main code are used only in tests 
+- code organization -  are our modules well structures -  interdependencies
+- supporting functions - like duration formatting etc.   should unified and centralized to utils module - not they are kind of split around

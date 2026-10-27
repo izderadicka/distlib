@@ -132,16 +132,22 @@ learn them later:
 - **Q1. Laggard followers at a raise:**
   - (a) the raise needs every member's support, so one absent member blocks it until expelled;
   - (b) the raise needs only the core's support, and laggards get "upgrade required". *Leaning (b).*
+  - A: Agree that all core members must upgrade,  followers can required to upgrade, however we must consider impact on data custodianship -  if many nodes will become unavailable -  so I think older nodes should still serve blobs, if possible?
 - **Q2. What a stopped laggard does.** It can no longer follow the log, so its allowlist freezes:
   it would go on admitting members expelled after the raise.
   - *Leaning:* it stops talking to the group altogether, keeps its data, and resumes after upgrading.
+  - A: I think admitting expelled would be OK, more important is that it can serve custoded content
 - **Q3. Who raises:**
   - manual, with a command such as `distlib group raise-protocol` that core members approve;
   - or automatic, once the whole core supports the new version.
   - *Leaning:* manual for v1, since it is visible and simple.
+  - A: agree manual
 - **Q4. Support window:** how many protocol versions a release must speak. The log needs every old
   rule regardless, so this concerns talking only (ALPNs, heartbeats).
+  - A: latest and previous, maybe also one version back? I would rather just have some path to upgrade - it's then responsibility of group users  to do it in timely manner
 - **Q5. Downgrades:** not supported once a data dir is migrated, or once the group is raised?
   *Leaning:* not supported; back up before migrating.
+  - A: yes no downgrade now
 - **Q6. Heartbeats:** strict and gated like everything else, or exact-bytes signatures so that
   fields appended at the end need no raise?
+  - A: whatever is easier 
