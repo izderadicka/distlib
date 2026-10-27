@@ -1370,6 +1370,7 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
 /// refusal would tell the CLI to exit before the leader could acknowledge it.
 async fn finish_expulsion(role: &Role) {
     let mut network = role.network.clone();
+    tracing::warn!(member = %role.me, "this node was expelled; waiting for a voter to confirm Raft learner cleanup before exiting");
     loop {
         for (id, addr) in follower::read(&role.sources).candidates(role.me) {
             let client = network.new_client(RawMemberId::from(id), &addr).await;
@@ -1378,7 +1379,7 @@ async fn finish_expulsion(role: &Role) {
                 return;
             }
         }
-        tracing::warn!(member = %role.me, "this node was expelled; waiting for a voter to confirm Raft learner cleanup before exiting");
+        tracing::debug!(member = %role.me, "no voter confirmed Raft learner cleanup; retrying");
         tokio::time::sleep(core_group::RETRY).await;
     }
 }
@@ -1841,6 +1842,40 @@ mod retirement_tests {
         })
         .collect();
         (promoted, teacher, expelled, events)
+    }
+
+    #[tokio::test]
+    async fn promotion_does_not_trust_an_expelled_predecessor() {
+        let (key, teacher, _, mut events) = promotion_history();
+        let me = MemberId::from(key.public());
+        // The teacher was recorded when it promoted this node. Expelling it
+        // afterward must remove its authority even though the predecessor is
+        // still remembered, including after a restart before seating.
+        events.push((
+            7,
+            SignedEvent::sign(
+                &key,
+                MembershipEvent::MemberExpelled {
+                    member: teacher,
+                    reason: "former voter expelled".into(),
+                },
+                Timestamp::from_millis(7),
+                6,
+            )
+            .unwrap(),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("expelled-predecessor.redb");
+        let state = StateMachineStore::open(&path).unwrap();
+        for verdict in state.apply_followed(7, &events).await.unwrap() {
+            verdict.unwrap();
+        }
+        assert!(!state.membership().is_member(&teacher));
+        drop(state);
+        let state = StateMachineStore::open(&path).unwrap();
+        let promotion = state.prepare_promotion(me).await.unwrap();
+        assert_eq!(promotion.voters, BTreeSet::from([me]));
+        assert_eq!(state.promotion().unwrap().voters, promotion.voters);
     }
 
     #[tokio::test]
