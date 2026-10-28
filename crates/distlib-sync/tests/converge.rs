@@ -905,34 +905,26 @@ fn the_catalogue_key_derivation_is_fixed() {
     );
 }
 
-// Waits out a real timer rather than doing work, so it belongs in the slow
-// lane — see the carried item C10.
 #[cfg(feature = "slow-tests")]
-/// A member joining is what makes this node ask again for content nobody had.
-///
-/// The sweep asks about a hash **once per generation** — otherwise a node
-/// holding an entry whose bytes no reachable member has dials the whole group
-/// for it on every round for as long as it runs, and, worse, every freshly
-/// stranded entry queues behind the ones that have already failed.
-///
-/// That rule is only safe because of the reset this test pins. Somebody who has
-/// just joined is the likeliest holder of bytes nobody here had, so a sweep
-/// that slept through a membership change would be one that backed off from its
-/// own answer. The other reset is a five-minute timer, and if the timer were
-/// what carried this the test would take five minutes.
-///
-/// **Carol is given the bytes directly rather than by writing the entry**, and
-/// the difference is the whole test. A write would publish a new entry straight
-/// from its author, which is the one case iroh-docs *does* fetch content for —
-/// so it would pass with the reset removed and prove nothing.
-#[tokio::test]
-async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
+/// Alice and bob, both holding the entry `item/1/title` and neither its bytes,
+/// so the group is a place where this content does not exist: bob asks, alice
+/// cannot answer. What the sweep's tests start from.
+struct Stranded {
+    alice: Node,
+    bob: Node,
+    alice_key: SecretKey,
+    founding: MembershipState,
+    to_alice: watch::Sender<MembershipState>,
+    to_bob: watch::Sender<MembershipState>,
+    _documents: [tempfile::TempDir; 2],
+}
+
+#[cfg(feature = "slow-tests")]
+async fn stranded() -> Stranded {
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
-    let carol_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
     let bob_id = MemberId::from(bob_key.public());
-    let carol_id = MemberId::from(carol_key.public());
 
     let alice_docs = tempfile::TempDir::new().unwrap();
     let bob_docs = tempfile::TempDir::new().unwrap();
@@ -983,9 +975,7 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
     .await
     .expect("bob reads it the ordinary way first");
 
-    // Both come back holding the entry and no bytes at all, so the group is a
-    // place where this content does not exist. Bob asks, alice cannot answer,
-    // and that is bob's generation spent.
+    // Both come back holding the entry and no bytes at all.
     alice.shutdown().await;
     bob.shutdown().await;
     let (to_alice, alice_sees) = watch::channel(MembershipState::new());
@@ -996,7 +986,20 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
         Some(alice_docs.path().to_path_buf()),
     )
     .await;
-    let bob = Node::start_storing(bob_key, bob_sees, Some(bob_docs.path().to_path_buf())).await;
+    let bob = Node::start_storing(
+        bob_key.clone(),
+        bob_sees,
+        Some(bob_docs.path().to_path_buf()),
+    )
+    .await;
+    // Where each is now, as members announce it: both came back elsewhere.
+    alice
+        .directory
+        .learn(&SignedAddress::sign(&bob_key, bob.addr.clone(), 1).unwrap())
+        .unwrap();
+    bob.directory
+        .learn(&SignedAddress::sign(&alice_key, alice.addr.clone(), 1).unwrap())
+        .unwrap();
     to_alice.send(founding.clone()).unwrap();
     to_bob.send(founding.clone()).unwrap();
     for node in [&alice, &bob] {
@@ -1011,9 +1014,52 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
         ),
         "neither node may hold the bytes, or the rest of this proves nothing"
     );
+    Stranded {
+        alice,
+        bob,
+        alice_key,
+        founding,
+        to_alice,
+        to_bob,
+        _documents: [alice_docs, bob_docs],
+    }
+}
 
-    // Long enough for several sweeps to have asked and failed.
-    tokio::time::sleep(Duration::from_secs(12)).await;
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
+/// A member joining is what makes this node ask again for content nobody had.
+///
+/// The sweep waits longer before asking about a hash each time it fails —
+/// otherwise a node holding an entry whose bytes no reachable member has dials
+/// the whole group for it on every round for as long as it runs.
+///
+/// That rule is only safe because of the reset this test pins. Somebody who has
+/// just joined is the likeliest holder of bytes nobody here had, so a sweep
+/// that slept through a membership change would be one that backed off from its
+/// own answer. **Fifty seconds** of failing first: by then bob's next ask is
+/// about forty seconds away, so only the reset gets him the bytes within the
+/// twenty this allows.
+///
+/// **Carol is given the bytes directly rather than by writing the entry**, and
+/// the difference is the whole test. A write would publish a new entry straight
+/// from its author, which is the one case iroh-docs *does* fetch content for —
+/// so it would pass with the reset removed and prove nothing.
+#[tokio::test]
+async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
+    let carol_key = SecretKey::generate();
+    let carol_id = MemberId::from(carol_key.public());
+    let Stranded {
+        alice,
+        bob,
+        alice_key,
+        founding,
+        to_alice,
+        to_bob,
+        _documents,
+    } = stranded().await;
+
+    tokio::time::sleep(Duration::from_secs(50)).await;
 
     // Carol holds the bytes without ever having written the entry.
     let (to_carol, carol_sees) = watch::channel(MembershipState::new());
@@ -1034,7 +1080,7 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
         .await
         .unwrap();
 
-    let read = tokio::time::timeout(SOON, async {
+    let read = tokio::time::timeout(PROMPTLY * 2, async {
         loop {
             match bob.catalogue.get("item/1/title").await {
                 Ok(Some(value)) => return value,
@@ -1049,6 +1095,49 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
     assert_eq!(&read[..], b"Dune");
 
     carol.shutdown().await;
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+// Waits out a real timer rather than doing work, so it belongs in the slow
+// lane — see the carried item C10.
+#[cfg(feature = "slow-tests")]
+/// A member who gets the bytes after bob asked is asked again within seconds,
+/// with no membership change to prompt it.
+///
+/// Bob's first asks fail, because nobody has the bytes; then alice gets them.
+/// Bob used to wait out a five-minute timer before asking again, which on CI
+/// was a node that never showed a book (5d's flake fix). Alice is given the
+/// bytes directly, as carol is below, so that iroh-docs has nothing to fetch.
+#[tokio::test]
+async fn content_that_turns_up_later_is_asked_for_again_within_seconds() {
+    // The senders kept: the membership log ending stops the sweep.
+    let Stranded {
+        alice,
+        bob,
+        to_alice: _to_alice,
+        to_bob: _to_bob,
+        _documents,
+        ..
+    } = stranded().await;
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    alice.blobs.add_bytes(&b"Dune"[..]).await.unwrap();
+
+    let read = tokio::time::timeout(SOON, async {
+        loop {
+            match bob.catalogue.get("item/1/title").await {
+                Ok(Some(value)) => return value,
+                Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => {}
+                Err(error) => panic!("reading the catalogue failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob must ask again soon after failing, not after five minutes");
+    assert_eq!(&read[..], b"Dune");
+
     alice.shutdown().await;
     bob.shutdown().await;
 }

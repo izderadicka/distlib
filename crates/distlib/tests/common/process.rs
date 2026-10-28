@@ -13,11 +13,15 @@
 
 use std::{
     fs::File,
+    hash::{BuildHasher as _, RandomState},
     io::Read as _,
     net::{TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU16, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU16, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -609,13 +613,12 @@ const PINNED: std::ops::Range<u16> = 20_000..30_000;
 /// which is nowhere near where the problem was.
 ///
 /// So: a fixed range the kernel will not allocate from, walked by a counter so
-/// two nodes in one run cannot collide, offset by the process id so two runs on
-/// one machine do not either, and probed with the protocol that will use it.
+/// two nodes in one process cannot collide, from a random place so two
+/// processes at once rarely do either, and probed with the protocol that will
+/// use it.
 pub fn a_free_port(protocol: Protocol) -> u16 {
     let span = PINNED.end - PINNED.start;
-    // Spreads concurrent runs apart. Not a guarantee — hence the probe — but it
-    // means two runs do not start walking from the same place.
-    let offset = (std::process::id() as u16).wrapping_mul(64);
+    let offset = where_this_process_starts(span);
 
     for _ in 0..span {
         let step = offset.wrapping_add(NEXT_PORT.fetch_add(1, Ordering::Relaxed));
@@ -629,6 +632,22 @@ pub fn a_free_port(protocol: Protocol) -> u16 {
         }
     }
     panic!("no free port in {PINNED:?}");
+}
+
+/// Where in [`PINNED`] this process starts walking: random, once per process.
+///
+/// nextest runs every test as a process of its own, several at once, and two
+/// that start from the same port can both probe it free before either node
+/// binds it. This used to be the process id times 64; Windows' process ids are
+/// multiples of four, which left 256 starting places, and two tests sharing
+/// one was a node failing to bind on Windows CI. Random, they share one about
+/// once in ten thousand pairs; the probe still cannot close the gap.
+fn where_this_process_starts(span: u16) -> u16 {
+    static START: OnceLock<u16> = OnceLock::new();
+    *START.get_or_init(|| {
+        let random = RandomState::new().hash_one(std::process::id());
+        u16::try_from(random % u64::from(span)).expect("below the span, which is a u16")
+    })
 }
 
 /// Waits for a process that is expected to give up on its own.
