@@ -1404,23 +1404,26 @@ async fn offer_peers_as_they_are_learned(
 /// is the worst shape a backoff can have: the more is stranded, the longer a
 /// *newly* stranded entry waits behind it to be asked even once.
 ///
-/// So the pacing is no longer here. It is [`ASK_AGAIN`] and the generation rule
-/// beside it, and this is once again what it says it is: how often the document
-/// is looked at.
+/// So the pacing is no longer here. It is each hash's own wait, [`Unanswered`],
+/// and this is once again what it says it is: how often the document is looked
+/// at.
 const FETCH_AGAIN: Duration = Duration::from_secs(5);
 
-/// How long before a hash nobody could serve is asked about again.
+/// The longest a hash nobody could serve waits before it is asked about again.
 ///
-/// **The backstop, not the mechanism.** What normally ends a generation is the
-/// membership changing, because a member who has just joined is the likeliest
-/// holder of bytes nobody here had. This covers the other way the answer can
-/// arrive — a member who was already present finishing their own download —
-/// which nothing tells this node about: `Op::ContentReady` reaches direct
-/// neighbours once, which is the very gap this sweep exists to paper over.
+/// A hash that could not be fetched is asked again after [`FETCH_AGAIN`], and
+/// after twice as long at each failure, up to this. So a fetch that failed for
+/// a moment, against a member a second behind, is retried within seconds; it
+/// used to wait the whole five minutes (seen on CI as a node that never
+/// projected a book). One nobody can serve still settles at one ask in five
+/// minutes.
 ///
-/// Long, because being wrong in this direction costs a wait and being wrong in
-/// the other costs a round of dials to every member for as long as the node
-/// runs. The case it delays is one this node cannot detect and did not cause.
+/// **The membership changing asks again at once**, because a member who has
+/// just joined is the likeliest holder of bytes nobody here had. The waits
+/// cover the other way the answer can arrive — a member who was already present
+/// finishing their own download — which nothing tells this node about:
+/// `Op::ContentReady` reaches direct neighbours once, which is the very gap
+/// this sweep exists to paper over.
 const ASK_AGAIN: Duration = Duration::from_secs(300);
 
 /// The longest one download is waited on before the sweep moves past it.
@@ -1438,10 +1441,11 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(20);
 /// this, such content never arrives. It works only because members announce
 /// where they are (P2-15): the downloader is given bare ids.
 ///
-/// Each hash is asked about once per generation. A generation ends when the
-/// membership changes, the likeliest moment for somebody to have the bytes, or
-/// after [`ASK_AGAIN`]. What it fetches it tells the read model about, since no
-/// `ContentReady` follows (ground truth 12).
+/// A hash that did not arrive waits longer at each failure, up to
+/// [`ASK_AGAIN`], and every hash is asked about again when the membership
+/// changes, the likeliest moment for somebody to have the bytes. What it
+/// fetches it tells the read model about, since no `ContentReady` follows
+/// (ground truth 12).
 async fn fetch_content_nobody_offered(
     doc: Doc,
     fetching: Fetching,
@@ -1454,14 +1458,11 @@ async fn fetch_content_nobody_offered(
         downloader,
         news,
     } = fetching;
-    let mut asked = AskedThisGeneration::default();
+    let mut unanswered = Unanswered::default();
     loop {
-        if !wait_for_the_next_round(&mut membership, &mut asked).await {
+        if !wait_for_the_next_round(&mut membership, &mut unanswered).await {
             tracing::error!("the membership log is gone; stopping the catalogue's repair task");
             return;
-        }
-        if asked.started.elapsed() >= ASK_AGAIN {
-            asked.start_again();
         }
         // The peers the document is offered to: a member this node cannot
         // reach cannot serve it content either.
@@ -1481,44 +1482,68 @@ async fn fetch_content_nobody_offered(
             }
         };
         // Pruned to what is still wanted, so it cannot outlive what it is about.
-        asked.hashes.retain(|hash| wanted.contains(hash));
+        unanswered.hashes.retain(|hash, _| wanted.contains(hash));
+        let round = Instant::now();
         for hash in wanted {
-            if asked.hashes.insert(hash) {
-                fetch_one(&downloader, hash, &providers, &news).await;
+            if unanswered.due(&hash, round)
+                && !fetch_one(&downloader, hash, &providers, &news).await
+            {
+                unanswered.failed(hash, Instant::now());
             }
         }
     }
 }
 
-/// The hashes asked about in this generation that did not arrive, and when
-/// the generation started.
-struct AskedThisGeneration {
-    hashes: HashSet<Hash>,
-    started: Instant,
+/// The hashes asked about that did not arrive, and when each may be asked
+/// about again.
+#[derive(Debug, Default)]
+struct Unanswered {
+    hashes: HashMap<Hash, Retry>,
 }
 
-impl Default for AskedThisGeneration {
-    fn default() -> Self {
-        Self {
-            hashes: HashSet::new(),
-            started: Instant::now(),
-        }
+/// When a hash may be asked about again, and how long it was made to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retry {
+    at: Instant,
+    waited: Duration,
+}
+
+impl Unanswered {
+    /// Whether `hash` may be asked about at `now`: never asked, or waited out.
+    fn due(&self, hash: &Hash, now: Instant) -> bool {
+        self.hashes.get(hash).is_none_or(|retry| retry.at <= now)
+    }
+
+    /// `hash` did not arrive at `now`: it waits [`FETCH_AGAIN`] the first
+    /// time, twice as long as before after that, and never more than
+    /// [`ASK_AGAIN`].
+    fn failed(&mut self, hash: Hash, now: Instant) {
+        let waited = self
+            .hashes
+            .get(&hash)
+            .map_or(FETCH_AGAIN, |retry| (retry.waited * 2).min(ASK_AGAIN));
+        self.hashes.insert(
+            hash,
+            Retry {
+                at: now + waited,
+                waited,
+            },
+        );
+    }
+
+    /// Every hash may be asked about at once again.
+    fn forget_all(&mut self) {
+        self.hashes.clear();
     }
 }
 
-impl AskedThisGeneration {
-    fn start_again(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// Waits [`FETCH_AGAIN`], starting a new generation whenever the membership
-/// changes meanwhile; `false` once the membership log is gone. A deadline
-/// rather than a fresh sleep, so a group whose membership keeps changing
-/// cannot hold the round off for ever.
+/// Waits [`FETCH_AGAIN`], forgetting every hash's wait whenever the
+/// membership changes meanwhile; `false` once the membership log is gone. A
+/// deadline rather than a fresh sleep, so a group whose membership keeps
+/// changing cannot hold the round off for ever.
 async fn wait_for_the_next_round(
     membership: &mut watch::Receiver<MembershipState>,
-    asked: &mut AskedThisGeneration,
+    unanswered: &mut Unanswered,
 ) -> bool {
     let next_round = Instant::now() + FETCH_AGAIN;
     loop {
@@ -1529,7 +1554,7 @@ async fn wait_for_the_next_round(
                     return false;
                 }
                 tracing::debug!("the group changed; asking again for content that is missing");
-                asked.start_again();
+                unanswered.forget_all();
             }
         }
     }
@@ -1539,7 +1564,14 @@ async fn wait_for_the_next_round(
 /// repairing together does not all ask the same member. One at a time, and for
 /// at most [`FETCH_DEADLINE`]: one peer that never answers must not hold up
 /// every other hash.
-async fn fetch_one(downloader: &Downloader, hash: Hash, providers: &[EndpointId], news: &News) {
+///
+/// Whether it arrived.
+async fn fetch_one(
+    downloader: &Downloader,
+    hash: Hash,
+    providers: &[EndpointId],
+    news: &News,
+) -> bool {
     let asked = tokio::time::timeout(
         FETCH_DEADLINE,
         downloader.download(HashAndFormat::raw(hash), Shuffled::new(providers.to_vec())),
@@ -1549,11 +1581,18 @@ async fn fetch_one(downloader: &Downloader, hash: Hash, providers: &[EndpointId]
         Ok(Ok(())) => {
             tracing::debug!(%hash, "fetched content nobody offered");
             news.content_landed();
+            true
         }
         // Ordinary rather than alarming: nobody reachable has it yet. Asked
-        // again in the next generation.
-        Ok(Err(error)) => tracing::debug!(%hash, %error, "no member had this content"),
-        Err(_) => tracing::debug!(%hash, "gave up waiting for this content for now"),
+        // again after a wait.
+        Ok(Err(error)) => {
+            tracing::debug!(%hash, %error, "no member had this content");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(%hash, "gave up waiting for this content for now");
+            false
+        }
     }
 }
 
@@ -1630,4 +1669,34 @@ fn sync_with(
     reachable(membership, me, directory)
         .filter_map(|(member, addr)| addr.to_endpoint_addr(member).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hash that keeps failing is asked again after 5 s, then 10 s, 20 s, …,
+    /// never more than five minutes apart; a membership change asks at once.
+    #[test]
+    fn an_unanswered_hash_waits_longer_each_time_up_to_ask_again() {
+        let hash = Hash::from_bytes([1; 32]);
+        let start = Instant::now();
+        let mut unanswered = Unanswered::default();
+        assert!(unanswered.due(&hash, start), "never asked, so asked now");
+
+        let mut now = start;
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            unanswered.failed(hash, now);
+            let retry = unanswered.hashes[&hash];
+            assert!(!unanswered.due(&hash, retry.at - Duration::from_millis(1)));
+            assert!(unanswered.due(&hash, retry.at));
+            waits.push(retry.waited.as_secs());
+            now = retry.at;
+        }
+        assert_eq!(waits, [5, 10, 20, 40, 80, 160, 300, 300]);
+
+        unanswered.forget_all();
+        assert!(unanswered.due(&hash, now));
+    }
 }

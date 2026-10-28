@@ -47,6 +47,34 @@ use common::{
 /// project.
 const SOON: Duration = Duration::from_secs(60);
 
+/// What alice's store and the others' holdings say when her use of `item`
+/// never shows. Each read is given a few seconds, so a store that has stopped
+/// answering says so rather than hanging the test.
+async fn why_alice_has_no_use(
+    alice: &Runtime,
+    others: [(&str, &Runtime); 2],
+    item: ItemId,
+) -> String {
+    let within = Duration::from_secs(5);
+    let last_used = tokio::time::timeout(within, alice.store().last_used()).await;
+    let files = tokio::time::timeout(within, alice.store().item(item))
+        .await
+        .map(|stored| stored.map(|stored| stored.map(|stored| stored.item.files.len())));
+    let holders: Vec<String> = others
+        .iter()
+        .map(|(name, runtime)| {
+            format!(
+                "{name} holds it: {}",
+                runtime.catalogue().holdings().holds(item)
+            )
+        })
+        .collect();
+    format!(
+        "alice's last_used: {last_used:?}; files of the item in alice's read model: {files:?}; {}",
+        holders.join("; ")
+    )
+}
+
 /// Downloads as a caller of the API does since 3a-5: starts the task, then
 /// asks after it until it ends. Answers with the finished task — whose
 /// `files` say what was fetched — or with why it was refused or failed.
@@ -305,13 +333,19 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     );
     // 5b-3b: a download is a use of the item, and so is serving it.
     assert!(bob.store().last_used().await.unwrap().contains_key(&item));
-    tokio::time::timeout(SOON, async {
+    // Fails now and then on Windows CI only. What it prints says which of the
+    // two explanations is true: alice's store stopped answering, or she served
+    // the book before her own read model had it, so the use matched nothing.
+    let alice_used_it = tokio::time::timeout(SOON, async {
         while !alice.store().last_used().await.unwrap().contains_key(&item) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("alice served the book, which is a use of it");
+    .await;
+    if alice_used_it.is_err() {
+        let why = why_alice_has_no_use(&alice, [("bob", &bob), ("carol", &carol)], item).await;
+        panic!("alice served the book, which is a use of it; {why}");
+    }
     assert_eq!(
         std::fs::read(bobs_dest.join("dune.epub")).unwrap(),
         bytes,
