@@ -269,21 +269,7 @@ async fn re_promotion_accepts_a_newly_elected_leader() {
         uniform_voters(&d).is_some_and(|v| v.contains(&RawMemberId::from(d.id)))
     })
     .await;
-    // An election d starts is not one it is sure to win: the others may still
-    // hear from their leader and refuse it, and the next election may go to
-    // anyone (seen on CI). So d asks again until it leads.
-    tokio::time::timeout(PATIENTLY, async {
-        loop {
-            let raft = d.node.raft().unwrap();
-            if raft.metrics().borrow().current_leader == Some(RawMemberId::from(d.id)) {
-                return;
-            }
-            raft.trigger().elect().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-    })
-    .await
-    .expect("d leads");
+    until_leading(&d, &[a, b]).await;
     change_core(&d, &[a], &[a, b, c, &d]).await;
     until_upto(PATIENTLY * 2, "c votes under its new leader", || {
         uniform_voters(&d).is_some_and(|v| v.len() == 4)
@@ -308,6 +294,74 @@ async fn re_promotion_accepts_a_newly_elected_leader() {
     for peer in peers.iter().chain([&d]) {
         peer.shutdown().await;
     }
+}
+
+/// Makes `peer` the leader, the others having to stop calling elections of
+/// their own while it asks.
+///
+/// openraft 0.9 has no leadership transfer, and an election a voter calls is
+/// not one it is sure to win:
+/// - the others still hear from their leader and refuse it (the leader lease),
+///   though its higher term unseats that leader, and the election after goes
+///   to whichever voter's timer fires first;
+/// - while its term is the higher one it refuses the leader's appends, so it
+///   misses what a new leader writes, and is then refused for its shorter log
+///   as well.
+///
+/// Retrying on a timer fell into step with another voter's election timer and
+/// lost every time; retrying after each election settled still lost about one
+/// run in five (both seen under load). So: once `peer` holds all the leader
+/// has written, the others' elections are switched off, `peer` asks, and its
+/// own timer asks again once their leases run out. An attempt that has not won
+/// within ten seconds — a write slipped in and `peer` is behind — switches them
+/// back on and starts again.
+async fn until_leading(peer: &Peer, others: &[&Peer]) {
+    let me = RawMemberId::from(peer.id);
+    let leads = || peer.node.raft().unwrap().metrics().borrow().current_leader == Some(me);
+    let elections = |enabled: bool| {
+        for other in others {
+            other.node.raft().unwrap().runtime_config().elect(enabled);
+        }
+    };
+    tokio::time::timeout(PATIENTLY * 2, async {
+        while !leads() {
+            until_upto(PATIENTLY, "a leader peer has caught up with", || {
+                caught_up(peer, others)
+            })
+            .await;
+            elections(false);
+            peer.node.raft().unwrap().trigger().elect().await.unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !leads() {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+            elections(true);
+        }
+    })
+    .await
+    .expect("peer leads");
+}
+
+/// Whether `peer` follows a leader, among `others` or itself, and holds every
+/// entry that leader has written.
+fn caught_up(peer: &Peer, others: &[&Peer]) -> bool {
+    let mine = peer.node.raft().unwrap().metrics().borrow().clone();
+    let Some(leader) = mine.current_leader else {
+        return false;
+    };
+    others
+        .iter()
+        .chain([&peer])
+        .find(|voter| RawMemberId::from(voter.id) == leader)
+        .and_then(|voter| voter.node.raft())
+        .is_some_and(|raft| {
+            let theirs = raft.metrics().borrow().clone();
+            theirs.current_leader == Some(leader)
+                && theirs.current_term == mine.current_term
+                && theirs.last_log_index == mine.last_log_index
+        })
 }
 
 async fn change_core(proposer: &Peer, approvers: &[&Peer], core: &[&Peer]) {
