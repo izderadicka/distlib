@@ -773,6 +773,7 @@ async fn a_store_of_another_version_is_started_afresh() {
     assert_eq!(
         tables,
         [
+            "blob_last_used",
             "bookmarks",
             "file_authors",
             "item_files",
@@ -856,6 +857,32 @@ async fn an_items_last_use_is_stamped_by_item_or_by_blob() {
         store.last_used().await.expect("read"),
         BTreeMap::from([(one, at(200)), (other, at(200))]),
         "every item of the blob, the later stamp, kept through a replay"
+    );
+}
+
+/// A copy served before this node's read model has the item still counts as
+/// a use once the item is projected (C47: on Windows CI, a custodian fetched
+/// the book from its adder before the adder's own read model had it).
+#[tokio::test]
+async fn a_blob_served_before_its_item_is_projected_counts_once_it_is() {
+    let store = empty().await;
+    let item = ItemId::from_bytes([1; 32]);
+    let blob = ContentHash::from_bytes([9; 32]);
+    let at = UNIX_EPOCH + Duration::from_secs(100);
+
+    store.mark_used_by_blob(blob, at).await.expect("written");
+    assert!(
+        store.last_used().await.expect("read").is_empty(),
+        "no item names the blob yet"
+    );
+
+    store
+        .upsert_item(with_file(item, blob))
+        .await
+        .expect("written");
+    assert_eq!(
+        store.last_used().await.expect("read"),
+        BTreeMap::from([(item, at)])
     );
 }
 

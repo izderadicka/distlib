@@ -392,13 +392,13 @@ impl Store {
         .await
     }
 
-    /// Records that this node used every item `blob` is a file of at `at`.
+    /// Records that this node used every item `blob` is a file of at `at`,
+    /// including an item its read model has not projected yet.
     pub async fn mark_used_by_blob(&self, blob: ContentHash, at: SystemTime) -> Result<()> {
         self.write("told a blob was used", move |tx| {
             tx.execute(
-                "INSERT INTO last_used (item, used_at) \
-                 SELECT item, ?2 FROM item_files WHERE blob = ?1 \
-                 ON CONFLICT (item) DO UPDATE SET used_at = excluded.used_at",
+                "INSERT INTO blob_last_used (blob, used_at) VALUES (?1, ?2) \
+                 ON CONFLICT (blob) DO UPDATE SET used_at = excluded.used_at",
                 params![blob.to_string(), millis_since_epoch(at)],
             )
             .map(|_| ())
@@ -406,18 +406,26 @@ impl Store {
         .await
     }
 
-    /// When this node last used each item it has used.
+    /// When this node last used each item it has used: the latest of its own
+    /// stamp and its files' (C47).
     pub async fn last_used(&self) -> Result<BTreeMap<ItemId, SystemTime>> {
         self.read(|conn| {
-            conn.prepare("SELECT item, used_at FROM last_used")?
-                .query_map([], |row| {
-                    let millis: u64 = row.get(1)?;
-                    Ok((
-                        identifier(row, 0, "item")?,
-                        UNIX_EPOCH + Duration::from_millis(millis),
-                    ))
-                })?
-                .collect()
+            conn.prepare(
+                "SELECT item, MAX(used_at) FROM ( \
+                     SELECT item, used_at FROM last_used \
+                     UNION ALL \
+                     SELECT f.item, b.used_at FROM blob_last_used b \
+                     JOIN item_files f ON f.blob = b.blob \
+                 ) GROUP BY item",
+            )?
+            .query_map([], |row| {
+                let millis: u64 = row.get(1)?;
+                Ok((
+                    identifier(row, 0, "item")?,
+                    UNIX_EPOCH + Duration::from_millis(millis),
+                ))
+            })?
+            .collect()
         })
         .await
     }
