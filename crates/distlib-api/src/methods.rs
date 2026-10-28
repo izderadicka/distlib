@@ -12,7 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode, MembershipState};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode, MembershipState};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
@@ -431,13 +431,12 @@ impl Api {
     /// `group.propose_add` — admit a member (§4.3).
     async fn propose_add(&self, params: ProposeAdd) -> Result<Value, Error> {
         self.propose(MembershipEvent::MemberAdded {
-            member: MemberRecord {
+            member: MemberProfile {
                 member_id: params.member,
                 display_name: params.name.unwrap_or_default(),
                 // Theirs to set, not ours: §5.5 makes custodian assignment
                 // depend on it, and `PledgeChanged` is self-only for that
                 // reason. Admitting somebody does not speak for their storage.
-                pledge_bytes: 0,
             },
         })
         .await

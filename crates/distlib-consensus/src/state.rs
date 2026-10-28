@@ -16,9 +16,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ConsensusError, Result},
-    event::{MemberRecord, MembershipEvent, check_founders, check_settings, no_pledge},
+    event::{MemberProfile, MembershipEvent, check_founders, check_settings},
     signed::SignedEvent,
 };
+
+/// What is known about one member: who they are, and what they pledge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRecord {
+    /// The member's identity, and the key their connections are authenticated by.
+    pub member_id: MemberId,
+
+    /// Display name. Metadata, not identity — two members may share one.
+    pub display_name: String,
+
+    /// Storage this member commits to providing, 0 until it pledges.
+    ///
+    /// Lives in the log rather than in gossip because custodian assignment
+    /// (§5.5) requires every peer to agree on identical weights; a value that
+    /// drifted between peers would give them different custodians for the same
+    /// item.
+    pub pledge_bytes: u64,
+}
+
+impl MemberRecord {
+    /// `profile`'s record, pledging `pledge_bytes`.
+    fn of(profile: &MemberProfile, pledge_bytes: u64) -> Self {
+        Self {
+            member_id: profile.member_id,
+            display_name: profile.display_name.clone(),
+            pledge_bytes,
+        }
+    }
+}
 
 /// Who the group is, as of the events applied so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,10 +275,8 @@ impl MembershipState {
     ///
     /// Being a member is enough to submit an admission or an expulsion — §4.4
     /// step 1 says "any member", and step 2 is where the ceremony lives; see
-    /// [`Self::approvals_needed`]. Four events are not like that:
+    /// [`Self::approvals_needed`]. Three events are not like that:
     ///
-    /// * an admission carries no pledge, because a pledge is set only by its
-    ///   owner (D8) and the admitted member has not signed this one;
     /// * a pledge is a promise about the proposer's *own* storage, and §5.5
     ///   makes custodian assignment depend on it, so letting anyone rewrite
     ///   anyone else's would let one member move everybody's data; and it is
@@ -259,7 +286,6 @@ impl MembershipState {
     /// * an approval *is* §4.4 step 2, so only a core node casts one.
     fn authorise(&self, proposer: MemberId, event: &MembershipEvent) -> Result<()> {
         match event {
-            MembershipEvent::MemberAdded { member } => no_pledge(member),
             MembershipEvent::PledgeChanged { member, .. } if *member != proposer => {
                 Err(ConsensusError::PledgeNotOwn {
                     proposer,
@@ -661,7 +687,7 @@ impl MembershipState {
     fn found(
         &mut self,
         group_id: GroupId,
-        founders: &[(MemberRecord, NodeAddr)],
+        founders: &[(MemberProfile, NodeAddr)],
         settings: &GroupSettings,
         proposer: MemberId,
     ) -> Result<()> {
@@ -686,7 +712,7 @@ impl MembershipState {
         self.settings = settings.clone();
         self.members = founders
             .iter()
-            .map(|(founder, _)| (founder.member_id, founder.clone()))
+            .map(|(founder, _)| (founder.member_id, MemberRecord::of(founder, 0)))
             .collect();
         // Founders are the initial voters, at the addresses they founded with;
         // `CoreGroupChanged` moves it from here.
@@ -707,21 +733,17 @@ impl MembershipState {
                 //
                 // The pledge survives that, because it is the one field of the
                 // record its own member owns: `PledgeChanged` is self-only
-                // (P1-20) precisely so nobody sets somebody else's, and
-                // overwriting it from a `MemberAdded` — whose pledge
-                // [`Self::authorise`] holds at 0 — is that same write by
-                // another door. Correcting a display name would otherwise
-                // retract a storage promise §5.5's custodian assignment reads.
-                // Re-admitting an expelled member finds no record and so
-                // starts them at zero, which is the intent there.
-                let record = MemberRecord {
-                    pledge_bytes: self
-                        .members
-                        .get(&member.member_id)
-                        .map_or(0, |had| had.pledge_bytes),
-                    ..member.clone()
-                };
-                self.members.insert(member.member_id, record);
+                // (P1-20) precisely so nobody sets somebody else's.
+                // Correcting a display name would otherwise retract a storage
+                // promise §5.5's custodian assignment reads. Re-admitting an
+                // expelled member finds no record and so starts them at zero,
+                // which is the intent there.
+                let pledge_bytes = self
+                    .members
+                    .get(&member.member_id)
+                    .map_or(0, |had| had.pledge_bytes);
+                self.members
+                    .insert(member.member_id, MemberRecord::of(member, pledge_bytes));
                 Ok(())
             }
 

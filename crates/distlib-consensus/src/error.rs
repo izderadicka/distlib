@@ -62,13 +62,6 @@ pub enum ConsensusError {
     #[error("the core group must be a non-empty subset of the membership, naming each member once")]
     InvalidCoreGroup,
 
-    /// A member record arrived with a pledge in it, at founding or admission.
-    ///
-    /// A pledge is set only by its owner (D8), so every member starts at 0 and
-    /// pledges with its own `PledgeChanged`.
-    #[error("{member} cannot join with a pledge of {pledge_bytes} bytes; a member starts at 0")]
-    PledgeOnJoining { member: MemberId, pledge_bytes: u64 },
-
     /// A member tried to set somebody else's pledge.
     #[error("{proposer} cannot set the pledge of {member}; a pledge is the member's own")]
     PledgeNotOwn {

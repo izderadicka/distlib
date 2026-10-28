@@ -39,7 +39,7 @@ use tokio::sync::broadcast;
 
 mod common;
 use common::{
-    PLEDGE, api, bound, config, following, found, group_settings, init_logging, pledge, record,
+    PLEDGE, api, bound, config, following, found, group_settings, init_logging, pledge, profile,
     until_projected, until_released,
 };
 
@@ -233,7 +233,7 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
             .node()
             .propose(
                 MembershipEvent::MemberAdded {
-                    member: record(member, name),
+                    member: profile(member, name),
                 },
                 &alice_key,
             )

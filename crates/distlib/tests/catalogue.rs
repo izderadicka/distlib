@@ -34,7 +34,7 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, config, following, group_settings, init_logging, record, until_projected,
+    api, bound, config, following, group_settings, init_logging, profile, until_projected,
 };
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
@@ -73,8 +73,8 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
         .node()
         .init_group(
             vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
+                (profile(alice_id, "alice"), bound(&alice)),
+                (profile(bob_id, "bob"), bound(&bob)),
             ],
             group_settings(),
             &alice_key,
@@ -163,7 +163,7 @@ struct Group {
 /// Founds a group on one core node and joins two followers to it.
 ///
 /// Followers rather than a second core node, because that is the case the
-/// address book does *not* record: `MemberRecord` carries an id, a name and a
+/// address book does *not* record: `MemberProfile` carries an id, a name and a
 /// pledge, and Raft's node map holds voters. Where bob and carol are is
 /// written down nowhere — which is the whole question this file's follower
 /// tests exist to answer.
@@ -193,7 +193,7 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
     alice
         .node()
         .init_group(
-            vec![(record(alice_id, "alice"), bound(&alice))],
+            vec![(profile(alice_id, "alice"), bound(&alice))],
             group_settings(),
             &alice_key,
         )
@@ -210,7 +210,7 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
             .node()
             .propose(
                 MembershipEvent::MemberAdded {
-                    member: record(MemberId::from(key.public()), name),
+                    member: profile(MemberId::from(key.public()), name),
                 },
                 &alice_key,
             )
@@ -391,7 +391,7 @@ async fn a_node_serves_exactly_the_protocols_its_endpoint_advertises() {
 /// **The first acceptance run of 2a-2c: two followers, relays disabled.**
 ///
 /// Neither bob nor carol is in the core group, so neither one's address is
-/// recorded anywhere — not in a `MemberRecord`, not in Raft's node map, not in
+/// recorded anywhere — not in a `MemberProfile`, not in Raft's node map, not in
 /// the address book, which holds core nodes only. Each knows where *alice* is
 /// and nothing else. What has to happen anyway is that what one writes reaches
 /// the other.
@@ -428,7 +428,7 @@ async fn what_one_follower_writes_the_other_follower_reads() {
 /// information available` while the group converged normally — and said in its
 /// failure message that the day it failed was the day to write this.
 ///
-/// **Nothing in the log carries this.** A `MemberRecord` has no address field
+/// **Nothing in the log carries this.** A `MemberProfile` has no address field
 /// and Raft's node map holds voters, so bob's whereabouts reach carol only
 /// because bob *said* where he is, on the group's gossip topic, signed by his
 /// own key. Carol was not there to hear him say it the first time; she learns
@@ -1534,7 +1534,7 @@ async fn a_late_joiner_still_learns_where_the_others_are() {
         .node()
         .propose(
             MembershipEvent::MemberAdded {
-                member: record(latecomer_id, "latecomer"),
+                member: profile(latecomer_id, "latecomer"),
             },
             &group.alice_key,
         )
@@ -1605,7 +1605,7 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
     alice
         .node()
         .init_group(
-            vec![(record(alice_id, "alice"), bound(&alice))],
+            vec![(profile(alice_id, "alice"), bound(&alice))],
             group_settings(),
             &alice_key,
         )
@@ -1620,7 +1620,7 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
             .node()
             .propose(
                 MembershipEvent::MemberAdded {
-                    member: record(MemberId::from(key.public()), name),
+                    member: profile(MemberId::from(key.public()), name),
                 },
                 &alice_key,
             )

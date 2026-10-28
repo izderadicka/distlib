@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{
-    ConsensusError, MemberRecord, MemberlogClient, MembershipEvent, MembershipState, ProposeError,
+    ConsensusError, MemberProfile, MemberlogClient, MembershipEvent, MembershipState, ProposeError,
     SignedEvent, Timestamp, node::NodeError,
 };
 use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId};
@@ -73,7 +73,7 @@ async fn a_founded_group_derives_its_membership_from_the_log() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -108,8 +108,8 @@ async fn admitting_a_member_reaches_every_node() {
         .node
         .init_group(
             vec![
-                (first.record("first"), first.addr.clone()),
-                (second.record("second"), second.addr.clone()),
+                (first.profile("first"), first.addr.clone()),
+                (second.profile("second"), second.addr.clone()),
             ],
             Default::default(),
             &first.secret,
@@ -128,10 +128,9 @@ async fn admitting_a_member_reaches_every_node() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "newcomer".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &first.secret,
@@ -193,7 +192,7 @@ async fn founding_replaces_the_seed_with_the_log() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -236,8 +235,8 @@ async fn a_follower_can_propose() {
         .node
         .init_group(
             vec![
-                (first.record("first"), first.addr.clone()),
-                (second.record("second"), second.addr.clone()),
+                (first.profile("first"), first.addr.clone()),
+                (second.profile("second"), second.addr.clone()),
             ],
             Default::default(),
             &first.secret,
@@ -269,10 +268,9 @@ async fn a_follower_can_propose() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "admitted by a follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &second.secret,
@@ -301,7 +299,7 @@ async fn a_proposal_the_rules_refuse_is_reported_as_refused() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -361,7 +359,7 @@ async fn three_founders_converge_on_one_group() {
     let founders = peers
         .iter()
         .enumerate()
-        .map(|(index, peer)| (peer.record(&format!("founder-{index}")), peer.addr.clone()))
+        .map(|(index, peer)| (peer.profile(&format!("founder-{index}")), peer.addr.clone()))
         .collect();
     peers[0]
         .node
@@ -415,7 +413,7 @@ async fn a_founded_trio() -> Vec<Peer> {
     let founders = peers
         .iter()
         .enumerate()
-        .map(|(index, peer)| (peer.record(&format!("founder-{index}")), peer.addr.clone()))
+        .map(|(index, peer)| (peer.profile(&format!("founder-{index}")), peer.addr.clone()))
         .collect();
     peers[0]
         .node
@@ -586,7 +584,7 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -599,10 +597,9 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
 
     let newcomer = MemberId::from(SecretKey::generate().public());
     let oversized = MembershipEvent::MemberAdded {
-        member: MemberRecord {
+        member: MemberProfile {
             member_id: newcomer,
             display_name: "x".repeat(distlib_consensus::MAX_DISPLAY_NAME + 1),
-            pledge_bytes: 0,
         },
     };
 
@@ -627,10 +624,9 @@ async fn an_over_long_name_is_refused_at_both_doors_into_the_log() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: bystander_id,
                     display_name: "bystander".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -850,10 +846,9 @@ async fn a_demoted_node_catches_up_on_what_it_missed() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "newcomer".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &peers[0].secret,
@@ -977,10 +972,9 @@ async fn a_demoted_node_promoted_again_votes_again() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "newcomer".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &stays.secret,
@@ -1017,10 +1011,9 @@ async fn a_follower_proposing_a_core_expulsion_needs_a_majority_of_the_core() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "the proposer".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &peers[0].secret,
@@ -1163,10 +1156,9 @@ async fn a_demoted_node_hears_its_own_proposal_at_once() {
         Duration::from_secs(10),
         peers[2].node.propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "proposed by the demoted".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &peers[2].secret,
@@ -1262,10 +1254,9 @@ async fn expelling_the_leader_leaves_a_group_that_still_commits() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "after the leader".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &rest[0].secret,
@@ -1292,7 +1283,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -1309,7 +1300,7 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: bystander.record("bystander"),
+                member: bystander.profile("bystander"),
             },
             &founder.secret,
         )
@@ -1354,10 +1345,9 @@ async fn a_member_who_is_not_a_voter_is_refused_raft_but_may_propose() {
     let event = distlib_consensus::SignedEvent::sign(
         &bystander.secret,
         MembershipEvent::MemberAdded {
-            member: MemberRecord {
+            member: MemberProfile {
                 member_id: newcomer,
                 display_name: "invited by a non-voter".to_owned(),
-                pledge_bytes: 0,
             },
         },
         distlib_consensus::Timestamp::now(),
@@ -1416,7 +1406,7 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -1433,7 +1423,7 @@ async fn a_node_that_founds_nothing_serves_raft_to_nobody() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: bystander.record("bystander"),
+                member: bystander.profile("bystander"),
             },
             &founder.secret,
         )
@@ -1494,7 +1484,7 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -1513,10 +1503,9 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -1549,10 +1538,9 @@ async fn a_follower_catches_up_on_the_log_it_was_never_pushed() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "later".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -1699,8 +1687,8 @@ async fn every_member_a_node_reports_is_one_it_admits() {
         .node
         .init_group(
             vec![
-                (first.record("first"), first.addr.clone()),
-                (second.record("second"), second.addr.clone()),
+                (first.profile("first"), first.addr.clone()),
+                (second.profile("second"), second.addr.clone()),
             ],
             Default::default(),
             &first.secret,
@@ -1718,10 +1706,9 @@ async fn every_member_a_node_reports_is_one_it_admits() {
                 .node
                 .propose(
                     MembershipEvent::MemberAdded {
-                        member: MemberRecord {
+                        member: MemberProfile {
                             member_id: *newcomer,
                             display_name: format!("newcomer-{index}"),
-                            pledge_bytes: 0,
                         },
                     },
                     &first.secret,
@@ -1792,8 +1779,8 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
         .node
         .init_group(
             vec![
-                (first.record("first"), first.addr.clone()),
-                (second.record("second"), second.addr.clone()),
+                (first.profile("first"), first.addr.clone()),
+                (second.profile("second"), second.addr.clone()),
             ],
             Default::default(),
             &first.secret,
@@ -1807,7 +1794,7 @@ async fn a_core_node_that_is_not_the_leader_hands_a_members_proposal_on() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: member.record("member"),
+                member: member.profile("member"),
             },
             &first.secret,
         )
@@ -1930,7 +1917,7 @@ async fn a_founder_and_its_follower_with(settings: GroupSettings) -> (Peer, Peer
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             settings,
             &founder.secret,
         )
@@ -1947,10 +1934,9 @@ async fn a_founder_and_its_follower_with(settings: GroupSettings) -> (Peer, Peer
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -1988,7 +1974,7 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -2006,10 +1992,9 @@ async fn a_follower_moves_on_from_a_source_that_does_not_answer() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2059,7 +2044,7 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -2076,10 +2061,9 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2113,10 +2097,9 @@ async fn a_change_reaches_a_follower_without_waiting_for_its_timer() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: newcomer,
                     display_name: "newcomer".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2179,7 +2162,7 @@ async fn voters_that_never_spoke_can_still_be_dialled_by_id() {
     let founders = peers
         .iter()
         .enumerate()
-        .map(|(index, peer)| (peer.record(&format!("voter-{index}")), peer.addr.clone()))
+        .map(|(index, peer)| (peer.profile(&format!("voter-{index}")), peer.addr.clone()))
         .collect();
     peers[0]
         .node
@@ -2266,7 +2249,7 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
     let founders = core
         .iter()
         .enumerate()
-        .map(|(index, peer)| (peer.record(&format!("voter-{index}")), peer.addr.clone()))
+        .map(|(index, peer)| (peer.profile(&format!("voter-{index}")), peer.addr.clone()))
         .collect();
     core[0]
         .node
@@ -2283,10 +2266,9 @@ async fn a_follower_learns_the_rest_of_the_core_group_from_the_one_it_asks() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: joiner,
                     display_name: "late arrival".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &core[0].secret,
@@ -2339,7 +2321,7 @@ async fn a_follower_reports_where_the_core_group_is() {
     founder
         .node
         .init_group(
-            vec![(founder.record("the founder"), founder.addr.clone())],
+            vec![(founder.profile("the founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -2354,10 +2336,9 @@ async fn a_follower_reports_where_the_core_group_is() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: joiner,
                     display_name: "a follower".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2404,7 +2385,7 @@ async fn an_expelled_follower_stops_asking_and_says_so() {
     let core = Peer::start(core_key, vec![follower_id]).await;
     core.node
         .init_group(
-            vec![(core.record("core"), core.addr.clone())],
+            vec![(core.profile("core"), core.addr.clone())],
             Default::default(),
             &core.secret,
         )
@@ -2413,10 +2394,9 @@ async fn an_expelled_follower_stops_asking_and_says_so() {
     core.node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: follower_id,
                     display_name: "for now".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &core.secret,
@@ -2490,7 +2470,7 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -2514,10 +2494,9 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: joining,
                     display_name: "joiner".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2554,10 +2533,9 @@ async fn a_follower_promoted_by_the_log_starts_voting_without_a_restart() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: absentee,
                     display_name: "absentee".to_owned(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,
@@ -2835,7 +2813,7 @@ async fn disjoint_singleton_replacement_converges_and_accepts_writes() {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             Default::default(),
             &founder.secret,
         )
@@ -2848,10 +2826,9 @@ async fn disjoint_singleton_replacement_converges_and_accepts_writes() {
         .node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: joining,
                     display_name: "replacement".into(),
-                    pledge_bytes: 0,
                 },
             },
             &founder.secret,

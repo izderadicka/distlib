@@ -49,26 +49,22 @@ impl Timestamp {
     }
 }
 
-/// What is known about one member.
+/// Who a member is, as founding or admission states it.
+///
+/// No pledge: a pledge is set only by its owner (D8), and these events are
+/// signed by somebody else, so every member joins at 0 and pledges with its
+/// own [`MembershipEvent::PledgeChanged`].
 ///
 /// Per delta P0-2 there is no separate `node_id`: v1 defines member and
 /// endpoint identity as equal, and Phase 2 introduces `DeviceId` at the point
 /// multi-device makes it mean something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemberRecord {
+pub struct MemberProfile {
     /// The member's identity, and the key their connections are authenticated by.
     pub member_id: MemberId,
 
     /// Display name. Metadata, not identity — two members may share one.
     pub display_name: String,
-
-    /// Storage this member commits to providing.
-    ///
-    /// Lives in the log rather than in gossip because custodian assignment
-    /// (§5.5) requires every peer to agree on identical weights; a value that
-    /// drifted between peers would give them different custodians for the same
-    /// item.
-    pub pledge_bytes: u64,
 }
 
 /// A change to the group's membership.
@@ -91,7 +87,7 @@ pub enum MembershipEvent {
     /// the log's own contents by any other route.
     GroupFounded {
         group_id: GroupId,
-        founders: Vec<(MemberRecord, NodeAddr)>,
+        founders: Vec<(MemberProfile, NodeAddr)>,
         /// What the group decided once, for good: replicas, custody weights,
         /// how long proposals wait (phase 5's D2). Boxed, so the one entry
         /// that carries it does not make every other event as large.
@@ -102,7 +98,7 @@ pub enum MembershipEvent {
     ///
     /// Also the way a previously expelled member is re-admitted; the latest
     /// event wins, and the log keeps the whole history either way.
-    MemberAdded { member: MemberRecord },
+    MemberAdded { member: MemberProfile },
 
     /// A member is removed. Every peer drops them from the allowlist and closes
     /// connections already open to them (§4.4).
@@ -224,7 +220,7 @@ impl MembershipEvent {
     /// three entries. Two different events would then describe the same group
     /// under different ids.
     pub fn found(
-        founders: Vec<(MemberRecord, NodeAddr)>,
+        founders: Vec<(MemberProfile, NodeAddr)>,
         settings: GroupSettings,
         at: Timestamp,
     ) -> Result<Self> {
@@ -260,8 +256,8 @@ pub(crate) fn check_settings(settings: &GroupSettings) -> Result<()> {
         })
 }
 
-/// The founders' ids, sorted — if the set is a valid one: non-empty, no member
-/// twice, and no pledges.
+/// The founders' ids, sorted — if the set is a valid one: non-empty, and no
+/// member twice.
 ///
 /// One function for both because they are one pass, and because the two callers
 /// want the same list for related reasons. [`MembershipEvent::found`] hashes it,
@@ -271,13 +267,10 @@ pub(crate) fn check_settings(settings: &GroupSettings) -> Result<()> {
 /// Sorting `MemberId` sorts by the key's bytes — `iroh::PublicKey` compares
 /// `as_bytes()`, and the newtype's derived `Ord` delegates to it — which is what
 /// lets one list serve a byte-oriented hash and an equality scan alike.
-fn checked_ids(founders: &[(MemberRecord, NodeAddr)]) -> Result<Vec<MemberId>> {
+fn checked_ids(founders: &[(MemberProfile, NodeAddr)]) -> Result<Vec<MemberId>> {
     if founders.is_empty() {
         return Err(ConsensusError::NoFounders);
     }
-    founders
-        .iter()
-        .try_for_each(|(record, _)| no_pledge(record))?;
 
     let mut ids: Vec<MemberId> = founders
         .iter()
@@ -290,27 +283,12 @@ fn checked_ids(founders: &[(MemberRecord, NodeAddr)]) -> Result<Vec<MemberId>> {
     Ok(ids)
 }
 
-/// Refuses a record that joins the group with a pledge in it.
-///
-/// A pledge is set only by its owner (D8), and a record in `GroupFounded` or
-/// `MemberAdded` is signed by somebody else — even the signing founder pledges
-/// afterwards, so one rule covers both. Every member starts at 0.
-pub(crate) fn no_pledge(record: &MemberRecord) -> Result<()> {
-    match record.pledge_bytes {
-        0 => Ok(()),
-        pledge_bytes => Err(ConsensusError::PledgeOnJoining {
-            member: record.member_id,
-            pledge_bytes,
-        }),
-    }
-}
-
 /// The rule a founder set must satisfy, for the caller that wants only the
 /// verdict.
 ///
 /// Checked in two places on purpose — [`MembershipEvent::found`] so a locally
 /// built event cannot be malformed, and again on apply, because an event
 /// arriving from another node is not ours to trust.
-pub(crate) fn check_founders(founders: &[(MemberRecord, NodeAddr)]) -> Result<()> {
+pub(crate) fn check_founders(founders: &[(MemberProfile, NodeAddr)]) -> Result<()> {
     checked_ids(founders).map(|_| ())
 }

@@ -23,7 +23,7 @@ use std::{
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState};
 use distlib_core::{
     Config, CoreMember, DataDir, GroupSettings, ItemId, MemberId, NetConfig, NodeAddr,
 };
@@ -122,13 +122,12 @@ pub fn group_settings() -> GroupSettings {
     }
 }
 
-/// A member's record as founding or admission writes it: no pledge, which only
-/// the member sets — see [`pledge`].
-pub fn record(id: MemberId, name: &str) -> MemberRecord {
-    MemberRecord {
+/// A member's profile for founding or admission; the member pledges itself,
+/// see [`pledge`].
+pub fn profile(id: MemberId, name: &str) -> MemberProfile {
+    MemberProfile {
         member_id: id,
         display_name: name.to_owned(),
-        pledge_bytes: 0,
     }
 }
 
@@ -262,7 +261,7 @@ pub async fn found<R: Borrow<Runtime>>(
         .map(|(runtime, (key, _))| {
             let member_id = MemberId::from(key.public());
             (
-                record(member_id, &member_id.to_string()),
+                profile(member_id, &member_id.to_string()),
                 bound(runtime.borrow()),
             )
         })

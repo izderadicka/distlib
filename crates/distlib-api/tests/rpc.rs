@@ -20,7 +20,7 @@ use distlib_api::{
     tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
     uploads::Uploads,
 };
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
@@ -274,10 +274,9 @@ impl Harness {
 
         node.init_group(
             vec![(
-                MemberRecord {
+                MemberProfile {
                     member_id: id,
                     display_name: "founder".to_owned(),
-                    pledge_bytes: 0,
                 },
                 addr,
             )],
@@ -451,10 +450,9 @@ impl Harness {
             .enumerate()
             .map(|(index, (id, addr))| {
                 (
-                    MemberRecord {
+                    MemberProfile {
                         member_id: *id,
                         display_name: format!("founder-{index}"),
-                        pledge_bytes: 0,
                     },
                     addr.clone(),
                 )

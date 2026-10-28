@@ -638,7 +638,7 @@ fn mismatched<E: std::error::Error>(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use crate::{MemberRecord, MembershipEvent, SignedEvent, Timestamp};
+    use crate::{MemberProfile, MembershipEvent, SignedEvent, Timestamp};
     use openraft::{
         CommittedLeaderId, Entry, EntryPayload, LogId, Membership, Vote,
         storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
@@ -675,13 +675,12 @@ mod tests {
         let me = MemberId::from(key.public());
         let learner = MemberId::from(iroh::SecretKey::from_bytes(&[32; 32]).public());
         let raw = RawMemberId::from(me);
-        let record = |member_id| MemberRecord {
+        let profile = |member_id| MemberProfile {
             member_id,
             display_name: "member".into(),
-            pledge_bytes: 0,
         };
         let found = MembershipEvent::found(
-            vec![(record(me), NodeAddr::default())],
+            vec![(profile(me), NodeAddr::default())],
             Default::default(),
             Timestamp::from_millis(1),
         )
@@ -701,7 +700,7 @@ mod tests {
             EntryPayload::Normal(sign(found, 1)),
             EntryPayload::Normal(sign(
                 MembershipEvent::MemberAdded {
-                    member: record(learner),
+                    member: profile(learner),
                 },
                 2,
             )),

@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_consensus::{
-    ConsensusError, MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp,
+    ConsensusError, MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -41,11 +41,10 @@ impl Signer {
         Self { secret, id }
     }
 
-    fn record(&self, name: &str) -> MemberRecord {
-        MemberRecord {
+    fn profile(&self, name: &str) -> MemberProfile {
+        MemberProfile {
             member_id: self.id,
             display_name: name.to_owned(),
-            pledge_bytes: 0,
         }
     }
 
@@ -55,8 +54,8 @@ impl Signer {
     /// the log carrying addresses is that they are not interchangeable — a test
     /// that gave every founder the same one could not tell a lost address from
     /// a kept one.
-    fn founder(&self, name: &str) -> (MemberRecord, NodeAddr) {
-        (self.record(name), self.addr(0))
+    fn founder(&self, name: &str) -> (MemberProfile, NodeAddr) {
+        (self.profile(name), self.addr(0))
     }
 
     /// A recognisable address for this signer, `port` distinguishing successive
@@ -224,7 +223,7 @@ fn events_before_founding_are_refused() {
 
     let event = alice.sign(
         MembershipEvent::MemberAdded {
-            member: alice.record("alice"),
+            member: alice.profile("alice"),
         },
         state.changed_at(),
     );
@@ -369,7 +368,7 @@ fn the_group_id_derivation_is_fixed() {
     // would say so. It pins the tag, the count, the timestamp encoding and the
     // sort together — the sort in particular, which is over `MemberId` and has
     // to stay its key bytes' own order.
-    let founders: Vec<(MemberRecord, NodeAddr)> = [3u8, 1, 2]
+    let founders: Vec<(MemberProfile, NodeAddr)> = [3u8, 1, 2]
         .into_iter()
         .map(|seed| {
             let signer = Signer::from_secret(SecretKey::from_bytes(&[seed; 32]));
@@ -432,7 +431,7 @@ fn a_non_member_cannot_propose() {
 
     let event = outsider.sign(
         MembershipEvent::MemberAdded {
-            member: outsider.record("outsider"),
+            member: outsider.profile("outsider"),
         },
         state.changed_at(),
     );
@@ -454,7 +453,7 @@ fn an_expelled_member_can_no_longer_propose() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -567,14 +566,14 @@ fn an_expelled_member_can_be_re_admitted() {
 
     for event in [
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
         MembershipEvent::MemberExpelled {
             member: bob.id,
             reason: "mistake".to_owned(),
         },
         MembershipEvent::MemberAdded {
-            member: bob.record("bob again"),
+            member: bob.profile("bob again"),
         },
     ] {
         propose(&mut state, &alice, event).unwrap();
@@ -673,7 +672,7 @@ fn the_core_group_can_grow() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -770,7 +769,7 @@ fn a_core_member_admitting_somebody_is_a_single_step() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -790,7 +789,7 @@ fn an_admission_proposed_by_a_follower_waits_for_a_core_member() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -800,7 +799,7 @@ fn an_admission_proposed_by_a_follower_waits_for_a_core_member() {
         &mut state,
         &bob,
         MembershipEvent::MemberAdded {
-            member: carol.record("carol"),
+            member: carol.profile("carol"),
         },
     )
     .unwrap();
@@ -860,7 +859,7 @@ fn expelling_a_follower_takes_one_core_member() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: newcomer.record("newcomer"),
+            member: newcomer.profile("newcomer"),
         },
     )
     .unwrap();
@@ -940,7 +939,7 @@ fn a_follower_cannot_approve() {
         &mut state,
         &founders[0],
         MembershipEvent::MemberAdded {
-            member: bystander.record("bystander"),
+            member: bystander.profile("bystander"),
         },
     )
     .unwrap();
@@ -1013,7 +1012,7 @@ fn the_last_voter_cannot_be_expelled() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -1039,7 +1038,7 @@ fn the_last_voter_cannot_be_expelled() {
             &mut state,
             &alice,
             MembershipEvent::MemberAdded {
-                member: alice.record("alice"),
+                member: alice.profile("alice"),
             },
         )
         .unwrap();
@@ -1187,7 +1186,7 @@ fn a_pending_proposal_about_a_member_is_dropped_when_their_membership_changes() 
             &mut state,
             alice,
             MembershipEvent::MemberAdded {
-                member: newcomer.record("newcomer"),
+                member: newcomer.profile("newcomer"),
             },
         )
         .unwrap();
@@ -1526,7 +1525,7 @@ fn a_change_that_takes_effect_at_once_is_not_refused_as_a_duplicate() {
             &mut state,
             alice,
             MembershipEvent::MemberAdded {
-                member: newcomer.record("newcomer"),
+                member: newcomer.profile("newcomer"),
             },
         )
         .unwrap();
@@ -1799,7 +1798,7 @@ fn a_member_cannot_set_another_members_pledge() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -1849,31 +1848,22 @@ fn a_pledge_below_the_groups_minimum_is_refused() {
 }
 
 #[test]
-fn a_member_is_admitted_without_a_pledge() {
-    // A pledge is set only by its owner (#154), and an admission is signed by
-    // somebody else.
+fn founders_and_admitted_members_start_without_a_pledge() {
+    // A pledge is set only by its owner (#154), and founding and admission
+    // are signed by somebody else, so neither carries one.
     let (mut state, alice) = founded();
     let bob = Signer::generate();
-
-    let refused = propose(
+    propose(
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: MemberRecord {
-                pledge_bytes: PLEDGE,
-                ..bob.record("bob")
-            },
+            member: bob.profile("bob"),
         },
-    );
+    )
+    .unwrap();
 
-    assert_eq!(
-        refused,
-        Err(ConsensusError::PledgeOnJoining {
-            member: bob.id,
-            pledge_bytes: PLEDGE,
-        })
-    );
-    assert!(!state.is_member(&bob.id));
+    assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, 0);
+    assert_eq!(state.member(&bob.id).unwrap().pledge_bytes, 0);
 }
 
 #[test]
@@ -1896,7 +1886,7 @@ fn re_admitting_a_member_keeps_their_pledge() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob, renamed"),
+            member: bob.profile("bob, renamed"),
         },
     )
     .unwrap();
@@ -1904,67 +1894,6 @@ fn re_admitting_a_member_keeps_their_pledge() {
     let record = state.member(&bob.id).unwrap();
     assert_eq!(record.display_name, "bob, renamed");
     assert_eq!(record.pledge_bytes, PLEDGE);
-}
-
-#[test]
-fn a_founder_pledging_at_founding_is_refused_when_building_the_event() {
-    let alice = Signer::generate();
-    let bob = Signer::generate();
-
-    let built = MembershipEvent::found(
-        vec![
-            alice.founder("alice"),
-            (
-                MemberRecord {
-                    pledge_bytes: PLEDGE,
-                    ..bob.record("bob")
-                },
-                bob.addr(0),
-            ),
-        ],
-        Default::default(),
-        Timestamp::from_millis(1),
-    );
-
-    assert_eq!(
-        built.unwrap_err(),
-        ConsensusError::PledgeOnJoining {
-            member: bob.id,
-            pledge_bytes: PLEDGE,
-        }
-    );
-}
-
-#[test]
-fn a_founder_pledging_at_founding_is_refused_on_apply() {
-    // Even the signing founder's own pledge: every founder pledges afterwards,
-    // so one rule covers founding and admission.
-    let alice = Signer::generate();
-    let mut state = MembershipState::new();
-
-    let event = alice.sign(
-        MembershipEvent::GroupFounded {
-            group_id: GroupId::from_bytes([7; 32]),
-            founders: vec![(
-                MemberRecord {
-                    pledge_bytes: PLEDGE,
-                    ..alice.record("alice")
-                },
-                alice.addr(0),
-            )],
-            settings: Box::default(),
-        },
-        state.changed_at(),
-    );
-
-    assert_eq!(
-        apply_next(&mut state, &event),
-        Err(ConsensusError::PledgeOnJoining {
-            member: alice.id,
-            pledge_bytes: PLEDGE,
-        })
-    );
-    assert!(state.is_empty(), "not founded");
 }
 
 #[test]
@@ -1977,7 +1906,7 @@ fn a_non_core_member_cannot_change_the_core_group() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -2040,7 +1969,7 @@ fn a_proposal_against_a_superseded_membership_is_refused() {
         &mut state,
         &alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -2257,7 +2186,7 @@ fn apply_scenario(
         let (actor, subject) = (&pool[actor % pool.len()], &pool[choice % pool.len()]);
         let event = match kind {
             0 => MembershipEvent::MemberAdded {
-                member: subject.record("member"),
+                member: subject.profile("member"),
             },
             1 => MembershipEvent::MemberExpelled {
                 member: subject.id,

@@ -29,7 +29,7 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
     error::ConsensusError,
-    event::{MemberRecord, MembershipEvent, Timestamp},
+    event::{MemberProfile, MembershipEvent, Timestamp},
     gossip,
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
@@ -871,7 +871,7 @@ impl MembershipNode {
     /// checked against.
     pub async fn init_group(
         &self,
-        founders: Vec<(MemberRecord, NodeAddr)>,
+        founders: Vec<(MemberProfile, NodeAddr)>,
         settings: GroupSettings,
         secret_key: &SecretKey,
     ) -> Result<()> {
@@ -1786,24 +1786,28 @@ mod retirement_tests {
         let teacher = MemberId::from(old.public());
         let me = MemberId::from(promoted.public());
         let expelled = MemberId::from(SecretKey::from_bytes(&[23; 32]).public());
-        let record = |member_id| MemberRecord {
+        let profile = |member_id| MemberProfile {
             member_id,
             display_name: "member".into(),
-            pledge_bytes: 0,
         };
         let founding = MembershipEvent::found(
-            vec![(record(teacher), NodeAddr::default())],
+            vec![(profile(teacher), NodeAddr::default())],
             Default::default(),
             Timestamp::from_millis(1),
         )
         .unwrap();
         let events = vec![
             (&old, founding),
-            (&old, MembershipEvent::MemberAdded { member: record(me) }),
             (
                 &old,
                 MembershipEvent::MemberAdded {
-                    member: record(expelled),
+                    member: profile(me),
+                },
+            ),
+            (
+                &old,
+                MembershipEvent::MemberAdded {
+                    member: profile(expelled),
                 },
             ),
             (
@@ -2019,10 +2023,9 @@ mod retirement_tests {
         let teacher = MemberId::from(SecretKey::from_bytes(&[2; 32]).public());
         let event = MembershipEvent::found(
             vec![(
-                crate::MemberRecord {
+                crate::MemberProfile {
                     member_id: me,
                     display_name: "me".into(),
-                    pledge_bytes: 0,
                 },
                 NodeAddr::default(),
             )],
@@ -2101,13 +2104,12 @@ mod retirement_tests {
         let key = SecretKey::from_bytes(&[1; 32]);
         let old = MemberId::from(key.public());
         let new = MemberId::from(SecretKey::from_bytes(&[2; 32]).public());
-        let record = |id| crate::MemberRecord {
+        let profile = |id| crate::MemberProfile {
             member_id: id,
             display_name: "member".into(),
-            pledge_bytes: 0,
         };
         let founded = MembershipEvent::found(
-            vec![(record(old), NodeAddr::default())],
+            vec![(profile(old), NodeAddr::default())],
             Default::default(),
             Timestamp::from_millis(1),
         )
@@ -2115,7 +2117,7 @@ mod retirement_tests {
         let events = [
             founded,
             MembershipEvent::MemberAdded {
-                member: record(new),
+                member: profile(new),
             },
             MembershipEvent::CoreGroupChanged {
                 core: vec![(new, NodeAddr::default())],

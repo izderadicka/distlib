@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use distlib_consensus::{MemberRecord, MembershipEvent};
+use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{MemberId, RawMemberId};
 use iroh::SecretKey;
 
@@ -29,7 +29,7 @@ async fn a_founded_trio() -> Vec<Peer> {
     let founders = peers
         .iter()
         .enumerate()
-        .map(|(i, p)| (p.record(&format!("founder-{i}")), p.addr.clone()))
+        .map(|(i, p)| (p.profile(&format!("founder-{i}")), p.addr.clone()))
         .collect();
     peers[0]
         .node
@@ -100,10 +100,9 @@ async fn core_turnover(restart: bool) {
     a.node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: d_id,
                     display_name: "d".into(),
-                    pledge_bytes: 0,
                 },
             },
             &a.secret,
@@ -219,10 +218,9 @@ async fn an_expelled_voter_that_exits_is_forgotten_by_raft() {
     a.node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: stranger,
                     display_name: "after".into(),
-                    pledge_bytes: 0,
                 },
             },
             &a.secret,
@@ -247,10 +245,9 @@ async fn re_promotion_accepts_a_newly_elected_leader() {
     a.node
         .propose(
             MembershipEvent::MemberAdded {
-                member: MemberRecord {
+                member: MemberProfile {
                     member_id: id,
                     display_name: "new leader".into(),
-                    pledge_bytes: 0,
                 },
             },
             &a.secret,

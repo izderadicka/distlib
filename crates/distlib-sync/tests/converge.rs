@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId,
     ItemKind, MemberId, NodeAddr, ProbeFailure, Rating, Review, SignedAddress, Wish, WishFields,
@@ -139,7 +139,7 @@ impl Node {
 }
 
 /// The same projection with one more member admitted, folded by hand.
-fn admitting(founded: &MembershipState, member: MemberRecord, by: &SecretKey) -> MembershipState {
+fn admitting(founded: &MembershipState, member: MemberProfile, by: &SecretKey) -> MembershipState {
     let event = MembershipEvent::MemberAdded { member };
     let signed = SignedEvent::sign(by, event, Timestamp::from_millis(2), 1).unwrap();
     let mut state = founded.clone();
@@ -148,7 +148,7 @@ fn admitting(founded: &MembershipState, member: MemberRecord, by: &SecretKey) ->
 }
 
 /// The projection a founded two-member group produces, folded by hand.
-fn founded(founders: Vec<(MemberRecord, NodeAddr)>, by: &SecretKey) -> MembershipState {
+fn founded(founders: Vec<(MemberProfile, NodeAddr)>, by: &SecretKey) -> MembershipState {
     let event =
         MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1)).unwrap();
     let signed = SignedEvent::sign(by, event, Timestamp::from_millis(1), 0).unwrap();
@@ -157,11 +157,10 @@ fn founded(founders: Vec<(MemberRecord, NodeAddr)>, by: &SecretKey) -> Membershi
     state
 }
 
-fn record(id: MemberId, name: &str) -> MemberRecord {
-    MemberRecord {
+fn profile(id: MemberId, name: &str) -> MemberProfile {
+    MemberProfile {
         member_id: id,
         display_name: name.to_owned(),
-        pledge_bytes: 0,
     }
 }
 
@@ -194,8 +193,8 @@ async fn what_one_member_writes_the_other_reads() {
 
     let founding = founded(
         vec![
-            (record(alice_id, "alice"), alice.addr.clone()),
-            (record(bob_id, "bob"), bob.addr.clone()),
+            (profile(alice_id, "alice"), alice.addr.clone()),
+            (profile(bob_id, "bob"), bob.addr.clone()),
         ],
         &alice_key,
     );
@@ -253,7 +252,7 @@ async fn three_founders() -> (
         .iter()
         .zip(&nodes)
         .zip(["alice", "bob", "carol"])
-        .map(|((id, node), name)| (record(*id, name), node.addr.clone()))
+        .map(|((id, node), name)| (profile(*id, name), node.addr.clone()))
         .collect();
     let founding = founded(founders, &keys[0]);
     for log in &logs {
@@ -637,8 +636,8 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
 
     let founding = founded(
         vec![
-            (record(alice_id, "alice"), alice.addr.clone()),
-            (record(bob_id, "bob"), bob.addr.clone()),
+            (profile(alice_id, "alice"), alice.addr.clone()),
+            (profile(bob_id, "bob"), bob.addr.clone()),
         ],
         &alice_key,
     );
@@ -750,7 +749,7 @@ async fn a_broken_store_is_not_reported_as_content_on_its_way() {
     let node = Node::start(key.clone(), sees).await;
     to_node
         .send(founded(
-            vec![(record(id, "alice"), node.addr.clone())],
+            vec![(profile(id, "alice"), node.addr.clone())],
             &key,
         ))
         .unwrap();
@@ -825,8 +824,8 @@ async fn a_node_that_lost_its_content_asks_for_it_again() {
 
     let founding = founded(
         vec![
-            (record(alice_id, "alice"), alice.addr.clone()),
-            (record(bob_id, "bob"), bob.addr.clone()),
+            (profile(alice_id, "alice"), alice.addr.clone()),
+            (profile(bob_id, "bob"), bob.addr.clone()),
         ],
         &alice_key,
     );
@@ -946,8 +945,8 @@ async fn stranded() -> Stranded {
 
     let founding = founded(
         vec![
-            (record(alice_id, "alice"), alice.addr.clone()),
-            (record(bob_id, "bob"), bob.addr.clone()),
+            (profile(alice_id, "alice"), alice.addr.clone()),
+            (profile(bob_id, "bob"), bob.addr.clone()),
         ],
         &alice_key,
     );
@@ -1072,7 +1071,7 @@ async fn a_member_who_arrives_with_the_content_is_asked_at_once() {
     for node in [&alice, &bob] {
         node.directory.learn(&announced).unwrap();
     }
-    let with_carol = admitting(&founding, record(carol_id, "carol"), &alice_key);
+    let with_carol = admitting(&founding, profile(carol_id, "carol"), &alice_key);
     to_alice.send(with_carol.clone()).unwrap();
     to_bob.send(with_carol.clone()).unwrap();
     to_carol.send(with_carol).unwrap();
@@ -1157,7 +1156,7 @@ async fn changes_are_reported_as_items_rather_than_as_entries() {
     let alice = Node::start(alice_key.clone(), alice_sees).await;
     to_alice
         .send(founded(
-            vec![(record(alice_id, "alice"), alice.addr.clone())],
+            vec![(profile(alice_id, "alice"), alice.addr.clone())],
             &alice_key,
         ))
         .unwrap();

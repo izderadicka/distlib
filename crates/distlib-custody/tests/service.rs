@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{ContentHash, FileRecord, FileRole, Item, ItemId, MemberId, NodeAddr};
 use distlib_custody::{Custody, CustodySources};
 use distlib_store::{Store, StoredItem};
@@ -23,10 +23,9 @@ fn founded(me: &SecretKey, other: &SecretKey) -> MembershipState {
     };
     let founder = |key: &SecretKey, name: &str| {
         (
-            MemberRecord {
+            MemberProfile {
                 member_id: MemberId::from(key.public()),
                 display_name: name.to_owned(),
-                pledge_bytes: 0,
             },
             NodeAddr::default(),
         )

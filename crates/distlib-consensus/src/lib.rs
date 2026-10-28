@@ -19,7 +19,7 @@ pub mod signed;
 pub mod state;
 
 pub use error::{ConsensusError, Result};
-pub use event::{MAX_DISPLAY_NAME, MAX_REASON, MemberRecord, MembershipEvent, Timestamp};
+pub use event::{MAX_DISPLAY_NAME, MAX_REASON, MemberProfile, MembershipEvent, Timestamp};
 pub use node::{MembershipNode, RAFT_DB, alpns};
 pub use raft::{
     BYTES_PER_FETCH, EVENTS_PER_FETCH, FetchFailed, Fetched, LogPage, LogStore, MemberlogClient,
@@ -27,4 +27,4 @@ pub use raft::{
     RaftProtocol, Source, StateMachineStore, TypeConfig,
 };
 pub use signed::SignedEvent;
-pub use state::{MembershipState, Proposal};
+pub use state::{MemberRecord, MembershipState, Proposal};
