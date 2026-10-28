@@ -1877,6 +1877,36 @@ fn a_member_is_admitted_without_a_pledge() {
 }
 
 #[test]
+fn re_admitting_a_member_keeps_their_pledge() {
+    // How a record is corrected. The pledge is the member's own, so a
+    // correction by somebody else must not retract it.
+    let (mut state, founders) = founded_by(2);
+    let (alice, bob) = (&founders[0], &founders[1]);
+    propose(
+        &mut state,
+        bob,
+        MembershipEvent::PledgeChanged {
+            member: bob.id,
+            pledge_bytes: PLEDGE,
+        },
+    )
+    .unwrap();
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberAdded {
+            member: bob.record("bob, renamed"),
+        },
+    )
+    .unwrap();
+
+    let record = state.member(&bob.id).unwrap();
+    assert_eq!(record.display_name, "bob, renamed");
+    assert_eq!(record.pledge_bytes, PLEDGE);
+}
+
+#[test]
 fn a_founder_pledging_at_founding_is_refused_when_building_the_event() {
     let alice = Signer::generate();
     let bob = Signer::generate();
