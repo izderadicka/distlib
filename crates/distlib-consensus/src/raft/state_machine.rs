@@ -110,6 +110,11 @@ struct Inner {
     applied: Mutex<Applied>,
     /// Distinguishes snapshots built at the same log id.
     snapshot_seq: AtomicU64,
+    /// Moves at every reset of the projection, under the `applied` lock. A
+    /// snapshot builder notes it with its copy of the state, and does not
+    /// write a snapshot once it has moved (#154 finding 5): openraft runs
+    /// builders on tasks of their own, which a reset does not wait for.
+    generation: AtomicU64,
     /// Announces the membership after every change.
     ///
     /// The point of the crate: a committed event has to reach the connection
@@ -143,6 +148,7 @@ impl StateMachineStore {
                 db,
                 applied: Mutex::new(Applied::default()),
                 snapshot_seq: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
                 membership: watch::channel(MembershipState::new()).0,
                 raft_membership: watch::channel(StoredMembership::default()).0,
                 promotion: Mutex::new(None),
@@ -385,6 +391,7 @@ impl StateMachineStore {
         let encoded = {
             let mut applied = self.lock()?;
             *applied = Applied::default();
+            self.inner.generation.fetch_add(1, Ordering::SeqCst);
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
@@ -637,9 +644,15 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // produces — which is what the trait asks for. None if the lock is
         // poisoned: the trait gives no way to fail here, so the builder fails
         // instead, before it writes anything.
+        let captured = self.lock().ok().map(|applied| {
+            (
+                applied.clone(),
+                self.inner.generation.load(Ordering::SeqCst),
+            )
+        });
         SnapshotBuilder {
-            db: Arc::clone(&self.inner.db),
-            applied: self.lock().ok().map(|applied| applied.clone()),
+            inner: Arc::clone(&self.inner),
+            captured,
             seq: self.inner.snapshot_seq.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -712,15 +725,16 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 /// Builds a snapshot from a copy of the state taken when it was created.
 #[derive(Debug)]
 pub struct SnapshotBuilder {
-    db: Arc<Database>,
-    /// None if the state was poisoned when this was created.
-    applied: Option<Applied>,
+    inner: Arc<Inner>,
+    /// The state and its generation, taken together; None if the state was
+    /// poisoned when this was created.
+    captured: Option<(Applied, u64)>,
     seq: u64,
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
     async fn build_snapshot(&mut self) -> StorageResult<Snapshot<TypeConfig>> {
-        let applied = self.applied.as_ref().ok_or_else(poisoned)?;
+        let (applied, generation) = self.captured.as_ref().ok_or_else(poisoned)?;
         // Two snapshots can share a `last_log_id`, so the sequence number is
         // what keeps their ids distinct during a transfer.
         let snapshot_id = match applied.last_applied {
@@ -744,8 +758,9 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
         )?;
 
         let ours = applied.last_applied;
+        let (inner, generation) = (Arc::clone(&self.inner), *generation);
         let insert_subject = subject.clone();
-        write_txn(&self.db, subject, move |txn| {
+        write_txn(&self.inner.db, subject, move |txn| {
             let fail = writing(insert_subject);
             let mut table = txn.open_table(SM).map_err(|source| fail(&source))?;
 
@@ -767,7 +782,11 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
                     None => false,
                 }
             };
-            if newer_exists {
+            // Checked in here, so a reset's own transaction is either before
+            // this one, and moved the generation first, or after it, and
+            // removes what this writes.
+            let reset_since = inner.generation.load(Ordering::SeqCst) != generation;
+            if newer_exists || reset_since {
                 return Ok(());
             }
 

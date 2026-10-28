@@ -4,10 +4,13 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::too_many_lines)]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    net::{Ipv4Addr, SocketAddr},
+};
 
-use distlib_consensus::{MemberProfile, MembershipEvent};
-use distlib_core::{MemberId, RawMemberId};
+use distlib_consensus::{ConsensusError, MemberProfile, MembershipEvent, node::NodeError};
+use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use iroh::SecretKey;
 
 mod common;
@@ -379,4 +382,96 @@ async fn change_core(proposer: &Peer, approvers: &[&Peer], core: &[&Peer]) {
             .await
             .unwrap();
     }
+}
+
+/// A core map refused as stale is not sent again (#154): it is the whole core
+/// group as its proposer read it, so sending it after catching up would undo
+/// the change that made it stale.
+///
+/// Made stale for certain: with the leader's heartbeats off, a follower holds
+/// a committed entry without knowing it is committed until the next append,
+/// and that append is its own proposal.
+#[tokio::test]
+async fn a_stale_core_change_is_refused_rather_than_sent_again() {
+    let peers = a_founded_trio().await;
+    let leading = peers[0]
+        .node
+        .raft()
+        .unwrap()
+        .metrics()
+        .borrow()
+        .current_leader;
+    let (leader, followers): (Vec<&Peer>, Vec<&Peer>) = peers
+        .iter()
+        .partition(|peer| Some(RawMemberId::from(peer.id)) == leading);
+    let (leader, follower, moved) = (leader[0], followers[0], followers[1]);
+    for peer in &followers {
+        peer.node.raft().unwrap().runtime_config().elect(false);
+    }
+    leader
+        .node
+        .raft()
+        .unwrap()
+        .runtime_config()
+        .heartbeat(false);
+
+    // The leader moves one voter; the follower has not applied it yet.
+    let moved_to = also_at(&moved.addr, 1);
+    let mut core = leader.node.membership().core().clone();
+    core.insert(moved.id, moved_to.clone());
+    let read_by_follower = follower.node.membership().core().clone();
+    leader
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: core.into_iter().collect(),
+            },
+            &leader.secret,
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        follower.node.membership().core().get(&moved.id),
+        Some(&moved_to),
+        "the follower must not know of the move yet, or nothing here is stale"
+    );
+
+    // The follower moves itself, in the map it read before the move.
+    let mut stale = read_by_follower;
+    stale.insert(follower.id, also_at(&follower.addr, 2));
+    let refused = follower
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: stale.into_iter().collect(),
+            },
+            &follower.secret,
+        )
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(NodeError::Event(ConsensusError::StaleProposal { .. }))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        leader.node.membership().core().get(&moved.id),
+        Some(&moved_to),
+        "the move stands"
+    );
+    for peer in &peers {
+        peer.shutdown().await;
+    }
+}
+
+/// `addr`, reachable at one more loopback port too: a new address for a voter
+/// that still works.
+fn also_at(addr: &NodeAddr, port: u16) -> NodeAddr {
+    let mut moved = addr.clone();
+    moved
+        .direct
+        .insert(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+    moved
 }

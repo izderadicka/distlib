@@ -962,7 +962,13 @@ impl MembershipNode {
             // which is the exact thing the check exists to prevent. Waiting
             // until we really hold it costs a replication round and keeps the
             // statement honest.
-            Err(NodeError::Event(ConsensusError::StaleProposal { current, .. })) => {
+            //
+            // Not a core map, though: it is the whole core group as the caller
+            // read it before the change that made it stale, so sending it again
+            // would undo that change (#154). The caller reads the group again.
+            Err(NodeError::Event(ConsensusError::StaleProposal { current, .. }))
+                if !matches!(event, MembershipEvent::CoreGroupChanged { .. }) =>
+            {
                 self.catch_up_to(current).await?;
                 self.propose_once(event, secret_key).await
             }
