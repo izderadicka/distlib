@@ -17,8 +17,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, collecting, config, download, following, group_settings, record,
-    until_a_pass_collects, until_projected,
+    PLEDGE, api, bound, collecting, config, download, following, found, group_settings, pledge,
+    profile, until_a_pass_collects, until_projected,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile, project
@@ -46,25 +46,18 @@ async fn alice_and_bob_collecting(dir: &Path) -> (Runtime, SecretKey, Runtime, S
     )
     .await
     .unwrap();
-    alice
-        .node()
-        .init_group(
-            vec![(record(alice_id, "alice"), bound(&alice))],
-            group_settings(),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    found(&[&alice], &[(&alice_key, PLEDGE)], &group_settings()).await;
     alice
         .node()
         .propose(
             MembershipEvent::MemberAdded {
-                member: record(bob_id, "bob"),
+                member: profile(bob_id, "bob"),
             },
             &alice_key,
         )
         .await
         .unwrap();
+    pledge(&alice, &bob_key, PLEDGE).await;
     let bob = Runtime::start(
         &bob_key,
         &collecting(following(alice_id, &bound(&alice))),

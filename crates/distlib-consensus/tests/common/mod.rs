@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipNode, MembershipState};
+use distlib_consensus::{MemberProfile, MembershipNode, MembershipState};
 use distlib_core::{MemberId, NodeAddr};
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use iroh::{
@@ -179,11 +179,10 @@ impl Peer {
         self._dir.path()
     }
 
-    pub fn record(&self, name: &str) -> MemberRecord {
-        MemberRecord {
+    pub fn profile(&self, name: &str) -> MemberProfile {
+        MemberProfile {
             member_id: self.id,
             display_name: name.to_owned(),
-            pledge_bytes: 0,
         }
     }
 }

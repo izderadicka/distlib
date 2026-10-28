@@ -21,7 +21,7 @@
 #![allow(clippy::unwrap_used)]
 
 use distlib_consensus::{
-    ConsensusError, LogStore, MAX_DISPLAY_NAME, MAX_REASON, MemberRecord, MembershipEvent,
+    ConsensusError, LogStore, MAX_DISPLAY_NAME, MAX_REASON, MemberProfile, MembershipEvent,
     MembershipState, SignedEvent, StateMachineStore, Timestamp, TypeConfig,
 };
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
@@ -46,16 +46,15 @@ impl Signer {
         Self { secret, id }
     }
 
-    fn record(&self, name: &str) -> MemberRecord {
-        MemberRecord {
+    fn profile(&self, name: &str) -> MemberProfile {
+        MemberProfile {
             member_id: self.id,
             display_name: name.to_owned(),
-            pledge_bytes: 0,
         }
     }
 
-    fn founder(&self, name: &str) -> (MemberRecord, NodeAddr) {
-        (self.record(name), self.addr(0))
+    fn founder(&self, name: &str) -> (MemberProfile, NodeAddr) {
+        (self.profile(name), self.addr(0))
     }
 
     fn addr(&self, port: u16) -> NodeAddr {
@@ -121,7 +120,7 @@ fn founding_entry(founder: &Signer) -> Entry<TypeConfig> {
         1,
         founder.sign(
             MembershipEvent::found(
-                vec![(founder.record("founder"), NodeAddr::default())],
+                vec![(founder.profile("founder"), NodeAddr::default())],
                 Default::default(),
                 Timestamp::from_millis(1),
             )
@@ -152,7 +151,7 @@ fn mem_01_a_pending_core_map_that_would_revert_an_address_is_dropped_and_can_be_
         &mut state,
         a,
         MembershipEvent::MemberAdded {
-            member: dave.record("dave"),
+            member: dave.profile("dave"),
         },
     )
     .unwrap();
@@ -283,7 +282,7 @@ fn mem_01_a_pending_map_naming_an_expelled_voter_is_dropped() {
         &mut state,
         a,
         MembershipEvent::MemberAdded {
-            member: dave.record("dave"),
+            member: dave.profile("dave"),
         },
     )
     .unwrap();
@@ -473,7 +472,7 @@ fn mem_03_readmitting_a_member_keeps_their_pledge() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -491,10 +490,9 @@ fn mem_03_readmitting_a_member_keeps_their_pledge() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: MemberRecord {
+            member: MemberProfile {
                 member_id: bob.id,
                 display_name: "bob_updated".to_owned(),
-                pledge_bytes: 0,
             },
         },
     )
@@ -523,7 +521,7 @@ fn mem_03_readmitting_an_expelled_member_starts_their_pledge_at_zero() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -549,7 +547,7 @@ fn mem_03_readmitting_an_expelled_member_starts_their_pledge_at_zero() {
         &mut state,
         alice,
         MembershipEvent::MemberAdded {
-            member: bob.record("bob"),
+            member: bob.profile("bob"),
         },
     )
     .unwrap();
@@ -568,7 +566,7 @@ fn mem_06_free_text_on_a_proposal_is_bounded() {
     let bob = Signer::generate();
     let long = "x".repeat(MAX_DISPLAY_NAME + 1);
 
-    let mut record = bob.record(&long);
+    let mut record = bob.profile(&long);
     let refused = MembershipEvent::MemberAdded {
         member: record.clone(),
     }

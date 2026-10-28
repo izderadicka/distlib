@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
 mod common;
-use common::{bound, config, group_settings, record};
+use common::{bound, config, group_settings, profile};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// for the projection behind that to catch up.
@@ -91,7 +91,7 @@ async fn a_node(dir: &Path) -> Runtime {
     runtime
         .node()
         .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
+            vec![(profile(id, "solo"), bound(&runtime))],
             group_settings(),
             &key,
         )
@@ -166,8 +166,8 @@ async fn an_item_written_on_one_node_is_news_on_the_other() {
         .node()
         .init_group(
             vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
+                (profile(alice_id, "alice"), bound(&alice)),
+                (profile(bob_id, "bob"), bound(&bob)),
             ],
             group_settings(),
             &alice_key,

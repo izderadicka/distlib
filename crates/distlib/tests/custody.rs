@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found, init_logging, until_released};
+use common::{api, config, found_and_settled, init_logging, until_released};
 
 const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
@@ -152,7 +152,11 @@ async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
         let data_dir = DataDir::new(dir.path().join(index.to_string()));
         runtimes.push(Runtime::start(key, &group_config, &data_dir).await.unwrap());
     }
-    found(&runtimes, &keys[0], &pledges, &settings).await;
+    let founding: Vec<_> = keys
+        .iter()
+        .zip(pledges.iter().map(|pledge| pledge.1))
+        .collect();
+    found_and_settled(&runtimes, &founding, &settings).await;
 
     for seed in 1..=16_u8 {
         let creator = &runtimes[creator_of(seed)];
@@ -241,13 +245,15 @@ async fn custody_follows_a_read_model_rebuilt_at_a_start() {
             .await
             .unwrap(),
     ];
-    // Two copies: alice's own, and bob's as the only other member.
+    // Two copies: alice's own, and bob's as the only other member. Settling
+    // quickly, as the pledges come after the founding.
     let settings = GroupSettings {
         replicas: NonZeroU8::new(2).unwrap(),
+        settle_secs: 1,
         ..GroupSettings::default()
     };
-    let pledges = [(ids[0], 100 * GB), (ids[1], 100 * GB)];
-    found(&runtimes, &keys[0], &pledges, &settings).await;
+    let pledges = [(&keys[0], 100 * GB), (&keys[1], 100 * GB)];
+    found_and_settled(&runtimes, &pledges, &settings).await;
     let bob = runtimes.pop().unwrap();
     let alice = runtimes.pop().unwrap();
 

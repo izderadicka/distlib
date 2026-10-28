@@ -31,8 +31,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, collecting, config, download, found, init_logging, until_a_pass_collects, until_projected,
-    until_released,
+    api, collecting, config, download, found_and_settled, init_logging, until_a_pass_collects,
+    until_projected, until_released,
 };
 
 const SOON: Duration = Duration::from_secs(60);
@@ -255,8 +255,12 @@ async fn founded(
         nodes.push(Node::start_with(key, &ids, dir, tuning).await);
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges.iter().copied()).collect();
-    found(&runtimes, &nodes[0].key, &pledges, settings).await;
+    let pledges: Vec<(&SecretKey, u64)> = nodes
+        .iter()
+        .map(|node| &node.key)
+        .zip(pledges.iter().copied())
+        .collect();
+    found_and_settled(&runtimes, &pledges, settings).await;
     nodes
 }
 

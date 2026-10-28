@@ -100,6 +100,13 @@ pub enum ConsensusError {
     #[error("there is no proposal at index {proposal} waiting for approval")]
     UnknownProposal { proposal: u64 },
 
+    /// An approval arrived at a log index past the proposal's expiry.
+    ///
+    /// The deadline is the proposal's index plus `pending_expiry`, whatever
+    /// came between: refused entries and Raft's own do not move it.
+    #[error("the proposal at index {proposal} expired before index {index}")]
+    ProposalExpired { proposal: u64, index: u64 },
+
     /// Somebody outside the core group tried to approve a proposal.
     ///
     /// §4.4 gives the decision to a quorum of core nodes; any member may

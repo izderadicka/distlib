@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use distlib_consensus::{
-    LogStore, MemberRecord, MembershipEvent, SignedEvent, Timestamp, TypeConfig,
+    LogStore, MemberProfile, MembershipEvent, SignedEvent, Timestamp, TypeConfig,
 };
 use distlib_core::{MemberId, RawMemberId};
 use iroh::SecretKey;
@@ -54,10 +54,9 @@ fn log_id(term: u64, index: u64) -> LogId<RawMemberId> {
 /// A real signed event, so entries carry the payload the log will actually hold.
 fn entry(term: u64, index: u64) -> Entry<TypeConfig> {
     let secret = SecretKey::generate();
-    let record = MemberRecord {
+    let record = MemberProfile {
         member_id: MemberId::from(secret.public()),
         display_name: format!("member at {index}"),
-        pledge_bytes: index,
     };
     let event = SignedEvent::sign(
         &secret,

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until_projected};
 
 const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
@@ -113,8 +113,8 @@ async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> [Node; 3] {
         });
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
-    found(&runtimes, &nodes[0].key, &pledges, &settings()).await;
+    let pledges: Vec<(&SecretKey, u64)> = nodes.iter().map(|node| &node.key).zip(pledges).collect();
+    found_and_settled(&runtimes, &pledges, &settings()).await;
     nodes.try_into().ok().unwrap()
 }
 

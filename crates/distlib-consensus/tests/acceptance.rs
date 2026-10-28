@@ -27,7 +27,7 @@
 
 use std::time::Duration;
 
-use distlib_consensus::{MemberRecord, MembershipEvent};
+use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{MemberId, NodeAddr};
 use iroh::SecretKey;
 
@@ -72,7 +72,7 @@ async fn a_group_of_three_voters_and_two_followers_meets_phase_one() {
     let founders = core
         .iter()
         .enumerate()
-        .map(|(index, peer)| (peer.record(&format!("core-{index}")), peer.addr.clone()))
+        .map(|(index, peer)| (peer.profile(&format!("core-{index}")), peer.addr.clone()))
         .collect();
     core[0]
         .node
@@ -283,10 +283,9 @@ async fn admit(by: &Peer, member: MemberId, name: &str) {
     admit_or_expel(
         by,
         MembershipEvent::MemberAdded {
-            member: MemberRecord {
+            member: MemberProfile {
                 member_id: member,
                 display_name: name.to_owned(),
-                pledge_bytes: 0,
             },
         },
     )

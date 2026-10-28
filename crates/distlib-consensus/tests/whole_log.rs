@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use distlib_consensus::{EVENTS_PER_FETCH, MemberRecord, MembershipEvent, RAFT_DB, TypeConfig};
+use distlib_consensus::{EVENTS_PER_FETCH, MemberProfile, MembershipEvent, RAFT_DB, TypeConfig};
 use distlib_core::{GroupSettings, MemberId};
 use iroh::SecretKey;
 use openraft::Raft;
@@ -30,7 +30,7 @@ async fn founded() -> Peer {
     founder
         .node
         .init_group(
-            vec![(founder.record("founder"), founder.addr.clone())],
+            vec![(founder.profile("founder"), founder.addr.clone())],
             settings,
             &founder.secret,
         )
@@ -42,10 +42,9 @@ async fn founded() -> Peer {
 /// Admits `count` members, so the log has that many more entries.
 async fn admit_many(founder: &Peer, count: usize) {
     for n in 0..count {
-        let member = MemberRecord {
+        let member = MemberProfile {
             member_id: MemberId::from(SecretKey::generate().public()),
             display_name: format!("member-{n}"),
-            pledge_bytes: 0,
         };
         founder
             .node
@@ -80,10 +79,9 @@ async fn snapshot(raft: &Raft<TypeConfig>) {
 /// Starts a member admitted by `founder`, following its log.
 async fn joiner(founder: &Peer) -> Peer {
     let key = SecretKey::generate();
-    let member = MemberRecord {
+    let member = MemberProfile {
         member_id: MemberId::from(key.public()),
         display_name: "joiner".to_owned(),
-        pledge_bytes: 0,
     };
     founder
         .node

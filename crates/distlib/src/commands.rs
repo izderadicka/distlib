@@ -13,7 +13,9 @@ use distlib_api::{
     Api, Client, ClientError, Server,
     tasks::{Downloaded, Outcome, Source},
 };
-use distlib_consensus::{MemberRecord, MembershipNode, MembershipState, StateMachineStore};
+use distlib_consensus::{
+    MemberProfile, MemberRecord, MembershipNode, MembershipState, StateMachineStore,
+};
 use distlib_core::{
     BookmarkId, Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId,
     Ticket, WishId,
@@ -1720,7 +1722,10 @@ async fn found(
     }
     let founders = founders(&config.consensus.core, me, || local_addr(node.endpoint()))?;
 
-    let names: Vec<_> = founders.iter().map(|(r, _)| display(r)).collect();
+    let names: Vec<_> = founders
+        .iter()
+        .map(|(founder, _)| named(&founder.member_id.to_string(), &founder.display_name))
+        .collect();
     tracing::info!(founders = names.join(", "), "founding the group");
     let settings = config.group.clone().unwrap_or_default();
     node.init_group(founders, settings, secret).await?;
@@ -1737,9 +1742,9 @@ fn founders(
     core: &[CoreMember],
     me: MemberId,
     mine: impl Fn() -> NodeAddr,
-) -> Result<Vec<(MemberRecord, NodeAddr)>> {
+) -> Result<Vec<(MemberProfile, NodeAddr)>> {
     if core.is_empty() {
-        return Ok(vec![(record(me, String::new()), mine())]);
+        return Ok(vec![(profile(me, String::new()), mine())]);
     }
     if !core.iter().any(|member| member.member == me) {
         bail!(
@@ -1756,7 +1761,7 @@ fn founders(
             } else {
                 member.addr()
             };
-            (record(member.member, member.name.clone()), addr)
+            (profile(member.member, member.name.clone()), addr)
         })
         .collect())
 }
@@ -1831,15 +1836,11 @@ fn local_addr(endpoint: &Endpoint) -> NodeAddr {
     }
 }
 
-/// A founding member's record.
-///
-/// `pledge_bytes` is zero because nothing reads it before phase 3, where
-/// storage pledges get a command of their own.
-fn record(member_id: MemberId, display_name: String) -> MemberRecord {
-    MemberRecord {
+/// A founding member's profile; it pledges afterwards, with `distlib pledge`.
+fn profile(member_id: MemberId, display_name: String) -> MemberProfile {
+    MemberProfile {
         member_id,
         display_name,
-        pledge_bytes: 0,
     }
 }
 

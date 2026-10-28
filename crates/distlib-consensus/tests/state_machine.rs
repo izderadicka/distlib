@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use distlib_consensus::{
-    MemberRecord, MembershipEvent, SignedEvent, StateMachineStore, Timestamp, TypeConfig,
+    MemberProfile, MembershipEvent, SignedEvent, StateMachineStore, Timestamp, TypeConfig,
 };
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
 use iroh::SecretKey;
@@ -35,11 +35,10 @@ impl Signer {
         Self { secret, id }
     }
 
-    fn record(&self, name: &str) -> MemberRecord {
-        MemberRecord {
+    fn profile(&self, name: &str) -> MemberProfile {
+        MemberProfile {
             member_id: self.id,
             display_name: name.to_owned(),
-            pledge_bytes: 0,
         }
     }
 
@@ -80,7 +79,7 @@ fn founding(founder: &Signer) -> Entry<TypeConfig> {
         1,
         founder.sign(
             MembershipEvent::found(
-                vec![(founder.record("founder"), NodeAddr::default())],
+                vec![(founder.profile("founder"), NodeAddr::default())],
                 Default::default(),
                 Timestamp::from_millis(1),
             )
@@ -116,7 +115,7 @@ async fn a_leader_election_does_not_invalidate_a_proposal_in_flight() {
             2,
             alice.sign(
                 MembershipEvent::MemberAdded {
-                    member: bob.record("bob"),
+                    member: bob.profile("bob"),
                 },
                 seen,
             ),
@@ -186,7 +185,7 @@ async fn a_proposal_still_waiting_for_approvals_survives_a_restart() {
             2,
             alice.sign(
                 MembershipEvent::MemberAdded {
-                    member: bob.record("bob"),
+                    member: bob.profile("bob"),
                 },
                 1,
             ),
@@ -200,7 +199,7 @@ async fn a_proposal_still_waiting_for_approvals_survives_a_restart() {
             3,
             bob.sign(
                 MembershipEvent::MemberAdded {
-                    member: carol.record("carol"),
+                    member: carol.profile("carol"),
                 },
                 2,
             ),
@@ -251,7 +250,7 @@ async fn a_rejected_event_is_skipped_rather_than_fatal() {
         2,
         stranger.sign(
             MembershipEvent::MemberAdded {
-                member: stranger.record("uninvited"),
+                member: stranger.profile("uninvited"),
             },
             1,
         ),
@@ -348,7 +347,7 @@ async fn an_installed_snapshot_carries_proposals_that_are_still_approvable() {
             2,
             alice.sign(
                 MembershipEvent::MemberAdded {
-                    member: bob.record("bob"),
+                    member: bob.profile("bob"),
                 },
                 1,
             ),
@@ -361,7 +360,7 @@ async fn an_installed_snapshot_carries_proposals_that_are_still_approvable() {
             3,
             bob.sign(
                 MembershipEvent::MemberAdded {
-                    member: carol.record("carol"),
+                    member: carol.profile("carol"),
                 },
                 2,
             ),
@@ -416,7 +415,7 @@ async fn a_builder_is_unaffected_by_later_applies() {
             2,
             alice.sign(
                 MembershipEvent::MemberAdded {
-                    member: bob.record("bob"),
+                    member: bob.profile("bob"),
                 },
                 1,
             ),
@@ -502,7 +501,7 @@ async fn a_stale_builder_does_not_overwrite_a_newer_snapshot() {
             5,
             alice.sign(
                 MembershipEvent::MemberAdded {
-                    member: bob.record("bob"),
+                    member: bob.profile("bob"),
                 },
                 1,
             ),
@@ -587,7 +586,7 @@ async fn apply_reports_whether_an_event_took_effect() {
                 2,
                 stranger.sign(
                     MembershipEvent::MemberAdded {
-                        member: stranger.record("uninvited"),
+                        member: stranger.profile("uninvited"),
                     },
                     1,
                 ),

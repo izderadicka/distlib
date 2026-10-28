@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until_projected};
 
 const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
@@ -147,8 +147,8 @@ async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) ->
         });
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().zip(pledges).collect();
-    found(&runtimes, &nodes[0].key, &pledges, settings).await;
+    let pledges: Vec<(&SecretKey, u64)> = nodes.iter().map(|node| &node.key).zip(pledges).collect();
+    found_and_settled(&runtimes, &pledges, settings).await;
     nodes.try_into().ok().unwrap()
 }
 
@@ -635,8 +635,9 @@ async fn a_group_founded_without_probes_makes_none() {
     }
 }
 
-/// The founder pledges 60 GB of the group's 100 GB minimum: its add is warned,
-/// not refused, but it is not sent content, so its probes would all fail.
+/// The third member has not pledged, below the group's 100 GB minimum — the
+/// only way to be below it, as a pledge is never set lower (P5-40). It is not
+/// sent content, so its probes would all fail.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_below_the_minimum_pledge_makes_no_probes() {
     let dir = TempDir::new().unwrap();
@@ -644,11 +645,12 @@ async fn a_member_below_the_minimum_pledge_makes_no_probes() {
         min_pledge_bytes: 100 * GB,
         ..settings()
     };
-    let ([founder, second, third], _book, _blob) =
-        a_book_kept(dir.path(), &minimum, [60 * GB, 100 * GB, 0]).await;
+    let ([founder, second, third], book, _blob) =
+        a_book_kept(dir.path(), &minimum, [100 * GB, 100 * GB, 0]).await;
+    until_projected(&third.runtime, book, 1, "the third member").await;
 
     tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(founder.probed(), ProbeCounts::default());
+    assert_eq!(third.probed(), ProbeCounts::default());
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;

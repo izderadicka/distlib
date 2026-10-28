@@ -16,9 +16,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ConsensusError, Result},
-    event::{MemberRecord, MembershipEvent, check_founders, check_settings},
+    event::{MemberProfile, MembershipEvent, check_founders, check_settings},
     signed::SignedEvent,
 };
+
+/// What is known about one member: who they are, and what they pledge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRecord {
+    /// The member's identity, and the key their connections are authenticated by.
+    pub member_id: MemberId,
+
+    /// Display name. Metadata, not identity — two members may share one.
+    pub display_name: String,
+
+    /// Storage this member commits to providing, 0 until it pledges.
+    ///
+    /// Lives in the log rather than in gossip because custodian assignment
+    /// (§5.5) requires every peer to agree on identical weights; a value that
+    /// drifted between peers would give them different custodians for the same
+    /// item.
+    pub pledge_bytes: u64,
+}
+
+impl MemberRecord {
+    /// `profile`'s record, pledging `pledge_bytes`.
+    fn of(profile: &MemberProfile, pledge_bytes: u64) -> Self {
+        Self {
+            member_id: profile.member_id,
+            display_name: profile.display_name.clone(),
+            pledge_bytes,
+        }
+    }
+}
 
 /// Who the group is, as of the events applied so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +245,9 @@ impl MembershipState {
                 }
                 self.authorise(proposer, event)?;
                 match event {
-                    MembershipEvent::Approved { proposal } => self.approve(*proposal, proposer)?,
+                    MembershipEvent::Approved { proposal } => {
+                        self.approve(index, *proposal, proposer)?
+                    }
                     MembershipEvent::Withdrawn { proposal } => {
                         self.withdraw(*proposal, proposer)?
                     }
@@ -398,12 +429,11 @@ impl MembershipState {
         // discard the approvals a proposal had gathered by proposing again.
         // That leaves a slot only its proposer can clear — which is what
         // `Withdrawn` is for, and what the `pending_expiry` setting is for when the
-        // proposer has gone away.
+        // proposer has gone away: one past its deadline no longer holds the slot.
         if let Some(proposed_about) = subject(event)
-            && let Some((waiting, _)) = self
-                .pending
-                .iter()
-                .find(|(_, pending)| subject(&pending.event) == Some(proposed_about))
+            && let Some((waiting, _)) = self.pending.iter().find(|(waiting, pending)| {
+                !self.expired(**waiting, index) && subject(&pending.event) == Some(proposed_about)
+            })
         {
             return Err(ConsensusError::AlreadyPending { proposal: *waiting });
         }
@@ -421,7 +451,7 @@ impl MembershipState {
 
     /// Records `approver`'s agreement, applying the proposal if that was the
     /// last approval it needed.
-    fn approve(&mut self, proposal: u64, approver: MemberId) -> Result<()> {
+    fn approve(&mut self, index: u64, proposal: u64, approver: MemberId) -> Result<()> {
         // Taken out for the duration. Every path either applies it — in which
         // case it stops being pending — or puts it back exactly as it was,
         // which is what keeps [`Self::apply`]'s promise that a refused entry
@@ -430,7 +460,7 @@ impl MembershipState {
             return Err(ConsensusError::UnknownProposal { proposal });
         };
 
-        if let Err(error) = self.still_allowed(&entry, approver) {
+        if let Err(error) = self.still_allowed(index, proposal, &entry, approver) {
             self.pending.insert(proposal, entry);
             return Err(error);
         }
@@ -481,13 +511,33 @@ impl MembershipState {
         Ok(())
     }
 
+    /// Whether the proposal made at `proposal` is past its deadline at `index`.
+    ///
+    /// The sweep in [`Self::apply`] keeps the same deadline, but only a
+    /// successful entry sweeps, so refused entries in between would otherwise
+    /// leave an expired proposal in force.
+    fn expired(&self, proposal: u64, index: u64) -> bool {
+        index.saturating_sub(proposal) > self.settings.pending_expiry.get()
+    }
+
     /// Whether the rules still allow `approver` to approve `entry`.
     ///
     /// Re-checked here rather than only when the proposal was made, because the
     /// group can move in between and that gap is precisely where this kind of
     /// thing goes wrong: the proposer must still be a member, and must still be
     /// allowed to have proposed what they did.
-    fn still_allowed(&self, entry: &Proposal, approver: MemberId) -> Result<()> {
+    ///
+    /// And the proposal must not have [expired](Self::expired).
+    fn still_allowed(
+        &self,
+        index: u64,
+        proposal: u64,
+        entry: &Proposal,
+        approver: MemberId,
+    ) -> Result<()> {
+        if self.expired(proposal, index) {
+            return Err(ConsensusError::ProposalExpired { proposal, index });
+        }
         if target(&entry.event) == Some(approver) {
             return Err(ConsensusError::SelfApproval { member: approver });
         }
@@ -637,7 +687,7 @@ impl MembershipState {
     fn found(
         &mut self,
         group_id: GroupId,
-        founders: &[(MemberRecord, NodeAddr)],
+        founders: &[(MemberProfile, NodeAddr)],
         settings: &GroupSettings,
         proposer: MemberId,
     ) -> Result<()> {
@@ -662,7 +712,7 @@ impl MembershipState {
         self.settings = settings.clone();
         self.members = founders
             .iter()
-            .map(|(founder, _)| (founder.member_id, founder.clone()))
+            .map(|(founder, _)| (founder.member_id, MemberRecord::of(founder, 0)))
             .collect();
         // Founders are the initial voters, at the addresses they founded with;
         // `CoreGroupChanged` moves it from here.
@@ -683,21 +733,17 @@ impl MembershipState {
                 //
                 // The pledge survives that, because it is the one field of the
                 // record its own member owns: `PledgeChanged` is self-only
-                // (P1-20) precisely so nobody sets somebody else's, and
-                // overwriting it from a `MemberAdded` — which always carries
-                // the zero `propose_add` fills in — is that same write by
-                // another door. Correcting a display name would otherwise
-                // retract a storage promise §5.5's custodian assignment reads.
-                // Re-admitting an expelled member finds no record and so
-                // starts them at zero, which is the intent there.
-                let record = MemberRecord {
-                    pledge_bytes: self
-                        .members
-                        .get(&member.member_id)
-                        .map_or(member.pledge_bytes, |had| had.pledge_bytes),
-                    ..member.clone()
-                };
-                self.members.insert(member.member_id, record);
+                // (P1-20) precisely so nobody sets somebody else's.
+                // Correcting a display name would otherwise retract a storage
+                // promise §5.5's custodian assignment reads. Re-admitting an
+                // expelled member finds no record and so starts them at zero,
+                // which is the intent there.
+                let pledge_bytes = self
+                    .members
+                    .get(&member.member_id)
+                    .map_or(0, |had| had.pledge_bytes);
+                self.members
+                    .insert(member.member_id, MemberRecord::of(member, pledge_bytes));
                 Ok(())
             }
 

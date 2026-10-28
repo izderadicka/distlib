@@ -278,13 +278,12 @@ async fn an_unreachable_peer_does_not_stall_startup() {
 }
 
 fn sample_event() -> distlib_consensus::SignedEvent {
-    use distlib_consensus::{MemberRecord, MembershipEvent, SignedEvent, Timestamp};
+    use distlib_consensus::{MemberProfile, MembershipEvent, SignedEvent, Timestamp};
 
     let secret = SecretKey::generate();
-    let record = MemberRecord {
+    let record = MemberProfile {
         member_id: MemberId::from(secret.public()),
         display_name: "replicated".to_owned(),
-        pledge_bytes: 0,
     };
     SignedEvent::sign(
         &secret,

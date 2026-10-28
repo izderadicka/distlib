@@ -13,7 +13,7 @@ use std::{
 };
 
 use distlib_consensus::{
-    Fetched, MemberRecord, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
+    Fetched, MemberProfile, MemberlogClient, MembershipEvent, MembershipNode, MembershipState,
 };
 use distlib_core::{MemberId, NodeAddr, SignedAddress};
 use distlib_net::{
@@ -73,7 +73,7 @@ impl Group {
         let router = distlib_net::serve(endpoint, node.protocols());
 
         node.init_group(
-            vec![(record(id, "founder"), addr.clone())],
+            vec![(profile(id, "founder"), addr.clone())],
             Default::default(),
             &secret,
         )
@@ -101,7 +101,7 @@ impl Group {
         self.node
             .propose(
                 MembershipEvent::MemberAdded {
-                    member: record(member, name),
+                    member: profile(member, name),
                 },
                 &self.secret,
             )
@@ -165,11 +165,10 @@ impl Group {
     }
 }
 
-fn record(member_id: MemberId, name: &str) -> MemberRecord {
-    MemberRecord {
+fn profile(member_id: MemberId, name: &str) -> MemberProfile {
+    MemberProfile {
         member_id,
         display_name: name.to_owned(),
-        pledge_bytes: 0,
     }
 }
 

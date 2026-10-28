@@ -32,7 +32,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, group_settings, init_logging, record, until_released};
+use common::{api, bound, config, group_settings, init_logging, profile, until_released};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// then for the projection behind that to catch up.
@@ -154,8 +154,8 @@ async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
         .node()
         .init_group(
             vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
+                (profile(alice_id, "alice"), bound(&alice)),
+                (profile(bob_id, "bob"), bound(&bob)),
             ],
             group_settings(),
             &alice_key,
@@ -414,7 +414,7 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
     runtime
         .node()
         .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
+            vec![(profile(id, "solo"), bound(&runtime))],
             group_settings(),
             &key,
         )
@@ -543,7 +543,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     runtime
         .node()
         .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
+            vec![(profile(id, "solo"), bound(&runtime))],
             group_settings(),
             &key,
         )

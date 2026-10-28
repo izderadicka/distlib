@@ -23,7 +23,7 @@ use std::{
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_consensus::MemberRecord;
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState};
 use distlib_core::{
     Config, CoreMember, DataDir, GroupSettings, ItemId, MemberId, NetConfig, NodeAddr,
 };
@@ -122,12 +122,22 @@ pub fn group_settings() -> GroupSettings {
     }
 }
 
-pub fn record(id: MemberId, name: &str) -> MemberRecord {
-    MemberRecord {
+/// A member's profile for founding or admission; the member pledges itself,
+/// see [`pledge`].
+pub fn profile(id: MemberId, name: &str) -> MemberProfile {
+    MemberProfile {
         member_id: id,
         display_name: name.to_owned(),
-        pledge_bytes: PLEDGE,
     }
+}
+
+/// The member of `key` pledges `pledge_bytes`, through `runtime`'s node.
+pub async fn pledge(runtime: &Runtime, key: &SecretKey, pledge_bytes: u64) {
+    let event = MembershipEvent::PledgeChanged {
+        member: MemberId::from(key.public()),
+        pledge_bytes,
+    };
+    runtime.node().propose(event, key).await.unwrap();
 }
 
 pub fn bound(runtime: &Runtime) -> NodeAddr {
@@ -237,32 +247,83 @@ pub async fn download(api: &Api, item: ItemId, dest: &Path) {
     .unwrap();
 }
 
-/// Founds the group of `runtimes`, each member pledging what `pledges` says.
+/// Founds the group of `runtimes`, the first key founding, then each member
+/// pledging what `pledges` says; a member given 0 does not pledge. Returns once
+/// every node's membership has every pledge.
 pub async fn found<R: Borrow<Runtime>>(
     runtimes: &[R],
-    founder: &SecretKey,
-    pledges: &[(MemberId, u64)],
+    pledges: &[(&SecretKey, u64)],
     settings: &GroupSettings,
 ) {
     let founders = runtimes
         .iter()
         .zip(pledges)
-        .map(|(runtime, (member_id, pledge_bytes))| {
-            let runtime = runtime.borrow();
+        .map(|(runtime, (key, _))| {
+            let member_id = MemberId::from(key.public());
             (
-                MemberRecord {
-                    member_id: *member_id,
-                    display_name: member_id.to_string(),
-                    pledge_bytes: *pledge_bytes,
-                },
-                bound(runtime),
+                profile(member_id, &member_id.to_string()),
+                bound(runtime.borrow()),
             )
         })
         .collect();
-    runtimes[0]
-        .borrow()
+    let founder = runtimes[0].borrow();
+    founder
         .node()
-        .init_group(founders, settings.clone(), founder)
+        .init_group(founders, settings.clone(), pledges[0].0)
         .await
         .unwrap();
+    for (key, pledge_bytes) in pledges.iter().filter(|(_, bytes)| *bytes > 0) {
+        pledge(founder, key, *pledge_bytes).await;
+    }
+    let pledged = |state: &MembershipState| {
+        pledges.iter().all(|(key, pledge_bytes)| {
+            state
+                .member(&MemberId::from(key.public()))
+                .is_some_and(|record| record.pledge_bytes == *pledge_bytes)
+        })
+    };
+    for runtime in runtimes {
+        tokio::time::timeout(SOON, runtime.borrow().node().subscribe().wait_for(pledged))
+            .await
+            .expect("every node learns every founder's pledge")
+            .unwrap();
+    }
+}
+
+/// [`found`], returning once each node's custody counts the pledges too.
+///
+/// Custody takes the founding group at once, but a pledge made after it only
+/// once the membership has been still for `settle_secs`. A node's own pledge
+/// stands for the whole group's: the pledges land within milliseconds of each
+/// other, well inside any test's `settle_secs`, so they settle together.
+pub async fn found_and_settled<R: Borrow<Runtime>>(
+    runtimes: &[R],
+    pledges: &[(&SecretKey, u64)],
+    settings: &GroupSettings,
+) {
+    found(runtimes, pledges, settings).await;
+    until_custody_counts_pledges(runtimes, pledges).await;
+}
+
+/// Waits until each of `runtimes`' custody counts its own pledge in `pledges`.
+async fn until_custody_counts_pledges<R: Borrow<Runtime>>(
+    runtimes: &[R],
+    pledges: &[(&SecretKey, u64)],
+) {
+    for (runtime, (_, pledge_bytes)) in runtimes.iter().zip(pledges) {
+        let counted = || {
+            runtime
+                .borrow()
+                .custody()
+                .status()
+                .map(|status| status.pledge_bytes)
+        };
+        tokio::time::timeout(SOON, async {
+            while counted() != Some(*pledge_bytes) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("custody counts the node's pledge once it has settled");
+    }
 }

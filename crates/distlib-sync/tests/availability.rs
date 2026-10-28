@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use distlib_consensus::{MemberRecord, MembershipEvent, MembershipState, SignedEvent, Timestamp};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
     ContentHash, Event as NodeEvent, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId,
     KeepReason, MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
@@ -325,11 +325,10 @@ fn sorted(ids: impl IntoIterator<Item = ItemId>) -> Vec<ItemId> {
     ids
 }
 
-fn record(id: MemberId) -> MemberRecord {
-    MemberRecord {
+fn profile(id: MemberId) -> MemberProfile {
+    MemberProfile {
         member_id: id,
         display_name: String::new(),
-        pledge_bytes: 0,
     }
 }
 
@@ -338,7 +337,7 @@ fn record(id: MemberId) -> MemberRecord {
 fn group(core: &[(&SecretKey, &Node)], followers: &[MemberId]) -> MembershipState {
     let founding = MembershipEvent::found(
         core.iter()
-            .map(|(_, node)| (record(node.id), node.addr.clone()))
+            .map(|(_, node)| (profile(node.id), node.addr.clone()))
             .collect(),
         Default::default(),
         Timestamp::from_millis(1),
@@ -354,7 +353,7 @@ fn group(core: &[(&SecretKey, &Node)], followers: &[MemberId]) -> MembershipStat
         .unwrap();
     for (n, follower) in (2..).zip(followers) {
         let event = MembershipEvent::MemberAdded {
-            member: record(*follower),
+            member: profile(*follower),
         };
         let signed = SignedEvent::sign(by, event, Timestamp::from_millis(n), n - 1).unwrap();
         state.apply(n, &signed).unwrap();

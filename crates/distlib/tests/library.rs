@@ -24,7 +24,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, group_settings, record, until_projected};
+use common::{PLEDGE, api, config, found, group_settings, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -62,18 +62,12 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
     )
     .await
     .unwrap();
-    alice
-        .node()
-        .init_group(
-            vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
-            ],
-            group_settings(),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    found(
+        &[&alice, &bob],
+        &[(&alice_key, PLEDGE), (&bob_key, PLEDGE)],
+        &group_settings(),
+    )
+    .await;
     alice.catalogue().ready().await;
     bob.catalogue().ready().await;
 
@@ -162,18 +156,12 @@ async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
     )
     .await
     .unwrap();
-    alice
-        .node()
-        .init_group(
-            vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
-            ],
-            group_settings(),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    found(
+        &[&alice, &bob],
+        &[(&alice_key, PLEDGE), (&bob_key, PLEDGE)],
+        &group_settings(),
+    )
+    .await;
     alice.catalogue().ready().await;
     bob.catalogue().ready().await;
     let book = dir.path().join("dune.epub");
@@ -227,15 +215,7 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contri
     let runtime = Runtime::start(&key, &solo_config, &DataDir::new(dir.path().join("solo")))
         .await
         .unwrap();
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            &key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(&key, PLEDGE)], &group_settings()).await;
     runtime.catalogue().ready().await;
 
     let file_a = dir.path().join("chapter-1.mp3");
@@ -348,15 +328,7 @@ async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fi
     let runtime = Runtime::start(&key, &solo_config, &DataDir::new(dir.path().join("solo")))
         .await
         .unwrap();
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            &key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(&key, PLEDGE)], &group_settings()).await;
     runtime.catalogue().ready().await;
 
     // Two different paths, the same bytes — a caller who pointed at one
@@ -430,15 +402,7 @@ async fn adding_two_different_files_under_one_name_is_refused() {
     // `add_file` whatever the guard did, so deleting the guard would turn
     // this red on the wrong error and prove nothing. With a group, deleting
     // it makes the call *succeed* and write the item this refuses.
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            &key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(&key, PLEDGE)], &group_settings()).await;
     runtime.catalogue().ready().await;
 
     // The ordinary way to arrive here: one audiobook, two discs, and the
@@ -499,18 +463,12 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
     )
     .await
     .unwrap();
-    alice
-        .node()
-        .init_group(
-            vec![
-                (record(alice_id, "alice"), bound(&alice)),
-                (record(bob_id, "bob"), bound(&bob)),
-            ],
-            group_settings(),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    found(
+        &[&alice, &bob],
+        &[(&alice_key, PLEDGE), (&bob_key, PLEDGE)],
+        &group_settings(),
+    )
+    .await;
     alice.catalogue().ready().await;
     bob.catalogue().ready().await;
     let alice_api = api(&alice, &alice_key);
@@ -605,15 +563,7 @@ async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
     let runtime = Runtime::start(&key, &config(&[id]), &DataDir::new(dir.path().join("solo")))
         .await
         .unwrap();
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            &key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(&key, PLEDGE)], &group_settings()).await;
     runtime.catalogue().ready().await;
 
     let nowhere = ItemId::from_bytes([3; 32]);
