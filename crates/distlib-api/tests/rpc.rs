@@ -20,7 +20,7 @@ use distlib_api::{
     tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
     uploads::Uploads,
 };
-use distlib_consensus::{MemberRecord, MembershipNode};
+use distlib_consensus::{MemberRecord, MembershipEvent, MembershipNode};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
@@ -60,6 +60,16 @@ fn settings() -> GroupSettings {
         min_pledge_bytes: PLEDGE,
         ..GroupSettings::default()
     }
+}
+
+/// The member of `secret` pledges [`PLEDGE`], through `node`: a founder joins at
+/// 0 and pledges for itself.
+async fn pledge(node: &MembershipNode, secret: &SecretKey) {
+    let event = MembershipEvent::PledgeChanged {
+        member: MemberId::from(secret.public()),
+        pledge_bytes: PLEDGE,
+    };
+    node.propose(event, secret).await.unwrap();
 }
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
@@ -267,7 +277,7 @@ impl Harness {
                 MemberRecord {
                     member_id: id,
                     display_name: "founder".to_owned(),
-                    pledge_bytes: PLEDGE,
+                    pledge_bytes: 0,
                 },
                 addr,
             )],
@@ -276,6 +286,7 @@ impl Harness {
         )
         .await
         .unwrap();
+        pledge(&node, &secret).await;
 
         let token = "0123456789abcdef".repeat(4);
         let tasks = Tasks::new(distlib_api::events::bus());
@@ -443,7 +454,7 @@ impl Harness {
                     MemberRecord {
                         member_id: *id,
                         display_name: format!("founder-{index}"),
-                        pledge_bytes: PLEDGE,
+                        pledge_bytes: 0,
                     },
                     addr.clone(),
                 )
@@ -453,6 +464,9 @@ impl Harness {
             .init_group(founders, settings(), &secrets[0])
             .await
             .unwrap();
+        for secret in &secrets {
+            pledge(&nodes[0], secret).await;
+        }
         for node in &nodes {
             timeout(Duration::from_secs(15), async {
                 while node.membership().group_id().is_none() {

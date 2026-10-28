@@ -1658,6 +1658,92 @@ fn a_proposal_stops_waiting_once_the_log_has_moved_past_it() {
     );
 }
 
+/// `who` approves `proposal` as the entry at `index`, leaving a gap before it.
+///
+/// The gap stands for entries the fold never applied — refused ones, and Raft's
+/// own — which move the log but not `changed_at`, so nothing sweeps.
+fn approve_at(
+    state: &mut MembershipState,
+    who: &Signer,
+    proposal: u64,
+    index: u64,
+) -> Result<(), ConsensusError> {
+    let signed = who.sign(MembershipEvent::Approved { proposal }, state.changed_at());
+    state.apply(index, &signed)
+}
+
+#[test]
+fn a_proposal_can_be_approved_at_its_deadline_after_entries_the_fold_skipped() {
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "just in time".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+
+    approve_at(&mut state, bob, proposal, proposal + EXPIRY).unwrap();
+
+    assert!(!state.is_member(&carol.id), "the approval counted");
+}
+
+#[test]
+fn a_proposal_cannot_be_approved_past_its_deadline_after_entries_the_fold_skipped() {
+    // The deadline is a log index, whatever came between (#154). Before, only a
+    // successful entry swept, so a run of refused ones kept a proposal alive.
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
+    let (alice, bob, carol) = (&founders[0], &founders[1], &founders[2]);
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberExpelled {
+            member: carol.id,
+            reason: "too late".to_owned(),
+        },
+    )
+    .unwrap();
+    let proposal = the_pending_one(&state);
+    let index = proposal + EXPIRY + 1;
+
+    assert_eq!(
+        approve_at(&mut state, bob, proposal, index),
+        Err(ConsensusError::ProposalExpired { proposal, index })
+    );
+    assert!(state.is_member(&carol.id), "an expiry decides nothing");
+    assert_eq!(
+        the_pending_one(&state),
+        proposal,
+        "a refused entry changes nothing, the sweep included"
+    );
+}
+
+#[test]
+fn a_proposal_past_its_deadline_does_not_block_a_new_one_about_the_same_member() {
+    let (mut state, founders) = founded_by_with(3, expiring_after(EXPIRY));
+    let (alice, carol) = (&founders[0], &founders[2]);
+    let expel = || MembershipEvent::MemberExpelled {
+        member: carol.id,
+        reason: "asked again".to_owned(),
+    };
+    propose(&mut state, alice, expel()).unwrap();
+    let first = the_pending_one(&state);
+    let again = first + EXPIRY + 1;
+
+    let signed = alice.sign(expel(), state.changed_at());
+    state.apply(again, &signed).unwrap();
+
+    assert_eq!(
+        state.pending().map(|(index, _)| index).collect::<Vec<_>>(),
+        vec![again],
+        "the new one waits, and the expired one is swept"
+    );
+}
+
 #[test]
 fn a_subject_is_free_again_once_its_proposal_has_expired() {
     // The two rules have to fit together: one proposal per subject would be a
@@ -1760,6 +1846,95 @@ fn a_pledge_below_the_groups_minimum_is_refused() {
     assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, 0);
     propose(&mut state, &alice, pledge(minimum)).unwrap();
     assert_eq!(state.member(&alice.id).unwrap().pledge_bytes, minimum);
+}
+
+#[test]
+fn a_member_is_admitted_without_a_pledge() {
+    // A pledge is set only by its owner (#154), and an admission is signed by
+    // somebody else.
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+
+    let refused = propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: MemberRecord {
+                pledge_bytes: PLEDGE,
+                ..bob.record("bob")
+            },
+        },
+    );
+
+    assert_eq!(
+        refused,
+        Err(ConsensusError::PledgeOnJoining {
+            member: bob.id,
+            pledge_bytes: PLEDGE,
+        })
+    );
+    assert!(!state.is_member(&bob.id));
+}
+
+#[test]
+fn a_founder_pledging_at_founding_is_refused_when_building_the_event() {
+    let alice = Signer::generate();
+    let bob = Signer::generate();
+
+    let built = MembershipEvent::found(
+        vec![
+            alice.founder("alice"),
+            (
+                MemberRecord {
+                    pledge_bytes: PLEDGE,
+                    ..bob.record("bob")
+                },
+                bob.addr(0),
+            ),
+        ],
+        Default::default(),
+        Timestamp::from_millis(1),
+    );
+
+    assert_eq!(
+        built.unwrap_err(),
+        ConsensusError::PledgeOnJoining {
+            member: bob.id,
+            pledge_bytes: PLEDGE,
+        }
+    );
+}
+
+#[test]
+fn a_founder_pledging_at_founding_is_refused_on_apply() {
+    // Even the signing founder's own pledge: every founder pledges afterwards,
+    // so one rule covers founding and admission.
+    let alice = Signer::generate();
+    let mut state = MembershipState::new();
+
+    let event = alice.sign(
+        MembershipEvent::GroupFounded {
+            group_id: GroupId::from_bytes([7; 32]),
+            founders: vec![(
+                MemberRecord {
+                    pledge_bytes: PLEDGE,
+                    ..alice.record("alice")
+                },
+                alice.addr(0),
+            )],
+            settings: Box::default(),
+        },
+        state.changed_at(),
+    );
+
+    assert_eq!(
+        apply_next(&mut state, &event),
+        Err(ConsensusError::PledgeOnJoining {
+            member: alice.id,
+            pledge_bytes: PLEDGE,
+        })
+    );
+    assert!(state.is_empty(), "not founded");
 }
 
 #[test]

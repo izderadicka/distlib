@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{PLEDGE, api, bound, collecting, config, group_settings, record};
+use common::{PLEDGE, api, collecting, config, found, group_settings};
 
 /// A group of one, founded, with its catalogue open and `limit` bytes of
 /// storage.
@@ -28,19 +28,10 @@ async fn founded_alone(dir: &Path, limit: u64) -> (Runtime, Api) {
 
 /// [`founded_alone`] as `solo_config` says, by `key`.
 async fn founded_alone_with(dir: &Path, key: &SecretKey, solo_config: &Config) -> (Runtime, Api) {
-    let id = MemberId::from(key.public());
     let runtime = Runtime::start(key, solo_config, &DataDir::new(dir.join("solo")))
         .await
         .unwrap();
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(key, PLEDGE)], &group_settings()).await;
     runtime.catalogue().ready().await;
     let api = api(&runtime, key);
     (runtime, api)

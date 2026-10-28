@@ -8,14 +8,13 @@ use std::{path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_consensus::MemberRecord;
 use distlib_core::{DataDir, GroupSettings, MemberId};
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, download, found, until_projected};
+use common::{api, config, download, found, until_projected};
 
 const SOON: Duration = Duration::from_secs(30);
 
@@ -35,16 +34,12 @@ async fn founded_alone(dir: &Path, pledge_bytes: u64) -> (Runtime, Api) {
     let runtime = Runtime::start(&key, &config(&[id]), &DataDir::new(dir.join("solo")))
         .await
         .unwrap();
-    let founder = MemberRecord {
-        member_id: id,
-        display_name: "solo".to_owned(),
-        pledge_bytes,
-    };
-    runtime
-        .node()
-        .init_group(vec![(founder, bound(&runtime))], settings(), &key)
-        .await
-        .unwrap();
+    found(
+        std::slice::from_ref(&runtime),
+        &[(&key, pledge_bytes)],
+        &settings(),
+    )
+    .await;
     runtime.catalogue().ready().await;
     let api = api(&runtime, &key);
     (runtime, api)
@@ -165,13 +160,7 @@ async fn a_member_below_the_minimum_pledge_browses_but_takes_no_content() {
         let data_dir = DataDir::new(dir.path().join(format!("node-{index}")));
         runtimes.push(Runtime::start(key, &config(&ids), &data_dir).await.unwrap());
     }
-    found(
-        &runtimes,
-        &keys[0],
-        &[(ids[0], 100), (ids[1], 0)],
-        &settings(),
-    )
-    .await;
+    found(&runtimes, &[(&keys[0], 100), (&keys[1], 0)], &settings()).await;
     let [founder, member] = [0, 1].map(|index| api(&runtimes[index], &keys[index]));
     runtimes[0].catalogue().ready().await;
     let added = add_a_file(&founder, dir.path(), 1, 20).await.unwrap();

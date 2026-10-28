@@ -260,8 +260,8 @@ pub(crate) fn check_settings(settings: &GroupSettings) -> Result<()> {
         })
 }
 
-/// The founders' ids, sorted — if the set is a valid one: non-empty, and no
-/// member twice.
+/// The founders' ids, sorted — if the set is a valid one: non-empty, no member
+/// twice, and no pledges.
 ///
 /// One function for both because they are one pass, and because the two callers
 /// want the same list for related reasons. [`MembershipEvent::found`] hashes it,
@@ -275,6 +275,9 @@ fn checked_ids(founders: &[(MemberRecord, NodeAddr)]) -> Result<Vec<MemberId>> {
     if founders.is_empty() {
         return Err(ConsensusError::NoFounders);
     }
+    founders
+        .iter()
+        .try_for_each(|(record, _)| no_pledge(record))?;
 
     let mut ids: Vec<MemberId> = founders
         .iter()
@@ -285,6 +288,21 @@ fn checked_ids(founders: &[(MemberRecord, NodeAddr)]) -> Result<Vec<MemberId>> {
         return Err(ConsensusError::DuplicateFounder { member: pair[0] });
     }
     Ok(ids)
+}
+
+/// Refuses a record that joins the group with a pledge in it.
+///
+/// A pledge is set only by its owner (D8), and a record in `GroupFounded` or
+/// `MemberAdded` is signed by somebody else — even the signing founder pledges
+/// afterwards, so one rule covers both. Every member starts at 0.
+pub(crate) fn no_pledge(record: &MemberRecord) -> Result<()> {
+    match record.pledge_bytes {
+        0 => Ok(()),
+        pledge_bytes => Err(ConsensusError::PledgeOnJoining {
+            member: record.member_id,
+            pledge_bytes,
+        }),
+    }
 }
 
 /// The rule a founder set must satisfy, for the caller that wants only the

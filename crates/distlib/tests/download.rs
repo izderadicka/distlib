@@ -39,8 +39,8 @@ use tokio::sync::broadcast;
 
 mod common;
 use common::{
-    api, bound, config, following, group_settings, init_logging, record, until_projected,
-    until_released,
+    PLEDGE, api, bound, config, following, found, group_settings, init_logging, pledge, record,
+    until_projected, until_released,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
@@ -227,16 +227,8 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     )
     .await
     .unwrap();
-    alice
-        .node()
-        .init_group(
-            vec![(record(alice_id, "alice"), bound(&alice))],
-            group_settings(),
-            &alice_key,
-        )
-        .await
-        .unwrap();
-    for (member, name) in [(bob_id, "bob"), (carol_id, "carol")] {
+    found(&[&alice], &[(&alice_key, PLEDGE)], &group_settings()).await;
+    for (member, name, key) in [(bob_id, "bob", &bob_key), (carol_id, "carol", &carol_key)] {
         alice
             .node()
             .propose(
@@ -247,6 +239,7 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
             )
             .await
             .unwrap();
+        pledge(&alice, key, PLEDGE).await;
     }
 
     // Followers, so that shutting alice down later is the core node leaving
@@ -848,15 +841,7 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
     let runtime = Runtime::start(&key, &config(&[id]), &DataDir::new(dir.path().join("solo")))
         .await
         .unwrap();
-    runtime
-        .node()
-        .init_group(
-            vec![(record(id, "solo"), bound(&runtime))],
-            group_settings(),
-            &key,
-        )
-        .await
-        .unwrap();
+    found(&[&runtime], &[(&key, PLEDGE)], &group_settings()).await;
     tokio::time::timeout(SOON, runtime.catalogue().ready())
         .await
         .unwrap();

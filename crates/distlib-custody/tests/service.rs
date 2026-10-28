@@ -16,27 +16,34 @@ use tokio::sync::{broadcast, watch};
 
 const GB: u64 = 1_000_000_000;
 
-/// A group of `me` and `other`, founded by `other`, both pledging.
-fn founded(me: MemberId, other: &SecretKey) -> MembershipState {
-    let record = |member_id, name: &str| {
+/// A group of `me` and `other`, founded by `other`, then each pledging.
+fn founded(me: &SecretKey, other: &SecretKey) -> MembershipState {
+    let sign = |key: &SecretKey, event, seen| {
+        SignedEvent::sign(key, event, Timestamp::from_millis(1), seen).unwrap()
+    };
+    let founder = |key: &SecretKey, name: &str| {
         (
             MemberRecord {
-                member_id,
+                member_id: MemberId::from(key.public()),
                 display_name: name.to_owned(),
-                pledge_bytes: 100 * GB,
+                pledge_bytes: 0,
             },
             NodeAddr::default(),
         )
     };
-    let founders = vec![
-        record(MemberId::from(other.public()), "other"),
-        record(me, "me"),
-    ];
+    let founders = vec![founder(other, "other"), founder(me, "me")];
     let event =
         MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1)).unwrap();
-    let signed = SignedEvent::sign(other, event, Timestamp::from_millis(1), 0).unwrap();
     let mut state = MembershipState::new();
-    state.apply(1, &signed).unwrap();
+    state.apply(1, &sign(other, event, 0)).unwrap();
+    for key in [other, me] {
+        let pledge = MembershipEvent::PledgeChanged {
+            member: MemberId::from(key.public()),
+            pledge_bytes: 100 * GB,
+        };
+        let seen = state.changed_at();
+        state.apply(seen + 1, &sign(key, pledge, seen)).unwrap();
+    }
     state
 }
 
@@ -72,14 +79,15 @@ fn an_item(creator: MemberId) -> StoredItem {
 #[tokio::test]
 async fn a_replay_finished_before_the_start_still_counts() {
     let other = SecretKey::generate();
-    let me = MemberId::from(SecretKey::generate().public());
+    let my_key = SecretKey::generate();
+    let me = MemberId::from(my_key.public());
     let store = Store::open(None).await.unwrap();
     store
         .upsert_item(an_item(MemberId::from(other.public())))
         .await
         .unwrap();
 
-    let (_membership_tx, membership) = watch::channel(founded(me, &other));
+    let (_membership_tx, membership) = watch::channel(founded(&my_key, &other));
     let (_events_tx, events) = broadcast::channel(16);
     let (replays_tx, replays) = watch::channel(0);
     replays_tx.send_replace(1);

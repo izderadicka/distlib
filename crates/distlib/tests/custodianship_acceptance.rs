@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until_projected};
 
 const SOON: Duration = Duration::from_secs(60);
 const PLEDGE: u64 = 100_000_000_000;
@@ -121,8 +121,8 @@ async fn five_nodes(dir: &Path) -> Vec<Node> {
         });
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
-    let pledges: Vec<(MemberId, u64)> = ids.into_iter().map(|id| (id, PLEDGE)).collect();
-    found(&runtimes, &nodes[0].key, &pledges, &settings()).await;
+    let pledges: Vec<(&SecretKey, u64)> = nodes.iter().map(|node| (&node.key, PLEDGE)).collect();
+    found_and_settled(&runtimes, &pledges, &settings()).await;
     nodes
 }
 

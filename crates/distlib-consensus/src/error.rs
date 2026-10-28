@@ -62,6 +62,13 @@ pub enum ConsensusError {
     #[error("the core group must be a non-empty subset of the membership, naming each member once")]
     InvalidCoreGroup,
 
+    /// A member record arrived with a pledge in it, at founding or admission.
+    ///
+    /// A pledge is set only by its owner (D8), so every member starts at 0 and
+    /// pledges with its own `PledgeChanged`.
+    #[error("{member} cannot join with a pledge of {pledge_bytes} bytes; a member starts at 0")]
+    PledgeOnJoining { member: MemberId, pledge_bytes: u64 },
+
     /// A member tried to set somebody else's pledge.
     #[error("{proposer} cannot set the pledge of {member}; a pledge is the member's own")]
     PledgeNotOwn {
@@ -99,6 +106,13 @@ pub enum ConsensusError {
     /// not accumulate against an applied proposal.
     #[error("there is no proposal at index {proposal} waiting for approval")]
     UnknownProposal { proposal: u64 },
+
+    /// An approval arrived at a log index past the proposal's expiry.
+    ///
+    /// The deadline is the proposal's index plus `pending_expiry`, whatever
+    /// came between: refused entries and Raft's own do not move it.
+    #[error("the proposal at index {proposal} expired before index {index}")]
+    ProposalExpired { proposal: u64, index: u64 },
 
     /// Somebody outside the core group tried to approve a proposal.
     ///

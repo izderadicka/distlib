@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d planned, before 5c-5b.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -690,8 +690,9 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
 run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)):
 
 - **5d-1 — the plan.** The upgrade note, its questions decided (Ivan), and this section.
-- **5d-2 — fold rules (#154's 8 and expiry).** A member is admitted with pledge 0, and at founding
-  only the signing founder may give a pledge, its own: a pledge is set only by its owner (D8).
+- **5d-2 — fold rules (#154's 8 and expiry).** *Done (#170, P5-40).* A member is admitted with
+  pledge 0, and so is every founder, the signing one too (P5-40): a pledge is set only by its owner
+  (D8).
   A proposal expires by log index (Ivan): it cannot be approved at an index past where it was made
   plus its expiry, whatever came between. Both change what the fold accepts, so they go in before
   v1, when that would need a raise.
