@@ -269,11 +269,21 @@ async fn re_promotion_accepts_a_newly_elected_leader() {
         uniform_voters(&d).is_some_and(|v| v.contains(&RawMemberId::from(d.id)))
     })
     .await;
-    d.node.raft().unwrap().trigger().elect().await.unwrap();
-    until_upto(PATIENTLY, "d leads", || {
-        d.node.raft().unwrap().metrics().borrow().current_leader == Some(RawMemberId::from(d.id))
+    // An election d starts is not one it is sure to win: the others may still
+    // hear from their leader and refuse it, and the next election may go to
+    // anyone (seen on CI). So d asks again until it leads.
+    tokio::time::timeout(PATIENTLY, async {
+        loop {
+            let raft = d.node.raft().unwrap();
+            if raft.metrics().borrow().current_leader == Some(RawMemberId::from(d.id)) {
+                return;
+            }
+            raft.trigger().elect().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     })
-    .await;
+    .await
+    .expect("d leads");
     change_core(&d, &[a], &[a, b, c, &d]).await;
     until_upto(PATIENTLY * 2, "c votes under its new leader", || {
         uniform_voters(&d).is_some_and(|v| v.len() == 4)
