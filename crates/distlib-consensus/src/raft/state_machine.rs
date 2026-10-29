@@ -114,6 +114,7 @@ struct Inner {
     /// snapshot builder notes it with its copy of the state, and does not
     /// write a snapshot once it has moved (#154 finding 5): openraft runs
     /// builders on tasks of their own, which a reset does not wait for.
+    /// Relaxed is enough: the `applied` lock and redb's write lock order it.
     generation: AtomicU64,
     /// Announces the membership after every change.
     ///
@@ -391,7 +392,7 @@ impl StateMachineStore {
         let encoded = {
             let mut applied = self.lock()?;
             *applied = Applied::default();
-            self.inner.generation.fetch_add(1, Ordering::SeqCst);
+            self.inner.generation.fetch_add(1, Ordering::Relaxed);
             encode(&*applied, ErrorSubject::StateMachine)?
         };
 
@@ -647,7 +648,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         let captured = self.lock().ok().map(|applied| {
             (
                 applied.clone(),
-                self.inner.generation.load(Ordering::SeqCst),
+                self.inner.generation.load(Ordering::Relaxed),
             )
         });
         SnapshotBuilder {
@@ -785,7 +786,7 @@ impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
             // Checked in here, so a reset's own transaction is either before
             // this one, and moved the generation first, or after it, and
             // removes what this writes.
-            let reset_since = inner.generation.load(Ordering::SeqCst) != generation;
+            let reset_since = inner.generation.load(Ordering::Relaxed) != generation;
             if newer_exists || reset_since {
                 return Ok(());
             }
