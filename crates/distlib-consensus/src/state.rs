@@ -806,3 +806,43 @@ impl MembershipState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::golden::{
+        ADDR, DEFAULT_SETTINGS, GROUP_9, MEMBER_1, MEMBER_2, addr, assert_golden, member, profile,
+    };
+
+    /// The projection as a snapshot and the applied state store it, with every
+    /// field filled: a member, a core seat and a pending proposal.
+    #[test]
+    fn the_membership_state_encoding_is_fixed() {
+        let state = MembershipState {
+            group: Some(GroupId::from_bytes([9; 32])),
+            members: BTreeMap::from([(member(1), MemberRecord::of(&profile(1), 1_000))]),
+            core: BTreeMap::from([(member(1), addr())]),
+            pending: BTreeMap::from([(
+                4,
+                Proposal {
+                    event: MembershipEvent::MemberAdded { member: profile(2) },
+                    proposer: member(1),
+                    approvals: BTreeSet::from([member(1)]),
+                },
+            )]),
+            changed_at: 4,
+            settings: GroupSettings::default(),
+        };
+        assert_golden(
+            &state,
+            &format!(
+                "01{GROUP_9}\
+                 01{MEMBER_1}{MEMBER_1}03616e6ee807\
+                 01{MEMBER_1}{ADDR}\
+                 0104\
+                 01{MEMBER_2}03616e6e{MEMBER_1}01{MEMBER_1}\
+                 04{DEFAULT_SETTINGS}"
+            ),
+        );
+    }
+}

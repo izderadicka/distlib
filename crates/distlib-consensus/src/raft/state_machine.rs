@@ -813,6 +813,49 @@ mod tests {
     #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
     use super::*;
+    use crate::golden::{
+        DEFAULT_SETTINGS, MEMBER_1, MEMBER_2, assert_golden, log_id, log_id_hex, member,
+        raft_membership, raft_membership_hex,
+    };
+
+    /// What the state machine keeps in redb, each under its own key.
+    #[test]
+    fn the_stored_encodings_are_fixed() {
+        let (log_id_hex, membership_hex) = (log_id_hex(), raft_membership_hex());
+        let stored_membership = || StoredMembership::new(Some(log_id()), raft_membership());
+        let stored_membership_hex = format!("01{log_id_hex}{membership_hex}");
+        assert_golden(
+            &Applied {
+                last_applied: Some(log_id()),
+                membership: stored_membership(),
+                state: MembershipState::default(),
+                followed_upto: 5,
+            },
+            &format!("01{log_id_hex}{stored_membership_hex}0000000000{DEFAULT_SETTINGS}05"),
+        );
+        assert_golden(
+            &StoredSnapshot {
+                meta: SnapshotMeta {
+                    last_log_id: Some(log_id()),
+                    last_membership: stored_membership(),
+                    snapshot_id: "2-5-0".into(),
+                },
+                data: vec![1, 2],
+            },
+            &format!("01{log_id_hex}{stored_membership_hex}05322d352d30020102"),
+        );
+        assert_golden(
+            &Some(Promotion {
+                at: 5,
+                voters: BTreeSet::from([member(1)]),
+            }),
+            &format!("010501{MEMBER_1}"),
+        );
+        assert_golden(
+            &PromotionPredecessors::from([(member(1), BTreeSet::from([member(2)]))]),
+            &format!("01{MEMBER_1}01{MEMBER_2}"),
+        );
+    }
 
     #[tokio::test]
     async fn a_poisoned_state_is_never_persisted() {

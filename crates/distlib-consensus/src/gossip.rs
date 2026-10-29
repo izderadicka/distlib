@@ -381,3 +381,18 @@ fn note_where_a_member_is(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::golden::{assert_golden, signed_address, signed_address_hex};
+
+    #[test]
+    fn announcement_encodings_are_fixed() {
+        assert_golden(&Announcement::Applied { up_to: 5 }, "0005");
+        assert_golden(
+            &Announcement::ReachableAt(Box::new(signed_address())),
+            &format!("01{}", signed_address_hex()),
+        );
+    }
+}

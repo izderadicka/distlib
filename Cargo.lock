@@ -1202,6 +1202,7 @@ dependencies = [
  "anyerror",
  "blake3",
  "bytes",
+ "data-encoding",
  "distlib-core",
  "distlib-net",
  "futures-lite",

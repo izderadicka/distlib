@@ -37,6 +37,8 @@ anyerror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Hex for the golden encodings.
+data-encoding = { workspace = true }
 # Enables `RawMemberId: From<u64>`, which openraft's conformance suite needs.
 distlib-core = { workspace = true, features = ["testing"] }
 iroh = { workspace = true }

@@ -12,6 +12,8 @@
 
 pub mod error;
 pub mod event;
+#[cfg(test)]
+mod golden;
 pub mod gossip;
 pub mod node;
 pub mod raft;
