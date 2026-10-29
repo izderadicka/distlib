@@ -125,6 +125,15 @@ const LEADER_CHANGE_WAIT: Duration = Duration::from_millis(ELECTION_TIMEOUT_MAX 
 /// and a follower can always read it from the founding entry. With nothing
 /// purged, openraft never sends a snapshot to a voter either, so every core
 /// node holds the whole log too.
+/// Whether a proposal refused as stale is sent again, unchanged, once caught up.
+///
+/// Not a core map: it is the whole core group as the caller read it before the
+/// change that made it stale, so sending it again would undo that change
+/// (#154). The caller reads the group again.
+fn sent_again_when_stale(event: &MembershipEvent) -> bool {
+    !matches!(event, MembershipEvent::CoreGroupChanged { .. })
+}
+
 fn raft_config() -> Config {
     Config {
         heartbeat_interval: 250,
@@ -962,7 +971,9 @@ impl MembershipNode {
             // which is the exact thing the check exists to prevent. Waiting
             // until we really hold it costs a replication round and keeps the
             // statement honest.
-            Err(NodeError::Event(ConsensusError::StaleProposal { current, .. })) => {
+            Err(NodeError::Event(ConsensusError::StaleProposal { current, .. }))
+                if sent_again_when_stale(event) =>
+            {
                 self.catch_up_to(current).await?;
                 self.propose_once(event, secret_key).await
             }
@@ -1767,6 +1778,23 @@ fn let_go_of_the_moved(
             let closed = hooks.close_connections_to(*member);
             tracing::info!(%member, closed, "the log moves a core node; letting go of it");
         }
+    }
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_core_map_is_not_sent_again_and_other_events_are() {
+        let member = MemberId::from(SecretKey::generate().public());
+        assert!(!sent_again_when_stale(&MembershipEvent::CoreGroupChanged {
+            core: vec![(member, NodeAddr::default())],
+        }));
+        assert!(sent_again_when_stale(&MembershipEvent::PledgeChanged {
+            member,
+            pledge_bytes: 1,
+        }));
     }
 }
 

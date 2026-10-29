@@ -537,6 +537,46 @@ async fn a_stale_builder_does_not_overwrite_a_newer_snapshot() {
 }
 
 #[tokio::test]
+async fn a_builder_from_before_a_promotion_reset_does_not_store_its_snapshot() {
+    // A reset clears the projection and its snapshot, and replay rebuilds them.
+    // A builder openraft started before the reset can still finish after it;
+    // storing its snapshot would put back what the reset cleared, ahead of a
+    // projection that is back at 0 (#154 finding 5).
+    let (mut store, _dir) = new_store();
+    store
+        .apply(vec![founding(&Signer::generate())])
+        .await
+        .unwrap();
+    let mut from_before = store.get_snapshot_builder().await;
+
+    store.reset_for_promotion().await.unwrap();
+    from_before.build_snapshot().await.unwrap();
+
+    assert!(store.get_current_snapshot().await.unwrap().is_none());
+    assert_eq!(store.last_applied_index(), 0);
+}
+
+#[tokio::test]
+async fn a_builder_from_after_a_promotion_reset_stores_its_snapshot() {
+    let (mut store, _dir) = new_store();
+    store.reset_for_promotion().await.unwrap();
+    store
+        .apply(vec![founding(&Signer::generate())])
+        .await
+        .unwrap();
+
+    store
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .unwrap();
+
+    let current = store.get_current_snapshot().await.unwrap().unwrap();
+    assert_eq!(current.meta.last_log_id, Some(log_id(1)));
+}
+
+#[tokio::test]
 async fn installing_a_snapshot_announces_the_membership() {
     // How a node that fell far behind learns about an expulsion: the leader
     // purged the log it needed, so it is caught up by snapshot instead. The
