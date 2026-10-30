@@ -898,21 +898,22 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     #[test]
-    fn redirect_encoding_is_stable() {
-        let redirect = Fetched::Redirect(Source {
-            core: Vec::new(),
-            leader: None,
-        });
-        assert_eq!(
-            postcard::to_stdvec(&redirect).expect("encode redirect"),
-            [2, 0, 0]
+    fn rpc_encodings_are_fixed() {
+        use crate::golden::{
+            assert_golden, signed, signed_address, signed_address_hex, signed_hex,
+        };
+
+        assert_golden(&Request::Propose(signed()), &format!("00{}", signed_hex()));
+        assert_golden(&Request::From { cursor: 5 }, "0105");
+        assert_golden(&Request::Directory, "02");
+        assert_golden(
+            &Response::Proposed(ProposeOutcome::Applied { index: 5 }),
+            "000005",
         );
-        assert_eq!(
-            postcard::to_stdvec(&Response::Fetched(redirect)).expect("encode response"),
-            [1, 2, 0, 0]
-        );
-        assert!(
-            matches!(postcard::from_bytes::<Fetched>(&[2, 0, 0]).expect("decode redirect"), Fetched::Redirect(source) if source.core.is_empty() && source.leader.is_none())
+        assert_golden(&Response::Fetched(Fetched::NoGroup), "0101");
+        assert_golden(
+            &Response::Directory(vec![signed_address()]),
+            &format!("0201{}", signed_address_hex()),
         );
     }
 

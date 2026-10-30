@@ -645,26 +645,108 @@ mod tests {
     };
     use std::{collections::BTreeMap, time::Duration};
 
+    fn vote() -> Vote<NodeId> {
+        Vote::new_committed(2, crate::golden::raw(1))
+    }
+
+    fn vote_hex() -> String {
+        format!("02{}01", crate::golden::RAW_1)
+    }
+
+    /// Every request, with openraft's bodies inside: a dependency upgrade that
+    /// changes those is a protocol change too.
     #[test]
-    fn retirement_rpc_encodings_are_stable() {
-        assert_eq!(postcard::to_stdvec(&Request::Retired).unwrap(), [3]);
-        assert_eq!(postcard::to_stdvec(&Request::ForgetMe).unwrap(), [4]);
-        assert!(matches!(
-            postcard::from_bytes::<Request>(&[4]).unwrap(),
-            Request::ForgetMe
-        ));
-        for value in [false, true] {
-            assert_eq!(
-                postcard::to_stdvec(&Response::Retired(value)).unwrap(),
-                [3, u8::from(value)]
-            );
-            assert_eq!(
-                postcard::to_stdvec(&Response::Forgotten(value)).unwrap(),
-                [4, u8::from(value)]
-            );
-            assert!(
-                matches!(postcard::from_bytes::<Response>(&[4, u8::from(value)]).unwrap(), Response::Forgotten(decoded) if decoded == value)
-            );
+    fn request_encodings_are_fixed() {
+        use crate::golden::{assert_golden, log_id, raft_membership, raft_membership_hex};
+        use openraft::{SnapshotMeta, StoredMembership};
+
+        let (vote_hex, log_id_hex) = (vote_hex(), crate::golden::log_id_hex());
+        let requests = [
+            (
+                Request::AppendEntries(AppendEntriesRequest {
+                    vote: vote(),
+                    prev_log_id: Some(log_id()),
+                    entries: vec![Entry {
+                        log_id: log_id(),
+                        payload: EntryPayload::Blank,
+                    }],
+                    leader_commit: Some(log_id()),
+                }),
+                // The vote, the previous log id, one blank entry, the commit.
+                format!("00{vote_hex}01{log_id_hex}01{log_id_hex}0001{log_id_hex}"),
+            ),
+            (
+                Request::Vote(VoteRequest::new(vote(), Some(log_id()))),
+                format!("01{vote_hex}01{log_id_hex}"),
+            ),
+            (
+                Request::InstallSnapshot(InstallSnapshotRequest {
+                    vote: vote(),
+                    meta: SnapshotMeta {
+                        last_log_id: Some(log_id()),
+                        last_membership: StoredMembership::new(Some(log_id()), raft_membership()),
+                        snapshot_id: "2-5-0".into(),
+                    },
+                    offset: 0,
+                    data: vec![1, 2],
+                    done: true,
+                }),
+                // The vote, the snapshot's metadata, the offset, the bytes,
+                // whether they are the last.
+                format!(
+                    "02{vote_hex}01{log_id_hex}01{log_id_hex}{}05322d352d300002010201",
+                    raft_membership_hex()
+                ),
+            ),
+            (Request::Retired, "03".to_owned()),
+            (Request::ForgetMe, "04".to_owned()),
+        ];
+        for (request, hex) in &requests {
+            assert_golden(request, hex);
+        }
+    }
+
+    #[test]
+    fn response_encodings_are_fixed() {
+        use crate::golden::{assert_golden, log_id};
+        use openraft::error::Fatal;
+
+        let (vote_hex, log_id_hex) = (vote_hex(), crate::golden::log_id_hex());
+        let responses = [
+            (
+                Response::AppendEntries(Ok(AppendEntriesResponse::Success)),
+                "000000".to_owned(),
+            ),
+            (
+                Response::AppendEntries(Ok(AppendEntriesResponse::PartialSuccess(Some(log_id())))),
+                format!("00000101{log_id_hex}"),
+            ),
+            (
+                Response::AppendEntries(Ok(AppendEntriesResponse::Conflict)),
+                "000002".to_owned(),
+            ),
+            (
+                Response::AppendEntries(Ok(AppendEntriesResponse::HigherVote(vote()))),
+                format!("000003{vote_hex}"),
+            ),
+            (
+                Response::AppendEntries(Err(RaftError::Fatal(Fatal::Stopped))),
+                "00010102".to_owned(),
+            ),
+            (
+                Response::Vote(Ok(VoteResponse::new(vote(), Some(log_id()), true))),
+                // The vote, whether it was granted, the voter's last log id.
+                format!("0100{vote_hex}0101{log_id_hex}"),
+            ),
+            (
+                Response::InstallSnapshot(Ok(InstallSnapshotResponse { vote: vote() })),
+                format!("0200{vote_hex}"),
+            ),
+            (Response::Retired(true), "0301".to_owned()),
+            (Response::Forgotten(true), "0401".to_owned()),
+        ];
+        for (response, hex) in &responses {
+            assert_golden(response, hex);
         }
     }
 
