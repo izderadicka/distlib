@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -712,8 +712,8 @@ run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)
     Sync's own wire facts, the catalogue key and the heartbeat topic, were pinned already.
 - **5d-5 — the custody score through `libm::log`.** *Done (#175, P5-43).* The same ranking on
   every platform, fixed before v1 freezes it; the scores' bits and one group's ranking pinned.
-- **5d-6 — a data-dir format version.** A binary refuses a data dir newer than it knows, and has a
-  place for migrations; none at v1.
+- **5d-6 — a data-dir format version.** *Done (#176, P5-44).* A binary refuses a data dir newer
+  than it knows, and has a place for migrations; none at v1.
 - **5d-7 — the group protocol version.** `protocol` in the membership state, founded at 1;
   `ProtocolSupported { max }`, which each node writes for itself; `ProtocolRaised { to }`, proposed
   by hand (`distlib group raise-protocol`) and approved by a core majority, refused unless every

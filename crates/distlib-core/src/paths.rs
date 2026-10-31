@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! <root>/
+//! ├── format           the data format, one number (see [`DATA_FORMAT`])
 //! ├── config.toml      configuration (see [`crate::config`])
 //! ├── keys/node.key    ed25519 secret key, 0600
 //! ├── api.token        local api bearer token, 0600
@@ -23,9 +24,19 @@
 //! machine share a single redb database, which is what makes a node's whole
 //! consensus state one thing to copy or delete.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Ordering,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use crate::error::{CoreError, Result};
+
+/// How this build lays out and encodes what a data directory holds (5d-6).
+///
+/// Raised by any change an older build would misread, with the step up from
+/// the old number added to [`DataDir::check_format`].
+pub const DATA_FORMAT: u32 = 1;
 
 /// The root of everything a node stores.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,8 +116,52 @@ impl DataDir {
         self.0.join("index")
     }
 
-    /// Creates the root directory and any parents. Existing directories are fine.
+    /// `<root>/format` — [`DATA_FORMAT`] as the directory was last written.
+    pub fn format_file(&self) -> PathBuf {
+        self.0.join("format")
+    }
+
+    /// Creates the root directory and any parents, and checks its format.
+    /// Existing directories are fine.
     pub fn create(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.0).map_err(CoreError::io("create data directory", &self.0))
+        std::fs::create_dir_all(&self.0)
+            .map_err(CoreError::io("create data directory", &self.0))?;
+        self.check_format()
+    }
+
+    /// Refuses a directory written in a format this build does not know.
+    ///
+    /// One without a format file is new, or was written before 5d-6, which
+    /// no release was; either way it is stamped with this build's. Every
+    /// directory a release opens is stamped from then on, so a missing file
+    /// never has to mean an older format. A newer format is refused, since
+    /// downgrades are not supported (`plan-upgrades.md`, Q5).
+    pub fn check_format(&self) -> Result<()> {
+        let path = self.format_file();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return std::fs::write(&path, format!("{DATA_FORMAT}\n"))
+                    .map_err(CoreError::io("write", &path));
+            }
+            Err(error) => return Err(CoreError::io("read", &path)(error)),
+        };
+        let bad_format = || CoreError::BadDataFormat {
+            path: path.clone(),
+            text: text.trim().to_owned(),
+        };
+        let found: u32 = text.trim().parse().map_err(|_| bad_format())?;
+        match found.cmp(&DATA_FORMAT) {
+            Ordering::Equal => Ok(()),
+            Ordering::Greater => Err(CoreError::DataDirTooNew {
+                path: self.0.clone(),
+                found,
+                supported: DATA_FORMAT,
+            }),
+            // Where a migration goes: one step per format, each keeping a
+            // backup of what it changes, then the new number written. Format
+            // 1 is the first, so nothing is older.
+            Ordering::Less => Err(bad_format()),
+        }
     }
 }
