@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use distlib_api::{tasks::Tasks, uploads::Uploads};
-use distlib_consensus::{MembershipNode, MembershipState};
+use distlib_consensus::{MembershipNode, MembershipState, PROTOCOL_MAX, announce_protocol_support};
 use distlib_core::{
     Config, ContentHash, DataDir, Event, MemberId, NodeAddr, TransferConfig, identity::member_id,
 };
@@ -55,6 +55,8 @@ use tokio::{
 /// is the way to stop one.
 pub struct Runtime {
     node: Arc<MembershipNode>,
+    /// Says in the log which group protocols this build speaks (5d-7).
+    protocol_support: JoinHandle<()>,
     catalogue: Catalogue,
     /// The heartbeat, and who else is online.
     availability: Availability,
@@ -190,6 +192,7 @@ impl Runtime {
         let router = serve_protocols(transport.endpoint.clone(), &node, &catalogue);
 
         Ok(Self {
+            protocol_support: spawn_protocol_support(&node, secret),
             node,
             catalogue,
             availability,
@@ -322,6 +325,7 @@ impl Runtime {
         // minute later. A closed connection, by contrast, is reported to every
         // topic at once. Nothing below needs the network to stop.
         self.router.endpoint().close().await;
+        self.protocol_support.abort();
         self.node.shutdown().await;
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
@@ -353,6 +357,13 @@ impl Runtime {
             tracing::warn!(%error, "router did not shut down cleanly");
         }
     }
+}
+
+/// Says in the log which group protocols this build speaks, for as long as
+/// the node runs (5d-7).
+fn spawn_protocol_support(node: &Arc<MembershipNode>, secret: &SecretKey) -> JoinHandle<()> {
+    let (node, secret) = (Arc::clone(node), secret.clone());
+    tokio::spawn(async move { announce_protocol_support(&node, &secret, PROTOCOL_MAX).await })
 }
 
 /// Every ALPN this process serves.

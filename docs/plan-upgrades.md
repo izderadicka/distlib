@@ -124,7 +124,7 @@ learn them later:
 2. Fix the custody score's `ln` before the ranking is frozen. *(5d-5)*
 3. A data-dir format version: refuse newer; a migration hook (empty at v1). *(5d-6, done in #176)*
 4. `protocol` in the membership state, with `ProtocolSupported` and `ProtocolRaised`, their fold
-   rules, and the manual raise. *(5d-7)*
+   rules, and the manual raise. *(5d-7: the log and the fold in #177, the rest in 5d-7b)*
 5. "Upgrade required" mode: on a raise beyond `max`, and on an undecodable log entry or memberlog
    page. Shown in `status`, the CLI and the UI. *(5d-8)*
 

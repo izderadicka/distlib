@@ -2006,6 +2006,15 @@ fn describe(event: &MembershipEvent, membership: &MembershipState) -> String {
             member,
             pledge_bytes,
         } => format!("set the pledge of {member} to {pledge_bytes} bytes"),
+        MembershipEvent::ProtocolRaised { to } => format!(
+            "raise the group protocol from {} to {to}",
+            membership.protocol()
+        ),
+        // Never pending, as a pledge is not: the member's own, approved by
+        // nobody.
+        MembershipEvent::ProtocolSupported { member, max } => {
+            format!("say that {member} speaks protocols up to {max}")
+        }
         // Neither is ever a pending proposal — both are dispatched by the fold
         // rather than held — so this is unreachable rather than a real case.
         MembershipEvent::GroupFounded { group_id, .. } => format!("found group {group_id}"),
