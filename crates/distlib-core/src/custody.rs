@@ -238,11 +238,11 @@ impl Ranked {
         // a step so that neither end of the interval is reached.
         let bits = u64::from_le_bytes(first) >> 11;
         let h = (bits as f64 + 0.5) / (1_u64 << 53) as f64;
-        // `ln` is the platform's: glibc and Windows' runtime may differ in the
-        // last bit, so two nodes can rank a near-tie differently (P5-4).
-        // `libm::log` would make it the same everywhere.
+        // `libm::log`, not `f64::ln`, which is the platform's: glibc's differs
+        // from it in the last bit for about one input in fourteen, so two
+        // nodes could rank a near-tie differently (P5-4, 5d-5).
         Self {
-            score: -weight / h.ln(),
+            score: -weight / libm::log(h),
             member,
         }
     }
@@ -267,5 +267,39 @@ impl Ord for Ranked {
         self.score
             .total_cmp(&other.score)
             .then_with(|| other.member.cmp(&self.member))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::SecretKey;
+
+    use super::*;
+
+    /// The bits of 64 members' scores for 1,024 items, hashed. CI runs this
+    /// on Linux, macOS and Windows, so it is what shows a score is the same
+    /// everywhere; and the platform's `ln` differs from `libm::log` often
+    /// enough that going back to it fails here (5d-5).
+    #[test]
+    fn every_platform_scores_to_the_same_bits() {
+        let key = blake3::derive_key(CUSTODY_CONTEXT, &[]);
+        let members: Vec<MemberId> = (0..64_u8)
+            .map(|seed| MemberId::from(SecretKey::from_bytes(&[seed; 32]).public()))
+            .collect();
+        let mut scores = blake3::Hasher::new();
+        for n in 0..1024_u32 {
+            let mut item = [0; 32];
+            item[..4].copy_from_slice(&n.to_le_bytes());
+            for (weight, member) in (1..).zip(&members) {
+                let ranked =
+                    Ranked::new(&key, ItemId::from_bytes(item), *member, f64::from(weight));
+                scores.update(&ranked.score.to_bits().to_le_bytes());
+            }
+        }
+
+        assert_eq!(
+            scores.finalize().to_hex().as_str(),
+            "ffba99ed9833bf39bc1055ee5d6f57b51bef3b3c2d91878200e9cd4a7689a3e3"
+        );
     }
 }

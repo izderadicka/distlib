@@ -306,3 +306,41 @@ fn the_load_factor_is_each_items_size_per_slot_over_the_total_weight() {
     let weightless = CustodyGroup::new(REPLICAS, RULE, [(a, 0)]);
     assert_eq!(weightless.load_factor(demand), None);
 }
+
+/// Who keeps what in one fixed group: the ranking every node must agree on,
+/// pinned, so that a change to scores, weights or slots fails here rather
+/// than splitting a live group's view of custody (5d-5). Members by their
+/// place in the pool; even items are created by member 0, so one slot fewer.
+#[test]
+fn a_fixed_group_ranks_its_custodians_the_same_way_for_good() {
+    let pledges: Vec<(MemberId, u64)> = POOL[..6]
+        .iter()
+        .copied()
+        .zip([100, 200, 300, 400, 500, 1_200])
+        .collect();
+    let group = group(&pledges);
+    let ranked: Vec<Vec<usize>> = items(8, &[POOL[0], POOL[39]])
+        .iter()
+        .map(|item| {
+            group
+                .custodians(item)
+                .iter()
+                .map(|member| POOL.iter().position(|pooled| pooled == member).unwrap())
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(
+        ranked,
+        [
+            vec![5, 3],
+            vec![5, 3, 4],
+            vec![4, 5],
+            vec![5, 2, 4],
+            vec![1, 4],
+            vec![5, 2, 3],
+            vec![4, 5],
+            vec![3, 5, 4],
+        ]
+    );
+}

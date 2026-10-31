@@ -39,7 +39,8 @@ for good.
 A smaller finding: the custody score uses the platform's `ln`. The comment in `custody.rs` notes
 that glibc and the Windows runtime may differ, so even nodes on the **same** version can rank
 custodians differently. Fixing it (`libm::log`) changes the ranking, which makes it a protocol
-change once v1 is out. It should be fixed before v1.
+change once v1 is out. It should be fixed before v1. *Fixed in 5d-5 (#175): `libm::log`, with the
+scores' bits pinned.*
 
 ## 3. Principles
 
