@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 mod common;
 
-use common::process::{Friend, run_command};
+use common::process::{Friend, distlib, run_command};
 
 /// The member id `init` printed, from its `identity` line.
 fn identity_in(printed: &str) -> String {
@@ -116,6 +116,23 @@ fn status_of_a_stopped_founder_reads_its_role_from_the_database() {
 
     assert!(printed.contains("role        core member"), "{printed}");
     assert!(printed.contains("node        not running"), "{printed}");
+}
+
+/// 5d-6: a directory a newer build wrote is refused before its database is
+/// read, by the commands that read it with the node stopped as well.
+#[test]
+fn members_of_a_data_dir_in_a_newer_format_says_to_run_the_newer_build() {
+    let dir = TempDir::new().unwrap();
+    run_command(dir.path(), &["init"]);
+    std::fs::write(dir.path().join("raft.redb"), b"").unwrap();
+    std::fs::write(dir.path().join("format"), "2\n").unwrap();
+
+    let output = distlib(dir.path()).arg("members").output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is in format 2"), "{stderr}");
+    assert!(stderr.contains("run the newer build"), "{stderr}");
 }
 
 /// 5a-3: a founder's `[group]` is what its group is founded with, and

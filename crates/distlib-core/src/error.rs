@@ -40,6 +40,22 @@ pub enum CoreError {
     #[error("could not determine a default data directory; pass --data-dir")]
     NoDataDir,
 
+    /// The data directory was written by a newer build.
+    #[error(
+        "the data directory {path} is in format {found}, written by a newer distlib; \
+         this build reads format {supported} at most, and downgrades are not supported: \
+         run the newer build"
+    )]
+    DataDirTooNew {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+
+    /// The data directory's format file holds no format this build knows.
+    #[error("{path} holds {text:?}, which is not a data format")]
+    BadDataFormat { path: PathBuf, text: String },
+
     /// A string that was meant to be a join ticket is not one.
     #[error("that is not a valid join ticket: {reason}")]
     MalformedTicket { reason: String },

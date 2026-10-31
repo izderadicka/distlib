@@ -1878,6 +1878,7 @@ fn stored_membership(paths: &Paths) -> Result<Option<MembershipState>> {
     if !path.exists() {
         return Ok(None);
     }
+    paths.data_dir.check_format()?;
     let store = StateMachineStore::open(&path).with_context(|| {
         format!(
             "could not open {}; a running `distlib run` holds it exclusively",

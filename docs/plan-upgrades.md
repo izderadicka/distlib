@@ -122,7 +122,7 @@ learn them later:
 1. **Golden encoding tests**: fixed bytes for every wire and stored type, which fail when an
    encoding changes. This is the cheapest guard against an accidental protocol change. *(5d-4)*
 2. Fix the custody score's `ln` before the ranking is frozen. *(5d-5)*
-3. A data-dir format version: refuse newer; a migration hook (empty at v1). *(5d-6)*
+3. A data-dir format version: refuse newer; a migration hook (empty at v1). *(5d-6, done in #176)*
 4. `protocol` in the membership state, with `ProtocolSupported` and `ProtocolRaised`, their fold
    rules, and the manual raise. *(5d-7)*
 5. "Upgrade required" mode: on a raise beyond `max`, and on an undecodable log entry or memberlog
