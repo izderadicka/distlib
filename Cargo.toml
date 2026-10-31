@@ -125,6 +125,11 @@ blake3 = "=1.8.7"
 # built for tantivy, at this version.
 rayon = "=1.12.0"
 
+# --- maths -----------------------------------------------------------------
+# The custody score's logarithm, the same to the last bit on every platform
+# (5d-5). No default features: `arch` may swap in a platform's own routine.
+libm = { version = "=0.2.16", default-features = false }
+
 # --- observability ---------------------------------------------------------
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
