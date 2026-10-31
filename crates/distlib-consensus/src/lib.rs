@@ -22,11 +22,11 @@ pub mod state;
 
 pub use error::{ConsensusError, Result};
 pub use event::{MAX_DISPLAY_NAME, MAX_REASON, MemberProfile, MembershipEvent, Timestamp};
-pub use node::{MembershipNode, RAFT_DB, alpns};
+pub use node::{MembershipNode, RAFT_DB, alpns, announce_protocol_support};
 pub use raft::{
     BYTES_PER_FETCH, EVENTS_PER_FETCH, FetchFailed, Fetched, LogPage, LogStore, MemberlogClient,
     MemberlogProtocol, ProposeError, ProposeOutcome, RaftClient, RaftNetworkFactoryImpl,
     RaftProtocol, Source, StateMachineStore, TypeConfig,
 };
 pub use signed::SignedEvent;
-pub use state::{MemberRecord, MembershipState, Proposal};
+pub use state::{FIRST_PROTOCOL, MemberRecord, MembershipState, PROTOCOL_MAX, Proposal};
