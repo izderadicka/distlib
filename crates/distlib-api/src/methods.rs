@@ -7,6 +7,8 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashSet},
+    error::Error as _,
+    iter,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -1945,8 +1947,16 @@ impl<'a> OneRefresh<'a> {
 /// Every `SyncError` a catalogue read or write can fail with is this method
 /// failing for its own reasons — none of them are the caller's mistake the
 /// way an invalid file path is, which [`Api::hash_file`] reports separately.
+///
+/// The causes follow the message, as `anyhow` prints them: "the catalogue
+/// could not be deleted from" alone does not say why.
 fn sync_error(error: SyncError) -> Error {
-    Error::failed(error.to_string())
+    let causes = iter::successors(error.source(), |&cause| cause.source());
+    let message = iter::once(error.to_string())
+        .chain(causes.map(ToString::to_string))
+        .collect::<Vec<_>>()
+        .join(": ");
+    Error::failed(message)
 }
 
 /// Every `NetError` `library.download` can meet is this method failing for
@@ -2347,4 +2357,25 @@ struct TaskParams {
 fn parse<T: for<'de> Deserialize<'de>>(params: Option<Value>) -> Result<T, Error> {
     serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|error| Error::invalid_params(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_catalogue_failure_says_why() {
+        // What iroh-docs answers when a delete's timestamp is not the latest.
+        let refused = SyncError::Docs {
+            doing: "deleted from",
+            source: "A newer entry exists for either this entry's key or a prefix of the key."
+                .into(),
+        };
+
+        assert_eq!(
+            sync_error(refused).message,
+            "the catalogue could not be deleted from: \
+             A newer entry exists for either this entry's key or a prefix of the key."
+        );
+    }
 }
