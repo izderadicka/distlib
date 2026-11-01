@@ -24,6 +24,8 @@ export interface NodeStatus {
   pending: number;
   /** What the group decided when it was founded; `null` before there is one. */
   settings: GroupSettings | null;
+  /** The group protocol, and what raising it waits for; `null` before there is a group. */
+  protocol: Protocol | null;
   /** This node's custody and the group's load; `null` until custody is computed. */
   custody: Custody | null;
   /** How many items the pin manager has in each state. */
@@ -73,6 +75,16 @@ export interface Storage {
   mandatory_over_limit: boolean;
   /** When the last garbage collection pass began, in microseconds since the epoch. */
   last_collection_at: number | null;
+}
+
+/** The group protocol (5d-7). */
+export interface Protocol {
+  /** What every node in the group speaks. */
+  group: number;
+  /** The newest this node's build speaks. */
+  supported: number;
+  /** The core members whose build does not speak the next protocol yet. */
+  core_not_speaking_next: string[];
 }
 
 /** A group's settings, fixed when it was founded. */

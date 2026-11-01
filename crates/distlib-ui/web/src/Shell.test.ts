@@ -25,6 +25,7 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 0,
   settings: null,
+  protocol: null,
   custody: null,
   pins: { queued: 0, fetching: 0, failed: 0, waiting_for_room: 0, kept: 0, releasing: 0 },
   storage: {

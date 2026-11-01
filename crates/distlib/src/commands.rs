@@ -653,6 +653,17 @@ pub async fn pledge(paths: &Paths, bytes: u64) -> Result<()> {
     Ok(())
 }
 
+/// `distlib raise-protocol`
+pub async fn raise_protocol(paths: &Paths) -> Result<()> {
+    let answer = ask(paths, "group.raise_protocol", Value::Null).await?;
+    let to = answer["to"].as_u64().unwrap_or(0);
+    println!(
+        "{}",
+        report("raised", &format!("the group protocol to {to}"), &answer)
+    );
+    Ok(())
+}
+
 /// The warning an add or a pledge answers with when this node pledges less
 /// than what it added requires (phase 5's D8); nothing when it is enough.
 fn print_under_pledged(under_pledged: &Value) {
@@ -1441,6 +1452,9 @@ fn print_live_status(live: &Value) {
         pending => println!("pending     {pending} awaiting approval — see `distlib pending`"),
     }
     print_settings(&live["settings"]);
+    if let Some(lines) = protocol_lines(&live["protocol"]) {
+        println!("{lines}");
+    }
     print_custody(&live["custody"]);
     print_pins(&live["pins"]);
     print_storage(&live["storage"]);
@@ -1901,7 +1915,37 @@ fn print_group(membership: &MembershipState) -> bool {
         membership.len(),
         membership.core().len()
     );
+    println!("protocol    {}", membership.protocol());
     true
+}
+
+/// The group protocol (5d-7), and, once this build speaks a newer one, what
+/// raising to it waits for. `None` before there is a group.
+fn protocol_lines(protocol: &Value) -> Option<String> {
+    let group = protocol["group"].as_u64()?;
+    let supported = protocol["supported"].as_u64()?;
+    if supported <= group {
+        return Some(format!("protocol    {group}"));
+    }
+    let waiting: Vec<String> = protocol["core_not_speaking_next"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|member| member.chars().take(12).collect())
+        .collect();
+    let next = group + 1;
+    let raise = if waiting.is_empty() {
+        format!("every core member speaks {next}: raise it with `distlib raise-protocol`")
+    } else {
+        format!(
+            "raising to {next} waits for core members {}",
+            waiting.join(", ")
+        )
+    };
+    Some(format!(
+        "protocol    {group}; this node speaks up to {supported}\n            {raise}"
+    ))
 }
 
 /// The group's settings, one `key = value` line each, as `[group]` spells
@@ -2063,6 +2107,35 @@ mod tests {
         assert!(warning.contains("pledges 100 bytes"), "{warning}");
         assert!(warning.contains("`distlib pledge 120`"), "{warning}");
         assert_eq!(under_pledged_warning(&Value::Null), None);
+    }
+
+    #[test]
+    fn the_protocol_says_what_a_raise_waits_for_only_once_this_build_speaks_more() {
+        let protocol = |supported, waiting: &[&str]| {
+            protocol_lines(&json!({
+                "group": 1,
+                "supported": supported,
+                "core_not_speaking_next": waiting,
+            }))
+        };
+        let carol = "c".repeat(64);
+
+        assert_eq!(protocol(1, &[&carol]).as_deref(), Some("protocol    1"));
+        assert_eq!(
+            protocol(2, &[&carol]).as_deref(),
+            Some(
+                "protocol    1; this node speaks up to 2\n            \
+                 raising to 2 waits for core members cccccccccccc"
+            )
+        );
+        assert_eq!(
+            protocol(2, &[]).as_deref(),
+            Some(
+                "protocol    1; this node speaks up to 2\n            \
+                 every core member speaks 2: raise it with `distlib raise-protocol`"
+            )
+        );
+        assert_eq!(protocol_lines(&Value::Null), None, "no group yet");
     }
 
     #[test]

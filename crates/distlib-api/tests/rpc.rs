@@ -2510,3 +2510,116 @@ async fn library_add_takes_an_upload_once() {
 
     harness.shutdown().await;
 }
+
+/// 5d-7: status says the group's protocol, this build's, and which core
+/// members do not speak the next one yet; and a raise they would refuse is
+/// refused before it is proposed, since a refused proposal is still an entry
+/// in the log.
+#[tokio::test]
+async fn a_raise_the_core_does_not_speak_yet_is_refused_before_it_is_proposed() {
+    let harness = Harness::start().await;
+    let me = harness.node.id();
+    let log_length = || {
+        harness
+            .node
+            .raft()
+            .unwrap()
+            .metrics()
+            .borrow()
+            .last_log_index
+    };
+
+    let status = harness.call("node.status", Value::Null).await;
+    assert_eq!(
+        status["protocol"],
+        json!({ "group": 1, "supported": 1, "core_not_speaking_next": [me] })
+    );
+    let before = log_length();
+
+    let refused = harness.refuse("group.raise_protocol", Value::Null).await;
+
+    assert_eq!(code(&refused), -32000);
+    let message = refused["message"].as_str().unwrap();
+    assert!(
+        message.contains(&me.to_string()) && message.contains("protocol 2"),
+        "{message}"
+    );
+    assert_eq!(log_length(), before, "nothing was proposed");
+
+    harness.shutdown().await;
+}
+
+/// 5d-7: once every core member speaks the next protocol, a raise is proposed
+/// and waits for a majority of the core, and says so, like any proposal.
+#[cfg(feature = "slow-tests")]
+#[tokio::test]
+async fn a_raise_waits_for_a_majority_of_the_core_and_says_so() {
+    use tokio::time::timeout;
+
+    let (harness, nodes, secrets) = Harness::founded_by(3).await;
+    // Each once it has the one before: a stale `ProtocolSupported` is not sent
+    // again, since the node's own announcer looks again instead.
+    let mut said_at = 0;
+    for (node, secret) in nodes.iter().zip(&secrets) {
+        timeout(Duration::from_secs(15), async {
+            while node.membership().changed_at() < said_at {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("each node must catch up with the one before it");
+        let event = MembershipEvent::ProtocolSupported {
+            member: node.id(),
+            max: 2,
+        };
+        said_at = node.propose(event, secret).await.unwrap();
+    }
+    timeout(Duration::from_secs(15), async {
+        while harness
+            .node
+            .membership()
+            .core_not_speaking(2)
+            .next()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("every core member's support must reach the node serving the api");
+    let status = harness.call("node.status", Value::Null).await;
+    assert_eq!(status["protocol"]["core_not_speaking_next"], json!([]));
+
+    let raising = harness.call("group.raise_protocol", Value::Null).await;
+
+    assert_eq!(raising["to"], json!(2));
+    assert_eq!(raising["applied"], json!(false), "{raising}");
+    assert_eq!(raising["waiting"]["approvals"], json!(1));
+    assert_eq!(raising["waiting"]["needed"], json!(2));
+    let pending = harness.call("group.pending", Value::Null).await;
+    assert_eq!(
+        pending["pending"][0]["what"],
+        json!("raise the group protocol from 1 to 2")
+    );
+    let proposal = raising["proposal"].as_u64().unwrap();
+    nodes[1]
+        .propose(MembershipEvent::Approved { proposal }, &secrets[1])
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        while harness.node.membership().protocol() != 2 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the raise must reach the node serving the api");
+    let status = harness.call("node.status", Value::Null).await;
+    assert_eq!(status["protocol"]["group"], json!(2));
+    assert_eq!(
+        status["protocol"]["supported"],
+        json!(1),
+        "this build's, which the test's own proposals did not change"
+    );
+
+    harness.shutdown().await;
+}

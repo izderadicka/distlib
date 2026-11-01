@@ -14,7 +14,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode, MembershipState};
+use distlib_consensus::{
+    ConsensusError, MemberProfile, MembershipEvent, MembershipNode, MembershipState, PROTOCOL_MAX,
+};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
     ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
@@ -119,6 +121,7 @@ impl Api {
             "group.pending" => self.pending(),
             "group.approve" => self.approve(parse(params)?).await,
             "group.withdraw" => self.withdraw(parse(params)?).await,
+            "group.raise_protocol" => self.raise_protocol().await,
             "group.pledge_set" => self.pledge_set(parse(params)?).await,
             "group.ticket" => self.ticket(),
             "group.suspects" => self.suspects().await,
@@ -188,6 +191,7 @@ impl Api {
             "pending": membership.pending().count(),
             // Fixed at founding, so null until there is a group.
             "settings": membership.group_id().map(|_| membership.settings()),
+            "protocol": membership.group_id().map(|_| protocol(&membership)),
             // Null until custody has been computed.
             "custody": self.custody.status(),
             "pins": *self.pins.borrow(),
@@ -407,6 +411,27 @@ impl Api {
         .await?;
         let mut answer = self.outcome(params.proposal);
         answer["already_approved"] = json!(already);
+        Ok(answer)
+    }
+
+    /// `group.raise_protocol` — propose raising the group one protocol up
+    /// (5d-7), which a majority of the core decides.
+    ///
+    /// Refused here, before anything is proposed, while a core member does not
+    /// speak it: the fold would refuse it too, and a refused proposal is still
+    /// an entry in the log.
+    async fn raise_protocol(&self) -> Result<Value, Error> {
+        let membership = self.node.membership();
+        let to = membership.protocol() + 1;
+        if let Some(member) = membership.core_not_speaking(to).next() {
+            let refused = ConsensusError::CoreLacksProtocol {
+                member,
+                protocol: to,
+            };
+            return Err(Error::failed(refused.to_string()));
+        }
+        let mut answer = self.propose(MembershipEvent::ProtocolRaised { to }).await?;
+        answer["to"] = json!(to);
         Ok(answer)
     }
 
@@ -1631,6 +1656,18 @@ impl Api {
             "waiting": waiting,
         })
     }
+}
+
+/// `node.status`'s group protocol (5d-7): the group's, the newest this build
+/// speaks, and the core members that do not speak the next one yet — what
+/// `group.raise_protocol` waits for.
+fn protocol(membership: &MembershipState) -> Value {
+    let next = membership.protocol() + 1;
+    json!({
+        "group": membership.protocol(),
+        "supported": PROTOCOL_MAX,
+        "core_not_speaking_next": membership.core_not_speaking(next).collect::<Vec<_>>(),
+    })
 }
 
 /// `node.status`'s view of the catalogue's swarm (C14): who this node is a
