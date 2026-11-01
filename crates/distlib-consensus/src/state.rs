@@ -359,11 +359,7 @@ impl MembershipState {
         mut core: impl Iterator<Item = &'a MemberId>,
         protocol: u32,
     ) -> Result<()> {
-        match core.find(|member| {
-            self.members
-                .get(member)
-                .is_none_or(|record| record.protocol_max < protocol)
-        }) {
+        match core.find(|member| !self.speaks(member, protocol)) {
             Some(member) => Err(ConsensusError::CoreLacksProtocol {
                 member: *member,
                 protocol,
@@ -722,6 +718,23 @@ impl MembershipState {
     /// founding.
     pub fn protocol(&self) -> u32 {
         self.protocol
+    }
+
+    /// Whether `member` is one whose build speaks group protocol `protocol`,
+    /// as it last said in the log (5d-7).
+    pub fn speaks(&self, member: &MemberId, protocol: u32) -> bool {
+        self.members
+            .get(member)
+            .is_some_and(|record| record.protocol_max >= protocol)
+    }
+
+    /// The core members whose build does not speak `protocol` yet: what a
+    /// raise to it waits for (5d-7).
+    pub fn core_not_speaking(&self, protocol: u32) -> impl Iterator<Item = MemberId> + '_ {
+        self.core
+            .keys()
+            .filter(move |member| !self.speaks(member, protocol))
+            .copied()
     }
 
     /// Whether `member` currently belongs to the group.

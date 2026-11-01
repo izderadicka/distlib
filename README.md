@@ -336,6 +336,7 @@ them hold for every protocol added later.
 | `distlib approve <proposal>` | Approve a pending change. |
 | `distlib withdraw <proposal>` | Take back a change you proposed. |
 | `distlib core set <member>` / `core remove <member>` | Change the core group: who votes, and where they are. |
+| `distlib raise-protocol` | Propose raising the group one protocol up, once every core member's build speaks it; `distlib status` says which do not yet. |
 | `distlib pledge <bytes>` | Set this node's storage pledge. Only ever this node's, at least the group's minimum, and below its storage limit if it has one. |
 | `distlib ticket` | Print a join ticket for somebody who has been admitted. |
 | `distlib join <ticket>` | Join a group from a ticket: writes its core nodes into this node's config. |
@@ -374,12 +375,13 @@ curl -s http://127.0.0.1:11280/rpc \
 
 | Method | |
 |---|---|
-| `node.status` | Identity, group, whether this node votes, Raft state, current leader; its `custody`: the items it keeps for the group and their size, its `pledge_bytes`, and the group's `load_factor`; the bytes it keeps as own, custody and cache against its storage limit. |
+| `node.status` | Identity, group, whether this node votes, Raft state, current leader; its `custody`: the items it keeps for the group and their size, its `pledge_bytes`, and the group's `load_factor`; the bytes it keeps as own, custody and cache against its storage limit; its `protocol`: the group's, the newest this build speaks (`supported`), and the core members whose build does not speak the next one yet. |
 | `group.members` | The membership as this node's log has it, with each member's pledge and what it is required to pledge, and its `coverage`: of the items this node holds that the member should keep too, how many it should (`expected`) and how many its heartbeat says it holds (`announced`) — `null` while it is offline or what it holds is not known yet. |
 | `group.propose_add` | `{member, name?}` — admit a member. |
 | `group.propose_expel` | `{member, reason}` — remove one. |
 | `group.propose_core` | Move a core node, or add or drop one. |
 | `group.pending` / `group.approve` / `group.withdraw` | Changes waiting for approvals, and acting on them. |
+| `group.raise_protocol` | Propose raising the group one protocol up, which a majority of the core decides. Refused while a core member's build does not speak it. |
 | `group.pledge_set` | `{bytes}` — set *this* node's storage pledge. A pledge belongs to whoever makes it, so there is no `member` parameter. Refused below the group's minimum or below half of what this node is required to pledge; `under_pledged` says so when it is below that requirement. |
 | `group.ticket` | A join ticket for this group. |
 | `library.list` / `library.search` | `{offset?, limit?}` / `{query, offset?, limit?}` — a page of items, and the total. Each hit says whether it is `held` here, and how many online members hold it (`providers`, `null` while what an online member holds is not yet known). |

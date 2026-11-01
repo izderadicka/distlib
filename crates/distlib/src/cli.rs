@@ -143,6 +143,13 @@ pub enum Command {
         command: CoreCommand,
     },
 
+    /// Raise the group one protocol up.
+    ///
+    /// Once every core member runs a build that speaks it — `distlib status`
+    /// says which do not yet — and decided by a majority of the core, like a
+    /// change to who votes. One step at a time, and never back down.
+    RaiseProtocol,
+
     /// Set this node's storage pledge.
     ///
     /// Only ever this node's: a pledge is a promise about the proposer's own

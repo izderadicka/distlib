@@ -51,6 +51,7 @@ const STATUS: NodeStatus = {
   followed_upto: null,
   pending: 1,
   settings: SETTINGS,
+  protocol: { group: 1, supported: 1, core_not_speaking_next: [ME] },
   custody: { items: 3, bytes: 120_000_000_000, pledge_bytes: 200_000_000_000, load_factor: 0.4567 },
   pins: { queued: 0, fetching: 0, failed: 0, waiting_for_room: 0, kept: 3, releasing: 0 },
   storage: {
@@ -220,12 +221,43 @@ describe("the node page", () => {
     expect(screen.getByText(wholly("dd", "off"))).toBeTruthy();
   });
 
-  it("shows no settings before there is a group", async () => {
-    answer = { ...answer, status: { ...STATUS, group: null, settings: null } };
+  it("shows no settings or protocol before there is a group", async () => {
+    answer = { ...answer, status: { ...STATUS, group: null, settings: null, protocol: null } };
     open();
 
     await screen.findByText(ME);
     expect(screen.queryByText("Group settings")).toBeNull();
+    expect(screen.queryByText("Protocol")).toBeNull();
+  });
+
+  it("shows the group's protocol, and nothing about raising it while this build speaks no newer one", async () => {
+    open();
+
+    await screen.findByText(ME);
+    expect(screen.getByText("Protocol").nextElementSibling?.textContent).toBe("1");
+  });
+
+  it("says which core members a raise waits for, by name, once this build speaks a newer protocol", async () => {
+    answer = {
+      ...answer,
+      status: { ...STATUS, protocol: { group: 1, supported: 2, core_not_speaking_next: [CAROL, DAVE] } },
+    };
+    open();
+
+    await screen.findByText(ME);
+    expect(screen.getByText("Protocol").nextElementSibling?.textContent).toBe(
+      "1; this node speaks up to 2 — raising to 2 waits for carol, dddddddddddd…",
+    );
+  });
+
+  it("says a raise is ready once every core member speaks the next protocol", async () => {
+    answer = { ...answer, status: { ...STATUS, protocol: { group: 1, supported: 2, core_not_speaking_next: [] } } };
+    open();
+
+    await screen.findByText(ME);
+    expect(screen.getByText("Protocol").nextElementSibling?.textContent).toBe(
+      "1; this node speaks up to 2 — every core member speaks 2: raise it with distlib raise-protocol",
+    );
   });
 
   it("shows each member's place in the catalogue's swarm", async () => {

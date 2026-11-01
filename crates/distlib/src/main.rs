@@ -127,6 +127,7 @@ async fn main() -> Result<()> {
             file,
         } => commands::download(&paths, item_id, &dest, file).await,
         Command::Pledge { bytes } => commands::pledge(&paths, bytes).await,
+        Command::RaiseProtocol => commands::raise_protocol(&paths).await,
         Command::Ticket => commands::ticket(&paths).await,
         Command::Ui { base_url } => commands::ui(&paths, base_url.as_deref()),
         Command::Join { ticket } => commands::join(&paths, &ticket),

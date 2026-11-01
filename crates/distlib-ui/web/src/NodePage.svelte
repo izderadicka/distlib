@@ -17,6 +17,7 @@
     type CheckOutcome,
     type Member,
     type NodeStatus,
+    type Protocol,
     type Suspect,
     Unauthorised,
   } from "./lib/rpc";
@@ -113,6 +114,22 @@
     return name || `${member.slice(0, 12)}…`;
   }
 
+  /**
+   * The group protocol, and, once this build speaks a newer one, what raising
+   * to it waits for (5d-7).
+   */
+  function protocolSaid({ group, supported, core_not_speaking_next: waiting }: Protocol): string {
+    if (supported <= group) {
+      return `${group}`;
+    }
+    const next = group + 1;
+    const raise =
+      waiting.length === 0
+        ? `every core member speaks ${next}: raise it with distlib raise-protocol`
+        : `raising to ${next} waits for ${waiting.map((member) => named(member, names.get(member))).join(", ")}`;
+    return `${group}; this node speaks up to ${supported} — ${raise}`;
+  }
+
   /** A core node says what Raft makes it; a follower has no Raft to ask. */
   function role(node: NodeStatus): string {
     if (!node.core) {
@@ -139,6 +156,10 @@
       {#if status.pending > 0}
         <dt>Pending</dt>
         <dd>{status.pending} proposal{status.pending === 1 ? "" : "s"} awaiting approval</dd>
+      {/if}
+      {#if status.protocol}
+        <dt>Protocol</dt>
+        <dd>{protocolSaid(status.protocol)}</dd>
       {/if}
     </dl>
   </section>

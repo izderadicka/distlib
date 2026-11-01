@@ -115,6 +115,7 @@ fn status_of_a_stopped_founder_reads_its_role_from_the_database() {
     let printed = run_command(founder.dir.path(), &["status"]);
 
     assert!(printed.contains("role        core member"), "{printed}");
+    assert!(printed.contains("protocol    1"), "{printed}");
     assert!(printed.contains("node        not running"), "{printed}");
 }
 
