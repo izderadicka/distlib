@@ -179,13 +179,13 @@ pub async fn follow(following: Following, mut hints: Hints) {
     let mut addresses_asked_for = false;
 
     loop {
-        // At the top of every pass: after a fetch that stopped at a raise,
-        // and straight after a restart behind one.
-        if let Some(behind) = behind_the_group(&state_machine) {
-            stop_until_upgraded(&upgrade_required, behind);
+        let progress = fetch_log_from_core_nodes(me, &state_machine, &client, &sources).await;
+        // Straight after every fetch, whatever it brought: a raise that is the
+        // newest entry stops it now rather than a quiet poll later, and a
+        // restart behind a raise stops at its first pass.
+        if stopped_behind_the_group(&state_machine, &upgrade_required) {
             return;
         }
-        let progress = fetch_log_from_core_nodes(me, &state_machine, &client, &sources).await;
 
         // Not before the first answer: until then `sources` holds what
         // configuration named, and a node that has not been admitted yet is
@@ -255,13 +255,18 @@ pub async fn follow(following: Following, mut hints: Hints) {
     }
 }
 
-/// Whether this node's group has raised its protocol past this build's.
-fn behind_the_group(state_machine: &StateMachineStore) -> Option<UpgradeRequired> {
+/// Stops this node if its group has raised its protocol past this build's.
+fn stopped_behind_the_group(
+    state_machine: &StateMachineStore,
+    upgrade_required: &watch::Sender<Option<UpgradeRequired>>,
+) -> bool {
     let group = state_machine.membership().protocol();
-    (group > PROTOCOL_MAX).then(|| UpgradeRequired::Protocol {
-        group,
-        at: state_machine.followed_upto(),
-    })
+    if group <= PROTOCOL_MAX {
+        return false;
+    }
+    let at = state_machine.followed_upto();
+    stop_until_upgraded(upgrade_required, UpgradeRequired::Protocol { group, at });
+    true
 }
 
 /// Says this node stops reading the log until it is upgraded, and why.

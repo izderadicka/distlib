@@ -3002,6 +3002,38 @@ async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be
     .await;
 }
 
+/// 5d-8: a running follower stops as soon as it applies a raise that is the
+/// newest entry, not a quiet poll later (found in review on #179).
+#[tokio::test]
+async fn a_running_follower_stops_promptly_at_the_newest_entry_being_a_raise() {
+    let (founder, follower) = a_founder_and_a_follower().await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::ProtocolSupported {
+                member: founder.id,
+                max: 2,
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    founder
+        .node
+        .propose(MembershipEvent::ProtocolRaised { to: 2 }, &founder.secret)
+        .await
+        .unwrap();
+
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        upgrade_required.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the follower to stop well before its next quiet poll")
+    .unwrap();
+}
+
 /// A core node of a newer build, as an older one hears it: every answer it
 /// sends is one this build cannot decode.
 #[derive(Debug, Clone)]
