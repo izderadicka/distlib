@@ -26,6 +26,7 @@ const STATUS: NodeStatus = {
   pending: 0,
   settings: null,
   protocol: null,
+  upgrade_required: null,
   custody: null,
   pins: { queued: 0, fetching: 0, failed: 0, waiting_for_room: 0, kept: 0, releasing: 0 },
   storage: {
@@ -92,6 +93,59 @@ describe("the shell", () => {
 
     await screen.findByText(/Cannot reach the node/);
     expect(screen.getByText(ME)).toBeTruthy();
+  });
+
+  /** Answers `node.status` with `upgrade_required` set to each of `answers` in turn, the last one after. */
+  function upgradeRequiredIn(...answers: NodeStatus["upgrade_required"][]) {
+    const others = vi.mocked(call).getMockImplementation();
+    vi.mocked(call).mockImplementation((async (method: string) =>
+      method === "node.status"
+        ? { ...STATUS, upgrade_required: answers.length > 1 ? answers.shift() : answers[0] }
+        : others?.(method as "node.status", null)) as typeof call);
+  }
+
+  it("says nothing of an upgrade while the node follows the log", async () => {
+    open();
+    await screen.findByText("The library is empty.");
+
+    expect(screen.queryByText(/Upgrade required/)).toBeNull();
+  });
+
+  it("says on every page when the node stopped for an upgrade, and why", async () => {
+    upgradeRequiredIn({ reason: "protocol", group: 2, at: 7 });
+    open();
+
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toMatch(/Upgrade required:\s+the group speaks protocol 2, which this node's build does not/);
+    expect(banner.textContent).toMatch(/stopped following the group's log at index 7/);
+    navigate("/node");
+    await screen.findByText(ME);
+    expect(screen.getByRole("alert")).toBe(banner);
+  });
+
+  it("shows the banner when the node says it stopped", async () => {
+    upgradeRequiredIn(null, { reason: "undecodable", at: 9 });
+    const { watcher } = open();
+    await screen.findByText("The library is empty.");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    watcher.onEvent({ type: "node.upgrade_required" });
+
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toMatch(/the core nodes send log entries this node's build cannot read/);
+    expect(banner.textContent).toMatch(/at index 9/);
+  });
+
+  it("asks again after a reconnect, which may have missed the event", async () => {
+    upgradeRequiredIn(null, { reason: "protocol", group: 2, at: 7 });
+    const { watcher } = open();
+    await screen.findByText("The library is empty.");
+    watcher.onConnection("reconnecting");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    watcher.onConnection("live");
+
+    await screen.findByRole("alert");
   });
 
   it("opens on the library", async () => {
@@ -218,7 +272,8 @@ describe("the shell", () => {
     vi.mocked(call).mockResolvedValue({ results: [], total: 0 });
     watcher.onEvent({ type: "catalogue.item_added", item_id: "x" });
 
-    await waitFor(() => expect(call).toHaveBeenCalledTimes(2));
+    const searches = () => vi.mocked(call).mock.calls.filter(([method]) => method !== "node.status");
+    await waitFor(() => expect(searches()).toHaveLength(2));
   });
 
   it("hands a refused token up to whoever signs the tab in", () => {

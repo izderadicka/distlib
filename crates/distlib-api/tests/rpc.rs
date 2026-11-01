@@ -20,7 +20,7 @@ use distlib_api::{
     tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
     uploads::Uploads,
 };
-use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode};
+use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode, UpgradeRequired};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
@@ -2511,6 +2511,20 @@ async fn library_add_takes_an_upload_once() {
     harness.shutdown().await;
 }
 
+/// 5d-8: what `node.status` says once a follower stops, as the CLI and UI
+/// read it.
+#[test]
+fn upgrade_required_reads_as_a_reason_and_where_the_node_stopped() {
+    assert_eq!(
+        serde_json::to_value(UpgradeRequired::Protocol { group: 2, at: 7 }).unwrap(),
+        json!({ "reason": "protocol", "group": 2, "at": 7 })
+    );
+    assert_eq!(
+        serde_json::to_value(UpgradeRequired::Undecodable { at: 7 }).unwrap(),
+        json!({ "reason": "undecodable", "at": 7 })
+    );
+}
+
 /// 5d-7: status says the group's protocol, this build's, and which core
 /// members do not speak the next one yet; and a raise they would refuse is
 /// refused before it is proposed, since a refused proposal is still an entry
@@ -2533,6 +2547,11 @@ async fn a_raise_the_core_does_not_speak_yet_is_refused_before_it_is_proposed() 
     assert_eq!(
         status["protocol"],
         json!({ "group": 1, "supported": 1, "core_not_speaking_next": [me] })
+    );
+    assert_eq!(
+        status.get("upgrade_required"),
+        Some(&Value::Null),
+        "a core node never stops"
     );
     let before = log_length();
 

@@ -75,7 +75,7 @@ pub struct Server {
     task: tokio::task::JoinHandle<()>,
     /// Turn membership and catalogue-swarm changes into events. Owned here so
     /// that they stop with the server rather than outliving it.
-    publishers: [tokio::task::JoinHandle<()>; 2],
+    publishers: [tokio::task::JoinHandle<()>; 3],
 }
 
 impl Server {
@@ -106,8 +106,9 @@ struct Shared {
 /// Binds `addr` and serves the API until the returned [`Server`] is dropped.
 ///
 /// The event bus is `api.tasks`' — see [`events::bus`]. The server subscribes
-/// a receiver per watcher, and publishes the membership's and the catalogue
-/// swarm's changes into it itself, since both are already in `api`.
+/// a receiver per watcher, and publishes the membership's, the catalogue
+/// swarm's and an upgrade required's changes into it itself, since all are
+/// already in `api`.
 ///
 /// Returns once the listener is bound, so a caller that immediately connects
 /// will not race the server into existence.
@@ -125,6 +126,11 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
             api.catalogue.sync_status(),
             api.tasks.events().clone(),
             Event::SyncStatus,
+        )),
+        tokio::spawn(events::publish_whenever(
+            api.node.subscribe_upgrade_required(),
+            api.tasks.events().clone(),
+            Event::UpgradeRequired,
         )),
     ];
     let shared = Arc::new(Shared { api, token });

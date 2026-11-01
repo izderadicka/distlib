@@ -40,6 +40,12 @@ pub enum Event {
     #[serde(rename = "sync.status")]
     SyncStatus,
 
+    /// This node stopped following the log until it is upgraded (5d-8).
+    ///
+    /// No payload: `node.status` says why.
+    #[serde(rename = "node.upgrade_required")]
+    UpgradeRequired,
+
     /// An item this node's read model did not hold is now in it — searchable
     /// and readable, since it is published only after both are committed.
     #[serde(rename = "catalogue.item_added")]
@@ -134,6 +140,7 @@ impl Event {
         match self {
             Self::MembershipChanged => "membership.changed",
             Self::SyncStatus => "sync.status",
+            Self::UpgradeRequired => "node.upgrade_required",
             Self::ItemAdded { .. } => "catalogue.item_added",
             Self::ItemChanged { .. } => "catalogue.item_changed",
             Self::AvailabilityChanged { .. } => "availability.changed",

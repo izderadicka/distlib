@@ -13,13 +13,17 @@ use std::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{
-    ConsensusError, FIRST_PROTOCOL, MemberProfile, MemberlogClient, MembershipEvent,
-    MembershipState, ProposeError, SignedEvent, Timestamp, announce_protocol_support,
-    node::NodeError,
+    ConsensusError, FIRST_PROTOCOL, Failure, MemberProfile, MemberlogClient, MembershipEvent,
+    MembershipState, ProposeError, SignedEvent, Timestamp, UpgradeRequired,
+    announce_protocol_support, node::NodeError,
 };
 use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId};
 use distlib_net::{AddressBook, Directory};
-use iroh::SecretKey;
+use iroh::{
+    Endpoint, SecretKey,
+    endpoint::{Connection, RelayMode, presets},
+    protocol::{AcceptError, ProtocolHandler, Router},
+};
 
 mod common;
 use common::{Peer, pending_on, until, wait_for};
@@ -1640,7 +1644,11 @@ async fn a_local_allowlist_refusal_is_not_a_remote_expulsion() {
         distlib_net::Directory::default(),
     );
     let error = client.fetch(source.id, &source.addr, 0).await.unwrap_err();
-    assert!(!error.refused, "a local deny must be retryable: {error}");
+    assert_eq!(
+        error.why,
+        Failure::Unreachable,
+        "a local deny must be retryable: {error}"
+    );
     follower.shutdown().await;
     source.shutdown().await;
 }
@@ -2994,49 +3002,135 @@ async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be
     .await;
 }
 
-/// 5d-7: a build below the group's protocol proposes nothing, though its
-/// record says less than it speaks. The fold would refuse it, and a refused
-/// proposal is still an entry in the log, so retrying would fill the log.
+/// A core node of a newer build, as an older one hears it: every answer it
+/// sends is one this build cannot decode.
+#[derive(Debug, Clone)]
+struct AnswersInANewerFormat;
+
+impl ProtocolHandler for AnswersInANewerFormat {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            let _ = recv.read_to_end(64 * 1024).await;
+            let _ = send.write_all(&[0xff; 16]).await;
+            let _ = send.finish();
+        }
+        Ok(())
+    }
+}
+
+/// 5d-8: a follower whose only core node answers in a format it cannot read
+/// stops, rather than asking forever or taking it for an expulsion.
 #[tokio::test]
-async fn a_build_below_the_groups_protocol_writes_nothing() {
-    let (founder, follower) = a_founder_and_a_follower().await;
+async fn a_follower_stops_when_the_core_answers_in_a_format_it_cannot_read() {
+    let core_key = SecretKey::generate();
+    let core_id = MemberId::from(core_key.public());
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .secret_key(core_key)
+        .alpns(vec![distlib_net::alpn::MEMBERLOG.to_vec()])
+        .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let core_addr = NodeAddr {
+        relay: None,
+        direct: endpoint.bound_sockets().into_iter().collect(),
+    };
+    let core = Router::builder(endpoint)
+        .accept(distlib_net::alpn::MEMBERLOG, AnswersInANewerFormat)
+        .spawn();
+
+    let follower = Peer::start_with(
+        SecretKey::generate(),
+        vec![core_id],
+        vec![(core_id, core_addr)],
+    )
+    .await;
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
+    let why = *tokio::time::timeout(
+        Duration::from_secs(15),
+        upgrade_required.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the follower to stop")
+    .unwrap();
+
+    assert_eq!(why, Some(UpgradeRequired::Undecodable { at: 0 }));
+    tokio::select! {
+        () = follower.node.expelled() => panic!("an unreadable answer is not a refusal"),
+        () = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+    let _ = core.shutdown().await;
+}
+
+/// 5d-8: a follower whose build speaks only protocol 1 applies the raise to
+/// 2, stops there, and says so. Nothing after the raise is applied: it may be
+/// under rules this build does not know. The follower starts once both raises
+/// are in the log, so it reads them in one page and has to stop inside it.
+#[tokio::test]
+async fn a_follower_stops_at_a_raise_beyond_its_build() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
     founder
         .node
-        .propose(
-            MembershipEvent::ProtocolSupported {
-                member: founder.id,
-                max: 3,
-            },
+        .init_group(
+            vec![(founder.profile("founder"), founder.addr.clone())],
+            Default::default(),
             &founder.secret,
         )
         .await
         .unwrap();
-    for to in [2, 3] {
-        founder
-            .node
-            .propose(MembershipEvent::ProtocolRaised { to }, &founder.secret)
-            .await
-            .unwrap();
-    }
-    wait_for(&follower, "the raises to reach the follower", |m| {
-        m.protocol() == 3
+    wait_for(&founder, "the founding event to apply", |m| {
+        m.group_id().is_some()
     })
     .await;
-    let before = log_length(&founder);
+    let follower_key = SecretKey::generate();
+    let follower_id = MemberId::from(follower_key.public());
+    let propose = |event| founder.node.propose(event, &founder.secret);
+    propose(MembershipEvent::MemberAdded {
+        member: MemberProfile {
+            member_id: follower_id,
+            display_name: "follower".to_owned(),
+        },
+    })
+    .await
+    .unwrap();
+    propose(MembershipEvent::ProtocolSupported {
+        member: founder.id,
+        max: 3,
+    })
+    .await
+    .unwrap();
+    propose(MembershipEvent::ProtocolRaised { to: 2 })
+        .await
+        .unwrap();
+    let raised_to_2 = log_length(&founder).unwrap();
+    propose(MembershipEvent::ProtocolRaised { to: 3 })
+        .await
+        .unwrap();
 
-    tokio::select! {
-        () = announce_protocol_support(&follower.node, &follower.secret, 2) => unreachable!(),
-        () = tokio::time::sleep(Duration::from_secs(1)) => {}
-    }
+    let follower = Peer::start_with(
+        follower_key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
+    let why = *tokio::time::timeout(
+        Duration::from_secs(15),
+        upgrade_required.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the follower to stop")
+    .unwrap();
 
-    assert_eq!(log_length(&founder), before);
     assert_eq!(
-        follower
-            .node
-            .membership()
-            .member(&follower.id)
-            .unwrap()
-            .protocol_max,
-        FIRST_PROTOCOL
+        why,
+        Some(UpgradeRequired::Protocol {
+            group: 2,
+            at: raised_to_2
+        })
     );
+    assert_eq!(follower.node.followed_upto(), raised_to_2);
+    assert_eq!(follower.node.membership().protocol(), 2);
 }

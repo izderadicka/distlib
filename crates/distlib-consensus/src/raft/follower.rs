@@ -39,13 +39,29 @@ use tokio::{sync::watch, time::Instant};
 
 use distlib_core::{MemberId, NodeAddr};
 
+use serde::Serialize;
+
 use crate::{
     gossip::{Hint, Hints},
     raft::{
-        memberlog::{Fetched, MemberlogClient},
+        memberlog::{Failure, Fetched, MemberlogClient},
         state_machine::StateMachineStore,
     },
+    state::PROTOCOL_MAX,
 };
+
+/// Why a follower stopped reading the log until it is upgraded (5d-8).
+///
+/// `at` is where it stopped, the last index it applied: a newer build
+/// resumes from there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum UpgradeRequired {
+    /// The group raised its protocol to `group`, past what this build speaks.
+    Protocol { group: u32, at: u64 },
+    /// Every core node that answered sent a page this build cannot read.
+    Undecodable { at: u64 },
+}
 
 /// How long to wait before asking again when nothing has changed.
 ///
@@ -120,6 +136,10 @@ pub struct Following {
     /// about it — there is nothing useful left for a node outside the group to
     /// do, and plenty of harm in carrying on asking.
     pub expelled: watch::Sender<bool>,
+
+    /// Set once, if this node finds the group has moved past what its build
+    /// speaks. The loop stops there, as for an expulsion.
+    pub upgrade_required: watch::Sender<Option<UpgradeRequired>>,
 }
 
 /// Sources shared between the follow task and whoever forwards a proposal.
@@ -149,6 +169,7 @@ pub async fn follow(following: Following, mut hints: Hints) {
         client,
         sources,
         expelled,
+        upgrade_required,
     } = following;
 
     // Set once the core group has told this node where everyone is. Once,
@@ -158,6 +179,12 @@ pub async fn follow(following: Following, mut hints: Hints) {
     let mut addresses_asked_for = false;
 
     loop {
+        // At the top of every pass: after a fetch that stopped at a raise,
+        // and straight after a restart behind one.
+        if let Some(behind) = behind_the_group(&state_machine) {
+            stop_until_upgraded(&upgrade_required, behind);
+            return;
+        }
         let progress = fetch_log_from_core_nodes(me, &state_machine, &client, &sources).await;
 
         // Not before the first answer: until then `sources` holds what
@@ -191,6 +218,12 @@ pub async fn follow(following: Following, mut hints: Hints) {
             // Nothing this loop does will fix this.
             Progress::NoSources => IDLE_POLL,
 
+            Progress::Undecodable => {
+                let at = state_machine.followed_upto();
+                stop_until_upgraded(&upgrade_required, UpgradeRequired::Undecodable { at });
+                return;
+            }
+
             // Every core node that answered says this node is not in the
             // group. Which of the two things that means depends on whether
             // this node has ever held the log.
@@ -220,6 +253,30 @@ pub async fn follow(following: Following, mut hints: Hints) {
         };
         wait_for_a_reason(delay, &mut hints, state_machine.followed_upto()).await;
     }
+}
+
+/// Whether this node's group has raised its protocol past this build's.
+fn behind_the_group(state_machine: &StateMachineStore) -> Option<UpgradeRequired> {
+    let group = state_machine.membership().protocol();
+    (group > PROTOCOL_MAX).then(|| UpgradeRequired::Protocol {
+        group,
+        at: state_machine.followed_upto(),
+    })
+}
+
+/// Says this node stops reading the log until it is upgraded, and why.
+///
+/// It keeps its allowlist as it was (Q2) and goes on serving what it holds;
+/// what it no longer does is apply what the group decides.
+fn stop_until_upgraded(
+    upgrade_required: &watch::Sender<Option<UpgradeRequired>>,
+    why: UpgradeRequired,
+) {
+    tracing::error!(
+        ?why,
+        "upgrade required: the group speaks a protocol this build does not; this node stops following the log until it is upgraded"
+    );
+    upgrade_required.send_replace(Some(why));
 }
 
 /// Waits until there is something worth asking about.
@@ -259,6 +316,7 @@ async fn wait_for_a_reason(delay: Duration, hints: &mut Hints, cursor: u64) {
 /// Named for what actually happened rather than lumped into a single failure,
 /// because the right thing to do next differs for each: retry soon, retry
 /// slowly, or accept that retrying will not help.
+#[derive(Debug, PartialEq, Eq)]
 enum Progress {
     /// Entries arrived and were applied, and whether the source has more.
     Fetched { more: bool },
@@ -287,6 +345,10 @@ enum Progress {
     /// Configuration, not the network: `[consensus] core` named nobody
     /// reachable, or named only this node.
     NoSources,
+
+    /// Every source that answered sent what this build cannot read: the
+    /// group speaks a newer protocol (5d-8).
+    Undecodable,
 }
 
 /// Asks the core group where the rest of the group said it can be reached.
@@ -362,11 +424,7 @@ async fn fetch_log_from_core_nodes(
         return Progress::NoSources;
     }
 
-    // Refusals are counted rather than acted on one at a time: one core node
-    // refusing could be one core node that is wrong, and the useful question is
-    // whether *everybody who answered* refused.
-    let mut refusals = 0usize;
-    let mut answered_otherwise = 0usize;
+    let mut answers = Answers::default();
 
     while let Some((member, addr)) = candidates.pop_front() {
         // Bound referral chains, including cycles and dishonest fresh IDs.
@@ -402,7 +460,7 @@ async fn fetch_log_from_core_nodes(
             }
 
             Ok(Fetched::Redirect(source)) => {
-                answered_otherwise += 1;
+                answers.otherwise += 1;
                 let redirected = Sources {
                     core: source.core,
                     leader: source.leader,
@@ -414,12 +472,18 @@ async fn fetch_log_from_core_nodes(
             // Reachable, but with nothing to give: a core node that has not
             // itself received the founding entry yet. Somebody else may have.
             Ok(Fetched::NoGroup) => {
-                answered_otherwise += 1;
+                answers.otherwise += 1;
                 tracing::debug!(from = %member, "asked a node that has no group yet");
             }
 
-            Err(error) if error.refused => {
-                refusals += 1;
+            Err(error) if error.why == Failure::Undecodable => {
+                answers.otherwise += 1;
+                answers.undecodable += 1;
+                tracing::warn!(%error, from = %member, "a core node sent what this build cannot read");
+            }
+
+            Err(error) if error.why == Failure::Refused => {
+                answers.refusals += 1;
                 tracing::debug!(%error, from = %member, "a core node will not talk to this node");
             }
 
@@ -429,17 +493,41 @@ async fn fetch_log_from_core_nodes(
         }
     }
 
-    // Unreachable nodes get no vote: a core node that is down says nothing
-    // about who belongs, so one that is down while the others refuse must not
-    // keep this node asking forever.
-    if refusals > 0 && answered_otherwise == 0 {
-        return Progress::Refused;
-    }
+    answers.progress()
+}
 
-    // Every candidate was tried. `NoGroup` answers land here too: a core node
-    // that has not yet received the founding entry has nothing to give, and
-    // waiting is the only thing to do about it.
-    Progress::Unreachable
+/// What the core nodes asked said, when none of them handed over entries.
+///
+/// Counted rather than acted on one at a time: one core node refusing could be
+/// one core node that is wrong, and the useful question is whether *everybody
+/// who answered* refused.
+#[derive(Debug, Default)]
+struct Answers {
+    refusals: usize,
+    /// Answers other than a refusal, the undecodable included: those keep
+    /// this node from concluding it was expelled.
+    otherwise: usize,
+    /// Of `otherwise`, the ones this build could not read; only when every
+    /// answer was one does it stop (5d-8).
+    undecodable: usize,
+}
+
+impl Answers {
+    fn progress(&self) -> Progress {
+        // Unreachable nodes get no vote: a core node that is down says nothing
+        // about who belongs, so one that is down while the others refuse must
+        // not keep this node asking forever.
+        if self.refusals > 0 && self.otherwise == 0 {
+            return Progress::Refused;
+        }
+        if self.undecodable > 0 && self.undecodable == self.otherwise {
+            return Progress::Undecodable;
+        }
+        // Every candidate was tried. `NoGroup` answers land here too: a core
+        // node that has not yet received the founding entry has nothing to
+        // give, and waiting is the only thing to do about it.
+        Progress::Unreachable
+    }
 }
 
 #[cfg(test)]
@@ -536,5 +624,27 @@ mod tests {
         .await
         .expect("the deadline must survive a chatty peer");
         chatter.abort();
+    }
+
+    #[test]
+    fn a_follower_stops_only_when_every_answer_was_unreadable() {
+        let answers = |refusals, otherwise, undecodable| Answers {
+            refusals,
+            otherwise,
+            undecodable,
+        };
+        assert_eq!(answers(0, 2, 2).progress(), Progress::Undecodable);
+        assert_eq!(answers(1, 1, 1).progress(), Progress::Undecodable);
+        assert_eq!(
+            answers(0, 2, 1).progress(),
+            Progress::Unreachable,
+            "a core node that answered in a readable way may have the entries"
+        );
+        assert_eq!(
+            answers(2, 1, 1).progress(),
+            Progress::Undecodable,
+            "an unreadable answer is not a refusal: no expulsion"
+        );
+        assert_eq!(answers(2, 0, 0).progress(), Progress::Refused);
     }
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Everything a signed-in tab shows: the pages, how to get between them,
-  // and whether the node can be heard. The one connection to the node's
+  // whether the node can be heard, and whether it needs an upgrade. The one connection to the node's
   // events is held here, for whichever page is open to listen to (D2, D6).
   import { onMount } from "svelte";
 
@@ -12,10 +12,23 @@
   import WishesPage from "./WishesPage.svelte";
   import { type Connection, type Listen, type NodeEvent, watch } from "./lib/events";
   import { href, onLinkClick, onPopState, router } from "./lib/router.svelte";
+  import { call, Unauthorised, type UpgradeRequired } from "./lib/rpc";
 
   let { onUnauthorised }: { onUnauthorised: () => void } = $props();
 
   let connection = $state<Connection>("connecting");
+  let upgradeRequired = $state<UpgradeRequired | null>(null);
+
+  /** Whether the node stopped following the log; a failure here is the connection line's to show. */
+  async function loadUpgradeRequired() {
+    try {
+      upgradeRequired = (await call("node.status", null)).upgrade_required;
+    } catch (error) {
+      if (error instanceof Unauthorised) {
+        onUnauthorised();
+      }
+    }
+  }
 
   const listeners = new Set<(event: NodeEvent) => void>();
   const listen: Listen = (listener) => {
@@ -23,17 +36,27 @@
     return () => listeners.delete(listener);
   };
 
-  onMount(() =>
-    watch({
+  onMount(() => {
+    loadUpgradeRequired();
+    return watch({
       onEvent: (event) => {
+        if (event.type === "node.upgrade_required") {
+          loadUpgradeRequired();
+        }
         for (const listener of listeners) {
           listener(event);
         }
       },
-      onConnection: (now) => (connection = now),
+      onConnection: (now) => {
+        // A reconnected tab may have missed the event.
+        if (now === "live" && connection !== "live") {
+          loadUpgradeRequired();
+        }
+        connection = now;
+      },
       onUnauthorised,
-    }),
-  );
+    });
+  });
 </script>
 
 <svelte:window onpopstate={onPopState} />
@@ -46,6 +69,18 @@
   <a href="/bookmarks" aria-current={router.route.page === "bookmarks" ? "page" : undefined}>Bookmarks</a>
   <a href="/node" aria-current={router.route.page === "node" ? "page" : undefined}>Node</a>
 </nav>
+
+{#if upgradeRequired}
+  <p class="failure" role="alert">
+    Upgrade required:
+    {#if upgradeRequired.reason === "protocol"}
+      the group speaks protocol {upgradeRequired.group}, which this node's build does not.
+    {:else}
+      the core nodes send log entries this node's build cannot read.
+    {/if}
+    The node stopped following the group's log at index {upgradeRequired.at}; upgrade distlib to resume.
+  </p>
+{/if}
 
 <p class="connection {connection}">
   {#if connection === "live"}

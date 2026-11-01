@@ -220,6 +220,14 @@ pub enum ProposeOutcome {
 pub struct FetchFailed {
     pub member: MemberId,
     pub message: String,
+    pub why: Failure,
+}
+
+/// Why an exchange with one peer failed, as a follower acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// It could not be completed: try somebody else, or this one again later.
+    Unreachable,
 
     /// The peer refused us at the allowlist rather than failing to answer.
     ///
@@ -227,7 +235,23 @@ pub struct FetchFailed {
     /// try somebody else; refused means that node's copy of the log does not
     /// have this one in the group, and no amount of retrying will change its
     /// mind — only being re-admitted will.
-    pub refused: bool,
+    Refused,
+
+    /// The peer answered in an encoding this build cannot read: it speaks a
+    /// newer protocol, and only upgrading this node will help (5d-8).
+    Undecodable,
+}
+
+impl Failure {
+    /// What a failure to talk to a peer says: a refusal, or nothing.
+    fn of(error: &NetError) -> Self {
+        match error {
+            NetError::Rejected {
+                by_remote: true, ..
+            } => Self::Refused,
+            _ => Self::Unreachable,
+        }
+    }
 }
 
 /// Why a forwarded proposal did not take effect.
@@ -663,7 +687,7 @@ impl MemberlogClient {
         let failed = |message: String| FetchFailed {
             member,
             message,
-            refused: false,
+            why: Failure::Unreachable,
         };
         let exchange = self.exchange(member, addr, Request::From { cursor });
 
@@ -673,7 +697,7 @@ impl MemberlogClient {
             .map_err(|rebuffed| FetchFailed {
                 member,
                 message: rebuffed.message,
-                refused: rebuffed.refused,
+                why: rebuffed.why,
             })? {
             Response::Fetched(fetched) => {
                 // Every answer names the current core group with addresses, so
@@ -706,7 +730,7 @@ impl MemberlogClient {
         let failed = |message: String| FetchFailed {
             member,
             message,
-            refused: false,
+            why: Failure::Unreachable,
         };
         let exchange = self.exchange(member, addr, Request::Directory);
 
@@ -716,7 +740,7 @@ impl MemberlogClient {
             .map_err(|rebuffed| FetchFailed {
                 member,
                 message: rebuffed.message,
-                refused: rebuffed.refused,
+                why: rebuffed.why,
             })? {
             Response::Directory(addresses) => Ok(learn_all(&self.directory, member, addresses)),
             Response::Fetched(_) | Response::Proposed(_) => Err(failed(
@@ -764,13 +788,7 @@ impl MemberlogClient {
             .await
             .map_err(|_| format!("connecting: no answer within {CONNECT_TIMEOUT:?}"))?
             .map_err(|error| Rebuffed {
-                refused: matches!(
-                    error,
-                    NetError::Rejected {
-                        by_remote: true,
-                        ..
-                    }
-                ),
+                why: Failure::of(&error),
                 message: format!("connecting: {error}"),
             })?;
 
@@ -787,7 +805,10 @@ impl MemberlogClient {
             .read_to_end(MAX_RPC_BYTES)
             .await
             .map_err(Rebuffed::from_peer(member, "reading the answer"))?;
-        Ok(postcard::from_bytes(&encoded).map_err(failed("decoding the answer"))?)
+        postcard::from_bytes(&encoded).map_err(|error| Rebuffed {
+            message: format!("decoding the answer: {error}"),
+            why: Failure::Undecodable,
+        })
     }
 }
 
@@ -837,7 +858,7 @@ fn learn_all(directory: &Directory, from: MemberId, addresses: Vec<SignedAddress
 #[error("{message}")]
 struct Rebuffed {
     message: String,
-    refused: bool,
+    why: Failure,
 }
 
 impl Rebuffed {
@@ -845,7 +866,7 @@ impl Rebuffed {
     fn new(message: String) -> Self {
         Self {
             message,
-            refused: false,
+            why: Failure::Unreachable,
         }
     }
 
@@ -863,13 +884,7 @@ impl Rebuffed {
         move |error| {
             let error = NetError::peer(member, error);
             Self {
-                refused: matches!(
-                    error,
-                    NetError::Rejected {
-                        by_remote: true,
-                        ..
-                    }
-                ),
+                why: Failure::of(&error),
                 message: format!("{what}: {error}"),
             }
         }
