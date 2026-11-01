@@ -148,25 +148,52 @@ const ANNOUNCE_RETRY: Duration = Duration::from_secs(5);
 /// `max`, the newest protocol its build speaks: proposes it whenever this
 /// node is a member whose record says less (5d-7). Runs until cancelled.
 ///
-/// Only ever up: a record above `max` is a newer build's, and writing less
-/// than it would be a downgrade, which the group does not support.
+/// **Once per member per upgrade**, and never on a restart: the record says
+/// `max` from then on. Only ever up, since writing less than the record would
+/// be a downgrade, and never below the group's protocol, which the fold
+/// refuses: a build below it is "upgrade required" (5d-8).
+///
+/// **A refused proposal is still an entry in the log**, so a refusal is not
+/// retried on a timer — every node reaches the same verdict, and retrying
+/// would add an entry every few seconds. It is looked at again when the
+/// membership next changes. Only a failure to reach the group is retried.
 pub async fn announce_protocol_support(node: &MembershipNode, secret_key: &SecretKey, max: u32) {
     let me = MemberId::from(secret_key.public());
     let mut memberships = node.subscribe();
     loop {
-        let says_less = memberships
-            .borrow_and_update()
-            .member(&me)
-            .is_some_and(|record| record.protocol_max < max);
+        let says_less = {
+            let membership = memberships.borrow_and_update();
+            max >= membership.protocol()
+                && membership
+                    .member(&me)
+                    .is_some_and(|record| record.protocol_max < max)
+        };
         if says_less {
             let event = MembershipEvent::ProtocolSupported { member: me, max };
-            if let Err(error) = node.propose(event, secret_key).await {
-                tracing::warn!(%error, max, "could not say which protocols this node supports; trying again");
-                tokio::time::sleep(ANNOUNCE_RETRY).await;
+            match node.propose(event, secret_key).await {
+                Ok(_) => continue,
+                // Behind the group: catching up changes the membership, and
+                // the record is looked at again then.
+                Err(NodeError::Event(ConsensusError::StaleProposal { .. })) => {
+                    tracing::debug!(
+                        max,
+                        "proposed against an old membership; looking again once caught up"
+                    );
+                }
+                Err(NodeError::Event(refused)) => {
+                    tracing::error!(%refused, max, "the group refused this node's protocol support; not saying it again until the membership changes");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, max, "could not say which protocols this node supports; trying again");
+                    tokio::time::sleep(ANNOUNCE_RETRY).await;
+                    continue;
+                }
             }
-            continue;
         }
         if memberships.changed().await.is_err() {
+            tracing::error!(
+                "the membership is gone; this node no longer says which protocols it supports"
+            );
             return;
         }
     }

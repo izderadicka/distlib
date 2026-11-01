@@ -2901,11 +2901,8 @@ async fn disjoint_singleton_replacement_converges_and_accepts_writes() {
     founder.shutdown().await;
 }
 
-/// 5d-7: each member's node says in the log which protocols its build speaks
-/// (a follower's through forwarding), and once the core has, the group can be
-/// raised. A build that speaks less writes nothing: that would be a downgrade.
-#[tokio::test]
-async fn each_node_says_which_protocols_it_speaks_and_then_the_group_can_be_raised() {
+/// A founder of a group of one, and a member it admitted that follows it.
+async fn a_founder_and_a_follower() -> (Peer, Peer) {
     let founder = Peer::start(SecretKey::generate(), vec![]).await;
     founder
         .node
@@ -2941,6 +2938,25 @@ async fn each_node_says_which_protocols_it_speaks_and_then_the_group_can_be_rais
         vec![(founder.id, founder.addr.clone())],
     )
     .await;
+    wait_for(&follower, "the log to reach the follower", |m| {
+        m.is_member(&follower_id)
+    })
+    .await;
+    (founder, follower)
+}
+
+/// How many entries `core`'s log holds, refused ones included: what
+/// `changed_at`, which only accepted ones move, cannot show.
+fn log_length(core: &Peer) -> Option<u64> {
+    core.node.raft().unwrap().metrics().borrow().last_log_index
+}
+
+/// 5d-7: each member's node says in the log which protocols its build speaks
+/// (a follower's through forwarding), once, and then the group can be raised.
+/// Saying it again, as after a restart, or saying less writes nothing.
+#[tokio::test]
+async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be_raised() {
+    let (founder, follower) = a_founder_and_a_follower().await;
     let speaks_2 = |member: MemberId| {
         move |m: &MembershipState| m.member(&member).is_some_and(|r| r.protocol_max == 2)
     };
@@ -2949,23 +2965,23 @@ async fn each_node_says_which_protocols_it_speaks_and_then_the_group_can_be_rais
         () = announce_protocol_support(&founder.node, &founder.secret, 2) => unreachable!(),
         () = announce_protocol_support(&follower.node, &follower.secret, 2) => unreachable!(),
         () = async {
-            wait_for(&founder, "both to say they speak 2", |m| {
-                speaks_2(founder.id)(m) && speaks_2(follower_id)(m)
-            })
-            .await;
+            // On both, so neither is still behind on what the other said.
+            for peer in [&founder, &follower] {
+                wait_for(peer, "both to say they speak 2", |m| {
+                    speaks_2(founder.id)(m) && speaks_2(follower.id)(m)
+                })
+                .await;
+            }
         } => {}
     }
-    let said_at = founder.node.membership().changed_at();
+    let said = log_length(&founder);
     tokio::select! {
         () = announce_protocol_support(&founder.node, &founder.secret, 2) => unreachable!(),
+        () = announce_protocol_support(&follower.node, &follower.secret, 2) => unreachable!(),
         () = announce_protocol_support(&founder.node, &founder.secret, FIRST_PROTOCOL) => unreachable!(),
-        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+        () = tokio::time::sleep(Duration::from_secs(1)) => {}
     }
-    assert_eq!(
-        founder.node.membership().changed_at(),
-        said_at,
-        "nothing more to say: the same max again, or a lower one"
-    );
+    assert_eq!(log_length(&founder), said, "nothing more to say");
 
     founder
         .node
@@ -2976,4 +2992,51 @@ async fn each_node_says_which_protocols_it_speaks_and_then_the_group_can_be_rais
         m.protocol() == 2
     })
     .await;
+}
+
+/// 5d-7: a build below the group's protocol proposes nothing, though its
+/// record says less than it speaks. The fold would refuse it, and a refused
+/// proposal is still an entry in the log, so retrying would fill the log.
+#[tokio::test]
+async fn a_build_below_the_groups_protocol_writes_nothing() {
+    let (founder, follower) = a_founder_and_a_follower().await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::ProtocolSupported {
+                member: founder.id,
+                max: 3,
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    for to in [2, 3] {
+        founder
+            .node
+            .propose(MembershipEvent::ProtocolRaised { to }, &founder.secret)
+            .await
+            .unwrap();
+    }
+    wait_for(&follower, "the raises to reach the follower", |m| {
+        m.protocol() == 3
+    })
+    .await;
+    let before = log_length(&founder);
+
+    tokio::select! {
+        () = announce_protocol_support(&follower.node, &follower.secret, 2) => unreachable!(),
+        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+    }
+
+    assert_eq!(log_length(&founder), before);
+    assert_eq!(
+        follower
+            .node
+            .membership()
+            .member(&follower.id)
+            .unwrap()
+            .protocol_max,
+        FIRST_PROTOCOL
+    );
 }
