@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use distlib_consensus::{
-    ConsensusError, MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp,
+    ConsensusError, FIRST_PROTOCOL, MemberProfile, MembershipEvent, MembershipState, SignedEvent,
+    Timestamp,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -2218,4 +2219,241 @@ fn apply_scenario(
         // Refused events are expected and are exactly what the rules are for.
         let _ = propose(state, actor, event);
     }
+}
+
+/// `who` says its build speaks protocols up to `max`.
+fn supports(state: &mut MembershipState, who: &Signer, max: u32) -> Result<(), ConsensusError> {
+    propose(
+        state,
+        who,
+        MembershipEvent::ProtocolSupported {
+            member: who.id,
+            max,
+        },
+    )
+}
+
+/// `who` proposes raising the group to protocol `to`.
+fn raise(state: &mut MembershipState, who: &Signer, to: u32) -> Result<(), ConsensusError> {
+    propose(state, who, MembershipEvent::ProtocolRaised { to })
+}
+
+#[test]
+fn a_group_is_founded_at_the_first_protocol_which_every_member_supports() {
+    let (mut state, alice) = founded();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.profile("bob"),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(MembershipState::new().protocol(), 0);
+    assert_eq!(state.protocol(), FIRST_PROTOCOL);
+    for member in [alice.id, bob.id] {
+        assert_eq!(state.member(&member).unwrap().protocol_max, FIRST_PROTOCOL);
+    }
+}
+
+#[test]
+fn a_members_protocol_support_is_its_own_and_needs_no_approval() {
+    let (mut state, founders) = founded_by(2);
+    let (alice, bob) = (&founders[0], &founders[1]);
+
+    supports(&mut state, alice, 2).unwrap();
+    let refused = propose(
+        &mut state,
+        alice,
+        MembershipEvent::ProtocolSupported {
+            member: bob.id,
+            max: 2,
+        },
+    );
+
+    assert_eq!(state.member(&alice.id).unwrap().protocol_max, 2);
+    assert_eq!(state.pending().count(), 0);
+    assert_eq!(
+        refused,
+        Err(ConsensusError::ProtocolSupportNotOwn {
+            proposer: alice.id,
+            member: bob.id,
+        })
+    );
+    assert_eq!(state.member(&bob.id).unwrap().protocol_max, FIRST_PROTOCOL);
+}
+
+#[test]
+fn a_raise_takes_a_majority_of_the_core_once_every_core_member_supports_it() {
+    let (mut state, founders) = founded_by(3);
+    supports(&mut state, &founders[0], 2).unwrap();
+    supports(&mut state, &founders[1], 2).unwrap();
+
+    assert_eq!(
+        raise(&mut state, &founders[0], 2),
+        Err(ConsensusError::CoreLacksProtocol {
+            member: founders[2].id,
+            protocol: 2,
+        })
+    );
+
+    supports(&mut state, &founders[2], 2).unwrap();
+    raise(&mut state, &founders[0], 2).unwrap();
+    assert_eq!(state.protocol(), FIRST_PROTOCOL, "one approval of two");
+    let raising = the_pending_one(&state);
+    approve(&mut state, &founders[1], raising).unwrap();
+
+    assert_eq!(state.protocol(), 2);
+    assert_eq!(state.pending().count(), 0);
+}
+
+#[test]
+fn a_raise_goes_one_protocol_up_at_a_time() {
+    let (mut state, alice) = founded();
+    supports(&mut state, &alice, 3).unwrap();
+
+    for to in [FIRST_PROTOCOL, 3] {
+        assert_eq!(
+            raise(&mut state, &alice, to),
+            Err(ConsensusError::ProtocolNotNext {
+                to,
+                protocol: FIRST_PROTOCOL,
+            })
+        );
+    }
+    // A core of one is its own majority.
+    raise(&mut state, &alice, 2).unwrap();
+    assert_eq!(state.protocol(), 2);
+}
+
+#[test]
+fn a_member_made_core_without_support_stops_a_raise_in_flight() {
+    let (mut state, founders) = founded_by(3);
+    for founder in &founders {
+        supports(&mut state, founder, 2).unwrap();
+    }
+    let dave = Signer::generate();
+    propose(
+        &mut state,
+        &founders[0],
+        MembershipEvent::MemberAdded {
+            member: dave.profile("dave"),
+        },
+    )
+    .unwrap();
+    raise(&mut state, &founders[0], 2).unwrap();
+    let raising = the_pending_one(&state);
+    let everyone: Vec<&Signer> = founders.iter().chain([&dave]).collect();
+    propose(
+        &mut state,
+        &founders[0],
+        MembershipEvent::CoreGroupChanged {
+            core: core_group(&everyone),
+        },
+    )
+    .unwrap();
+    let promoting = state
+        .pending()
+        .map(|(index, _)| index)
+        .find(|index| *index != raising)
+        .unwrap();
+    approve(&mut state, &founders[1], promoting).unwrap();
+    assert!(state.is_core(&dave.id));
+
+    assert_eq!(
+        approve(&mut state, &founders[1], raising),
+        Err(ConsensusError::CoreLacksProtocol {
+            member: dave.id,
+            protocol: 2,
+        })
+    );
+    assert_eq!(state.protocol(), FIRST_PROTOCOL);
+}
+
+#[test]
+fn once_raised_nobody_is_made_core_who_does_not_support_the_protocol() {
+    let (mut state, alice) = founded();
+    supports(&mut state, &alice, 2).unwrap();
+    raise(&mut state, &alice, 2).unwrap();
+    let bob = Signer::generate();
+    propose(
+        &mut state,
+        &alice,
+        MembershipEvent::MemberAdded {
+            member: bob.profile("bob"),
+        },
+    )
+    .unwrap();
+    let promote_bob = |state: &mut MembershipState| {
+        propose(
+            state,
+            &alice,
+            MembershipEvent::CoreGroupChanged {
+                core: core_group(&[&alice, &bob]),
+            },
+        )
+    };
+
+    assert_eq!(
+        promote_bob(&mut state),
+        Err(ConsensusError::CoreLacksProtocol {
+            member: bob.id,
+            protocol: 2,
+        })
+    );
+    supports(&mut state, &bob, 2).unwrap();
+    promote_bob(&mut state).unwrap();
+    assert!(state.is_core(&bob.id));
+}
+
+#[test]
+fn support_below_the_groups_protocol_is_a_downgrade_and_refused() {
+    let (mut state, alice) = founded();
+    supports(&mut state, &alice, 2).unwrap();
+    raise(&mut state, &alice, 2).unwrap();
+
+    assert_eq!(
+        supports(&mut state, &alice, FIRST_PROTOCOL),
+        Err(ConsensusError::ProtocolSupportBelowGroup {
+            max: FIRST_PROTOCOL,
+            protocol: 2,
+        })
+    );
+    assert_eq!(state.member(&alice.id).unwrap().protocol_max, 2);
+}
+
+#[test]
+fn re_admitting_a_member_keeps_their_protocol_support() {
+    let (mut state, founders) = founded_by(2);
+    let (alice, bob) = (&founders[0], &founders[1]);
+    supports(&mut state, bob, 2).unwrap();
+
+    propose(
+        &mut state,
+        alice,
+        MembershipEvent::MemberAdded {
+            member: bob.profile("bob, renamed"),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(state.member(&bob.id).unwrap().protocol_max, 2);
+}
+
+#[test]
+fn one_raise_waits_at_a_time() {
+    // As for any subject: two would split the approvals they need.
+    let (mut state, founders) = founded_by(3);
+    for founder in &founders {
+        supports(&mut state, founder, 2).unwrap();
+    }
+    raise(&mut state, &founders[0], 2).unwrap();
+    let raising = the_pending_one(&state);
+
+    assert_eq!(
+        raise(&mut state, &founders[1], 2),
+        Err(ConsensusError::AlreadyPending { proposal: raising })
+    );
 }

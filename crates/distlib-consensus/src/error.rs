@@ -180,6 +180,26 @@ pub enum ConsensusError {
     /// A group was founded with settings that contradict each other.
     #[error("the group settings are inconsistent: {reason}")]
     InvalidSettings { reason: String },
+
+    /// A member's protocol support is its own to state, like a pledge.
+    #[error("{proposer} cannot state which protocols {member} supports")]
+    ProtocolSupportNotOwn {
+        proposer: MemberId,
+        member: MemberId,
+    },
+
+    /// A member said it supports less than the group already speaks: a
+    /// downgrade, which is not supported.
+    #[error("supporting protocols up to {max} is below the group's protocol {protocol}")]
+    ProtocolSupportBelowGroup { max: u32, protocol: u32 },
+
+    /// A raise goes one protocol up at a time.
+    #[error("the group is at protocol {protocol}, so it can be raised to {} only, not {to}", protocol + 1)]
+    ProtocolNotNext { to: u32, protocol: u32 },
+
+    /// A core member, or one being made core, does not support the protocol.
+    #[error("core member {member} does not support protocol {protocol} yet")]
+    CoreLacksProtocol { member: MemberId, protocol: u32 },
 }
 
 impl From<postcard::Error> for ConsensusError {

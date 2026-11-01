@@ -20,6 +20,13 @@ use crate::{
     signed::SignedEvent,
 };
 
+/// The group protocol every group is founded at, and what a member supports
+/// until it says otherwise: every build speaks it (5d-7).
+pub const FIRST_PROTOCOL: u32 = 1;
+
+/// The newest group protocol this build speaks (5d-7).
+pub const PROTOCOL_MAX: u32 = 1;
+
 /// What is known about one member: who they are, and what they pledge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberRecord {
@@ -36,15 +43,22 @@ pub struct MemberRecord {
     /// drifted between peers would give them different custodians for the same
     /// item.
     pub pledge_bytes: u64,
+
+    /// The newest group protocol this member's build speaks, as it last said
+    /// in [`MembershipEvent::ProtocolSupported`]; [`FIRST_PROTOCOL`] until
+    /// then.
+    pub protocol_max: u32,
 }
 
 impl MemberRecord {
-    /// `profile`'s record, pledging `pledge_bytes`.
-    fn of(profile: &MemberProfile, pledge_bytes: u64) -> Self {
+    /// `profile`'s record, pledging `pledge_bytes` and supporting protocols up
+    /// to `protocol_max`.
+    fn of(profile: &MemberProfile, pledge_bytes: u64, protocol_max: u32) -> Self {
         Self {
             member_id: profile.member_id,
             display_name: profile.display_name.clone(),
             pledge_bytes,
+            protocol_max,
         }
     }
 }
@@ -81,6 +95,9 @@ pub struct MembershipState {
     /// because nothing verifies an entry's timestamp (P1-3): one member whose
     /// clock is a year fast would otherwise sweep every pending proposal.
     settings: GroupSettings,
+    /// The group protocol: [`FIRST_PROTOCOL`] from founding, then whatever
+    /// [`MembershipEvent::ProtocolRaised`] last made it; 0 before founding.
+    protocol: u32,
 }
 
 /// A submitted change that has not yet collected the approvals it needs.
@@ -140,6 +157,7 @@ fn target(event: &MembershipEvent) -> Option<MemberId> {
 enum Subject {
     Member(MemberId),
     CoreGroup,
+    Protocol,
 }
 
 fn subject(event: &MembershipEvent) -> Option<Subject> {
@@ -147,8 +165,9 @@ fn subject(event: &MembershipEvent) -> Option<Subject> {
         MembershipEvent::MemberAdded { member } => Some(Subject::Member(member.member_id)),
         MembershipEvent::MemberExpelled { member, .. } => Some(Subject::Member(*member)),
         MembershipEvent::CoreGroupChanged { .. } => Some(Subject::CoreGroup),
-        // A pledge needs no approvals and so never waits; founding, approvals
-        // and withdrawals are not proposals at all.
+        MembershipEvent::ProtocolRaised { .. } => Some(Subject::Protocol),
+        // A pledge or a protocol's support needs no approvals and so never
+        // waits; founding, approvals and withdrawals are not proposals at all.
         _ => None,
     }
 }
@@ -284,6 +303,11 @@ impl MembershipState {
     /// * the core group is the set of Raft voters, and a non-voter rewriting it
     ///   could remove every voter but themselves;
     /// * an approval *is* §4.4 step 2, so only a core node casts one.
+    ///
+    /// A member's protocol support is its own too, and never below the
+    /// group's; a raise goes one step up, and only while the whole core
+    /// supports it (5d-7). Re-checked on every approval, so a core member
+    /// added meanwhile without support stops a raise in flight.
     fn authorise(&self, proposer: MemberId, event: &MembershipEvent) -> Result<()> {
         match event {
             MembershipEvent::PledgeChanged { member, .. } if *member != proposer => {
@@ -306,7 +330,45 @@ impl MembershipState {
             MembershipEvent::Approved { .. } if !self.core.contains_key(&proposer) => {
                 Err(ConsensusError::ApproverNotCore { approver: proposer })
             }
+            MembershipEvent::ProtocolSupported { member, .. } if *member != proposer => {
+                Err(ConsensusError::ProtocolSupportNotOwn {
+                    proposer,
+                    member: *member,
+                })
+            }
+            MembershipEvent::ProtocolSupported { max, .. } if *max < self.protocol => {
+                Err(ConsensusError::ProtocolSupportBelowGroup {
+                    max: *max,
+                    protocol: self.protocol,
+                })
+            }
+            MembershipEvent::ProtocolRaised { to } if *to != self.protocol + 1 => {
+                Err(ConsensusError::ProtocolNotNext {
+                    to: *to,
+                    protocol: self.protocol,
+                })
+            }
+            MembershipEvent::ProtocolRaised { to } => self.core_supports(self.core.keys(), *to),
             _ => Ok(()),
+        }
+    }
+
+    /// Refuses if any of `core` does not support `protocol`.
+    fn core_supports<'a>(
+        &self,
+        mut core: impl Iterator<Item = &'a MemberId>,
+        protocol: u32,
+    ) -> Result<()> {
+        match core.find(|member| {
+            self.members
+                .get(member)
+                .is_none_or(|record| record.protocol_max < protocol)
+        }) {
+            Some(member) => Err(ConsensusError::CoreLacksProtocol {
+                member: *member,
+                protocol,
+            }),
+            None => Ok(()),
         }
     }
 
@@ -330,6 +392,10 @@ impl MembershipState {
             // agree to it, so requiring an approval would mean requiring one
             // from a bystander.
             MembershipEvent::PledgeChanged { .. } => 0,
+            // The same, for what the member's own build speaks.
+            MembershipEvent::ProtocolSupported { .. } => 0,
+            // What every node will speak from here on: as weighty as who votes.
+            MembershipEvent::ProtocolRaised { .. } => self.core.len() / 2 + 1,
             event if self.changes_the_voters(event) => self.core.len() / 2 + 1,
             _ => 1,
         }
@@ -651,6 +717,13 @@ impl MembershipState {
         self.changed_at
     }
 
+    /// The group protocol: what every node speaks, and what decides which
+    /// rules the fold applies once a later one exists (5d-7). 0 before
+    /// founding.
+    pub fn protocol(&self) -> u32 {
+        self.protocol
+    }
+
     /// Whether `member` currently belongs to the group.
     pub fn is_member(&self, member: &MemberId) -> bool {
         self.members.contains_key(member)
@@ -710,9 +783,15 @@ impl MembershipState {
 
         self.group = Some(group_id);
         self.settings = settings.clone();
+        self.protocol = FIRST_PROTOCOL;
         self.members = founders
             .iter()
-            .map(|(founder, _)| (founder.member_id, MemberRecord::of(founder, 0)))
+            .map(|(founder, _)| {
+                (
+                    founder.member_id,
+                    MemberRecord::of(founder, 0, FIRST_PROTOCOL),
+                )
+            })
             .collect();
         // Founders are the initial voters, at the addresses they founded with;
         // `CoreGroupChanged` moves it from here.
@@ -731,19 +810,25 @@ impl MembershipState {
                 // Insert rather than reject-if-present: this is also how an
                 // expelled member is re-admitted, and how a record is corrected.
                 //
-                // The pledge survives that, because it is the one field of the
-                // record its own member owns: `PledgeChanged` is self-only
-                // (P1-20) precisely so nobody sets somebody else's.
-                // Correcting a display name would otherwise retract a storage
-                // promise §5.5's custodian assignment reads. Re-admitting an
-                // expelled member finds no record and so starts them at zero,
-                // which is the intent there.
-                let pledge_bytes = self
+                // The pledge survives that, because it is a field of the record
+                // its own member owns: `PledgeChanged` is self-only (P1-20)
+                // precisely so nobody sets somebody else's. Correcting a
+                // display name would otherwise retract a storage promise
+                // §5.5's custodian assignment reads. The protocol support is
+                // the member's own the same way. Re-admitting an expelled
+                // member finds no record and so starts them at zero, and at
+                // the first protocol until their node says more, which is the
+                // intent there.
+                let (pledge_bytes, protocol_max) = self
                     .members
                     .get(&member.member_id)
-                    .map_or(0, |had| had.pledge_bytes);
-                self.members
-                    .insert(member.member_id, MemberRecord::of(member, pledge_bytes));
+                    .map_or((0, FIRST_PROTOCOL), |had| {
+                        (had.pledge_bytes, had.protocol_max)
+                    });
+                self.members.insert(
+                    member.member_id,
+                    MemberRecord::of(member, pledge_bytes, protocol_max),
+                );
                 Ok(())
             }
 
@@ -784,6 +869,10 @@ impl MembershipState {
                 if folded.len() != core.len() {
                     return Err(ConsensusError::InvalidCoreGroup);
                 }
+                // Nobody is made core who cannot speak what the group speaks:
+                // a voter below the protocol could not follow the log it
+                // votes on (5d-7). Until a raise, every member supports it.
+                self.core_supports(folded.keys(), self.protocol)?;
                 // Additions allowed since 2.3-2. Until then this refused them
                 // with `PromotionUnsupported`, because a node served
                 // `distlib/raft/0` only if it had started as a voter (P1-30) —
@@ -793,6 +882,20 @@ impl MembershipState {
                 // voter as a learner first and promotes it only once it has
                 // caught up.
                 self.core = folded;
+                Ok(())
+            }
+
+            MembershipEvent::ProtocolSupported { member, max } => {
+                let record = self
+                    .members
+                    .get_mut(member)
+                    .ok_or(ConsensusError::UnknownMember { member: *member })?;
+                record.protocol_max = *max;
+                Ok(())
+            }
+
+            MembershipEvent::ProtocolRaised { to } => {
+                self.protocol = *to;
                 Ok(())
             }
 
@@ -820,7 +923,7 @@ mod tests {
     fn the_membership_state_encoding_is_fixed() {
         let state = MembershipState {
             group: Some(GroupId::from_bytes([9; 32])),
-            members: BTreeMap::from([(member(1), MemberRecord::of(&profile(1), 1_000))]),
+            members: BTreeMap::from([(member(1), MemberRecord::of(&profile(1), 1_000, 2))]),
             core: BTreeMap::from([(member(1), addr())]),
             pending: BTreeMap::from([(
                 4,
@@ -832,16 +935,17 @@ mod tests {
             )]),
             changed_at: 4,
             settings: GroupSettings::default(),
+            protocol: 2,
         };
         assert_golden(
             &state,
             &format!(
                 "01{GROUP_9}\
-                 01{MEMBER_1}{MEMBER_1}03616e6ee807\
+                 01{MEMBER_1}{MEMBER_1}03616e6ee80702\
                  01{MEMBER_1}{ADDR}\
                  0104\
                  01{MEMBER_2}03616e6e{MEMBER_1}01{MEMBER_1}\
-                 04{DEFAULT_SETTINGS}"
+                 04{DEFAULT_SETTINGS}02"
             ),
         );
     }

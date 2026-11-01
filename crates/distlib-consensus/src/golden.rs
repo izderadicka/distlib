@@ -188,6 +188,14 @@ fn every_membership_event() {
             MembershipEvent::Withdrawn { proposal: 7 },
             "0607".to_owned(),
         ),
+        (
+            MembershipEvent::ProtocolSupported {
+                member: member(2),
+                max: 2,
+            },
+            format!("07{MEMBER_2}02"),
+        ),
+        (MembershipEvent::ProtocolRaised { to: 2 }, "0802".to_owned()),
     ];
     for (event, hex) in &events {
         assert_golden(event, hex);
@@ -279,6 +287,19 @@ fn every_consensus_error_keeps_its_discriminant() {
         },
         ConsensusError::InvalidSettings {
             reason: "bad".into(),
+        },
+        ConsensusError::ProtocolSupportNotOwn {
+            proposer: one,
+            member: one,
+        },
+        ConsensusError::ProtocolSupportBelowGroup {
+            max: 1,
+            protocol: 2,
+        },
+        ConsensusError::ProtocolNotNext { to: 3, protocol: 1 },
+        ConsensusError::CoreLacksProtocol {
+            member: one,
+            protocol: 2,
         },
     ];
     for (discriminant, error) in errors.iter().enumerate() {

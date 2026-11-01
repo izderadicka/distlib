@@ -130,8 +130,73 @@ const LEADER_CHANGE_WAIT: Duration = Duration::from_millis(ELECTION_TIMEOUT_MAX 
 /// Not a core map: it is the whole core group as the caller read it before the
 /// change that made it stale, so sending it again would undo that change
 /// (#154). The caller reads the group again.
+///
+/// Nor a protocol's support: [`announce_protocol_support`] looks again at what
+/// the caught-up log says, which may be that it was written already.
 fn sent_again_when_stale(event: &MembershipEvent) -> bool {
-    !matches!(event, MembershipEvent::CoreGroupChanged { .. })
+    !matches!(
+        event,
+        MembershipEvent::CoreGroupChanged { .. } | MembershipEvent::ProtocolSupported { .. }
+    )
+}
+
+/// How long [`announce_protocol_support`] waits after a proposal fails before
+/// it looks again.
+const ANNOUNCE_RETRY: Duration = Duration::from_secs(5);
+
+/// Keeps this node's [`MembershipEvent::ProtocolSupported`] in the log at
+/// `max`, the newest protocol its build speaks: proposes it whenever this
+/// node is a member whose record says less (5d-7). Runs until cancelled.
+///
+/// **Once per member per upgrade**, and never on a restart: the record says
+/// `max` from then on. Only ever up, since writing less than the record would
+/// be a downgrade, and never below the group's protocol, which the fold
+/// refuses: a build below it is "upgrade required" (5d-8).
+///
+/// **A refused proposal is still an entry in the log**, so a refusal is not
+/// retried on a timer — every node reaches the same verdict, and retrying
+/// would add an entry every few seconds. It is looked at again when the
+/// membership next changes. Only a failure to reach the group is retried.
+pub async fn announce_protocol_support(node: &MembershipNode, secret_key: &SecretKey, max: u32) {
+    let me = MemberId::from(secret_key.public());
+    let mut memberships = node.subscribe();
+    loop {
+        let says_less = {
+            let membership = memberships.borrow_and_update();
+            max >= membership.protocol()
+                && membership
+                    .member(&me)
+                    .is_some_and(|record| record.protocol_max < max)
+        };
+        if says_less {
+            let event = MembershipEvent::ProtocolSupported { member: me, max };
+            match node.propose(event, secret_key).await {
+                Ok(_) => continue,
+                // Behind the group: catching up changes the membership, and
+                // the record is looked at again then.
+                Err(NodeError::Event(ConsensusError::StaleProposal { .. })) => {
+                    tracing::debug!(
+                        max,
+                        "proposed against an old membership; looking again once caught up"
+                    );
+                }
+                Err(NodeError::Event(refused)) => {
+                    tracing::error!(%refused, max, "the group refused this node's protocol support; not saying it again until the membership changes");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, max, "could not say which protocols this node supports; trying again");
+                    tokio::time::sleep(ANNOUNCE_RETRY).await;
+                    continue;
+                }
+            }
+        }
+        if memberships.changed().await.is_err() {
+            tracing::error!(
+                "the membership is gone; this node no longer says which protocols it supports"
+            );
+            return;
+        }
+    }
 }
 
 fn raft_config() -> Config {

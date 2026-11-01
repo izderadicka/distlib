@@ -141,6 +141,20 @@ pub enum MembershipEvent {
     /// change. Appending leaves both alone, which is why `SIGNING_DOMAIN` has
     /// not had to move for either of these.
     Withdrawn { proposal: u64 },
+
+    /// A member's build speaks every group protocol up to `max` (5d-7).
+    ///
+    /// Its own, like a pledge, and written by the node itself when its build
+    /// speaks more than the log says — see
+    /// [`crate::node::announce_protocol_support`]. In the log so that a raise
+    /// is decided by the fold, the same on every node.
+    ProtocolSupported { member: MemberId, max: u32 },
+
+    /// The group moves to protocol `to`, one above the one it is at (5d-7).
+    ///
+    /// A majority of the core decides, and only while every core member
+    /// supports `to`: the core runs consensus, so it upgrades first.
+    ProtocolRaised { to: u32 },
 }
 
 /// The longest a member's display name may be, in bytes.
@@ -197,11 +211,13 @@ impl MembershipEvent {
                 within("display_name", &member.display_name, MAX_DISPLAY_NAME)
             }
             Self::MemberExpelled { reason, .. } => within("reason", reason, MAX_REASON),
-            // Nothing free-text: ids, addresses, a byte count and a log index.
+            // Nothing free-text: ids, addresses, numbers and log indexes.
             Self::PledgeChanged { .. }
             | Self::CoreGroupChanged { .. }
             | Self::Approved { .. }
-            | Self::Withdrawn { .. } => Ok(()),
+            | Self::Withdrawn { .. }
+            | Self::ProtocolSupported { .. }
+            | Self::ProtocolRaised { .. } => Ok(()),
         }
     }
 

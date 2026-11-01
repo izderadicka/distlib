@@ -831,7 +831,9 @@ mod tests {
                 state: MembershipState::default(),
                 followed_upto: 5,
             },
-            &format!("01{log_id_hex}{stored_membership_hex}0000000000{DEFAULT_SETTINGS}05"),
+            // The empty state: no group, members, core, pending or change,
+            // the default settings, and protocol 0.
+            &format!("01{log_id_hex}{stored_membership_hex}0000000000{DEFAULT_SETTINGS}0005"),
         );
         assert_golden(
             &StoredSnapshot {
