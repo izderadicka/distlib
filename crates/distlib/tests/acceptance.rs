@@ -388,6 +388,14 @@ fn download_refuses_what_it_cannot_do_without_losing_anything() {
     );
     // `added       {item}  {title}`
     let lost_id = added.split_whitespace().nth(1).unwrap().to_owned();
+    // Searchable first, as Dune above: until it is projected, `item` answers
+    // "no such item" (a flake on macOS CI, #179).
+    until_output(
+        alice.dir.path(),
+        &["search", "Lost"],
+        "the book alice just added to be searchable",
+        |out| hits(out).any(|(_, title)| title == "Lost"),
+    );
     until_files_are_projected(alice.dir.path(), &lost_id);
     let listed = run_command(alice.dir.path(), &["item", &lost_id]);
     // `  {blob}  lost.epub ({size} bytes)`
