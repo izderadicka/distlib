@@ -645,3 +645,42 @@ async fn apply_reports_whether_an_event_took_effect() {
         "a rejected event reports why, rather than passing for success"
     );
 }
+
+/// 5d-8: a follower applies a raise beyond its build and nothing after it, in
+/// the same page or after a restart.
+#[tokio::test]
+async fn a_followed_log_stops_at_a_raise_beyond_this_build() {
+    let founder = Signer::generate();
+    let (store, dir) = new_store();
+    let EntryPayload::Normal(founded) = founding(&founder).payload else {
+        unreachable!("founding is a normal entry")
+    };
+    let supported = founder.sign(
+        MembershipEvent::ProtocolSupported {
+            member: founder.id,
+            max: 3,
+        },
+        1,
+    );
+    let raise = |to, changed_at| founder.sign(MembershipEvent::ProtocolRaised { to }, changed_at);
+
+    store
+        .apply_followed(
+            4,
+            &[
+                (1, founded),
+                (2, supported),
+                (3, raise(2, 2)),
+                (4, raise(3, 3)),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.membership().protocol(), 2);
+    assert_eq!(store.followed_upto(), 3, "stopped at the raise");
+
+    let store = restart(store, &dir);
+    store.apply_followed(4, &[(4, raise(3, 3))]).await.unwrap();
+    assert_eq!(store.membership().protocol(), 2);
+    assert_eq!(store.followed_upto(), 3);
+}

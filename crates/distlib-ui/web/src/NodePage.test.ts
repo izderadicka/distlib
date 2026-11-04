@@ -52,6 +52,7 @@ const STATUS: NodeStatus = {
   pending: 1,
   settings: SETTINGS,
   protocol: { group: 1, supported: 1, core_not_speaking_next: [ME] },
+  upgrade_required: null,
   custody: { items: 3, bytes: 120_000_000_000, pledge_bytes: 200_000_000_000, load_factor: 0.4567 },
   pins: { queued: 0, fetching: 0, failed: 0, waiting_for_room: 0, kept: 3, releasing: 0 },
   storage: {

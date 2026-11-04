@@ -15,6 +15,7 @@ fn every_event() -> Vec<Event> {
     let all = vec![
         Event::MembershipChanged,
         Event::SyncStatus,
+        Event::UpgradeRequired,
         Event::ItemAdded { item_id },
         Event::ItemChanged { item_id },
         Event::AvailabilityChanged {
@@ -41,6 +42,7 @@ fn every_event() -> Vec<Event> {
         match event {
             Event::MembershipChanged
             | Event::SyncStatus
+            | Event::UpgradeRequired
             | Event::ItemAdded { .. }
             | Event::ItemChanged { .. }
             | Event::AvailabilityChanged { .. }

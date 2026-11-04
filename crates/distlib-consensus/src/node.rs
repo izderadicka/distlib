@@ -34,7 +34,7 @@ use crate::{
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
         RaftProtocol, Seat, StateMachineStore, TypeConfig, core_group,
-        follower::{self, SharedSources, Sources},
+        follower::{self, SharedSources, Sources, UpgradeRequired},
         network::TrustedCore,
     },
     signed::SignedEvent,
@@ -601,6 +601,10 @@ pub struct MembershipNode {
     /// the node rather than inside the follow loop.
     expelled: watch::Sender<bool>,
 
+    /// Why this node stopped reading the log until it is upgraded, once it
+    /// has (5d-8). A fact about the node, like `expelled`, so it lives here.
+    upgrade_required: watch::Sender<Option<UpgradeRequired>>,
+
     /// The follow loop's wake-up, shared with the gossip listener.
     ///
     /// Held so a follower's own proposal can wake it: the core node that
@@ -690,6 +694,7 @@ impl MembershipNode {
         // here for the life of the node so that `expelled` never observes a
         // closed channel and mistakes it for an answer.
         let (expelled, _) = watch::channel(false);
+        let (upgrade_required, _) = watch::channel(None);
 
         // Configuration, until the log can say better. A follower being
         // promoted replaces this with what the log said, in the moment before
@@ -720,6 +725,7 @@ impl MembershipNode {
             client: memberlog.clone(),
             sources: Arc::clone(&sources),
             expelled: expelled.clone(),
+            upgrade_required: upgrade_required.clone(),
             listens,
             seat: Seat::empty(),
             trusted,
@@ -770,6 +776,7 @@ impl MembershipNode {
             core_group,
             role,
             expelled,
+            upgrade_required,
             hints,
         })
     }
@@ -896,6 +903,18 @@ impl MembershipNode {
 
     pub fn is_core(&self) -> bool {
         self.seat.is_taken()
+    }
+
+    /// Why this node stopped reading the log until it is upgraded, or `None`
+    /// while it follows (5d-8). Only a follower stops: the group is raised
+    /// only once every core member speaks the new protocol.
+    pub fn upgrade_required(&self) -> Option<UpgradeRequired> {
+        *self.upgrade_required.borrow()
+    }
+
+    /// Watches [`Self::upgrade_required`], for whoever has to act on it.
+    pub fn subscribe_upgrade_required(&self) -> watch::Receiver<Option<UpgradeRequired>> {
+        self.upgrade_required.subscribe()
     }
 
     /// Resolves if this node discovers it has been expelled from its group.
@@ -1274,6 +1293,7 @@ struct Role {
     client: MemberlogClient,
     sources: SharedSources,
     expelled: watch::Sender<bool>,
+    upgrade_required: watch::Sender<Option<UpgradeRequired>>,
     listens: gossip::Hints,
     seat: Seat,
     trusted: TrustedCore,
@@ -1292,6 +1312,7 @@ impl Role {
             client: self.client.clone(),
             sources: Arc::clone(&self.sources),
             expelled: self.expelled.clone(),
+            upgrade_required: self.upgrade_required.clone(),
         }
     }
 }
@@ -2028,6 +2049,7 @@ mod retirement_tests {
                 leader: Some(expelled),
             })),
             expelled: watch::channel(false).0,
+            upgrade_required: watch::channel(None).0,
             listens: watch::channel(gossip::Hint::MayHaveMissed).1,
             seat: Seat::default(),
             trusted: TrustedCore::default(),

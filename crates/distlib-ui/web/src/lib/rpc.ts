@@ -26,6 +26,8 @@ export interface NodeStatus {
   settings: GroupSettings | null;
   /** The group protocol, and what raising it waits for; `null` before there is a group. */
   protocol: Protocol | null;
+  /** Why this node stopped following the log until it is upgraded; `null` while it follows. */
+  upgrade_required: UpgradeRequired | null;
   /** This node's custody and the group's load; `null` until custody is computed. */
   custody: Custody | null;
   /** How many items the pin manager has in each state. */
@@ -86,6 +88,9 @@ export interface Protocol {
   /** The core members whose build does not speak the next protocol yet. */
   core_not_speaking_next: string[];
 }
+
+/** Why a node stopped following the log, and the last index it applied. */
+export type UpgradeRequired = { reason: "protocol"; group: number; at: number } | { reason: "undecodable"; at: number };
 
 /** A group's settings, fixed when it was founded. */
 export interface GroupSettings {

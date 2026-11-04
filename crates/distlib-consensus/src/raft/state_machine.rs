@@ -43,7 +43,7 @@ use crate::{
         types::TypeConfig,
     },
     signed::SignedEvent,
-    state::MembershipState,
+    state::{MembershipState, PROTOCOL_MAX},
 };
 
 /// State machine storage, keyed by the constants below.
@@ -264,6 +264,11 @@ impl StateMachineStore {
     /// Refused events are skipped rather than fatal, for the reason they are on
     /// a core node — every node reaches the same verdict, so skipping keeps
     /// them in agreement.
+    ///
+    /// **Stops at a raise beyond [`PROTOCOL_MAX`]** (5d-8): what follows it may
+    /// be under rules this build does not know, so it is left unapplied, after
+    /// a restart too, and `followed_upto` stays at the raise, where a newer
+    /// build resumes.
     pub async fn apply_followed(
         &self,
         up_to: u64,
@@ -282,7 +287,13 @@ impl StateMachineStore {
         // happens after it is dropped, so no lock is held across an await.
         let (encoded, derived) = {
             let mut applied = self.lock()?;
+            let mut followed_upto = up_to;
+            let mut last_applied = applied.followed_upto;
             for (index, event) in events {
+                if applied.state.protocol() > PROTOCOL_MAX {
+                    followed_upto = last_applied;
+                    break;
+                }
                 let before: BTreeSet<_> = applied.state.core().keys().copied().collect();
                 let verdict = applied.state.apply(*index, event);
                 if let Err(error) = &verdict {
@@ -298,8 +309,9 @@ impl StateMachineStore {
                     }
                 }
                 verdicts.push(verdict);
+                last_applied = *index;
             }
-            applied.followed_upto = up_to;
+            applied.followed_upto = followed_upto;
             let encoded = encode(&*applied, ErrorSubject::StateMachine)?;
             (encoded, applied.state.clone())
         };

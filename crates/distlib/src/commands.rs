@@ -1413,6 +1413,10 @@ pub async fn members(paths: &Paths) -> Result<()> {
 
 /// What a running node says about itself.
 fn print_live_status(live: &Value) {
+    // First, so it is not lost among the lines that look healthy.
+    if let Some(warning) = upgrade_required_warning(&live["upgrade_required"]) {
+        println!("{warning}");
+    }
     match live["group"].as_str() {
         Some(group) => println!("group       {group}"),
         None => println!("group       none yet"),
@@ -1948,6 +1952,19 @@ fn protocol_lines(protocol: &Value) -> Option<String> {
     ))
 }
 
+/// Why this node stopped following the log, once it has (5d-8).
+fn upgrade_required_warning(upgrade_required: &Value) -> Option<String> {
+    let at = upgrade_required["at"].as_u64()?;
+    let why = match upgrade_required["group"].as_u64() {
+        Some(group) => format!("the group speaks protocol {group}, which this build does not"),
+        None => "the core nodes send log entries this build cannot read".to_owned(),
+    };
+    Some(format!(
+        "UPGRADE REQUIRED: {why}.\n            \
+         This node stopped following the log at index {at}; upgrade distlib to resume."
+    ))
+}
+
 /// The group's settings, one `key = value` line each, as `[group]` spells
 /// them. Nothing before the group is founded.
 fn print_settings(settings: &Value) {
@@ -2136,6 +2153,22 @@ mod tests {
             )
         );
         assert_eq!(protocol_lines(&Value::Null), None, "no group yet");
+    }
+
+    #[test]
+    fn upgrade_required_says_why_and_where_the_node_stopped() {
+        assert_eq!(
+            upgrade_required_warning(&json!({ "reason": "protocol", "group": 2, "at": 7 }))
+                .as_deref(),
+            Some(
+                "UPGRADE REQUIRED: the group speaks protocol 2, which this build does not.\n            \
+                 This node stopped following the log at index 7; upgrade distlib to resume."
+            )
+        );
+        let warning = upgrade_required_warning(&json!({ "reason": "undecodable", "at": 7 }))
+            .expect("an unreadable log warns");
+        assert!(warning.contains("cannot read"), "{warning}");
+        assert_eq!(upgrade_required_warning(&Value::Null), None, "following");
     }
 
     #[test]

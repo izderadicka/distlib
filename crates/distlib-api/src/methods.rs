@@ -192,6 +192,9 @@ impl Api {
             // Fixed at founding, so null until there is a group.
             "settings": membership.group_id().map(|_| membership.settings()),
             "protocol": membership.group_id().map(|_| protocol(&membership)),
+            // Null while this node follows the log; why it stopped once the
+            // group speaks a protocol this build does not (5d-8).
+            "upgrade_required": self.node.upgrade_required(),
             // Null until custody has been computed.
             "custody": self.custody.status(),
             "pins": *self.pins.borrow(),
