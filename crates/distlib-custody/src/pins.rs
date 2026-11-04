@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use distlib_consensus::MembershipState;
+use distlib_consensus::{MembershipState, UpgradeRequired};
 use distlib_core::{ContentHash, Event, ItemId, KeepReason, MemberId};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{Store, StoreError};
@@ -57,6 +57,9 @@ pub struct PinSources {
     pub storage: Storage,
     /// The probe failures, which say which copies are not real.
     pub catalogue: Catalogue,
+    /// Set once this node stops following the log until it is upgraded:
+    /// from then on it releases nothing (5d-8).
+    pub upgrade_required: watch::Receiver<Option<UpgradeRequired>>,
 }
 
 /// How many items the pin manager has in each state, for `node.status`.
@@ -105,6 +108,7 @@ impl PinManager {
             events,
             storage,
             catalogue,
+            upgrade_required,
         } = sources;
         let following_failed_copies =
             failed_copies::follow(catalogue, availability.clone(), membership.clone());
@@ -126,6 +130,7 @@ impl PinManager {
             next_turn: Turn::default(),
             max_fetches,
             counts: counts_sender,
+            upgrade_required,
         };
         // Subscribed here, before the task runs: a pass that finishes while
         // it starts is still heard.
@@ -206,6 +211,7 @@ struct Pins {
     next_turn: Turn,
     max_fetches: NonZeroUsize,
     counts: watch::Sender<PinCounts>,
+    upgrade_required: watch::Receiver<Option<UpgradeRequired>>,
 }
 
 impl Pins {
@@ -474,8 +480,15 @@ impl Pins {
 
     /// Lets go of `item` into the cache, once its copies elsewhere make up
     /// for this one, if this node holds it.
+    ///
+    /// Never while this node waits for an upgrade: its view of the group is
+    /// behind, and when versions disagree, more copies are kept (5d-8). The
+    /// item waits in `Releasing` for the upgraded build to decide.
     async fn release_if_safe(&mut self, item: ItemId) {
-        if self.keeper.holdings.holds(item) && !self.keeper.enough_copies_elsewhere(item) {
+        let behind_the_group = self.upgrade_required.borrow().is_some();
+        if behind_the_group
+            || (self.keeper.holdings.holds(item) && !self.keeper.enough_copies_elsewhere(item))
+        {
             self.pins.insert(item, Pin::Releasing);
             return;
         }

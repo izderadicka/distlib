@@ -8,7 +8,8 @@
 //! custody, never an own or custody item, and leaves the exported file be.
 //! 5c-1c's: custody that would not fit even so waits, evicting nothing,
 //! until letting go of another custody makes room. 5c-2b's: a copy that
-//! failed a probe does not count towards letting go.
+//! failed a probe does not count towards letting go. 5d-8b's: a node that
+//! waits for an upgrade lets go of nothing.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -21,9 +22,10 @@ use std::{
 };
 
 use distlib::Runtime;
+use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
-    ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason, MemberId,
-    ProbeFailure, TransferConfig,
+    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason,
+    MemberId, ProbeFailure, TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -31,8 +33,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, collecting, config, download, found_and_settled, init_logging, until_a_pass_collects,
-    until_projected, until_released,
+    api, bound, collecting, config, download, following, found_and_settled, init_logging, pledge,
+    until_a_pass_collects, until_projected, until_released,
 };
 
 const SOON: Duration = Duration::from_secs(60);
@@ -85,7 +87,17 @@ impl Node {
         if let Some(interval) = tuning.gc_interval_secs {
             config.storage.gc_interval_secs = interval;
         }
-        let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
+        Self::start_as(key, &config, dir).await
+    }
+
+    /// A follower of `founder`, which is the whole core.
+    async fn follow(key: SecretKey, founder: &Node, dir: DataDir) -> Self {
+        let config = collecting(following(founder.id, &bound(&founder.runtime)));
+        Self::start_as(key, &config, dir).await
+    }
+
+    async fn start_as(key: SecretKey, config: &Config, dir: DataDir) -> Self {
+        let runtime = Runtime::start(&key, config, &dir).await.unwrap();
         Self {
             runtime,
             id: key.public().into(),
@@ -166,6 +178,23 @@ impl Node {
                 self.id.fmt_short()
             )
         });
+    }
+
+    /// Waits until its custody counts its pledge as `pledge_bytes`.
+    async fn until_custody_counts(&self, pledge_bytes: u64) {
+        tokio::time::timeout(SOON, async {
+            while self
+                .runtime
+                .custody()
+                .status()
+                .map(|status| status.pledge_bytes)
+                != Some(pledge_bytes)
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("custody counts the node's pledge once it has settled");
     }
 
     /// Waits until it sees `holder` online and holding `item`.
@@ -393,6 +422,111 @@ fn custodian_and_other(founder: &Node, second: Node, third: Node, item: ItemId) 
         (second, third)
     } else {
         (third, second)
+    }
+}
+
+/// A founder that is the whole core, and two followers, all three pledging
+/// the same; returns once both followers' custody counts their pledge.
+async fn a_founder_and_two_followers(dir: &Path) -> (Node, Node, Node) {
+    let mut nodes = founded(dir, &[100 * GB], [Tuning::default()], &settings()).await;
+    let founder = nodes.pop().unwrap();
+    let mut followers = Vec::new();
+    for index in 1..=2 {
+        let key = SecretKey::generate();
+        let id = MemberId::from(key.public());
+        founder
+            .runtime
+            .node()
+            .propose(
+                MembershipEvent::MemberAdded {
+                    member: MemberProfile {
+                        member_id: id,
+                        display_name: index.to_string(),
+                    },
+                },
+                &founder.key,
+            )
+            .await
+            .unwrap();
+        pledge(&founder.runtime, &key, 100 * GB).await;
+        let dir = DataDir::new(dir.join(index.to_string()));
+        followers.push(Node::follow(key, &founder, dir).await);
+    }
+    for follower in &followers {
+        follower.until_custody_counts(100 * GB).await;
+    }
+    let third = followers.pop().unwrap();
+    let second = followers.pop().unwrap();
+    (founder, second, third)
+}
+
+/// **A node that waits for an upgrade lets go of nothing** (5d-8). As the
+/// test above, but the custodian and the other are followers of a founder
+/// that is the whole core. While the custodian waits to let go, the group
+/// raises its protocol past this build, so both followers stop. The other is
+/// back and keeps the book, which would let the custodian go; it keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_waits_for_an_upgrade_lets_go_of_nothing() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = a_founder_and_two_followers(dir.path()).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+    until_projected(&other.runtime, item, 1, "the other member").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&other.runtime, &other.key), item, &dest).await;
+    custodian.until_it_sees(other.id, item).await;
+    let (others_key, others_dir) = other.stop().await;
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+
+    for event in [
+        MembershipEvent::ProtocolSupported {
+            member: founder.id,
+            max: 2,
+        },
+        MembershipEvent::ProtocolRaised { to: 2 },
+    ] {
+        founder
+            .runtime
+            .node()
+            .propose(event, &founder.key)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(
+        SOON,
+        custodian
+            .runtime
+            .node()
+            .subscribe_upgrade_required()
+            .wait_for(Option::is_some),
+    )
+    .await
+    .expect("the custodian stops for an upgrade")
+    .unwrap();
+
+    let other = Node::follow(others_key, &founder, others_dir).await;
+    other
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(other.id, item).await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while waiting for an upgrade"
+    );
+
+    for node in [founder, custodian, other] {
+        node.stop().await;
     }
 }
 

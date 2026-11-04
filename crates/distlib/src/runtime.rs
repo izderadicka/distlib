@@ -585,6 +585,7 @@ fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
             events: inputs.events.subscribe(),
             storage: storage.clone(),
             catalogue: inputs.catalogue.clone(),
+            upgrade_required: inputs.node.subscribe_upgrade_required(),
         },
         inputs.config.transfer.max_fetches,
     );
