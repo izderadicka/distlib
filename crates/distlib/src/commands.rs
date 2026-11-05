@@ -509,6 +509,7 @@ fn report(done: &str, subject: &str, answer: &Value) -> String {
 /// `distlib pending`
 pub async fn pending(paths: &Paths) -> Result<()> {
     let answer = ask(paths, "group.pending", Value::Null).await?;
+    let names = MemberNames::of(&ask(paths, "group.members", Value::Null).await?);
     let proposals = answer["pending"].as_array().map_or(&[][..], |v| v);
 
     if proposals.is_empty() {
@@ -531,7 +532,7 @@ pub async fn pending(paths: &Paths) -> Result<()> {
             "        {} of {} approvals{yours}, proposed by {}",
             proposal["approvals"].as_array().map_or(0, Vec::len),
             proposal["needed"].as_u64().unwrap_or(0),
-            proposal["proposer"].as_str().unwrap_or("?")
+            names.named(&proposal["proposer"])
         );
         // "changes" rather than a time, because that is what it counts: the
         // number sits still while the group is quiet and then moves in a

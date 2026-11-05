@@ -326,7 +326,6 @@ impl Runtime {
         // topic at once. Nothing below needs the network to stop.
         self.router.endpoint().close().await;
         self.protocol_support.abort();
-        self.node.shutdown().await;
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
         self.projection.shutdown();
@@ -353,6 +352,9 @@ impl Runtime {
         if let Err(error) = self.search.close().await {
             tracing::warn!(%error, "search index did not close cleanly");
         }
+        // **After everything that watches the membership**: they take its
+        // end for a failure, and say so as an error.
+        self.node.shutdown().await;
         if let Err(error) = self.router.shutdown().await {
             tracing::warn!(%error, "router did not shut down cleanly");
         }

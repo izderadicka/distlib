@@ -1235,9 +1235,10 @@ async fn a_proposal_that_takes_effect_says_so_and_one_that_waits_says_what_it_wa
     assert_eq!(listed[0]["proposal"], json!(proposal));
     assert_eq!(listed[0]["proposer"], json!(me));
     assert_eq!(listed[0]["needed"], json!(1));
-    assert!(
-        listed[0]["what"].as_str().unwrap().starts_with("expel "),
-        "an operator deciding about this has to be able to read it: {pending}"
+    assert_eq!(
+        listed[0]["what"],
+        json!(format!("expel founder ({me}): the only voter")),
+        "an operator deciding about this has to be able to read it, by name"
     );
 
     // Status carries the count, so somebody who never runs `distlib pending`
@@ -1547,6 +1548,34 @@ async fn a_pledge_is_set_for_this_node_and_no_other() {
         -32602,
         "an unexpected parameter is refused rather than quietly ignored"
     );
+
+    harness.shutdown().await;
+}
+
+/// A pledge below the group's minimum is refused before it is proposed: a
+/// refused proposal is still an entry in the log (found by hand before 5c-5b).
+#[tokio::test]
+async fn a_pledge_below_the_minimum_is_refused_before_it_is_proposed() {
+    let harness = Harness::start().await;
+    let log_length = || {
+        harness
+            .node
+            .raft()
+            .unwrap()
+            .metrics()
+            .borrow()
+            .last_log_index
+    };
+    let before = log_length();
+
+    let refused = harness
+        .refuse("group.pledge_set", json!({ "bytes": PLEDGE / 2 }))
+        .await;
+
+    assert_eq!(code(&refused), -32602);
+    let message = refused["message"].as_str().unwrap();
+    assert!(message.contains("below the group's minimum"), "{message}");
+    assert_eq!(log_length(), before, "nothing was proposed");
 
     harness.shutdown().await;
 }

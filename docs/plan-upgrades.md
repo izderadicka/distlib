@@ -127,7 +127,7 @@ learn them later:
    rules, and the manual raise. *(5d-7: the log and the fold in #177, the command, status and UI in #178)*
 5. "Upgrade required" mode: on a raise beyond `max`, and on an undecodable log entry or memberlog
    page. Shown in `status`, the CLI and the UI. *(5d-8: stopping and saying so in #179,
-   releasing nothing in 5d-8b)*
+   releasing nothing in #180)*
 
 Heartbeats stay strict (Q6), so exact-bytes signatures are not needed. The fold rules #154 still
 asks for (pledge 0 on admission, expiry by log index) also go in before v1 *(5d-2)*: after v1, a
