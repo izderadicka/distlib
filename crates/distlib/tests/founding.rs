@@ -17,7 +17,9 @@ use std::process::Stdio;
 use tempfile::TempDir;
 
 mod common;
-use common::process::{Friend, Protocol, a_free_port, distlib, wait_for_all, wait_for_exit};
+use common::process::{
+    Friend, Protocol, a_free_port, distlib, run_command, wait_for_all, wait_for_exit,
+};
 
 #[test]
 fn run_refuses_a_data_directory_with_no_identity() {
@@ -394,7 +396,13 @@ fn a_follower_promoted_by_the_group_starts_voting_without_a_restart() {
         said.contains("proposed"),
         "adding a voter is not one member's decision; got:\n{said}"
     );
-    friends[1].approve(friends[1].the_pending_one());
+    let pending = friends[1].the_pending_one();
+    let listed = run_command(friends[1].dir.path(), &["pending"]);
+    assert!(
+        listed.contains(&format!("add newcomer ({}) to the core group", newcomer.id)),
+        "a pending change names who it is about; got:\n{listed}"
+    );
+    friends[1].approve(pending);
 
     // It reads the same entry the leader does, and sits down.
     joined.wait_for("this node is now a voter");

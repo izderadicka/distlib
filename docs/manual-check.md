@@ -441,8 +441,8 @@ dl -d $DL/b approve <N>          # approved <N> — it has taken effect
 dl -d $DL/a members              # three, all core: alice, bob, dave
 ```
 
-Carol's terminal first gives up her seat — `this node is now a follower` — then says it
-has been expelled, as erin's did, and shuts down.
+Carol's terminal first gives up her seat — `the log says this node no longer votes;
+standing down` — then says it has been expelled, as erin's did, and shuts down.
 
 **Pass:** whatever carol was custodian of now names somebody else, who fetches it:
 

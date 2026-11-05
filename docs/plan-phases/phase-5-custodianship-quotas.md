@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -682,7 +682,7 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   what it finds is fixed before the phase is called done.
   *Split in two* (P5-32): **5c-5a** *(done)* — the check written, its command-line half run end to
   end first, and what that found fixed; **5c-5b** — what Ivan's run of the whole check finds,
-  run after 5d (P5-38).
+  run after 5d (P5-38), its command-line half dry-run again first (P5-49).
 
 ### 5d — v1 readiness: the rest of #154, and upgrade hooks (9 PRs)
 
@@ -730,7 +730,7 @@ run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)
   - **5d-8a — stop following, and say so.** *Done (#179, P5-47).* A follower stops at a raise beyond its
     build, or when every core node that answered sent a page it cannot read. `node.status` and
     `distlib status` say why and where; every page of the UI shows a banner.
-  - **5d-8b — release nothing while stopped.** *(P5-48.)* Custody keeps every copy it holds until
+  - **5d-8b — release nothing while stopped.** *Done (#180, P5-48).* Custody keeps every copy it holds until
     the node is upgraded.
 
 ---
@@ -743,7 +743,7 @@ Every open C-number appears here once.
 |---|---|---|
 | **C1** | A full peer offer is O(N²) dials | **Unchanged** — and worth measuring at the thousands of members this phase targets. |
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
-| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged**, and probe failures blink too: a prober's newer failure is left out of `probe_failures()` until its content arrives, so for a moment a member can be listed with one prober fewer, or not red (seen on CI in 5c-5a, where the evidence named one prober of two). |
+| **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged**, and probe failures blink too: a prober's newer failure is left out of `probe_failures()` until its content arrives, so for a moment a member can be listed with one prober fewer, or not red (seen on CI in 5c-5a, where the evidence named one prober of two). **Also on the adder's own node**: straight after `distlib add`, its `item` said `files 0` for a moment (the dry run before 5c-5b), and `catalogue().item()` read an item without its file on macOS CI (#179's `pins` flake). |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
 | **C8** | `added_by`, `created`, `modified_by` have nowhere to come from | **In part**: authorship, for the creator's copy and quotas — the read model's `file_authors`, shown as `added_by` (5b-1a, P5-8). `created` and `modified_by` stay open. |
 | **C9** | `PENDING_EXPIRY` is one fixed count | **Closed by 5a-3a.** |

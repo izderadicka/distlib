@@ -572,7 +572,7 @@ impl Api {
     /// would only produce proposals the group refuses.
     ///
     /// Refused when what this node added requires more than twice the
-    /// pledge (D8); one below the group's minimum, by the log.
+    /// pledge (D8), and one below the group's minimum, before proposing.
     async fn pledge_set(&self, params: PledgeSet) -> Result<Value, Error> {
         // The space for own items and the cache is what the limit leaves.
         if let Some(limit) = self.storage.limit()
@@ -583,6 +583,12 @@ impl Api {
                 params.bytes
             )));
         }
+        // Before proposing, as the fold would refuse it: a refused proposal
+        // is still an entry in the log.
+        self.node
+            .membership()
+            .check_pledge(params.bytes)
+            .map_err(|error| Error::invalid_params(error.to_string()))?;
         let requirement = Requirement {
             pledge_bytes: params.bytes,
             ..self.requirement(0).await?
@@ -2036,30 +2042,44 @@ fn probe_error(error: ProbeError) -> Error {
 fn describe(event: &MembershipEvent, membership: &MembershipState) -> String {
     match event {
         MembershipEvent::MemberAdded { member } => {
-            format!("admit {} ({})", member.member_id, member.display_name)
+            format!("admit {} ({})", member.display_name, member.member_id)
         }
         MembershipEvent::MemberExpelled { member, reason } => {
-            format!("expel {member}: {reason}")
+            format!("expel {}: {reason}", named(member, membership))
         }
         MembershipEvent::CoreGroupChanged { core } => describe_core(core, membership),
         MembershipEvent::PledgeChanged {
             member,
             pledge_bytes,
-        } => format!("set the pledge of {member} to {pledge_bytes} bytes"),
+        } => format!(
+            "set the pledge of {} to {pledge_bytes} bytes",
+            named(member, membership)
+        ),
         MembershipEvent::ProtocolRaised { to } => format!(
             "raise the group protocol from {} to {to}",
             membership.protocol()
         ),
         // Never pending, as a pledge is not: the member's own, approved by
         // nobody.
-        MembershipEvent::ProtocolSupported { member, max } => {
-            format!("say that {member} speaks protocols up to {max}")
-        }
+        MembershipEvent::ProtocolSupported { member, max } => format!(
+            "say that {} speaks protocols up to {max}",
+            named(member, membership)
+        ),
         // Neither is ever a pending proposal — both are dispatched by the fold
         // rather than held — so this is unreachable rather than a real case.
         MembershipEvent::GroupFounded { group_id, .. } => format!("found group {group_id}"),
         MembershipEvent::Approved { proposal } => format!("approve {proposal}"),
         MembershipEvent::Withdrawn { proposal } => format!("withdraw {proposal}"),
+    }
+}
+
+/// `member` as people know it, `name (id)`, or the id alone without a name.
+fn named(member: &MemberId, membership: &MembershipState) -> String {
+    match membership.member(member) {
+        Some(record) if !record.display_name.is_empty() => {
+            format!("{} ({member})", record.display_name)
+        }
+        _ => member.to_string(),
     }
 }
 
@@ -2087,15 +2107,19 @@ fn describe_core(proposed: &[(MemberId, NodeAddr)], membership: &MembershipState
     changes.extend(
         now.keys()
             .filter(|member| !wanted.contains_key(member))
-            .map(|member| format!("drop {member} from the core group")),
+            .map(|member| format!("drop {} from the core group", named(member, membership))),
     );
     changes.extend(
         wanted
             .iter()
             .filter_map(|(member, addr)| match now.get(member) {
-                None => Some(format!("add {member} to the core group")),
+                None => Some(format!(
+                    "add {} to the core group",
+                    named(member, membership)
+                )),
                 Some(was) if was != *addr => Some(format!(
-                    "move {member} to {}",
+                    "move {} to {}",
+                    named(member, membership),
                     addr.direct
                         .iter()
                         .map(ToString::to_string)

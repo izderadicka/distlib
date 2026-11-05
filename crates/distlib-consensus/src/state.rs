@@ -316,14 +316,7 @@ impl MembershipState {
                     member: *member,
                 })
             }
-            MembershipEvent::PledgeChanged { pledge_bytes, .. }
-                if *pledge_bytes < self.settings.min_pledge_bytes =>
-            {
-                Err(ConsensusError::PledgeBelowMinimum {
-                    pledge_bytes: *pledge_bytes,
-                    min_pledge_bytes: self.settings.min_pledge_bytes,
-                })
-            }
+            MembershipEvent::PledgeChanged { pledge_bytes, .. } => self.check_pledge(*pledge_bytes),
             MembershipEvent::CoreGroupChanged { .. } if !self.core.contains_key(&proposer) => {
                 Err(ConsensusError::NotCoreMember { proposer })
             }
@@ -718,6 +711,19 @@ impl MembershipState {
     /// founding.
     pub fn protocol(&self) -> u32 {
         self.protocol
+    }
+
+    /// Refuses a pledge below the group's minimum (phase 5's D8): the fold's
+    /// rule, for a caller to check before proposing too.
+    pub fn check_pledge(&self, pledge_bytes: u64) -> Result<()> {
+        let min_pledge_bytes = self.settings.min_pledge_bytes;
+        if pledge_bytes < min_pledge_bytes {
+            return Err(ConsensusError::PledgeBelowMinimum {
+                pledge_bytes,
+                min_pledge_bytes,
+            });
+        }
+        Ok(())
     }
 
     /// Whether `member` is one whose build speaks group protocol `protocol`,
