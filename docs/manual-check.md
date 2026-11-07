@@ -147,7 +147,8 @@ means the file is not where the node looked.
 told nothing, they received it.
 
 ```sh
-dl -d $DL/b status       # group; role core member; a Raft leader; settings … replicas = 2
+dl -d $DL/b status       # group; role core member; a Raft leader; settings … replicas = 2;
+                         # protocol 1
 ```
 
 **Pass:** bob's `settings` are alice's `[group]` — he received them with the group.
@@ -167,8 +168,8 @@ dl -d $DL/a ui
 ```
 
 Open the link in the first browser window. **Pass:** the page says **Live**; the address
-bar no longer shows a `#token=`; **Node** shows alice's node, the group, and three
-members. Leave it open on **Node**.
+bar no longer shows a `#token=`; **Node** shows alice's node, the group, **Protocol 1**,
+and three members. Leave it open on **Node**.
 
 ---
 
@@ -248,7 +249,13 @@ dl -d $DL/e ui
 
 **Add**, choose `erin-notes.pdf`, title **Erin's notes**, type other, **Add**. **Pass:** the
 page stays, with a red warning: her pledge of 10 MB is below the 15.7 MB her adds now
-require; raise it with `distlib pledge`. Then the photos, from the command line:
+require; raise it with `distlib pledge`. Note the item, for §11:
+
+```sh
+NOTES=$(dl -d $DL/a search erin | awk '{print $1; exit}')
+```
+
+Then the photos, from the command line:
 
 ```sh
 dl -d $DL/e add $DL/files/erin-photos.zip --kind other --title "Erin's photos"
@@ -277,7 +284,7 @@ And from dave's page, in the second browser window:
 dl -d $DL/d ui
 ```
 
-**Pass:** the **Library** lists all three items. Search `herbert`: Dune is found, and the
+**Pass:** the **Library** lists all four items. Search `herbert`: Dune is found, and the
 address bar now carries `?q=herbert`. Clear it, open **Lectures**, **Download**: a bar
 with files and bytes climbs to the end, then shows where the file went.
 
@@ -304,6 +311,8 @@ EARTHSEA=$(dl -d $DL/d add $DL/files/earthsea.epub --kind ebook \
   --title "A Wizard of Earthsea" --author "Ursula K. Le Guin" | awk '/^added/{print $2}')
 dl -d $DL/d item $EARTHSEA     # added by dave; custodians <X>; held here, none online
 ```
+
+For a moment right after the add it may say `files 0`; ask again (C6).
 
 **Pass:** within seconds `item` says `held here, 1 online`: its custodian fetched it.
 Call the custodian X — erin pledges so little that it is all but certainly alice, bob or
@@ -359,7 +368,7 @@ dl -d $DL/<a voter, not X> expel $XID --with-evidence
 approves it; the same voter takes it back:
 
 ```sh
-dl -d $DL/<that voter> withdraw <N>     # withdrew  <N>
+dl -d $DL/<that voter> withdraw <N>     # N from `distlib approve N` above; withdrew  <N>
 ```
 
 The file is found and put back:
@@ -447,7 +456,7 @@ standing down` — then says it has been expelled, as erin's did, and shuts down
 **Pass:** whatever carol was custodian of now names somebody else, who fetches it:
 
 ```sh
-for i in $DUNE $LEFT $LECTURES $EARTHSEA; do
+for i in $DUNE $LEFT $LECTURES $EARTHSEA $NOTES; do
   dl -d $DL/a item $i | grep -E '^(title|custodians)'
 done                             # no carol
 dl -d $DL/<a new custodian> status    # custody counts the items it took over
@@ -458,7 +467,8 @@ dl -d $DL/<a new custodian> status    # custody counts the items it took over
 ## 12. The leader goes down
 
 ```sh
-dl -d $DL/b status               # the "Raft leader" line names it
+dl -d $DL/b status               # the "Raft leader" line names it, by id
+echo "alice $A"; echo "bob $B"; echo "dave $D"
 ```
 
 It is most likely alice. Ctrl-C that node's terminal, and **straight away**, from one of
