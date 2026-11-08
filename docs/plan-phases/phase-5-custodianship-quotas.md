@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -683,6 +683,36 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   *Split in two* (P5-32): **5c-5a** *(done)* — the check written, its command-line half run end to
   end first, and what that found fixed; **5c-5b** — what Ivan's run of the whole check finds,
   run after 5d (P5-38), its command-line half dry-run again first (P5-49).
+  Ivan's run and Codex's (#184) found what follows, fixed in four PRs (P5-50):
+  - **5c-5b1 — the Node page and the pledge.** A new event, `probes.changed`, published when a
+    probe failure is recorded or cleared (`Catalogue::probe_failures_changed`), and the Node page
+    reloads on it: §8 promises red and back without a reload, and the page showed neither (#184).
+    A pledge field on the Node page (`group.pledge_set`). The under-pledged warning, on the add
+    page and in the CLI, says the add went through and when adds will be refused (twice the
+    pledge, D8), and the page's links to the field. The tab title names the node.
+    **Acceptance:** Vitest for both probe transitions, the pledge field and the title; a Rust test
+    that a recorded and a cleared failure each publish the event.
+  - **5c-5b2 — a lone node, and quieter logs.** Bob, left alone in a normal run, logged four
+    lines a dead peer every 0.5 s, its own endpoint answering `endpoint stopping`.
+    *Diagnose first:* reproduce, and look for noq's `I/O error` — the QUIC endpoint's driver
+    dying on a socket error, leaving the node deaf. If it does, the cause is fixed, or reported
+    upstream with the node stopping loudly rather than running deaf. Then: openraft's retry of an
+    unreachable peer grows from 0.5 s to about 8 s (`RaftNetwork::backoff`); custody logs each
+    item it starts or stops keeping, since its only log line is the whole pass, which read
+    `items: 0` from before any item existed; the shutdown stops Raft straight after closing the
+    endpoint, the membership's watchers stopped before. manual-check.md: carol's own expulsion
+    line in §11 (a voter does not print a follower's `it will stop following`), and the known
+    harmless lines — "a message will be ignored because vote changed" at founding, and gossip's
+    `failed to send` at a stop, if the new order leaves it.
+    **Acceptance:** whatever the diagnosis needs as a test; a test of the backoff's intervals.
+  - **5c-5b3 — wishes.** The wishes as a table (title, type, status, wished by, when, fulfilled
+    by); "Make a wish" under it, on a page of its own; each wish on a page of its own, with its
+    details, Fulfil and its comments (kept, Ivan). **Acceptance:** Vitest per page.
+  - **5c-5b4 — the upload.** 1 GB through the page took 15 s or more on one machine, the download
+    less: the bytes are written to a staged file, then copied and hashed into the blob store.
+    Measured first, receiving and importing timed apart; if the copy is the cost, the upload
+    streams into the blob store as it arrives — a change to D5's staging, proposed to Ivan
+    before it is made.
 
 ### 5d — v1 readiness: the rest of #154, and upgrade hooks (9 PRs)
 
