@@ -100,7 +100,7 @@ async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it()
     let warned = add_a_file(&api, dir.path(), 1, 60).await.unwrap();
     assert_eq!(
         warned["under_pledged"],
-        json!({ "pledge_bytes": 100, "required_pledge_bytes": 120 })
+        json!({ "pledge_bytes": 100, "required_pledge_bytes": 120, "refused_above_bytes": 200 })
     );
     until_required(&api, 120).await;
 
@@ -120,7 +120,7 @@ async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it()
     let warned = pledge(&api, 60).await.unwrap();
     assert_eq!(
         warned["under_pledged"],
-        json!({ "pledge_bytes": 60, "required_pledge_bytes": 120 })
+        json!({ "pledge_bytes": 60, "required_pledge_bytes": 120, "refused_above_bytes": 120 })
     );
     assert_eq!(listed(&api).await.0, json!(60));
 
@@ -140,7 +140,7 @@ async fn adding_the_same_files_again_requires_nothing_more() {
     assert_eq!(again["created"], false);
     assert_eq!(
         again["under_pledged"],
-        json!({ "pledge_bytes": 100, "required_pledge_bytes": 120 })
+        json!({ "pledge_bytes": 100, "required_pledge_bytes": 120, "refused_above_bytes": 200 })
     );
 
     runtime.shutdown().await;

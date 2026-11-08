@@ -324,6 +324,8 @@ export type TaskState = {
 export interface UnderPledged {
   pledge_bytes: number;
   required_pledge_bytes: number;
+  /** The requirement past which an add is refused: twice the pledge. */
+  refused_above_bytes: number;
 }
 
 /** A page of items, and how many there are in all. */
@@ -337,6 +339,7 @@ interface Methods {
   "group.members": { params: null; result: Members };
   "group.suspects": { params: null; result: { suspects: Suspect[] } };
   "group.check": { params: { member: string }; result: { outcome: CheckOutcome } };
+  "group.pledge_set": { params: { bytes: number }; result: { under_pledged: UnderPledged | null } };
   "library.list": { params: { offset: number; limit: number }; result: ItemPage };
   "library.search": {
     params: { query: string; offset: number; limit: number };

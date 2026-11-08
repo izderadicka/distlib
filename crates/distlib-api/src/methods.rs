@@ -1808,14 +1808,15 @@ impl Requirement {
         )
     }
 
-    /// The warning for an answer: the pledge and what it should be, or null
-    /// when it is enough.
+    /// The warning for an answer: the pledge, what it should be and where
+    /// adds start being refused, or null when it is enough.
     fn under_pledged(self) -> Value {
         match self.standing() {
             PledgeStanding::Enough => Value::Null,
             PledgeStanding::Under | PledgeStanding::FarUnder => json!({
                 "pledge_bytes": self.pledge_bytes,
                 "required_pledge_bytes": self.required_pledge_bytes,
+                "refused_above_bytes": PledgeStanding::refused_above(self.pledge_bytes),
             }),
         }
     }

@@ -7,7 +7,8 @@
   // leaves nothing on the node. **Checked here first**: a name the node
   // would refuse only after the upload is cheaper to refuse before it.
   // **An add that leaves the pledge short stays here** to say so (D8), with
-  // a link to the item, rather than opening it.
+  // a link to the item, rather than opening it, and one to the Node page,
+  // where the pledge is raised.
   import MetadataFields from "./MetadataFields.svelte";
   import { bytes } from "./lib/format";
   import { emptyDraft, fields } from "./lib/metadata";
@@ -150,7 +151,9 @@
   {#if short}
     <p class="failure">
       This node's pledge of {bytes(short.pledge_bytes)} is below the {bytes(short.required_pledge_bytes)} its adds
-      now require. Raise it with <code>distlib pledge</code>.
+      now require. That is allowed for now, but adds that would require more than
+      {bytes(short.refused_above_bytes)} will be refused: raise the pledge on the
+      <a href={href({ page: "node" })}>Node page</a>.
     </p>
   {/if}
 </form>

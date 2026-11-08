@@ -160,8 +160,8 @@ describe("the add page", () => {
     expect(router.route).toEqual({ page: "library", query: "", number: 1 });
   });
 
-  it("stays to say when the add leaves this node's pledge short, with a link to the item", async () => {
-    const short = { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000 };
+  it("stays to say when the add leaves this node's pledge short, with links to the item and the pledge", async () => {
+    const short = { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000, refused_above_bytes: 200_000_000_000 };
     vi.mocked(call).mockResolvedValue({
       item_id: ITEM,
       created: true,
@@ -174,8 +174,10 @@ describe("the add page", () => {
 
     await submit();
 
-    await screen.findByText(/pledge of 100 GB is below the 120 GB its adds now require/);
+    const warning = await screen.findByText(/pledge of 100 GB is below the 120 GB its adds now require/);
+    expect(warning.textContent?.replace(/\s+/g, " ")).toContain("allowed for now, but adds that would require more than 200 GB will be refused");
     expect(screen.getByRole("link", { name: "Válka s mloky" }).getAttribute("href")).toBe(`/items/${ITEM}`);
+    expect(screen.getByRole("link", { name: "Node page" }).getAttribute("href")).toBe("/node");
     expect(router.route).toEqual({ page: "library", query: "", number: 1 });
   });
 
@@ -185,7 +187,7 @@ describe("the add page", () => {
       created: false,
       title: "R.U.R.",
       contributed_files: [],
-      under_pledged: { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000 },
+      under_pledged: { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000, refused_above_bytes: 200_000_000_000 },
     });
     open();
     await choose(file("rur.epub"));

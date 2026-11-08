@@ -40,6 +40,12 @@ const STATUS: NodeStatus = {
   sync: { neighbours: [], last_sync: [] },
 };
 const MEMBERS: Members = { group: null, changed_at: 1, members: [] };
+/** The group as the node lists it, while the test lets it. */
+let members: Members = MEMBERS;
+const ALICE: Members = {
+  ...MEMBERS,
+  members: [{ member: ME, name: "alice", pledge_bytes: 0, required_pledge_bytes: 0, core: true, coverage: null, red: false }],
+};
 
 /** Renders the shell, and hands back what it watches the node with. */
 function open() {
@@ -58,13 +64,14 @@ const current = () => screen.getAllByRole("link").find((link) => link.getAttribu
 
 describe("the shell", () => {
   beforeEach(() => {
+    members = MEMBERS;
     vi.mocked(call).mockReset();
     vi.mocked(call).mockImplementation((async (method: string) => {
       switch (method) {
         case "node.status":
           return STATUS;
         case "group.members":
-          return MEMBERS;
+          return members;
         case "group.suspects":
           return { suspects: [] };
         default:
@@ -146,6 +153,23 @@ describe("the shell", () => {
     watcher.onConnection("live");
 
     await screen.findByRole("alert");
+  });
+
+  it("names the node in the tab's title", async () => {
+    members = ALICE;
+    open();
+
+    await waitFor(() => expect(document.title).toBe("alice · distlib"));
+  });
+
+  it("names a node without a name by the start of its id, and again once it is given one", async () => {
+    const { watcher } = open();
+    await waitFor(() => expect(document.title).toBe(`${ME.slice(0, 12)}… · distlib`));
+
+    members = ALICE;
+    watcher.onEvent({ type: "membership.changed" });
+
+    await waitFor(() => expect(document.title).toBe("alice · distlib"));
   });
 
   it("opens on the library", async () => {
@@ -272,7 +296,7 @@ describe("the shell", () => {
     vi.mocked(call).mockResolvedValue({ results: [], total: 0 });
     watcher.onEvent({ type: "catalogue.item_added", item_id: "x" });
 
-    const searches = () => vi.mocked(call).mock.calls.filter(([method]) => method !== "node.status");
+    const searches = () => vi.mocked(call).mock.calls.filter(([method]) => method === "library.list");
     await waitFor(() => expect(searches()).toHaveLength(2));
   });
 

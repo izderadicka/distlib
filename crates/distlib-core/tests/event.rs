@@ -16,6 +16,7 @@ fn every_event() -> Vec<Event> {
         Event::MembershipChanged,
         Event::SyncStatus,
         Event::UpgradeRequired,
+        Event::ProbesChanged,
         Event::ItemAdded { item_id },
         Event::ItemChanged { item_id },
         Event::AvailabilityChanged {
@@ -43,6 +44,7 @@ fn every_event() -> Vec<Event> {
             Event::MembershipChanged
             | Event::SyncStatus
             | Event::UpgradeRequired
+            | Event::ProbesChanged
             | Event::ItemAdded { .. }
             | Event::ItemChanged { .. }
             | Event::AvailabilityChanged { .. }

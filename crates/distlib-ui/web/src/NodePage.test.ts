@@ -166,6 +166,8 @@ describe("the node page", () => {
           return { suspects: answer.suspects ?? [] };
         case "group.check":
           return { outcome: answer.checked ?? null };
+        case "group.pledge_set":
+          return { under_pledged: null };
         default:
           return answer.members;
       }
@@ -474,6 +476,48 @@ describe("the node page", () => {
     events.tell({ type: "bookmark.changed", item_id: "x" });
 
     expect(call).toHaveBeenCalledTimes(asked);
+  });
+
+  it("loads again when a probe failure is recorded, and when it is cleared", async () => {
+    const [me, carol] = members().members;
+    const { events } = open();
+    await screen.findByText("No member has failed a probe that still counts.");
+
+    answer = { ...answer, members: { ...members(), members: [me, { ...carol, red: true }] }, suspects: [CAROL_SUSPECTED] };
+    events.tell({ type: "probes.changed" });
+    await screen.findByRole("button", { name: "Check now" });
+    expect(cells()[1][0]).toBe("carol red");
+
+    answer = { ...answer, members: members(), suspects: [] };
+    events.tell({ type: "probes.changed" });
+    await screen.findByText("No member has failed a probe that still counts.");
+    expect(cells()[1][0]).toBe("carol");
+  });
+
+  it("sets this node's pledge, in GB, and loads again", async () => {
+    open();
+    await screen.findByText("Pledge and custody");
+    const asked = vi.mocked(call).mock.calls.filter(([method]) => method === "node.status").length;
+
+    await fireEvent.input(screen.getByLabelText("New pledge, in GB"), { target: { value: "0.016" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Set pledge" }));
+
+    await screen.findByText("Pledged 16 MB.");
+    expect(call).toHaveBeenCalledWith("group.pledge_set", { bytes: 16_000_000 });
+    const loads = vi.mocked(call).mock.calls.filter(([method]) => method === "node.status").length;
+    expect(loads).toBe(asked + 1);
+  });
+
+  it("says why a pledge was refused", async () => {
+    open();
+    await screen.findByText("Pledge and custody");
+    vi.mocked(call).mockRejectedValueOnce(new RpcError(-32602, "below the group's minimum of 50000000000 bytes"));
+
+    await fireEvent.input(screen.getByLabelText("New pledge, in GB"), { target: { value: "1" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Set pledge" }));
+
+    await screen.findByText("below the group's minimum of 50000000000 bytes");
+    expect(screen.queryByText(/^Pledged/)).toBeNull();
   });
 
   it("marks a red member in the members list", async () => {
