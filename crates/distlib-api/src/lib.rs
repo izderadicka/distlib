@@ -73,9 +73,9 @@ use uploads::UploadError;
 pub struct Server {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
-    /// Turn membership and catalogue-swarm changes into events. Owned here so
+    /// Turn membership, catalogue-swarm and probe changes into events. Owned here so
     /// that they stop with the server rather than outliving it.
-    publishers: [tokio::task::JoinHandle<()>; 3],
+    publishers: [tokio::task::JoinHandle<()>; 4],
 }
 
 impl Server {
@@ -107,8 +107,8 @@ struct Shared {
 ///
 /// The event bus is `api.tasks`' — see [`events::bus`]. The server subscribes
 /// a receiver per watcher, and publishes the membership's, the catalogue
-/// swarm's and an upgrade required's changes into it itself, since all are
-/// already in `api`.
+/// swarm's, an upgrade required's and the probe failures' changes into it
+/// itself, since all are already in `api`.
 ///
 /// Returns once the listener is bound, so a caller that immediately connects
 /// will not race the server into existence.
@@ -131,6 +131,11 @@ pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::
             api.node.subscribe_upgrade_required(),
             api.tasks.events().clone(),
             Event::UpgradeRequired,
+        )),
+        tokio::spawn(events::publish_whenever(
+            api.catalogue.probe_failures_changed(),
+            api.tasks.events().clone(),
+            Event::ProbesChanged,
         )),
     ];
     let shared = Arc::new(Shared { api, token });

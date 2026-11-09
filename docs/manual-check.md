@@ -167,8 +167,8 @@ for n in a b c; do dl -d $DL/$n pledge 5000000000; done     # pledged  500000000
 dl -d $DL/a ui
 ```
 
-Open the link in the first browser window. **Pass:** the page says **Live**; the address
-bar no longer shows a `#token=`; **Node** shows alice's node, the group, **Protocol 1**,
+Open the link in the first browser window. **Pass:** the page says **Live**; the tab is
+titled **alice · distlib**; the address bar no longer shows a `#token=`; **Node** shows alice's node, the group, **Protocol 1**,
 and three members. Leave it open on **Node**.
 
 ---
@@ -249,7 +249,10 @@ dl -d $DL/e ui
 
 **Add**, choose `erin-notes.pdf`, title **Erin's notes**, type other, **Add**. **Pass:** the
 page stays, with a red warning: her pledge of 10 MB is below the 15.7 MB her adds now
-require; raise it with `distlib pledge`. Note the item, for §11:
+require — allowed for now, but adds that would require more than 20 MB will be refused.
+Follow its **Node page** link, and under **Pledge and custody** set a new pledge of
+`0.016` GB. **Pass:** `Pledged 16 MB.`, the pledge reads 16 MB, and the warning there is
+gone. Note the item, for §11:
 
 ```sh
 NOTES=$(dl -d $DL/a search erin | awk '{print $1; exit}')

@@ -1,7 +1,8 @@
 <script lang="ts">
   // Everything a signed-in tab shows: the pages, how to get between them,
   // whether the node can be heard, and whether it needs an upgrade. The one connection to the node's
-  // events is held here, for whichever page is open to listen to (D2, D6).
+  // events is held here, for whichever page is open to listen to (D2, D6). The tab's title names
+  // the node, so that tabs on several nodes can be told apart.
   import { onMount } from "svelte";
 
   import AddPage from "./AddPage.svelte";
@@ -11,6 +12,7 @@
   import NodePage from "./NodePage.svelte";
   import WishesPage from "./WishesPage.svelte";
   import { type Connection, type Listen, type NodeEvent, watch } from "./lib/events";
+  import { whoIsWho } from "./lib/members";
   import { href, onLinkClick, onPopState, router } from "./lib/router.svelte";
   import { call, Unauthorised, type UpgradeRequired } from "./lib/rpc";
 
@@ -18,11 +20,25 @@
 
   let connection = $state<Connection>("connecting");
   let upgradeRequired = $state<UpgradeRequired | null>(null);
+  /** This node's member name, or the start of its id when it has none. */
+  let nodeName = $state<string | null>(null);
 
   /** Whether the node stopped following the log; a failure here is the connection line's to show. */
   async function loadUpgradeRequired() {
     try {
       upgradeRequired = (await call("node.status", null)).upgrade_required;
+    } catch (error) {
+      if (error instanceof Unauthorised) {
+        onUnauthorised();
+      }
+    }
+  }
+
+  /** Who this node is, for the title; a failure leaves the title as it was. */
+  async function loadNodeName() {
+    try {
+      const { me, names } = await whoIsWho();
+      nodeName = names.get(me) || `${me.slice(0, 12)}…`;
     } catch (error) {
       if (error instanceof Unauthorised) {
         onUnauthorised();
@@ -38,10 +54,15 @@
 
   onMount(() => {
     loadUpgradeRequired();
+    loadNodeName();
     return watch({
       onEvent: (event) => {
         if (event.type === "node.upgrade_required") {
           loadUpgradeRequired();
+        }
+        // A name is given at admission, which may be after the tab opened.
+        if (event.type === "membership.changed") {
+          loadNodeName();
         }
         for (const listener of listeners) {
           listener(event);
@@ -58,6 +79,10 @@
     });
   });
 </script>
+
+<svelte:head>
+  <title>{nodeName ? `${nodeName} · distlib` : "distlib"}</title>
+</svelte:head>
 
 <svelte:window onpopstate={onPopState} />
 <svelte:document onclick={onLinkClick} />

@@ -23,7 +23,8 @@ use distlib_api::{
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode, UpgradeRequired};
 use distlib_core::{
     Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
-    NOTE_MAX_BYTES, NodeAddr, Rating, Review, Ticket, Wish, WishFields, WishId, WishStatus,
+    NOTE_MAX_BYTES, NodeAddr, ProbeFailure, Rating, Review, Ticket, Wish, WishFields, WishId,
+    WishStatus,
 };
 use distlib_custody::{
     Coverage, CoverageSources, Custody, CustodySources, PinCounts, ProbeSources, Probes, Storage,
@@ -934,6 +935,35 @@ async fn a_watcher_hears_the_membership_change() {
         )
         .await;
     watcher.expect("membership.changed").await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watcher_hears_a_probe_failure_recorded_and_cleared() {
+    // #184: the Node page marks a custodian red, and back, without a reload.
+    let harness = Harness::start().await;
+    let custodian = MemberId::from(SecretKey::generate().public());
+    let failure = ProbeFailure {
+        item: ItemId::from_bytes([1; 32]),
+        blob: ContentHash::from_bytes([2; 32]),
+        chunk: 0,
+        in_a_row: 1,
+    };
+    let mut watcher = harness.watch().await;
+
+    harness
+        .catalogue
+        .record_probe_failure(custodian, &failure)
+        .await
+        .unwrap();
+    watcher.expect("probes.changed").await;
+    harness
+        .catalogue
+        .clear_probe_failure(custodian)
+        .await
+        .unwrap();
+    watcher.expect("probes.changed").await;
 
     harness.shutdown().await;
 }

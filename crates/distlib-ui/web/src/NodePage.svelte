@@ -1,11 +1,12 @@
 <script lang="ts">
-  // This node and its group, read-only (D8), kept current by the event
-  // stream: the page loads when it opens, and again on every `resync` —
-  // which each connection starts with — on `membership.changed`, on
-  // `sync.status`, for each member's place in the catalogue's swarm, and on
-  // an item added or a download finished, which change what is kept and what
-  // is required. Custody recomputed and probe failures have no news of their
-  // own, and show at the next load — or at once, for a check made here.
+  // This node and its group, kept current by the event stream: the page
+  // loads when it opens, and again on every `resync` — which each connection
+  // starts with — on `membership.changed`, on `sync.status`, for each
+  // member's place in the catalogue's swarm, on `probes.changed`, for who is
+  // red and the suspects, and on an item added or a download finished, which
+  // change what is kept and what is required. Custody recomputed has no news
+  // of its own, and shows at the next load. What can be changed here is this
+  // node's pledge (D8); the rest is read-only.
   import { onMount } from "svelte";
 
   import type { Listen } from "./lib/events";
@@ -31,6 +32,11 @@
   /** How the last check of each member came out, or why it could not be made. */
   let checked = $state<Record<string, string>>({});
   let checking = $state<string | null>(null);
+  /** A new pledge, in GB as a disk is sold, while it is typed. */
+  let newPledge = $state<number | null>(null);
+  let pledging = $state(false);
+  /** How the last pledge change came out. */
+  let pledgeSaid = $state<{ ok: boolean; text: string } | null>(null);
 
   function failed(error: unknown) {
     if (error instanceof Unauthorised) {
@@ -84,11 +90,36 @@
     }
   }
 
+  /** Proposes `newPledge` as this node's pledge, and loads again for it. */
+  async function setPledge(event: SubmitEvent) {
+    event.preventDefault();
+    if (newPledge === null) {
+      return;
+    }
+    const pledge = Math.round(newPledge * 1e9);
+    pledging = true;
+    try {
+      await call("group.pledge_set", { bytes: pledge });
+      pledgeSaid = { ok: true, text: `Pledged ${bytes(pledge)}.` };
+      newPledge = null;
+      await load();
+    } catch (error) {
+      if (error instanceof Unauthorised) {
+        onUnauthorised();
+      } else {
+        pledgeSaid = { ok: false, text: error instanceof Error ? error.message : String(error) };
+      }
+    } finally {
+      pledging = false;
+    }
+  }
+
   const reload = reloader(load);
   const RELOADED_ON = new Set([
     "resync",
     "membership.changed",
     "sync.status",
+    "probes.changed",
     "catalogue.item_added",
     "download.finished",
   ]);
@@ -254,16 +285,26 @@
     </dl>
     {#if mine && mine.pledge_bytes < mine.required_pledge_bytes}
       <p class="failure">
-        This node's pledge is below what its adds require. Raise it with <code>distlib pledge</code>; adds
-        that require far more are refused until then.
+        This node's pledge is below what its adds require. Raise it below; adds that require far more are
+        refused until then.
       </p>
     {/if}
     {#if status.custody && status.custody.bytes > status.custody.pledge_bytes}
       <p class="failure">
         Custodian of more than this node's pledge: {bytes(status.custody.bytes)} against {bytes(status.custody.pledge_bytes)}.
-        It is all kept even so; raise the pledge with <code>distlib pledge</code>.
+        It is all kept even so; raise the pledge below.
       </p>
     {/if}
+    <form class="add" onsubmit={setPledge}>
+      <label>
+        New pledge, in GB
+        <input type="number" min="0" step="any" bind:value={newPledge} disabled={pledging} />
+      </label>
+      <button disabled={pledging || newPledge === null}>Set pledge</button>
+      {#if pledgeSaid}
+        <p class={pledgeSaid.ok ? "notice" : "failure"}>{pledgeSaid.text}</p>
+      {/if}
+    </form>
     {#if (status.custody?.load_factor ?? 0) > 1}
       <p class="failure">The group's pledges do not cover every copy: some items are a copy short.</p>
     {/if}

@@ -123,13 +123,19 @@ pub enum PledgeStanding {
 
 impl PledgeStanding {
     pub fn of(pledge_bytes: u64, required_bytes: u64) -> Self {
-        if required_bytes > pledge_bytes.saturating_mul(FAR_UNDER_FACTOR) {
+        if required_bytes > Self::refused_above(pledge_bytes) {
             Self::FarUnder
         } else if required_bytes > pledge_bytes {
             Self::Under
         } else {
             Self::Enough
         }
+    }
+
+    /// The requirement past which `pledge_bytes` is far under: what an add
+    /// may take it to before it is refused.
+    pub fn refused_above(pledge_bytes: u64) -> u64 {
+        pledge_bytes.saturating_mul(FAR_UNDER_FACTOR)
     }
 }
 

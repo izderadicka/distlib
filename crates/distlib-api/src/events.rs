@@ -93,7 +93,8 @@ fn frame(name: &str, data: &impl serde::Serialize) -> Frame {
 }
 
 /// Publishes `event` whenever `changes` moves — `membership.changed` for the
-/// membership, `sync.status` for the catalogue's swarm.
+/// membership, `sync.status` for the catalogue's swarm, `probes.changed` for
+/// the probe failures.
 ///
 /// Never borrows the value: the events have no payload, and a borrow of a
 /// `watch` is a read lock that its writer's next update — the Raft state

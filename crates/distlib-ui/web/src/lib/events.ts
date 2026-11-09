@@ -32,6 +32,7 @@ export type NodeEvent =
   | { type: "wish.changed"; wish_id: string }
   | { type: "sync.status" }
   | { type: "node.upgrade_required" }
+  | { type: "probes.changed" }
   | ({ type: "download.progress"; task_id: number; item_id: string } & Progress)
   | { type: "download.finished"; task_id: number; item_id: string }
   | { type: "download.failed"; task_id: number; item_id: string }

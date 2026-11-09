@@ -676,9 +676,11 @@ fn print_under_pledged(under_pledged: &Value) {
 fn under_pledged_warning(under_pledged: &Value) -> Option<String> {
     let pledge = under_pledged["pledge_bytes"].as_u64()?;
     let required = under_pledged["required_pledge_bytes"].as_u64()?;
+    let refused_above = under_pledged["refused_above_bytes"].as_u64()?;
     Some(format!(
-        "WARNING     under-pledged: this node pledges {pledge} bytes, and what it added \
-         requires {required}; raise it with `distlib pledge {required}`"
+        "WARNING     under-pledged: done even so, but this node pledges {pledge} bytes and \
+         what it added requires {required}; adds that would require more than \
+         {refused_above} will be refused. Raise it with `distlib pledge {required}`"
     ))
 }
 
@@ -2119,10 +2121,18 @@ mod tests {
 
     #[test]
     fn an_under_pledged_answer_warns_with_the_pledge_needed_and_an_enough_one_does_not() {
-        let warning =
-            under_pledged_warning(&json!({ "pledge_bytes": 100, "required_pledge_bytes": 120 }))
-                .expect("an under-pledged answer warns");
+        let warning = under_pledged_warning(&json!({
+            "pledge_bytes": 100,
+            "required_pledge_bytes": 120,
+            "refused_above_bytes": 200
+        }))
+        .expect("an under-pledged answer warns");
+        assert!(warning.contains("done even so"), "{warning}");
         assert!(warning.contains("pledges 100 bytes"), "{warning}");
+        assert!(
+            warning.contains("more than 200 will be refused"),
+            "{warning}"
+        );
         assert!(warning.contains("`distlib pledge 120`"), "{warning}");
         assert_eq!(under_pledged_warning(&Value::Null), None);
     }
