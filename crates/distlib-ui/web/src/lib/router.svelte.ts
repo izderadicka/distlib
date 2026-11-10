@@ -14,6 +14,8 @@ export type Route =
   | { page: "item"; id: string }
   | { page: "add" }
   | { page: "wishes" }
+  | { page: "wish"; id: string }
+  | { page: "make_wish" }
   /** Every member's bookmarks, or with `query` and `member`, those matching. */
   | { page: "bookmarks"; query: string; member: string | null }
   | { page: "node" }
@@ -21,6 +23,9 @@ export type Route =
 
 /** An item id as the node writes one: 32 bytes of lower-case hex. */
 const ITEM = /^\/items\/([0-9a-f]{64})$/;
+
+/** A wish id, written the same way. */
+const WISH = /^\/wishes\/([0-9a-f]{64})$/;
 
 /** A member id, written the same way. */
 const MEMBER = /^[0-9a-f]{64}$/;
@@ -41,6 +46,8 @@ export function parse(url: URL): Route {
       return { page: "add" };
     case "/wishes":
       return { page: "wishes" };
+    case "/wishes/new":
+      return { page: "make_wish" };
     case "/bookmarks": {
       const member = url.searchParams.get("member");
       return {
@@ -54,7 +61,11 @@ export function parse(url: URL): Route {
       return { page: "node" };
     default: {
       const item = ITEM.exec(url.pathname);
-      return item ? { page: "item", id: item[1] } : { page: "missing" };
+      if (item) {
+        return { page: "item", id: item[1] };
+      }
+      const wish = WISH.exec(url.pathname);
+      return wish ? { page: "wish", id: wish[1] } : { page: "missing" };
     }
   }
 }
@@ -79,6 +90,10 @@ export function href(route: Route): string {
       return "/add";
     case "wishes":
       return "/wishes";
+    case "wish":
+      return `/wishes/${route.id}`;
+    case "make_wish":
+      return "/wishes/new";
     case "bookmarks": {
       const search = new URLSearchParams();
       if (route.query) {

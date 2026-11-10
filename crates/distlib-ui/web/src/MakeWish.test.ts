@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import MakeWish from "./MakeWish.svelte";
+import { navigate, router } from "./lib/router.svelte";
 import { call, RpcError } from "./lib/rpc";
 
 vi.mock("./lib/rpc", async (original) => ({
@@ -19,7 +20,8 @@ async function fill(label: string | RegExp, value: string) {
 describe("making a wish", () => {
   beforeEach(() => {
     vi.mocked(call).mockReset();
-    vi.mocked(call).mockResolvedValue({ wish_id: "1".repeat(32) });
+    vi.mocked(call).mockResolvedValue({ wish_id: "1".repeat(64) });
+    navigate("/wishes/new");
   });
 
   it("wishes for an item by everything said about it", async () => {
@@ -62,15 +64,19 @@ describe("making a wish", () => {
     expect(button().disabled).toBe(true);
   });
 
-  it("empties the form once the wish is made", async () => {
+  it("opens the wish's own page once it is made", async () => {
     render(MakeWish, { onUnauthorised: vi.fn() });
 
     await fill("Title", "Krakatit");
-    await fill(/^Authors/, "Karel Čapek");
     await fireEvent.click(button());
 
-    await vi.waitFor(() => expect(field("Title").value).toBe(""));
-    expect(field(/^Authors/).value).toBe("");
+    await vi.waitFor(() => expect(router.route).toEqual({ page: "wish", id: "1".repeat(64) }));
+  });
+
+  it("goes back to the wishes when cancelled", () => {
+    render(MakeWish, { onUnauthorised: vi.fn() });
+
+    expect(screen.getByRole("link", { name: "Cancel" }).getAttribute("href")).toBe("/wishes");
   });
 
   it("keeps the form, and says why, when the node refuses", async () => {
@@ -82,5 +88,6 @@ describe("making a wish", () => {
 
     await screen.findByText("title is too long");
     expect(field("Title").value).toBe("Krakatit");
+    expect(router.route).toEqual({ page: "make_wish" });
   });
 });

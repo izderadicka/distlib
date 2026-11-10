@@ -74,6 +74,8 @@ describe("the shell", () => {
           return members;
         case "group.suspects":
           return { suspects: [] };
+        case "community.wish_list":
+          return { wishes: [] };
         default:
           return { results: [], total: 0 };
       }
@@ -237,6 +239,17 @@ describe("the shell", () => {
 
     await fireEvent.click(screen.getByRole("link", { name: "Wishes" }));
 
+    await screen.findByRole("heading", { name: "Wishes" });
+    expect(current()?.textContent).toBe("Wishes");
+  });
+
+  it("opens a wish, and the page for making one, as the wishes", async () => {
+    navigate(`/wishes/${"d".repeat(64)}`);
+    open();
+    await screen.findByText("This node knows of no such wish yet.");
+    expect(current()?.textContent).toBe("Wishes");
+
+    navigate("/wishes/new");
     await screen.findByRole("heading", { name: "Make a wish" });
     expect(current()?.textContent).toBe("Wishes");
   });

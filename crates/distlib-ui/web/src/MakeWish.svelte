@@ -1,7 +1,9 @@
 <script lang="ts">
-  // A form for wishing for an item nobody has added yet. Only the title is
-  // needed; the rest helps whoever looks for it.
+  // The page for wishing for an item nobody has added yet. Only the title is
+  // needed; the rest helps whoever looks for it. Once it is made, the wish's
+  // own page opens.
   import { KINDS, type Kind, nonEmptyLines } from "./lib/metadata";
+  import { href, navigate } from "./lib/router.svelte";
   import { call, failureOf } from "./lib/rpc";
 
   let { onUnauthorised }: { onUnauthorised: () => void } = $props();
@@ -16,22 +18,18 @@
   async function wish(event: SubmitEvent) {
     event.preventDefault();
     saving = true;
-    failure = await failureOf(
-      () =>
-        call("community.wish_create", {
-          title: title.trim(),
-          kind: kind || undefined,
-          authors: nonEmptyLines(authors),
-          description: description.trim() || undefined,
-        }),
-      onUnauthorised,
-    );
+    let made: string | null = null;
+    failure = await failureOf(async () => {
+      ({ wish_id: made } = await call("community.wish_create", {
+        title: title.trim(),
+        kind: kind || undefined,
+        authors: nonEmptyLines(authors),
+        description: description.trim() || undefined,
+      }));
+    }, onUnauthorised);
     saving = false;
-    if (failure === null) {
-      title = "";
-      kind = "";
-      authors = "";
-      description = "";
+    if (made !== null) {
+      navigate(href({ page: "wish", id: made }));
     }
   }
 </script>
@@ -56,6 +54,7 @@
     </fieldset>
     <div class="actions">
       <button disabled={saving || title.trim() === ""}>Wish for it</button>
+      <a href={href({ page: "wishes" })}>Cancel</a>
     </div>
     {#if failure}
       <p class="failure">{failure}</p>
