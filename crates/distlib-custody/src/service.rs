@@ -144,11 +144,23 @@ async fn follow_item(store: &Store, item_id: ItemId, published: &Published) {
         Ok(Some(stored)) => {
             let item = stored.custody_item();
             let mut mine = false;
+            let mut changed = None;
             published.view.send_modify(|view| {
                 if let Some(view) = view {
+                    let was_mine = view.is_mine(item_id);
                     mine = view.update(&item);
+                    changed = (mine != was_mine).then(|| view.status());
                 }
             });
+            // The whole pass logs its totals; between passes, this is what
+            // says they moved (5c-5b2).
+            if let Some(custody) = changed {
+                if mine {
+                    tracing::info!(%item_id, ?custody, "now custodian of an item");
+                } else {
+                    tracing::info!(%item_id, ?custody, "no longer custodian of an item");
+                }
+            }
             // Every time, not only when it changes: a file added to an item
             // this node keeps is one more blob to keep.
             let _ = published.changes.send(CustodyChange::Item {

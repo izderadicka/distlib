@@ -1251,6 +1251,17 @@ impl MembershipNode {
     pub async fn shutdown(&self) {
         self.allowlist_updates.abort();
         self.evictions.abort();
+        self.stop_consensus().await;
+        self.gossip.abort();
+    }
+
+    /// Stops Raft and following the log, and leaves the membership's gossip
+    /// to [`Self::shutdown`]. For a caller that closes the endpoint between
+    /// the two: Raft, left running, dials its peers through a closed endpoint
+    /// and logs every failure, while the gossip topic, dropped before, says a
+    /// goodbye of its own (see `distlib::Runtime::shutdown`). Calling it again
+    /// does nothing.
+    pub async fn stop_consensus(&self) {
         // Before anything can change role out from under the rest of this.
         self.role.abort();
         // Before Raft stops, so a change in flight is abandoned rather than
@@ -1266,12 +1277,12 @@ impl MembershipNode {
         // would let it finish more tidily.
         stop(&self.follow);
 
-        if let Some(raft) = self.seat.raft()
+        // Out of its seat, so that a second call has nothing to stop.
+        if let Some(raft) = self.seat.vacate()
             && let Err(error) = raft.shutdown().await
         {
             tracing::warn!(%error, "raft did not shut down cleanly");
         }
-        self.gossip.abort();
     }
 }
 

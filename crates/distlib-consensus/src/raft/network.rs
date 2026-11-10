@@ -22,6 +22,7 @@
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
@@ -34,13 +35,14 @@ use iroh::{
 use openraft::{
     Raft, RaftNetworkFactory,
     error::{InstallSnapshotError, NetworkError, RPCError, RaftError, Unreachable},
-    network::{RPCOption, RaftNetwork},
+    network::{Backoff, RPCOption, RaftNetwork},
     raft::{
         AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
         InstallSnapshotResponse, VoteRequest, VoteResponse,
     },
 };
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 use crate::raft::{seat::Seat, state_machine::StateMachineStore, types::TypeConfig};
 
@@ -53,6 +55,19 @@ use crate::raft::{seat::Seat, state_machine::StateMachineStore, types::TypeConfi
 pub const MAX_RPC_BYTES: usize = 16 * 1024 * 1024;
 
 type NodeId = RawMemberId;
+
+/// How long an RPC waits for a dial before calling its peer unreachable.
+///
+/// Under openraft's heartbeat timeout (250 ms), so that a peer that is gone
+/// fails as unreachable, which openraft backs off from, rather than as a
+/// timeout, which it retries at the next heartbeat (5c-5b2).
+const DIAL_WAIT: Duration = Duration::from_millis(150);
+
+/// How long openraft waits before retrying an unreachable peer: half a second,
+/// doubling up to eight. A voter that comes back is noticed within eight
+/// seconds; one that stays away costs a few lines of log a minute.
+const FIRST_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 /// What one node asks another.
 #[derive(Debug, Serialize, Deserialize)]
@@ -402,6 +417,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             target,
             addr: node.clone(),
             connections: self.connections.clone(),
+            dialing: Arc::default(),
         }
     }
 }
@@ -444,6 +460,9 @@ where
     }
 }
 
+/// A dial running on its own, to the connection it makes.
+type Dial = JoinHandle<Result<Connection, NetError>>;
+
 /// Sends Raft RPCs to one peer.
 #[derive(Debug, Clone)]
 pub struct RaftClient {
@@ -453,6 +472,10 @@ pub struct RaftClient {
     /// The node's connections. Shared with every other protocol, so a peer is
     /// dialled once per protocol however many callers want it.
     connections: Connections,
+    /// A dial that an RPC stopped waiting for, left to finish into
+    /// `connections`: a slow path to a peer still gets connected, and a dead
+    /// one is dialled once at a time rather than once per heartbeat.
+    dialing: Arc<Mutex<Option<Dial>>>,
 }
 
 impl RaftClient {
@@ -561,24 +584,60 @@ impl RaftClient {
         postcard::from_bytes(&encoded).network()
     }
 
-    /// The cached connection, dialling if there is not one.
+    /// The cached connection, or one dialled within [`DIAL_WAIT`].
+    ///
+    /// Every failure is Unreachable rather than Network: openraft backs off
+    /// before retrying an unreachable peer, which is the right response to a
+    /// member who is simply offline, and members here are often offline.
     async fn connection<E: std::error::Error>(
         &self,
     ) -> Result<Connection, RPCError<NodeId, NodeAddr, E>> {
         let peer = MemberId::try_from(self.target).unreachable()?;
-        let addr = self.endpoint_addr()?;
-
-        self.connections
-            .get_or_connect(&self.endpoint, peer, addr, alpn::RAFT)
-            .await
-            // Unreachable rather than Network: openraft backs off before
-            // retrying an unreachable peer, which is the right response to a
-            // member who is simply offline, and members here are often offline.
+        if let Some(connection) = self.connections.cached(peer, alpn::RAFT) {
+            return Ok(connection);
+        }
+        let still_dialling = || {
+            Err(std::io::Error::other(format!(
+                "still dialling member {peer}"
+            )))
             .unreachable()
+        };
+
+        let dialing = self
+            .dialing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|dial| !dial.is_finished());
+        if dialing {
+            return still_dialling();
+        }
+        let (endpoint, connections) = (self.endpoint.clone(), self.connections.clone());
+        let addr = self.endpoint_addr()?;
+        let mut dial = tokio::spawn(async move {
+            connections
+                .get_or_connect(&endpoint, peer, addr, alpn::RAFT)
+                .await
+        });
+        match tokio::time::timeout(DIAL_WAIT, &mut dial).await {
+            Ok(dialled) => dialled.unreachable()?.unreachable(),
+            Err(_) => {
+                // Its result lands in `connections`; a failure is dialled
+                // again at the next try after this one's backoff.
+                *self.dialing.lock().unwrap_or_else(PoisonError::into_inner) = Some(dial);
+                still_dialling()
+            }
+        }
     }
 }
 
 impl RaftNetwork<TypeConfig> for RaftClient {
+    fn backoff(&self) -> Backoff {
+        Backoff::new(std::iter::successors(Some(FIRST_BACKOFF), |last| {
+            Some((*last * 2).min(MAX_BACKOFF))
+        }))
+    }
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
@@ -748,6 +807,82 @@ mod tests {
         for (response, hex) in &responses {
             assert_golden(response, hex);
         }
+    }
+
+    /// A client of a peer at an address where nothing answers, on an
+    /// endpoint of its own.
+    async fn client_of_a_silent_peer() -> (RaftClient, Endpoint, std::net::UdpSocket) {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        // Bound and never read, so a dial to it waits rather than failing.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let target = RawMemberId::from(MemberId::from(iroh::SecretKey::generate().public()));
+        let addr = NodeAddr {
+            direct: BTreeSet::from([silent.local_addr().unwrap()]),
+            relay: None,
+        };
+        let client = RaftNetworkFactoryImpl::new(endpoint.clone(), Connections::new())
+            .new_client(target, &addr)
+            .await;
+        (client, endpoint, silent)
+    }
+
+    /// Asks for a vote, and how long the answer took.
+    async fn timed_vote(
+        client: &mut RaftClient,
+    ) -> (
+        Result<VoteResponse<NodeId>, RPCError<NodeId, NodeAddr, RaftError<NodeId>>>,
+        Duration,
+    ) {
+        let started = std::time::Instant::now();
+        let answer = client
+            .vote(
+                VoteRequest::new(vote(), None),
+                RPCOption::new(Duration::from_secs(5)),
+            )
+            .await;
+        (answer, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_does_not_answer_is_unreachable_at_once_and_dialled_once_at_a_time() {
+        // 5c-5b2: a dial that outlasted the heartbeat's timeout was cancelled
+        // and started again at every heartbeat, and failed as a timeout, which
+        // openraft does not back off from.
+        let (mut client, endpoint, _silent) = client_of_a_silent_peer().await;
+
+        let (first, waited) = timed_vote(&mut client).await;
+        assert!(matches!(first, Err(RPCError::Unreachable(_))), "{first:?}");
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+        let (second, waited) = timed_vote(&mut client).await;
+        assert!(
+            matches!(&second, Err(RPCError::Unreachable(error)) if error.to_string().contains("still dialling")),
+            "{second:?}"
+        );
+        assert!(
+            waited < DIAL_WAIT,
+            "waited {waited:?} for a dial already under way"
+        );
+
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_peer_is_retried_later_each_time_up_to_eight_seconds() {
+        let (client, endpoint, _silent) = client_of_a_silent_peer().await;
+
+        let waits: Vec<_> = client.backoff().take(7).collect();
+        assert_eq!(
+            waits,
+            [500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000].map(Duration::from_millis)
+        );
+
+        endpoint.close().await;
     }
 
     #[tokio::test]
