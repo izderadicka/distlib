@@ -515,6 +515,48 @@ fn stops_cleanly_when_asked(name: &str, stop: impl FnOnce(&mut common::process::
 }
 
 #[test]
+fn a_voter_whose_peers_are_gone_stops_without_raft_failing_on_its_way_out() {
+    // 5c-5b2: closing the endpoint takes seconds, and Raft, stopped after it,
+    // went on dialling its peers through it and logged each failure.
+    let friends: Vec<Friend> = (0..3).map(|_| Friend::introduce()).collect();
+    let everyone: Vec<(String, u16)> = friends
+        .iter()
+        .map(|friend| (friend.id.clone(), friend.port))
+        .collect();
+    for friend in &friends {
+        friend.agree_on(&everyone);
+    }
+    let mut second = friends[1].run(false);
+    let mut third = friends[2].run(false);
+    let mut alone = friends[0].run(true);
+    wait_for_all(
+        &mut [&mut alone, &mut second, &mut third],
+        "members=3 core=3",
+    );
+    // Left alone, it keeps dialling the other two.
+    second.stop();
+    third.stop();
+    alone.wait_for("still dialling");
+    let log = alone.log.clone();
+
+    alone.stop();
+
+    let log = std::fs::read_to_string(log).unwrap();
+    let (_, stopping) = log
+        .split_once("shutting down")
+        .unwrap_or_else(|| panic!("the node should reach its own shutdown; got:\n{log}"));
+    assert!(
+        !stopping.contains("endpoint stopping"),
+        "Raft should be stopped before the endpoint closes; after `shutting down` it \
+         said:\n{stopping}"
+    );
+    assert!(
+        !stopping.contains("Double call"),
+        "Raft should be stopped once; after `shutting down` it said:\n{stopping}"
+    );
+}
+
+#[test]
 fn a_restarted_core_node_asks_the_others_where_everybody_is() {
     // Carried item C4, and the half of 2a-5 that was missing. A follower asks
     // for the directory in its follow loop; a core node runs the enactment

@@ -303,28 +303,18 @@ impl Runtime {
         self.router.endpoint()
     }
 
-    /// Says goodbye, closes the connections, then stops everything else.
+    /// Stops what runs on the node, says goodbye, closes the connections, then
+    /// stops the rest.
     ///
-    /// In this order: the heartbeat's goodbye, while there is an endpoint to
-    /// carry it; the endpoint's connections (P4-2); then the node, the
-    /// projection, the catalogue's task and the search index; and last the
-    /// router, which shuts down its protocol handlers. Each step says below
-    /// why it comes where it does.
+    /// In this order: the tasks, everything that watches the membership among
+    /// them; consensus; the heartbeat's goodbye and, at once after it, the
+    /// endpoint's connections (P4-2); the rest of the node; and last the
+    /// search index and the router, which shuts down its protocol handlers.
+    /// Each step says below why it comes where it does.
     pub async fn shutdown(&self) {
-        // **The heartbeat's goodbye before anything else**, while there is
-        // still an endpoint to carry it: the group then counts this node
-        // offline at once, not a TTL later (D4). It is a message on one topic,
-        // not the connection-level goodbye below.
-        self.availability.leave().await;
-        // **Then connections, so peers hear one goodbye that reaches every
-        // gossip topic** (P4-2). Left to the subsystems, the membership topic
-        // says goodbye on its own when `node.shutdown` drops it — and a peer
-        // hearing that drops this node from *all* its topics' bookkeeping
-        // without telling the others, so the catalogue's topic keeps a
-        // neighbour that is gone until it next tries to send to it, about a
-        // minute later. A closed connection, by contrast, is reported to every
-        // topic at once. Nothing below needs the network to stop.
-        self.router.endpoint().close().await;
+        // **The tasks first, before the node**: those that watch the
+        // membership take its end for a failure, and say so as an error. None
+        // needs the network to stop.
         self.protocol_support.abort();
         // Before the catalogue, because it reads from it: a projection left
         // running against a closing document logs failures about a shutdown.
@@ -338,23 +328,37 @@ impl Runtime {
         }
         // Before the router closes the blob store, which stops collection.
         self.upkeep.stop();
+        // **Then consensus, before the endpoint closes**: closing it takes
+        // seconds, and Raft, left running, dials its peers through it and logs
+        // every failure (5c-5b2).
+        self.node.stop_consensus().await;
+        // **The heartbeat's goodbye**, while there is still an endpoint to
+        // carry it: the group then counts this node offline at once, not a
+        // TTL later (D4). It is a goodbye on one gossip topic, and a peer
+        // hearing it drops this node from *all* its topics' bookkeeping
+        // without telling the others, so the catalogue's topic keeps a
+        // neighbour that is gone until it next tries to send to it, about a
+        // minute later — unless the connection closes before then. So **the
+        // connections straight after**, with nothing slow between (P4-2): a
+        // closed connection is reported to every topic at once.
+        self.availability.leave().await;
+        self.router.endpoint().close().await;
         // Only this subsystem's own task. The engines under it are protocol
         // handlers, and the router shuts those down itself — including the
         // blob store, which `BlobsProtocol::shutdown` closes.
         self.catalogue.shutdown();
-        // Explicit, and after the projection: tantivy's `IndexWriter` holds a
-        // lockfile for as long as it is alive, and its own `Drop` does not
-        // wait for its merge thread to actually exit — only
-        // `wait_merging_threads` does that, and `close` is what calls it. A
-        // restart in this same process, which reopens `index_dir()` right
-        // after this returns, is exactly what needs that lock gone rather
-        // than merely on its way out.
+        // Its gossip last: the membership topic, left to say goodbye on its
+        // own, would be the same one-topic goodbye as the heartbeat's.
+        self.node.shutdown().await;
+        // Explicit: tantivy's `IndexWriter` holds a lockfile for as long as it
+        // is alive, and its own `Drop` does not wait for its merge thread to
+        // actually exit — only `wait_merging_threads` does that, and `close`
+        // is what calls it. A restart in this same process, which reopens
+        // `index_dir()` right after this returns, is exactly what needs that
+        // lock gone rather than merely on its way out.
         if let Err(error) = self.search.close().await {
             tracing::warn!(%error, "search index did not close cleanly");
         }
-        // **After everything that watches the membership**: they take its
-        // end for a failure, and say so as an error.
-        self.node.shutdown().await;
         if let Err(error) = self.router.shutdown().await {
             tracing::warn!(%error, "router did not shut down cleanly");
         }

@@ -99,7 +99,7 @@ impl Connections {
     }
 
     /// The cached connection, if there is one and it is still usable.
-    fn cached(&self, peer: MemberId, alpn: &[u8]) -> Option<Connection> {
+    pub fn cached(&self, peer: MemberId, alpn: &[u8]) -> Option<Connection> {
         let mut open = self.lock();
         let key = (peer, alpn.to_vec());
 

@@ -454,7 +454,9 @@ dl -d $DL/a members              # three, all core: alice, bob, dave
 ```
 
 Carol's terminal first gives up her seat — `the log says this node no longer votes;
-standing down` — then says it has been expelled, as erin's did, and shuts down.
+standing down` — then shuts down, and ends with `this node has been expelled from its
+group and is no longer a member; its data directory can be deleted, …`. A voter does not
+print erin's `it will stop following`: it never followed.
 
 **Pass:** whatever carol was custodian of now names somebody else, who fetches it:
 
@@ -527,5 +529,16 @@ rm -rf $DL
   still counts the item kept, and nothing repairs it (C41).
 - Does red, and the evidence behind it, tell whoever sees it what to do next?
 - Anything the README's quickstart gets wrong.
+
+Known, and harmless — no need to note these:
+
+- At founding, `A message will be ignored because vote changed`: the third vote arrives
+  after two have already made a leader.
+- A core node whose peers are gone logs each failed try to reach them, `still dialling
+  member …`, half a second apart at first and every eight seconds after; one that cannot
+  win an election logs `while requesting vote` at each one, about every second and a half.
+- At a stop, gossip's `dial failed: closed` or `failed to send: connection task send loop
+  terminated`: messages to peers cut off by the endpoint closing, after the goodbyes that
+  matter have gone.
 
 Write what you find down; it becomes the next round of fixes.
