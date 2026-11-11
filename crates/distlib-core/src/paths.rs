@@ -48,14 +48,25 @@ impl DataDir {
         Self(root.into())
     }
 
-    /// Resolves the data directory: an explicit override wins, otherwise the
-    /// platform default (`~/.local/share/distlib` and its equivalents).
+    /// Resolves the data directory: an explicit override wins, made absolute,
+    /// otherwise the platform default (`~/.local/share/distlib` and its
+    /// equivalents).
+    ///
+    /// Absolute because iroh-blobs imports only from an absolute path: under a
+    /// relative `--data-dir`, every file uploaded from the web UI failed to be
+    /// added (5c-5b4).
     ///
     /// The config file lives *inside* the data directory, so this deliberately
     /// consults no configuration — see [`CoreError::DataDirInConfig`].
     pub fn resolve(override_root: Option<PathBuf>) -> Result<Self> {
         if let Some(root) = override_root {
-            return Ok(Self(root));
+            return std::path::absolute(&root)
+                .map(Self)
+                .map_err(|source| CoreError::Io {
+                    action: "resolve the data directory",
+                    path: root,
+                    source,
+                });
         }
         directories::ProjectDirs::from("", "", "distlib")
             .map(|dirs| Self(dirs.data_dir().to_path_buf()))

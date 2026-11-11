@@ -233,9 +233,10 @@ dl -d $DL/<that custodian> status    # custody 1 items, 1240000 bytes (or more)
 ```
 
 And from alice's page: **Add**, choose `lectures.mkv`, title **Lectures**, type video,
-**Add**. **Pass:** the bar moves steadily — the gigabyte is written twice, once as it
-arrives and once into the store, so it takes a while — and the item's page opens, naming
-its custodian, who fetches the gigabyte in turn.
+**Add**. **Pass:** the bar moves steadily, then **Adding…** for a few seconds while the
+node copies the gigabyte into its store and hashes it — and the item's page opens, naming
+its custodian, who fetches the gigabyte in turn. The node itself takes about three seconds
+for the gigabyte (a debug build); the rest is the browser sending it.
 
 ```sh
 LECTURES=$(dl -d $DL/a search lectures | awk '{print $1; exit}')
