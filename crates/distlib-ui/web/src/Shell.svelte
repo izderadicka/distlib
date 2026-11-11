@@ -9,6 +9,7 @@
   import BookmarksPage from "./BookmarksPage.svelte";
   import ItemPage from "./ItemPage.svelte";
   import LibraryPage from "./LibraryPage.svelte";
+  import MakeWish from "./MakeWish.svelte";
   import NodePage from "./NodePage.svelte";
   import WishesPage from "./WishesPage.svelte";
   import { type Connection, type Listen, type NodeEvent, watch } from "./lib/events";
@@ -90,7 +91,7 @@
 <nav>
   <a href="/" aria-current={router.route.page === "library" ? "page" : undefined}>Library</a>
   <a href="/add" aria-current={router.route.page === "add" ? "page" : undefined}>Add</a>
-  <a href="/wishes" aria-current={router.route.page === "wishes" ? "page" : undefined}>Wishes</a>
+  <a href="/wishes" aria-current={["wishes", "wish", "make_wish"].includes(router.route.page) ? "page" : undefined}>Wishes</a>
   <a href="/bookmarks" aria-current={router.route.page === "bookmarks" ? "page" : undefined}>Bookmarks</a>
   <a href="/node" aria-current={router.route.page === "node" ? "page" : undefined}>Node</a>
 </nav>
@@ -128,6 +129,10 @@
     <AddPage {onUnauthorised} />
   {:else if router.route.page === "wishes"}
     <WishesPage {listen} {onUnauthorised} />
+  {:else if router.route.page === "wish"}
+    <WishesPage id={router.route.id} {listen} {onUnauthorised} />
+  {:else if router.route.page === "make_wish"}
+    <MakeWish {onUnauthorised} />
   {:else if router.route.page === "bookmarks"}
     <BookmarksPage route={router.route} {listen} {onUnauthorised} />
   {:else if router.route.page === "node"}

@@ -42,6 +42,18 @@ describe("reading the address", () => {
     expect(at("/wishes")).toEqual({ page: "wishes" });
   });
 
+  it("reads a wish, and the page for making one", () => {
+    const id = "d".repeat(64);
+    expect(at(`/wishes/${id}`)).toEqual({ page: "wish", id });
+    expect(at("/wishes/new")).toEqual({ page: "make_wish" });
+  });
+
+  it("takes anything but a wish id as the node writes one for no wish", () => {
+    for (const id of ["D".repeat(64), "d".repeat(63), "d".repeat(65), "g".repeat(64), ""]) {
+      expect(at(`/wishes/${id}`)).toEqual({ page: "missing" });
+    }
+  });
+
   it("reads the bookmarks, searched and filtered by a member", () => {
     const bob = "b".repeat(64);
     expect(at("/bookmarks")).toEqual({ page: "bookmarks", query: "", member: null });
@@ -67,6 +79,8 @@ describe("writing the address", () => {
     expect(href({ page: "node" })).toBe("/node");
     expect(href({ page: "add" })).toBe("/add");
     expect(href({ page: "wishes" })).toBe("/wishes");
+    expect(href({ page: "make_wish" })).toBe("/wishes/new");
+    expect(href({ page: "wish", id: "d".repeat(64) })).toBe(`/wishes/${"d".repeat(64)}`);
     expect(href({ page: "bookmarks", query: "", member: null })).toBe("/bookmarks");
     expect(href({ page: "item", id: "a".repeat(64) })).toBe(`/items/${"a".repeat(64)}`);
   });

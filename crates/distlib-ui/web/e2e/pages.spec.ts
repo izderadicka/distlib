@@ -245,13 +245,14 @@ test("an item is rated, reviewed and bookmarked from its page", async ({ page, n
   await expect(bookmark).toContainText("the farm");
 });
 
-test("a wish is made, commented on and fulfilled from the wishes page", async ({ page, node }) => {
+test("a wish is made, commented on and fulfilled from its own page", async ({ page, node }) => {
   const errors = errorsOn(page);
   node.add("krakatit.epub", "a novel", "--kind", "ebook", "--title", "Krakatit", "--author", "Karel Čapek");
   await page.goto(node.link);
   await page.getByRole("link", { name: "Wishes" }).click();
   await expect(page.getByText("Nobody has wished for anything yet.")).toBeVisible();
 
+  await page.getByRole("button", { name: "Make a wish" }).click();
   await page.getByLabel("Title").fill("Krakatit");
   await page.getByLabel(/^Authors/).fill("Karel Čapek");
   await page.getByRole("button", { name: "Wish for it" }).click();
@@ -268,6 +269,13 @@ test("a wish is made, commented on and fulfilled from the wishes page", async ({
   await wish.getByRole("button", { name: "Fulfil…" }).click();
   await wish.getByRole("row", { name: /Krakatit/ }).getByRole("button", { name: "Fulfil with this" }).click();
   await expect(wish).toContainText("fulfilled");
+  expect(new URL(page.url()).pathname).toMatch(/^\/wishes\/[0-9a-f]{64}$/);
+
+  await page.getByRole("link", { name: "All wishes" }).click();
+  const row = page.getByRole("row", { name: /Krakatit/ });
+  await expect(row).toContainText("fulfilled");
+  await row.getByRole("link", { name: "Krakatit" }).first().click();
+  await expect(wish.getByLabel("Your comment")).toHaveValue("The one with the explosive.");
   await wish.getByRole("link", { name: "Krakatit" }).click();
   await expect(page.getByRole("heading", { name: "Krakatit" })).toBeVisible();
   expect(new URL(page.url()).pathname).toMatch(/^\/items\/[0-9a-f]{64}$/);
