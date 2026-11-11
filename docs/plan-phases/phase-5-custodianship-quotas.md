@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -708,7 +708,8 @@ tested, and demonstrable by hand with the CLI or a page. One PR at a time, revie
   - **5c-5b3 — wishes.** *Done (P5-53).* The wishes as a table (title, type, status, wished by, when, fulfilled
     by); "Make a wish" under it, on a page of its own; each wish on a page of its own, with its
     details, Fulfil and its comments (kept, Ivan). **Acceptance:** Vitest per page.
-  - **5c-5b4 — the upload.** 1 GB through the page took 15 s or more on one machine, the download
+  - **5c-5b4 — the upload.** *Done (P5-54): measured, no change to D5; a relative data
+    directory fixed.* 1 GB through the page took 15 s or more on one machine, the download
     less: the bytes are written to a staged file, then copied and hashed into the blob store.
     Measured first, receiving and importing timed apart; if the copy is the cost, the upload
     streams into the blob store as it arrives — a change to D5's staging, proposed to Ivan
@@ -806,6 +807,7 @@ Every open C-number appears here once.
 | **C46** | **Promotion cancelled before learner admission** — a promotion followed by demotion before replication starts can leave the node seated, with its allowlist held and persisted replay authority unexpired; restart resumes the same promotion | **Phase 6.** A retained learner normally catches up, but the never-added case needs an authenticated cancellation/recovery path (P5-33–P5-34). Timeout alone is not authority to reset acknowledged state. |
 | **C47** | **A served copy is sometimes not counted as a use**, on Windows CI only: `a_node_that_downloads_a_file_serves_it_after_a_restart` waits a minute for alice's use and does not see it (3 failures; P5-39). Either alice's store stopped answering, or she served the book before her own read model had it, so the use matched no item | **Fixed in #169** (P5-39). The test's failure message, added to diagnose it, said on the next failure: alice's store answered, had no use, and held the item; bob held the book and carol did not, so alice had served it. Her read model did not have the item yet when she served it. A served blob's use is now kept by blob (`blob_last_used`) and joined to `item_files` when read. |
 | **C48** | **Each leader change adds a log entry kept for ever** — openraft appends a `Blank` entry, about 100 bytes, when a new leader takes over, and the log is never purged (C43). A failed election writes none. A voter that returns while its leader backs off from it (up to 8 s, P5-52) can call an election before the leader reaches it, and the leader steps down on its higher term: one entry. A group changing leader once a minute adds about 50 MB a year, read by every node that joins (Ivan, on #188) | **Phase 6.** First count leader changes, by cause, in a long-running group; then, if it matters: leave `Blank` entries out of followers' pages and out of what is kept, since they carry no event, or avoid the term bump with PreVote, which openraft 0.9 lacks. |
+| **C49** | **An add refused by the quota imports its files first** — `library.add` hashes each file into the blob store before it knows the requirement, since only new file keys count (D8), so a refused 1 GB add costs about two seconds and leaves an untagged blob for GC (found in 5c-5b4) | **Phase 6.** A check on the files' sizes before importing can refuse only what would be refused whatever is already held; the exact check stays after. |
 
 ---
 

@@ -1,4 +1,5 @@
-//! The data directory's format (5d-6): stamped when new, refused when newer.
+//! The data directory: where it is, and its format (5d-6), stamped when new
+//! and refused when newer.
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
@@ -66,4 +67,21 @@ fn a_format_file_holding_no_format_is_refused() {
             "{text:?}: {refused:?}"
         );
     }
+}
+
+#[test]
+fn a_data_directory_given_as_a_relative_path_is_resolved_to_an_absolute_one() {
+    // 5c-5b4: iroh-blobs imports only from an absolute path, so uploads under
+    // a relative `--data-dir` could not be added.
+    let data_dir = DataDir::resolve(Some("node-a".into())).unwrap();
+
+    assert!(
+        data_dir.root().is_absolute(),
+        "{}",
+        data_dir.root().display()
+    );
+    assert_eq!(
+        data_dir.root(),
+        std::env::current_dir().unwrap().join("node-a")
+    );
 }
