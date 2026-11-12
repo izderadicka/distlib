@@ -320,6 +320,10 @@ fn starts_as_core(
     me: MemberId,
     core: &[(MemberId, NodeAddr)],
 ) -> bool {
+    // A node its group has passed cannot apply what the group decides (#183).
+    if follower::behind_the_group(state_machine).is_some() {
+        return false;
+    }
     if state_machine.promotion().is_some() {
         return true;
     }
@@ -334,6 +338,21 @@ fn starts_as_core(
     } else {
         core.iter().any(|(member, _)| *member == me)
     }
+}
+
+/// Whether this node has to be upgraded, as what is stored says (#183).
+///
+/// Set before anything reads it: custody keeps every copy while it is set, so
+/// a node stopped at a raise before a restart is stopped from its first
+/// moment, not once a fetch has come back.
+fn upgrade_required_from_storage(
+    state_machine: &StateMachineStore,
+) -> watch::Sender<Option<UpgradeRequired>> {
+    let (upgrade_required, _) = watch::channel(None);
+    if let Some(why) = follower::behind_the_group(state_machine) {
+        follower::stop_until_upgraded(&upgrade_required, why);
+    }
+    upgrade_required
 }
 
 /// Prefer persisted core addresses on restart, retaining applied voters while
@@ -683,6 +702,7 @@ impl MembershipNode {
         let (addresses, memberlog) =
             install_address_book_and_client(&endpoint, &connections, &directory, &core)?;
 
+        let upgrade_required = upgrade_required_from_storage(&state_machine);
         let is_core = starts_as_core(&state_machine, id, &core);
 
         // The gossip listener sends on this and the follow loop waits on it.
@@ -694,7 +714,6 @@ impl MembershipNode {
         // here for the life of the node so that `expelled` never observes a
         // closed channel and mistakes it for an answer.
         let (expelled, _) = watch::channel(false);
-        let (upgrade_required, _) = watch::channel(None);
 
         // Configuration, until the log can say better. A follower being
         // promoted replaces this with what the log said, in the moment before
@@ -1353,6 +1372,10 @@ impl Role {
 async fn serve_role(role: Role) {
     if role.seat.raft().is_none() && retired_and_expelled(&role) {
         finish_expulsion(&role).await;
+        return;
+    }
+    // Stopped at a raise when it started: nothing it reads can seat it.
+    if role.upgrade_required.borrow().is_some() {
         return;
     }
     let mut seated_at = role.state_machine.promotion().map_or_else(
