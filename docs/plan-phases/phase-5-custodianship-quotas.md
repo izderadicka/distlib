@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (P5-55).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -763,6 +763,17 @@ run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)
     `distlib status` say why and where; every page of the UI shows a banner.
   - **5d-8b — release nothing while stopped.** *Done (#180, P5-48).* Custody keeps every copy it holds until
     the node is upgraded.
+- **5d-9 — #183's two findings**, after 5c-5b and before the end-of-phase mutation pass. Both
+  concern a raise past what some node's build speaks (P5-55):
+  - **5d-9a — the start reads the stored protocol.** *Done (P5-55).* A node whose stored
+    membership is past its build says "upgrade required" before anything reads the signal, so
+    custody keeps every copy from the first moment, and it takes no seat, a voter restarted on
+    an older binary included.
+  - **5d-9b — a raise waits for Raft's voters.** The leader writes a raise, or an approval of one,
+    only while every voter in its Raft configuration, both halves of a joint one, speaks the new
+    protocol. Node-local, like a refused proposal's pre-check; the fold is unchanged, so followers
+    replay as before. A reconfiguration in flight only adds voters from the new core, which the fold
+    already requires to speak the group's protocol.
 
 ---
 
@@ -808,6 +819,7 @@ Every open C-number appears here once.
 | **C47** | **A served copy is sometimes not counted as a use**, on Windows CI only: `a_node_that_downloads_a_file_serves_it_after_a_restart` waits a minute for alice's use and does not see it (3 failures; P5-39). Either alice's store stopped answering, or she served the book before her own read model had it, so the use matched no item | **Fixed in #169** (P5-39). The test's failure message, added to diagnose it, said on the next failure: alice's store answered, had no use, and held the item; bob held the book and carol did not, so alice had served it. Her read model did not have the item yet when she served it. A served blob's use is now kept by blob (`blob_last_used`) and joined to `item_files` when read. |
 | **C48** | **Each leader change adds a log entry kept for ever** — openraft appends a `Blank` entry, about 100 bytes, when a new leader takes over, and the log is never purged (C43). A failed election writes none. A voter that returns while its leader backs off from it (up to 8 s, P5-52) can call an election before the leader reaches it, and the leader steps down on its higher term: one entry. A group changing leader once a minute adds about 50 MB a year, read by every node that joins (Ivan, on #188) | **Phase 6.** First count leader changes, by cause, in a long-running group; then, if it matters: leave `Blank` entries out of followers' pages and out of what is kept, since they carry no event, or avoid the term bump with PreVote, which openraft 0.9 lacks. |
 | **C49** | **An add refused by the quota imports its files first** — `library.add` hashes each file into the blob store before it knows the requirement, since only new file keys count (D8), so a refused 1 GB add costs about two seconds and leaves an untagged blob for GC (found in 5c-5b4) | **Phase 6.** A check on the files' sizes before importing can refuse only what would be refused whatever is already held; the exact check stays after. |
+| **C50** | **Paging through a role change is not tested** — replaying the log a page at a time publishes each intermediate membership to the role and allowlist watchers; promotion, demotion and re-admission across a page boundary, and a restart mid-replay, have no test (#154's review; no failure found) | **Phase 6.** |
 
 ---
 

@@ -3166,3 +3166,83 @@ async fn a_follower_stops_at_a_raise_beyond_its_build() {
     assert_eq!(follower.node.followed_upto(), raised_to_2);
     assert_eq!(follower.node.membership().protocol(), 2);
 }
+
+/// Has `founder`, of a build that speaks only protocol 1, say it speaks 2 and
+/// raise the group to it, as a newer build would; returns the raise's index.
+async fn raise_past_this_build(founder: &Peer) -> u64 {
+    let propose = |event| founder.node.propose(event, &founder.secret);
+    propose(MembershipEvent::ProtocolSupported {
+        member: founder.id,
+        max: 2,
+    })
+    .await
+    .unwrap();
+    propose(MembershipEvent::ProtocolRaised { to: 2 })
+        .await
+        .unwrap();
+    log_length(founder).unwrap()
+}
+
+/// #183: a follower stopped at a raise is stopped from the moment it
+/// restarts, before it has asked anyone anything: custody keeps every copy on
+/// that signal, so it must not be missing while the core is out of reach.
+#[tokio::test]
+async fn a_follower_stopped_at_a_raise_says_so_from_the_moment_it_restarts() {
+    let (founder, follower) = a_founder_and_a_follower().await;
+    let raised_at = raise_past_this_build(&founder).await;
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        upgrade_required.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the follower to stop")
+    .unwrap();
+    founder.shutdown().await;
+
+    let follower = follower
+        .restart_with_core(vec![(founder.id, founder.addr.clone())])
+        .await;
+
+    assert_eq!(
+        follower.node.upgrade_required(),
+        Some(UpgradeRequired::Protocol {
+            group: 2,
+            at: raised_at
+        })
+    );
+    follower.shutdown().await;
+}
+
+/// #183: a voter whose group has passed its build — a core node restarted on
+/// an older binary — takes no seat, and says it has to be upgraded.
+#[tokio::test]
+async fn a_voter_whose_group_has_passed_its_build_takes_no_seat_on_restart() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.profile("founder"), founder.addr.clone())],
+            Default::default(),
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |m| {
+        m.group_id().is_some()
+    })
+    .await;
+    raise_past_this_build(&founder).await;
+    wait_for(&founder, "the raise to apply", |m| m.protocol() == 2).await;
+
+    let founder = founder.restart(vec![]).await;
+
+    // Long enough for the role task to have taken a seat, had it meant to.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(founder.node.raft().is_none(), "no seat");
+    assert!(matches!(
+        founder.node.upgrade_required(),
+        Some(UpgradeRequired::Protocol { group: 2, .. })
+    ));
+    founder.shutdown().await;
+}
