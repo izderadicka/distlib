@@ -50,7 +50,7 @@ use crate::{
     state::PROTOCOL_MAX,
 };
 
-/// Why a follower stopped reading the log until it is upgraded (5d-8).
+/// Why a node stopped reading the log until it is upgraded (5d-8).
 ///
 /// `at` is where it stopped, the last index it applied: a newer build
 /// resumes from there.
@@ -183,7 +183,8 @@ pub async fn follow(following: Following, mut hints: Hints) {
         // Straight after every fetch, whatever it brought: a raise that is the
         // newest entry stops it now rather than a quiet poll later, and a
         // restart behind a raise stops at its first pass.
-        if stopped_behind_the_group(&state_machine, &upgrade_required) {
+        if let Some(why) = behind_the_group(&state_machine) {
+            stop_until_upgraded(&upgrade_required, why);
             return;
         }
 
@@ -255,25 +256,21 @@ pub async fn follow(following: Following, mut hints: Hints) {
     }
 }
 
-/// Stops this node if its group has raised its protocol past this build's.
-fn stopped_behind_the_group(
-    state_machine: &StateMachineStore,
-    upgrade_required: &watch::Sender<Option<UpgradeRequired>>,
-) -> bool {
+/// Why this node has to be upgraded, if its group has raised its protocol
+/// past this build's: read from what is stored, so a restart knows at once.
+pub(crate) fn behind_the_group(state_machine: &StateMachineStore) -> Option<UpgradeRequired> {
     let group = state_machine.membership().protocol();
-    if group <= PROTOCOL_MAX {
-        return false;
-    }
-    let at = state_machine.followed_upto();
-    stop_until_upgraded(upgrade_required, UpgradeRequired::Protocol { group, at });
-    true
+    (group > PROTOCOL_MAX).then(|| UpgradeRequired::Protocol {
+        group,
+        at: state_machine.position(),
+    })
 }
 
 /// Says this node stops reading the log until it is upgraded, and why.
 ///
 /// It keeps its allowlist as it was (Q2) and goes on serving what it holds;
 /// what it no longer does is apply what the group decides.
-fn stop_until_upgraded(
+pub(crate) fn stop_until_upgraded(
     upgrade_required: &watch::Sender<Option<UpgradeRequired>>,
     why: UpgradeRequired,
 ) {
