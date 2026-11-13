@@ -200,6 +200,15 @@ pub enum ConsensusError {
     /// A core member, or one being made core, does not support the protocol.
     #[error("core member {member} does not support protocol {protocol} yet")]
     CoreLacksProtocol { member: MemberId, protocol: u32 },
+
+    /// A Raft voter does not support the protocol a raise is for: one the
+    /// core is changing away from, still counted until Raft has removed it.
+    /// The leader's own refusal, before writing anything (#183), never the
+    /// fold's.
+    #[error(
+        "Raft voter {member} does not support protocol {protocol}; a raise waits until it has left"
+    )]
+    VoterLacksProtocol { member: MemberId, protocol: u32 },
 }
 
 impl From<postcard::Error> for ConsensusError {

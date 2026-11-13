@@ -46,6 +46,7 @@ use openraft::{ChangeMembers, Raft, RaftNetworkFactory, ServerState};
 use crate::raft::{
     network::RaftNetworkFactoryImpl, state_machine::StateMachineStore, types::TypeConfig,
 };
+use crate::{ConsensusError, MembershipEvent, MembershipState};
 
 /// How long to wait before trying again after a change that did not take.
 ///
@@ -419,6 +420,52 @@ async fn pass(
     }
 }
 
+/// Refuses `event` if it raises the group's protocol, or approves a raise,
+/// while one of Raft's voters does not speak it (#183).
+///
+/// The fold checks the core the log asks for; Raft's voters lag it while a
+/// reconfiguration runs, and a voter on its way out still counts toward
+/// quorum. These are the leader's effective configuration's, both halves of a
+/// joint one. Node-local, so never in the fold, whose verdict every node has
+/// to reach from the log alone. Learners do not count: they are not needed
+/// for quorum, and one that is gone for good would hold every raise up.
+pub(crate) fn raise_waits_for_voters(
+    raft: &Raft<TypeConfig>,
+    membership: &MembershipState,
+    event: &MembershipEvent,
+) -> Result<(), ConsensusError> {
+    let Some(protocol) = raised_to(membership, event) else {
+        return Ok(());
+    };
+    let metrics = raft.metrics();
+    let lacking = metrics
+        .borrow()
+        .membership_config
+        .voter_ids()
+        .filter_map(|id| MemberId::try_from(id).ok())
+        .find(|member| !membership.speaks(member, protocol));
+    lacking.map_or(Ok(()), |member| {
+        Err(ConsensusError::VoterLacksProtocol { member, protocol })
+    })
+}
+
+/// The protocol `event` raises the group to: a raise's own, or that of the
+/// pending raise it approves.
+fn raised_to(membership: &MembershipState, event: &MembershipEvent) -> Option<u32> {
+    let raise = match event {
+        MembershipEvent::Approved { proposal } => membership
+            .pending()
+            .find(|(index, _)| index == proposal)?
+            .1
+            .event(),
+        other => other,
+    };
+    match raise {
+        MembershipEvent::ProtocolRaised { to } => Some(*to),
+        _ => None,
+    }
+}
+
 /// Forget only learners that have durably learned they no longer vote. Offline
 /// nodes remain learners until they return; they do not count toward quorum.
 /// A failed status request never authorizes removal. Each probe is bounded so
@@ -462,6 +509,74 @@ mod tests {
     #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
     use super::*;
+
+    /// #183: an approval is checked as the raise it approves, and nothing
+    /// else is checked at all.
+    #[test]
+    fn an_approval_raises_to_what_the_raise_it_approves_does() {
+        use crate::{MemberProfile, SignedEvent, Timestamp};
+        use iroh::SecretKey;
+
+        let keys = [SecretKey::generate(), SecretKey::generate()];
+        let member = |key: &SecretKey| MemberId::from(key.public());
+        let mut state = MembershipState::default();
+        let mut index = 0;
+        let mut apply = |state: &mut MembershipState, key: &SecretKey, event| {
+            index += 1;
+            let signed = SignedEvent::sign(
+                key,
+                event,
+                Timestamp::from_millis(index),
+                state.changed_at(),
+            )
+            .unwrap();
+            state.apply(index, &signed).unwrap();
+            index
+        };
+        let founders = keys
+            .iter()
+            .map(|key| {
+                let profile = MemberProfile {
+                    member_id: member(key),
+                    display_name: "core".into(),
+                };
+                (profile, NodeAddr::default())
+            })
+            .collect();
+        let founding =
+            MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(0))
+                .unwrap();
+        apply(&mut state, &keys[0], founding);
+        for key in &keys {
+            let support = MembershipEvent::ProtocolSupported {
+                member: member(key),
+                max: 2,
+            };
+            apply(&mut state, key, support);
+        }
+        // Two core members: the raise waits for the second one's approval.
+        let raise = apply(
+            &mut state,
+            &keys[0],
+            MembershipEvent::ProtocolRaised { to: 2 },
+        );
+
+        let raised_to = |event| raised_to(&state, &event);
+        assert_eq!(
+            raised_to(MembershipEvent::Approved { proposal: raise }),
+            Some(2)
+        );
+        assert_eq!(
+            raised_to(MembershipEvent::ProtocolRaised { to: 2 }),
+            Some(2)
+        );
+        assert_eq!(raised_to(MembershipEvent::Approved { proposal: 1 }), None);
+        let pledge = MembershipEvent::PledgeChanged {
+            member: member(&keys[0]),
+            pledge_bytes: 1,
+        };
+        assert_eq!(raised_to(pledge), None);
+    }
 
     /// A leader can restart with only the joint entry committed. Its next
     /// reconciliation must complete that entry's target, even without a newer

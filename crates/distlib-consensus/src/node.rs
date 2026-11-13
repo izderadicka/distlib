@@ -1113,7 +1113,7 @@ impl MembershipNode {
         // See [`MembershipEvent::within_limits`].
         event.within_limits()?;
 
-        let event = SignedEvent::sign(
+        let signed = SignedEvent::sign(
             secret_key,
             event.clone(),
             Timestamp::now(),
@@ -1124,8 +1124,11 @@ impl MembershipNode {
         // simply commits the next proposal the other way. Cloning the handle
         // out is also what keeps the seat's lock off an await.
         match self.seat.raft() {
-            Some(raft) => self.commit_as_core(&raft, event).await,
-            None => self.commit_as_follower(&self.sources, event).await,
+            Some(raft) => {
+                core_group::raise_waits_for_voters(&raft, &self.membership(), event)?;
+                self.commit_as_core(&raft, signed).await
+            }
+            None => self.commit_as_follower(&self.sources, signed).await,
         }
     }
 

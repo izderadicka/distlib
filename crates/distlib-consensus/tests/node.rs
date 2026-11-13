@@ -3246,3 +3246,85 @@ async fn a_voter_whose_group_has_passed_its_build_takes_no_seat_on_restart() {
     ));
     founder.shutdown().await;
 }
+
+/// #183: a raise waits for Raft's voters, not only the core the log asks for.
+/// The founder, of a build that speaks protocol 1 only, hands the core to a
+/// member that speaks 2 and is stopped, so Raft can never promote it: the
+/// founder stays the only voter. The fold would take a raise now; the leader
+/// refuses it before anything is written, its own and one forwarded to it.
+#[tokio::test]
+async fn a_raise_waits_for_a_voter_that_is_leaving_the_core() {
+    let (founder, successor) = a_founder_and_a_follower().await;
+    let bystander_key = SecretKey::generate();
+    let bystander_id = MemberId::from(bystander_key.public());
+    founder
+        .node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberProfile {
+                    member_id: bystander_id,
+                    display_name: "bystander".to_owned(),
+                },
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    let bystander = Peer::start_with(
+        bystander_key,
+        vec![founder.id],
+        vec![(founder.id, founder.addr.clone())],
+    )
+    .await;
+    wait_for(&bystander, "the bystander to follow", |m| {
+        m.is_member(&bystander_id)
+    })
+    .await;
+    successor
+        .node
+        .propose(
+            MembershipEvent::ProtocolSupported {
+                member: successor.id,
+                max: 2,
+            },
+            &successor.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the successor's support", |m| {
+        m.speaks(&successor.id, 2)
+    })
+    .await;
+    successor.shutdown().await;
+    founder
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(successor.id, successor.addr.clone())],
+            },
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    assert!(!founder.node.membership().is_core(&founder.id));
+    let written = log_length(&founder);
+
+    for proposer in [&founder, &bystander] {
+        let raised = proposer
+            .node
+            .propose(MembershipEvent::ProtocolRaised { to: 2 }, &proposer.secret)
+            .await;
+
+        assert!(
+            matches!(
+                raised,
+                Err(NodeError::Event(ConsensusError::VoterLacksProtocol { member, protocol: 2 }))
+                    if member == founder.id
+            ),
+            "{raised:?}"
+        );
+    }
+    assert_eq!(log_length(&founder), written, "nothing written");
+    bystander.shutdown().await;
+    founder.shutdown().await;
+}
