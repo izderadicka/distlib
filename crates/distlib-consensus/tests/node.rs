@@ -3307,6 +3307,17 @@ async fn a_raise_waits_for_a_voter_that_is_leaving_the_core() {
         .await
         .unwrap();
     assert!(!founder.node.membership().is_core(&founder.id));
+    // The reconciler writes the successor in as a learner on its own time;
+    // promoting it needs it caught up, so nothing else is written after that.
+    until_upto(PATIENTLY, "the successor to be a learner", || {
+        let metrics = founder.node.raft().unwrap().metrics();
+        let seen = metrics.borrow();
+        seen.membership_config
+            .nodes()
+            .any(|(id, _)| *id == RawMemberId::from(successor.id))
+            && seen.last_applied >= *seen.membership_config.log_id()
+    })
+    .await;
     let written = log_length(&founder);
 
     for proposer in [&founder, &bystander] {
