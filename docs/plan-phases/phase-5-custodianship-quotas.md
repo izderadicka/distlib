@@ -897,6 +897,7 @@ Every open C-number appears here once.
 | **C55** | **Lookup by id only through n0** — `relay_mode = "default"` uses n0's pkarr and DNS, which publish the relay URL only; `custom` and `disabled` have no lookup at all, so self-hosted DNS or pkarr is not configurable (#194) | **A later version.** |
 | **C56** | **No hostnames for core members** — `addrs` and the address in the log are socket addresses, so a dyndns name cannot be given (#194) | **A later version.** |
 | **C57** | **No consensus test with a relay-addressed core member** — every consensus test runs on loopback with relays off (#194) | **Phase 6.** |
+| **C58** | **A re-check at a recorded chunk passed once on macOS CI** — `check_now_probes_a_member_at_once_and_records_how_it_came_out`: the custodian's chunk 500 overwritten, the third member's failure there read by the founder, and `group.check` still said `passed` (run 43581593608, PR #196). Either the check did not go to that chunk, or the custodian served it as valid; the code points to the second. Not reproduced in 108 local Linux runs, 72 of them under load. Its sibling, `a_failure_another_member_recorded_is_rechecked_at_its_chunk`, timed out once on macOS (run 41791183932) | **Diagnose on the next failure**: each probe now logs its chunk and outcome at debug, which CI's failure output carries (5e-2). |
 
 ---
 
