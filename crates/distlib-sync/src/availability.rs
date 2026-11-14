@@ -66,8 +66,9 @@ impl Holdings {
     ///
     /// Held means **every `role: content` file is complete here and kept for
     /// the item** — covers and other roles do not count, as they do not count
-    /// towards an item's identity. An item with no content file yet is one
-    /// still arriving, and is not held.
+    /// towards an item's identity. **Every one the item was born with**: its
+    /// content files must fingerprint to its id, so an item whose records are
+    /// still arriving is not held, however complete the ones here are (#185).
     ///
     /// **Kept, not only here**: a file whose tags are released, an evicted
     /// item's, stays complete until the next collection deletes it, and is
@@ -82,8 +83,10 @@ impl Holdings {
             .filter(|(_, record)| record.role == FileRole::Content)
             .map(|(hash, _)| Hash::from_bytes(*hash.as_bytes()))
             .collect();
-        let kept = self.kept_for(item.id).await?;
-        let mut held = !content.is_empty() && content.iter().all(|hash| kept.contains(hash));
+        let mut held = item.fingerprint() == Some(item.id) && {
+            let kept = self.kept_for(item.id).await?;
+            content.iter().all(|hash| kept.contains(hash))
+        };
         for hash in content.into_iter().take_while(|_| held) {
             let status = self
                 .blobs
@@ -183,20 +186,9 @@ mod tests {
         let holdings = Holdings::new((*store).clone());
         let mut changes = holdings.changes();
         let content = store.add_bytes(b"dune".to_vec()).await.unwrap().hash;
-        let mut item = Item::new(ItemId::from_bytes([1; 32]));
-        item.files.insert(
-            ContentHash::from_bytes(*content.as_bytes()),
-            FileRecord {
-                role: FileRole::Content,
-                format: "epub".to_owned(),
-                size: 4,
-                filename: "dune.epub".to_owned(),
-                seq: None,
-                disc: None,
-                title: None,
-                duration: None,
-            },
-        );
+        let hash = ContentHash::from_bytes(*content.as_bytes());
+        let mut item = Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]));
+        item.files.insert(hash, content_record("dune.epub"));
 
         assert!(
             !holdings.recheck(&item).await.unwrap(),
@@ -220,5 +212,47 @@ mod tests {
         changes.borrow_and_update();
         holdings.forget(item.id);
         assert!(!changes.has_changed().unwrap(), "forgotten again: none");
+    }
+
+    /// #185 finding 1: an item of two files, only one of whose records has
+    /// arrived, is not held, though that file is complete and kept; it is
+    /// once the second record lands and its file is kept.
+    #[tokio::test]
+    async fn an_item_whose_records_are_still_arriving_is_not_held() {
+        let store = MemStore::new();
+        let holdings = Holdings::new((*store).clone());
+        let mut hashes = Vec::new();
+        for bytes in [b"part one".to_vec(), b"part two".to_vec()] {
+            let added = store.add_bytes(bytes).await.unwrap().hash;
+            hashes.push(ContentHash::from_bytes(*added.as_bytes()));
+        }
+        let born = hashes
+            .iter()
+            .map(|hash| *hash.as_bytes())
+            .collect::<Vec<_>>();
+        let mut item = Item::new(ItemId::from_content_hashes(&born));
+        for hash in &hashes {
+            let tag = KeepReason::Cache.tag(item.id, *hash);
+            let blob = Hash::from_bytes(*hash.as_bytes());
+            store.tags().set(tag, blob).await.unwrap();
+        }
+
+        item.files.insert(hashes[0], content_record("one.mp3"));
+        assert!(!holdings.recheck(&item).await.unwrap(), "one record of two");
+        item.files.insert(hashes[1], content_record("two.mp3"));
+        assert!(holdings.recheck(&item).await.unwrap(), "both");
+    }
+
+    fn content_record(filename: &str) -> FileRecord {
+        FileRecord {
+            role: FileRole::Content,
+            format: "epub".to_owned(),
+            size: 4,
+            filename: filename.to_owned(),
+            seq: None,
+            disc: None,
+            title: None,
+            duration: None,
+        }
     }
 }
