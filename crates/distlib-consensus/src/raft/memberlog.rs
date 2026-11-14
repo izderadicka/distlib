@@ -39,6 +39,7 @@ use crate::{
     error::ConsensusError,
     raft::seat::Seat,
     raft::{
+        core_group,
         log_store::{LogPage, LogStore},
         network::MAX_RPC_BYTES,
         state_machine::StateMachineStore,
@@ -434,12 +435,20 @@ impl MemberlogProtocol {
         // caller: a follower forwards an already-signed event here. Reading it
         // verifies the signature, so a refusal is attributable; see
         // [`MembershipEvent::within_limits`] for why this is not in the fold.
-        match event
-            .event()
-            .and_then(crate::MembershipEvent::within_limits)
-        {
-            Ok(()) => {}
-            Err(refused) => return ProposeOutcome::Rejected(refused),
+        //
+        // A raise the leader's voters cannot all speak yet is refused here too,
+        // before it is written (#183): every forwarded proposal reaches the
+        // leader through this door, and only the leader judges it.
+        let refused = event.event().and_then(|decoded| {
+            decoded.within_limits()?;
+            core_group::raise_waits_for_voters(
+                &raft.metrics().borrow(),
+                &self.state_machine.membership(),
+                decoded,
+            )
+        });
+        if let Err(refused) = refused {
+            return ProposeOutcome::Rejected(refused);
         }
 
         // Around the forward too, so the sender hears an answer before its

@@ -301,6 +301,10 @@ fn every_consensus_error_keeps_its_discriminant() {
             member: one,
             protocol: 2,
         },
+        ConsensusError::VoterLacksProtocol {
+            member: one,
+            protocol: 2,
+        },
     ];
     for (discriminant, error) in errors.iter().enumerate() {
         let encoded = postcard::to_stdvec(error).expect("an error encodes");

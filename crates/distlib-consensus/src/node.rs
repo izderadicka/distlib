@@ -1113,7 +1113,7 @@ impl MembershipNode {
         // See [`MembershipEvent::within_limits`].
         event.within_limits()?;
 
-        let event = SignedEvent::sign(
+        let signed = SignedEvent::sign(
             secret_key,
             event.clone(),
             Timestamp::now(),
@@ -1124,8 +1124,8 @@ impl MembershipNode {
         // simply commits the next proposal the other way. Cloning the handle
         // out is also what keeps the seat's lock off an await.
         match self.seat.raft() {
-            Some(raft) => self.commit_as_core(&raft, event).await,
-            None => self.commit_as_follower(&self.sources, event).await,
+            Some(raft) => self.commit_as_core(&raft, event, signed).await,
+            None => self.commit_as_follower(&self.sources, signed).await,
         }
     }
 
@@ -1171,11 +1171,22 @@ impl MembershipNode {
 
     /// A voter's way to commit: through its own Raft, forwarding if it is not
     /// the leader.
-    async fn commit_as_core(&self, raft: &Raft<TypeConfig>, event: SignedEvent) -> Result<u64> {
+    async fn commit_as_core(
+        &self,
+        raft: &Raft<TypeConfig>,
+        event: &MembershipEvent,
+        signed: SignedEvent,
+    ) -> Result<u64> {
         let mut unreached = None;
 
         for _ in 0..PROPOSE_ATTEMPTS {
-            let forward = match raft.client_write(event.clone()).await {
+            // Each attempt: this node may have become the leader while waiting.
+            core_group::raise_waits_for_voters(
+                &raft.metrics().borrow(),
+                &self.membership(),
+                event,
+            )?;
+            let forward = match raft.client_write(signed.clone()).await {
                 // The write reached the log; `data` carries the state machine's
                 // verdict on whether the event then took effect. A committed
                 // event whose rules do not hold is skipped rather than fatal
@@ -1193,7 +1204,7 @@ impl MembershipNode {
                 (Some(leader), Some(addr)) => {
                     match self
                         .memberlog
-                        .propose_to_leader(leader, &addr, event.clone())
+                        .propose_to_leader(leader, &addr, signed.clone())
                         .await
                     {
                         Ok(index) => return Ok(index),
