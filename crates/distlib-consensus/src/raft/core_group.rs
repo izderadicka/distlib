@@ -430,19 +430,16 @@ async fn pass(
 /// to reach from the log alone. Learners do not count: they are not needed
 /// for quorum, and one that is gone for good would hold every raise up.
 ///
-/// **Judged by the leader.** A node that knows of another leader forwards the
-/// write there, and the leader checks it again on arrival, so this node's
-/// state, perhaps behind, has no say. Without a known leader it checks, since
-/// it may be leading already.
+/// **Judged by the leader only.** Any other node, one with no leader yet
+/// included, forwards the write, or waits for a leader and tries again, and
+/// the check runs again there; its own state may be behind, and a refusal is
+/// final. Callers check before every write attempt, not once.
 pub(crate) fn raise_waits_for_voters(
     metrics: &RaftMetrics<RawMemberId, NodeAddr>,
     membership: &MembershipState,
     event: &MembershipEvent,
 ) -> Result<(), ConsensusError> {
-    if metrics
-        .current_leader
-        .is_some_and(|leader| leader != metrics.id)
-    {
+    if metrics.state != ServerState::Leader {
         return Ok(());
     }
     let Some(protocol) = raised_to(membership, event) else {
@@ -587,8 +584,8 @@ mod tests {
         assert_eq!(raised_to(pledge), None);
     }
 
-    /// #183: a node that knows of another leader leaves a raise to it, as its
-    /// own state may be behind; the leader refuses it.
+    /// #183: a node that does not lead leaves a raise to the leader, as its own
+    /// state may be behind; the leader refuses it.
     #[test]
     fn only_the_leader_refuses_a_raise_a_voter_lacks() {
         use iroh::SecretKey;
@@ -596,7 +593,6 @@ mod tests {
         use std::sync::Arc;
 
         let voter = MemberId::from(SecretKey::generate().public());
-        let other = MemberId::from(SecretKey::generate().public());
         let mut metrics = RaftMetrics::new_initial(RawMemberId::from(voter));
         let voters = vec![BTreeSet::from([RawMemberId::from(voter)])];
         metrics.membership_config =
@@ -606,13 +602,15 @@ mod tests {
         let judged =
             |metrics: &RaftMetrics<_, _>| raise_waits_for_voters(metrics, &speaks_1_only, &raise);
 
-        metrics.current_leader = Some(RawMemberId::from(voter));
+        metrics.state = ServerState::Leader;
         assert!(matches!(
             judged(&metrics),
             Err(ConsensusError::VoterLacksProtocol { member, protocol: 2 }) if member == voter
         ));
-        metrics.current_leader = Some(RawMemberId::from(other));
-        assert!(judged(&metrics).is_ok());
+        for state in [ServerState::Follower, ServerState::Candidate] {
+            metrics.state = state;
+            assert!(judged(&metrics).is_ok(), "{state:?}");
+        }
     }
 
     /// A leader can restart with only the joint entry committed. Its next
