@@ -24,8 +24,8 @@ use std::{
 use distlib::Runtime;
 use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
-    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason,
-    MemberId, ProbeFailure, TransferConfig,
+    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, FileRole, GroupSettings,
+    Item, ItemId, KeepReason, MemberId, ProbeFailure, TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -401,6 +401,138 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     );
 
     for node in [founder, custodian, other] {
+        node.stop().await;
+    }
+}
+
+/// **Pins a defect (review after #185, finding 4); reverse it with the fix.**
+/// As the test above up to the custodian keeping the book, with the founder's
+/// the only other copy. Then the other member writes one more `role: content`
+/// file record on the book, naming a file nobody has: no node holds the book
+/// any more, by its own account. The other is stopped and the custodian
+/// pledges nothing. Above, it keeps custody while the founder's is the only
+/// other copy online; here it lets go at once, since it "does not hold" the
+/// book, though every byte it was custodian of is still there.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_stray_content_record_lets_a_custodian_go_without_copies_elsewhere() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+    assert!(custodian.runtime.catalogue().holdings().holds(item));
+
+    // What any member can write, by a bug or a newer build.
+    let stray = ContentHash::from_bytes([9; 32]);
+    let record = FileRecord {
+        role: FileRole::Content,
+        format: "epub".to_owned(),
+        size: 1,
+        filename: "stray.epub".to_owned(),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    other.runtime.catalogue().ready().await;
+    other
+        .runtime
+        .catalogue()
+        .write(&Item {
+            files: [(stray, record)].into(),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
+    // Nobody holds the book now, the founder that added it included.
+    tokio::time::timeout(SOON, async {
+        let availability = custodian.runtime.availability();
+        while custodian.runtime.catalogue().holdings().holds(item)
+            || availability.holders(&item).contains(&founder.id)
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the stray record reaches the custodian and the founder");
+    // The stray file is the custodian's to fetch, and nobody serves it.
+    custodian.until_pins("failed", 1).await;
+
+    other.stop().await;
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+    custodian.until_tagged_for_custody(false, item, file).await;
+    assert!(
+        custodian.keeps(KeepReason::Cache, item, file).await,
+        "into the cache, where space pressure may evict it"
+    );
+    assert!(
+        !custodian
+            .runtime
+            .availability()
+            .holders(&item)
+            .contains(&founder.id),
+        "let go with no copy announced elsewhere"
+    );
+
+    for node in [founder, custodian] {
+        node.stop().await;
+    }
+}
+
+/// How long the test below waits to see that nothing asks again.
+const QUIET_FOR: Duration = Duration::from_secs(10);
+
+/// **Pins a defect (review after #185, finding 5); reverse it with the fix.**
+/// The founder's copy of a book is wrong when the second member becomes its
+/// custodian, so the fetch fails. The copy is put right, which no heartbeat
+/// says: the fetch would now succeed, and nothing asks again, for as long as
+/// the group stays quiet. A change that has nothing to do with the book, the
+/// third member stopping, is what asks again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_fetch_is_not_asked_again_while_the_group_is_quiet() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    until_projected(&second.runtime, item, 1, "the second member").await;
+    second.until_it_sees(founder.id, item).await;
+
+    // Wrong underneath a store that still calls it complete.
+    let bytes = founder
+        .dir
+        .blobs_dir()
+        .join("data")
+        .join(format!("{file}.data"));
+    let book_bytes = std::fs::read(&bytes).unwrap();
+    std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
+    second
+        .call("group.pledge_set", json!({ "bytes": 100 * GB }))
+        .await;
+    second.until_custodian_of(1).await;
+    second.until_pins("failed", 1).await;
+
+    std::fs::write(&bytes, &book_bytes).unwrap();
+    tokio::time::sleep(QUIET_FOR).await;
+    assert_eq!(
+        second.call("node.status", json!({})).await["pins"]["failed"],
+        json!(1),
+        "asked again with nothing changed"
+    );
+    assert!(!second.runtime.blobs().has(file).await.unwrap());
+
+    third.stop().await;
+    second
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+
+    for node in [founder, second] {
         node.stop().await;
     }
 }

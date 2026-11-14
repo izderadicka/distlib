@@ -279,4 +279,55 @@ mod tests {
         alone.copied(item(1), true);
         assert!(alone.update([], start + DELAY, DELAY).is_empty());
     }
+
+    /// **Pins a defect (review after #185, finding 1); reverse it with the
+    /// fix.** A look lists an item only while exactly one *online* member
+    /// holds it, so at a look made while its last holder is away the item is
+    /// not listed, and the delay starts over when the holder returns. A last
+    /// copy on a node away once in every delay never gets its emergency copy.
+    #[test]
+    fn a_last_holder_away_at_one_look_in_every_delay_never_makes_the_item_due() {
+        let (mut alone, start) = (AloneItems::default(), Instant::now());
+        let mut now = start;
+        for _ in 0..10 {
+            assert!(alone.update([item(1)], now, DELAY).is_empty());
+            // The holder is offline at this look: nobody online holds it.
+            assert!(alone.update([], now + DELAY / 2, DELAY).is_empty());
+            now += DELAY;
+        }
+        assert!(
+            alone.update([item(1)], now, DELAY).is_empty(),
+            "one copy for ten delays, and still not due"
+        );
+    }
+
+    /// **Pins a defect (finding 1); reverse it with the fix.** How long an
+    /// item has been alone is kept in memory only, so a node restarted more
+    /// often than the delay never finds an item due, however long the item
+    /// has been down to one copy.
+    #[test]
+    fn a_restart_forgets_how_long_an_item_has_been_alone() {
+        let start = Instant::now();
+        let mut before_the_restart = AloneItems::default();
+        before_the_restart.update([item(1)], start, DELAY);
+        let almost_due = start + DELAY - Duration::from_secs(1);
+        assert!(
+            before_the_restart
+                .update([item(1)], almost_due, DELAY)
+                .is_empty()
+        );
+
+        // What a restart leaves: nothing.
+        let mut after_the_restart = AloneItems::default();
+        assert!(
+            after_the_restart
+                .update([item(1)], start + DELAY, DELAY)
+                .is_empty()
+        );
+        assert_eq!(
+            after_the_restart.next_due(DELAY),
+            Some(start + DELAY * 2),
+            "the whole delay again"
+        );
+    }
 }
