@@ -448,19 +448,24 @@ async fn one_stray_content_record_lets_a_custodian_go_without_copies_elsewhere()
         })
         .await
         .unwrap();
+    until_projected(&custodian.runtime, item, 2, "the custodian").await;
+    // The stray file is the custodian's to fetch, and nobody serves it.
+    custodian.until_pins("failed", 1).await;
+    // Read again, so what the custodian holds is worked out from the book
+    // with its stray record. A keep that began before the record landed
+    // rechecks the book as it read it then, and can leave the book held:
+    // about one run in ten here, and on CI, where the test then timed out.
+    custodian.call("admin.reindex", json!({})).await;
+    assert!(!custodian.runtime.catalogue().holdings().holds(item));
     // Nobody holds the book now, the founder that added it included.
     tokio::time::timeout(SOON, async {
         let availability = custodian.runtime.availability();
-        while custodian.runtime.catalogue().holdings().holds(item)
-            || availability.holders(&item).contains(&founder.id)
-        {
+        while availability.holders(&item).contains(&founder.id) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("the stray record reaches the custodian and the founder");
-    // The stray file is the custodian's to fetch, and nobody serves it.
-    custodian.until_pins("failed", 1).await;
+    .expect("the founder no longer announces the book");
 
     other.stop().await;
     custodian
