@@ -257,13 +257,19 @@ impl Node {
 
 /// Item `n`'s id, whatever its content.
 fn id(n: u16) -> ItemId {
-    item(n, ContentHash::from_bytes([0; 32])).id
+    item(n, content_of(n)).id
 }
 
+/// Item `n`'s one content file, as [`Node::content`] adds it: `n`'s bytes,
+/// hashed.
+fn content_of(n: u16) -> ContentHash {
+    ContentHash::from_bytes(*blake3::hash(&n.to_be_bytes()).as_bytes())
+}
+
+/// Item `n`, born with its one content file: its id is that file's
+/// fingerprint, as held requires.
 fn item(n: u16, content: ContentHash) -> Item {
-    let mut bytes = [0; 32];
-    bytes[..2].copy_from_slice(&n.to_be_bytes());
-    let mut item = Item::new(ItemId::from_bytes(bytes));
+    let mut item = Item::new(ItemId::from_content_hashes(&[*content.as_bytes()]));
     item.files.insert(content, file(&n.to_string()));
     item
 }
@@ -720,10 +726,7 @@ async fn what_a_beat_cannot_carry_is_published_as_a_base() {
     .expect("bob never said he no longer holds it");
     assert_eq!(gone.holdings.base, Some(base));
     assert_eq!(gone.holdings.count, held.len() as u64 - 1);
-    assert_eq!(
-        gone.holdings.removed,
-        sorted([item(7, ContentHash::from_bytes([0; 32])).id])
-    );
+    assert_eq!(gone.holdings.removed, sorted([id(7)]));
     assert!(gone.holdings.added.is_empty());
 
     alice.router.shutdown().await.unwrap();
