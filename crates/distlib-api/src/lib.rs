@@ -111,8 +111,11 @@ struct Shared {
 /// itself, since all are already in `api`.
 ///
 /// Returns once the listener is bound, so a caller that immediately connects
-/// will not race the server into existence.
+/// will not race the server into existence. First it lets go of the files of
+/// adds that stopped before they were written, which only it can do safely:
+/// adds come through here, so none is in flight yet.
 pub async fn serve(addr: SocketAddr, api: Api, token: SecretString) -> std::io::Result<Server> {
+    api.release_unpublished_own().await;
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
