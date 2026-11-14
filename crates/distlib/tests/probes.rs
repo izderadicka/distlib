@@ -257,7 +257,15 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pass_on_another_book_clears_the_failure_of_a_book_still_lost() {
     let dir = TempDir::new().unwrap();
-    let [founder, second, third] = three_nodes(dir.path(), &settings(), PLEDGES).await;
+    // The third member is below the minimum, so it makes no probes. With
+    // none, it would re-check the founder's failure, record its own, and
+    // hold no other book whose pass could clear it: seen on CI, where its
+    // failure kept the lost copy from counting again.
+    let founder_alone_probes = GroupSettings {
+        min_pledge_bytes: 100 * GB,
+        ..settings()
+    };
+    let [founder, second, third] = three_nodes(dir.path(), &founder_alone_probes, PLEDGES).await;
     let (lost, lost_blob) = add_a_book(&founder, &second, dir.path()).await;
     let (whole, _) = add_a_book_called("Emma", &founder, &second, dir.path()).await;
     until("the custodian holds both books", || async {
