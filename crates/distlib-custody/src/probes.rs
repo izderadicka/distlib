@@ -232,6 +232,7 @@ impl Inner {
             .blobs
             .probe(target.custodian, target.blob, target.chunk, PROBE_WITHIN)
             .await;
+        tracing::debug!(custodian = %target.custodian.fmt_short(), blob = %target.blob, chunk = target.chunk, ?probed, "probed");
         {
             let mut counts = lock(&self.counts);
             match probed {

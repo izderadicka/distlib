@@ -193,15 +193,12 @@ fn next_change(
     voters: &BTreeMap<MemberId, NodeAddr>,
     learners: &BTreeMap<MemberId, bool>,
 ) -> Option<Change> {
-    // An empty `wanted` is not "remove every voter". It means either that no
-    // group has been founded, or that expulsions have emptied the projection's
-    // core group — which they can, today, because `MemberExpelled` drops a
-    // member from `core` with no floor beneath it. Neither is an instruction:
-    // openraft refuses an empty membership outright, and a group with no voters
-    // could never commit the event that would restore them. So this leaves Raft
-    // alone and the group keeps whatever voters it had. That is a bad state to
-    // be in, but a stable one, and the fix belongs where the hole is — in the
-    // rule that let the core group be emptied.
+    // An empty `wanted` is not "remove every voter": it means no group has
+    // been founded yet. Expulsions cannot empty the core, since a member cannot
+    // approve its own expulsion and so the last one cannot be expelled. Either
+    // way it is no instruction: openraft refuses an empty membership, and a
+    // group with no voters could never commit the event that would restore
+    // them, so Raft is left alone.
     if wanted.is_empty() {
         return None;
     }
