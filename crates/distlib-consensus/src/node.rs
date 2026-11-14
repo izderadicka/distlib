@@ -315,6 +315,12 @@ fn open_stores(data_dir: &Path) -> Result<Stores> {
 /// The log decides, once there is one. Before that, configuration does — the
 /// same rule the allowlist follows, and for the same reason: a node cannot
 /// read a log it has no way to reach.
+///
+/// **The projection alone is not enough (#194).** A follower that crashed
+/// after following its promotion and before preparing it has a projection
+/// naming it core, and no Raft that knows it: seated so, it would refuse
+/// every leader for good. Unless Raft's own membership lists it, it starts
+/// as a follower, and its first pass prepares the promotion.
 fn starts_as_core(
     state_machine: &StateMachineStore,
     me: MemberId,
@@ -329,12 +335,11 @@ fn starts_as_core(
     }
     let membership = state_machine.membership();
     if membership.group_id().is_some() {
-        membership.is_core(&me)
-            || state_machine
-                .raft_membership()
-                .borrow()
-                .voter_ids()
-                .any(|id| id == RawMemberId::from(me))
+        let raft_membership = state_machine.raft_membership();
+        let raft_membership = raft_membership.borrow();
+        let raw = RawMemberId::from(me);
+        raft_membership.voter_ids().any(|id| id == raw)
+            || (membership.is_core(&me) && raft_membership.nodes().any(|(id, _)| *id == raw))
     } else {
         core.iter().any(|(member, _)| *member == me)
     }
@@ -2231,6 +2236,44 @@ mod retirement_tests {
                 .promotion()
                 .is_none()
         );
+    }
+
+    /// #194 finding 2: a follower that crashed after following its promotion,
+    /// before preparing it, starts as a follower; once Raft lists it, as a
+    /// learner on its way to voting, it starts as core.
+    #[tokio::test]
+    async fn a_promotion_followed_but_not_prepared_starts_as_a_follower() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("followed.redb");
+        let (promoted, teacher, _, events) = promotion_history();
+        let me = MemberId::from(promoted.public());
+        let store = StateMachineStore::open(&path).unwrap();
+        store
+            .apply_followed(events.len() as u64, &events)
+            .await
+            .unwrap();
+        drop(store);
+        let mut store = StateMachineStore::open(&path).unwrap();
+        assert!(store.membership().is_core(&me));
+        assert!(store.promotion().is_none());
+        assert!(!starts_as_core(&store, me, &[]), "no Raft knows it");
+
+        let voters = BTreeSet::from([RawMemberId::from(teacher)]);
+        let nodes: BTreeMap<_, _> = [teacher, me]
+            .into_iter()
+            .map(|member| (RawMemberId::from(member), NodeAddr::default()))
+            .collect();
+        store
+            .apply([Entry {
+                log_id: LogId::new(
+                    CommittedLeaderId::new(1, RawMemberId::from(teacher)),
+                    events.len() as u64 + 1,
+                ),
+                payload: EntryPayload::Membership(Membership::new(vec![voters], nodes)),
+            }])
+            .await
+            .unwrap();
+        assert!(starts_as_core(&store, me, &[]), "a learner on its way");
     }
 
     fn configuration(

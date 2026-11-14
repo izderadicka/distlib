@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (P5-58).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -786,14 +786,15 @@ The two designs, 5e-6 to 5e-8 (decided) and 5e-9 (proposed), are discussed with 
 The end-of-phase mutation pass follows 5e.
 
 - **5e-1 — the plan.** This section, its C-items and P5-57.
-- **5e-2 — a node starts as core only with Raft state (#194 finding 2).** A crash after the
+- **5e-2 — a node starts as core only with Raft state (#194 finding 2).** *Done (P5-58): only when
+  Raft's own membership lists the node.* A crash after the
   projection names this node core and before `prepare_promotion` commits leaves it seated with no
   Raft membership and no promotion; every clause of `may_speak_raft` then refuses the leader, for
   good. `starts_as_core` answers from the projection only when Raft has a membership; otherwise the
   node follows, and `take_the_seat` promotes it on its first pass. The stale comment in
   `core_group.rs` saying expulsions can empty the core goes too (#194 finding 4).
-  **Acceptance:** a store reopened in that state starts as a follower and is promoted; a regression
-  test beside `retirement_tests`.
+  **Acceptance:** a store reopened in that state starts as a follower, whose first pass prepares the
+  promotion; a regression test beside `retirement_tests`.
 - **5e-3 — a founder's relay (#194 finding 3).** `founders()` keeps a configured `relay` when only
   `addrs` is empty, and `found` waits, bounded, for the home relay when relays are on, so the
   founding entry, and every ticket made from it, carries one. **Acceptance:** a configured relay with
