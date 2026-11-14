@@ -1125,7 +1125,11 @@ impl MembershipNode {
         // out is also what keeps the seat's lock off an await.
         match self.seat.raft() {
             Some(raft) => {
-                core_group::raise_waits_for_voters(&raft, &self.membership(), event)?;
+                core_group::raise_waits_for_voters(
+                    &raft.metrics().borrow(),
+                    &self.membership(),
+                    event,
+                )?;
                 self.commit_as_core(&raft, signed).await
             }
             None => self.commit_as_follower(&self.sources, signed).await,

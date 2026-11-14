@@ -438,10 +438,14 @@ impl MemberlogProtocol {
         //
         // A raise the leader's voters cannot all speak yet is refused here too,
         // before it is written (#183): every forwarded proposal reaches the
-        // leader through this door.
+        // leader through this door, and only the leader judges it.
         let refused = event.event().and_then(|decoded| {
             decoded.within_limits()?;
-            core_group::raise_waits_for_voters(raft, &self.state_machine.membership(), decoded)
+            core_group::raise_waits_for_voters(
+                &raft.metrics().borrow(),
+                &self.state_machine.membership(),
+                decoded,
+            )
         });
         if let Err(refused) = refused {
             return ProposeOutcome::Rejected(refused);

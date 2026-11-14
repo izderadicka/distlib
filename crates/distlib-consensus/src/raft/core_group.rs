@@ -41,7 +41,7 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use openraft::{ChangeMembers, Raft, RaftNetworkFactory, ServerState};
+use openraft::{ChangeMembers, Raft, RaftMetrics, RaftNetworkFactory, ServerState};
 
 use crate::raft::{
     network::RaftNetworkFactoryImpl, state_machine::StateMachineStore, types::TypeConfig,
@@ -429,17 +429,26 @@ async fn pass(
 /// joint one. Node-local, so never in the fold, whose verdict every node has
 /// to reach from the log alone. Learners do not count: they are not needed
 /// for quorum, and one that is gone for good would hold every raise up.
+///
+/// **Judged by the leader.** A node that knows of another leader forwards the
+/// write there, and the leader checks it again on arrival, so this node's
+/// state, perhaps behind, has no say. Without a known leader it checks, since
+/// it may be leading already.
 pub(crate) fn raise_waits_for_voters(
-    raft: &Raft<TypeConfig>,
+    metrics: &RaftMetrics<RawMemberId, NodeAddr>,
     membership: &MembershipState,
     event: &MembershipEvent,
 ) -> Result<(), ConsensusError> {
+    if metrics
+        .current_leader
+        .is_some_and(|leader| leader != metrics.id)
+    {
+        return Ok(());
+    }
     let Some(protocol) = raised_to(membership, event) else {
         return Ok(());
     };
-    let metrics = raft.metrics();
     let lacking = metrics
-        .borrow()
         .membership_config
         .voter_ids()
         .filter_map(|id| MemberId::try_from(id).ok())
@@ -576,6 +585,34 @@ mod tests {
             pledge_bytes: 1,
         };
         assert_eq!(raised_to(pledge), None);
+    }
+
+    /// #183: a node that knows of another leader leaves a raise to it, as its
+    /// own state may be behind; the leader refuses it.
+    #[test]
+    fn only_the_leader_refuses_a_raise_a_voter_lacks() {
+        use iroh::SecretKey;
+        use openraft::{Membership, StoredMembership};
+        use std::sync::Arc;
+
+        let voter = MemberId::from(SecretKey::generate().public());
+        let other = MemberId::from(SecretKey::generate().public());
+        let mut metrics = RaftMetrics::new_initial(RawMemberId::from(voter));
+        let voters = vec![BTreeSet::from([RawMemberId::from(voter)])];
+        metrics.membership_config =
+            Arc::new(StoredMembership::new(None, Membership::new(voters, ())));
+        let raise = MembershipEvent::ProtocolRaised { to: 2 };
+        let speaks_1_only = MembershipState::default();
+        let judged =
+            |metrics: &RaftMetrics<_, _>| raise_waits_for_voters(metrics, &speaks_1_only, &raise);
+
+        metrics.current_leader = Some(RawMemberId::from(voter));
+        assert!(matches!(
+            judged(&metrics),
+            Err(ConsensusError::VoterLacksProtocol { member, protocol: 2 }) if member == voter
+        ));
+        metrics.current_leader = Some(RawMemberId::from(other));
+        assert!(judged(&metrics).is_ok());
     }
 
     /// A leader can restart with only the joint entry committed. Its next

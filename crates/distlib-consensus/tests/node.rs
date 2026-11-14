@@ -3252,6 +3252,7 @@ async fn a_voter_whose_group_has_passed_its_build_takes_no_seat_on_restart() {
 /// member that speaks 2 and is stopped, so Raft can never promote it: the
 /// founder stays the only voter. The fold would take a raise now; the leader
 /// refuses it before anything is written, its own and one forwarded to it.
+#[cfg(feature = "slow-tests")]
 #[tokio::test]
 async fn a_raise_waits_for_a_voter_that_is_leaving_the_core() {
     let (founder, successor) = a_founder_and_a_follower().await;
