@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (P5-56).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -769,11 +769,80 @@ run old and new versions side by side ([`plan-upgrades.md`](../plan-upgrades.md)
     membership is past its build says "upgrade required" before anything reads the signal, so
     custody keeps every copy from the first moment, and it takes no seat, a voter restarted on
     an older binary included.
-  - **5d-9b — a raise waits for Raft's voters.** *Done (P5-56): voters only, not learners.* The leader writes a raise, or an approval of one,
+  - **5d-9b — a raise waits for Raft's voters.** *Done (#193, P5-56): voters only, not learners.* The leader writes a raise, or an approval of one,
     only while every voter in its Raft configuration, both halves of a joint one, speaks the new
     protocol. Node-local, like a refused proposal's pre-check; the fold is unchanged, so followers
     replay as before. A reconfiguration in flight only adds voters from the new core, which the fold
     already requires to speak the group's protocol.
+
+### 5e — the reviews of #194 and #185 (9 PRs)
+
+Two reviews after 5d. #194 reviewed membership over Raft and how core members are addressed: no
+safety problem, two ways a node stays stuck for good, and gaps in relay addressing. #185 reviewed
+the catalogue and custody: copies counted as protection that nothing obliges anyone to keep. Every
+finding was checked against `ce9d3f5` and still holds. What v1 needs is below, smallest first; the
+rest is carried forward (C51–C57), #185's finding 4 stays C41 and its finding 8 joins C1 (P5-57).
+The two designs, 5e-6 to 5e-8 (decided) and 5e-9 (proposed), are discussed with Ivan before code.
+The end-of-phase mutation pass follows 5e.
+
+- **5e-1 — the plan.** This section, its C-items and P5-57.
+- **5e-2 — a node starts as core only with Raft state (#194 finding 2).** A crash after the
+  projection names this node core and before `prepare_promotion` commits leaves it seated with no
+  Raft membership and no promotion; every clause of `may_speak_raft` then refuses the leader, for
+  good. `starts_as_core` answers from the projection only when Raft has a membership; otherwise the
+  node follows, and `take_the_seat` promotes it on its first pass. The stale comment in
+  `core_group.rs` saying expulsions can empty the core goes too (#194 finding 4).
+  **Acceptance:** a store reopened in that state starts as a follower and is promoted; a regression
+  test beside `retirement_tests`.
+- **5e-3 — a founder's relay (#194 finding 3).** `founders()` keeps a configured `relay` when only
+  `addrs` is empty, and `found` waits, bounded, for the home relay when relays are on, so the
+  founding entry, and every ticket made from it, carries one. **Acceptance:** a configured relay with
+  no `addrs` reaches the founding entry; with relays off, founding does not wait.
+- **5e-4 — held means every file of the item (#185 finding 1).** `Holdings::recheck` counts an item
+  held only when its files fingerprint to its id and every content file is complete and kept. An
+  item whose files are still arriving is not advertised, so it counts neither for a release nor for
+  D6. **Acceptance:** an item whose second file record has not arrived is not held; it is once the
+  record lands and its file is kept.
+- **5e-5 — an add keeps before it publishes (#185 finding 2).** The own tags first, then the
+  catalogue write; a failed write releases them. At start, an own tag whose item the catalogue does
+  not have is released, which cleans up an add stopped before its write. A partly written item keeps
+  its tags, and adding it again completes it. **Acceptance:** an add whose catalogue write fails
+  keeps nothing; an own tag with no item is released at start; a published item's files survive GC
+  whenever the add stopped.
+- **5e-6 — a hand-off counts only copies someone must keep (#185 finding 3; Ivan).** An old
+  custodian lets go only when `replicas` online members other than itself hold a real copy and are
+  obliged to keep it: the item's current custodians, and its creator while it is a member. Cached
+  copies, emergency copies and other former custodians no longer count. Worked out locally from the
+  custody ranking; nothing changes on the wire. A new custodian waiting for room (P5-26) keeps the
+  old one holding, at no new cost: the old one has the copy already. **Acceptance:** new custodians
+  waiting for room and cached copies elsewhere — the old custodians keep custody; once the new ones
+  hold the item, they let go.
+- **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** A new keep
+  reason, `Emergency`, mandatory: D6's copy is kept under it, past the storage limit if need be, and
+  moved to the cache once 5e-6's test passes for the item. `node.status`, `distlib status` and the
+  Node page count it apart from custody. The `emergency/` tag prefix gets a golden test, with the
+  other prefixes. Emergency copies take places in custody's `max_fetches` rather than a task each, so
+  copies that cannot be evicted do not arrive in a burst. **Acceptance:** the emergency holder under
+  storage pressure while the custodians are away keeps the copy; when they return and hold the item,
+  it moves to the cache; many items due at once fetch at most `max_fetches` at a time.
+- **5e-8 — eviction by copies elsewhere (#185 finding 3; Ivan).** The cache goes first where the
+  item has the most real copies on other online members, counted up to `replicas`; then least
+  recently used; then by item id. The user's own file is the one exported, so a cached copy serves
+  the group, as a source and as redundancy; past `replicas` copies an item is safe, and recency, which
+  serving to others also sets, decides. It never refuses: an item short of copies goes last, not
+  never. **Acceptance:** under pressure, of two cached items the one with more copies elsewhere goes
+  first though used more recently; with equal copies, or both at `replicas` or more, the older one.
+- **5e-9 — a voter away during a promotion catches up (#194 finding 1).** Core {A, B, C}; C offline
+  while D is admitted and promoted; D later leads. C refuses D at the transport and in
+  `may_speak_raft`, since its view predates D, and only the leader replicates the entry that would
+  admit D: C is stuck for as long as D leads, enforcing a stale allowlist meanwhile. A node in the
+  middle of its own promotion refuses a leader promoted after `Promotion::voters` was fixed, for the
+  same reason. **Proposed** (the review's option 1, decided before code): a seated voter that has
+  heard from no leader for a few election timeouts fetches the signed log from the voters it knows,
+  as a follower does, and admits for Raft whoever that log names as core; the allowlist hook and
+  `may_speak_raft` both read it, so authority stays with the signed log. **Acceptance:** the review's
+  reproduction, restarting C on the same address: C catches up under leader D. It may split once
+  designed.
 
 ---
 
@@ -783,7 +852,7 @@ Every open C-number appears here once.
 
 | # | Item | Phase 5 |
 |---|---|---|
-| **C1** | A full peer offer is O(N²) dials | **Unchanged** — and worth measuring at the thousands of members this phase targets. |
+| **C1** | A full peer offer is O(N²) dials | **Unchanged** — and worth measuring at the thousands of members this phase targets. **#185 finding 8 counts it again** (each node offers every peer every ten minutes, and iroh-docs adds the peers it remembers to any list it is given, so a short list does not stay short): measure first, then a bounded, rotating fanout that still repairs a partition. |
 | **C3** | The sweep reads the whole document every five seconds | **Deferred.** Still cost only. |
 | **C6** | A field blinks out of the read model while its newest value is in flight | **Unchanged**, and probe failures blink too: a prober's newer failure is left out of `probe_failures()` until its content arrives, so for a moment a member can be listed with one prober fewer, or not red (seen on CI in 5c-5a, where the evidence named one prober of two). **Also on the adder's own node**: straight after `distlib add`, its `item` said `files 0` for a moment (the dry run before 5c-5b), and `catalogue().item()` read an item without its file on macOS CI (#179's `pins` flake). |
 | **C7** | The read model is replayed in full at every start | **Deferred**, and relied on again: 5b-5's table fills from the replay. |
@@ -810,7 +879,7 @@ Every open C-number appears here once.
 | **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase** (Ivan, P5-25). The load factor warns first, a node says when its custody is past its pledge, coverage shows a custodian that cannot keep up, and an item down to its last copy gets D6's emergency copy. |
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
-| **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. |
+| **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. **#185 finding 4 asks for it again; still deferred** (P5-57). |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **Closed by 5c-0** (P5-23): never purged, and served a page at a time. |
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 | **C44** | **The emergency copy fires only at the last live copy** (D6) | **A later version** (Ivan, P5-25). A group setting `emergency_at_copies`, 1 by default and at most `replicas − 1`, checked at founding: an item that has had at most that many live copies for `emergency_after_secs` gets emergency copies, one after another by the same first-after-the-custodians rule, the delay running from when it first fell to the threshold. It would make up for the overflow left out (C38). |
@@ -820,6 +889,13 @@ Every open C-number appears here once.
 | **C48** | **Each leader change adds a log entry kept for ever** — openraft appends a `Blank` entry, about 100 bytes, when a new leader takes over, and the log is never purged (C43). A failed election writes none. A voter that returns while its leader backs off from it (up to 8 s, P5-52) can call an election before the leader reaches it, and the leader steps down on its higher term: one entry. A group changing leader once a minute adds about 50 MB a year, read by every node that joins (Ivan, on #188) | **Phase 6.** First count leader changes, by cause, in a long-running group; then, if it matters: leave `Blank` entries out of followers' pages and out of what is kept, since they carry no event, or avoid the term bump with PreVote, which openraft 0.9 lacks. |
 | **C49** | **An add refused by the quota imports its files first** — `library.add` hashes each file into the blob store before it knows the requirement, since only new file keys count (D8), so a refused 1 GB add costs about two seconds and leaves an untagged blob for GC (found in 5c-5b4) | **Phase 6.** A check on the files' sizes before importing can refuse only what would be refused whatever is already held; the exact check stays after. |
 | **C50** | **Paging through a role change is not tested** — replaying the log a page at a time publishes each intermediate membership to the role and allowlist watchers; promotion, demotion and re-admission across a page boundary, and a restart mid-replay, have no test (#154's review; no failure found) | **Phase 6.** |
+| **C51** | **Pending custody fetches reserve no space** — admission adds only its own bytes, and a blob whose size has not arrived counts as nothing, so fetches admitted together can pass the storage limit (#185 finding 5) | **Phase 6.** Disk pressure, not a lost copy: a reservation per admitted fetch, released on completion, failure or cancellation. |
+| **C52** | **Any availability change retries every failed custody fetch** — after the one-second gather, whether or not the changed member could serve the item, with no per-item backoff (#185 finding 6) | **Phase 6.** Per-item backoff with jitter, reset early by a new holder of that item. |
+| **C53** | **A small holdings change can resend a whole inventory** — a new base list after 384 changed ids, or ten quiet minutes after one, fetched by every observer from its publisher: about 3.2 MB per 100,000 items, to each (#185 finding 9) | **A later version**, measured first (with C27 and C32). |
+| **C54** | **A removed voter that never returns stays a Raft learner** — asked every 2 s whether it has retired, and keeping its Raft-only transport exception (#194 finding 4) | **No phase.** Harmless; a way to clear it if one is ever needed. |
+| **C55** | **Lookup by id only through n0** — `relay_mode = "default"` uses n0's pkarr and DNS, which publish the relay URL only; `custom` and `disabled` have no lookup at all, so self-hosted DNS or pkarr is not configurable (#194) | **A later version.** |
+| **C56** | **No hostnames for core members** — `addrs` and the address in the log are socket addresses, so a dyndns name cannot be given (#194) | **A later version.** |
+| **C57** | **No consensus test with a relay-addressed core member** — every consensus test runs on loopback with relays off (#194) | **Phase 6.** |
 
 ---
 
