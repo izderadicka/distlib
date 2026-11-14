@@ -17,8 +17,8 @@ use distlib_consensus::{
     MemberProfile, MemberRecord, MembershipNode, MembershipState, StateMachineStore,
 };
 use distlib_core::{
-    BookmarkId, Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, TaskId,
-    Ticket, WishId,
+    BookmarkId, Config, ContentHash, CoreMember, DataDir, ItemId, MemberId, NodeAddr, RelayMode,
+    TaskId, Ticket, WishId,
     identity::{create_secret_key, load_or_create_secret_key, load_secret_key, member_id},
     token,
 };
@@ -30,7 +30,8 @@ use iroh::{Endpoint, EndpointAddr, RelayUrl, SecretKey, TransportAddr, Watcher a
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
 
-/// How long `status --online` waits to reach a relay before giving up.
+/// How long `status --online`, and founding, wait to reach a relay before
+/// giving up.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Everything a command needs to find this node's files.
@@ -1738,6 +1739,19 @@ async fn found(
         );
     }
 
+    // The founding entry is what every other founder, and every ticket, dials:
+    // wait, bounded, for the home relay, so this node's entry carries one.
+    if config.net.relay_mode != RelayMode::Disabled
+        && tokio::time::timeout(ONLINE_TIMEOUT, node.endpoint().online())
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            "no relay reached within {ONLINE_TIMEOUT:?}; this node's founding entry carries \
+             a relay only if [consensus] core gives one"
+        );
+    }
+
     if config.consensus.core.is_empty() {
         tracing::info!("no core group configured; founding with this node alone");
     }
@@ -1777,8 +1791,13 @@ fn founders(
     Ok(core
         .iter()
         .map(|member| {
+            // A configured relay stays: only the direct addresses are missing.
             let addr = if member.member == me && member.addrs.is_empty() {
-                mine()
+                let bound = mine();
+                NodeAddr {
+                    relay: member.relay.clone().or(bound.relay),
+                    ..bound
+                }
             } else {
                 member.addr()
             };
@@ -2377,6 +2396,36 @@ mod tests {
         assert!(
             error.to_string().contains("[consensus] core"),
             "the error should name the key to fix; got {error}"
+        );
+    }
+
+    #[test]
+    fn a_configured_relay_stays_when_only_the_addresses_come_from_the_endpoint() {
+        // #194 finding 3: with `relay_mode = "custom"` the relay is the only
+        // address outside the NAT, and every ticket is made from this entry.
+        let me = an_id(1);
+        let reached = || NodeAddr {
+            relay: Some("https://reached.example/".to_owned()),
+            ..bound()
+        };
+        let mut core = [configured(me, &[])];
+
+        let founded = founders(&core, me, reached).expect("this node is a founder");
+        assert_eq!(
+            founded[0].1,
+            reached(),
+            "the relay reached, with none configured"
+        );
+
+        core[0].relay = Some("https://configured.example/".to_owned());
+        let founded = founders(&core, me, reached).expect("this node is a founder");
+        assert_eq!(
+            founded[0].1,
+            NodeAddr {
+                relay: Some("https://configured.example/".to_owned()),
+                ..bound()
+            },
+            "the configured relay, with the bound addresses"
         );
     }
 
