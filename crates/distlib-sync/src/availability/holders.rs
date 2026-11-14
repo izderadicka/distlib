@@ -406,6 +406,24 @@ mod tests {
         );
     }
 
+    /// **Pins a defect (review after #185, finding 1); reverse it with the
+    /// fix.** An item whose only holder is offline is not solely held: it is
+    /// in nobody's list, so whoever times how long it has had one copy sees
+    /// it gone, and starts over when the holder returns.
+    #[test]
+    fn an_item_whose_last_holder_is_offline_is_not_listed_at_all() {
+        let (bob, carol) = (member(), member());
+        let mut holders = Holders::default();
+        holders.heard(bob, &stated(None, 1, &[1], &[]));
+
+        assert_eq!(
+            holders.sole_holders(&BTreeSet::from([bob])),
+            [(item(1), bob)]
+        );
+        assert!(holders.sole_holders(&BTreeSet::from([carol])).is_empty());
+        assert_eq!(holders.holders(&item(1)), [bob], "still known to hold it");
+    }
+
     /// A copy a probe found missing is still held, by what its member says,
     /// but is not a real copy: an item down to one other is solely held.
     #[test]

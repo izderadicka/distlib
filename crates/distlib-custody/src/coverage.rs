@@ -296,6 +296,26 @@ mod tests {
         assert!(!counted.contains_key(&carol));
     }
 
+    /// **Pins a defect (review after #185, finding 3); reverse it with the
+    /// fix.** A creator's copy is one of the item's replicas, but the creator
+    /// is never one of its custodians, so nothing expects it to announce the
+    /// item: a creator that announces nothing of what it added is not low.
+    #[test]
+    fn a_creator_that_announces_nothing_of_its_own_item_is_not_low() {
+        let (group, me, bob, carol) = group();
+        let start = Instant::now();
+        // Bob added both; this node and Carol are their custodians.
+        let held = [(item(1, bob), start), (item(2, bob), start)];
+        assert_eq!(group.custodians(&held[0].0).len(), 2, "one slot is Bob's");
+        assert!(group.is_custodian(&held[0].0, me));
+        let judged = HashSet::from([bob, carol]);
+        // Carol announces both; Bob, their creator, neither.
+        let counted = count(&group, &held, &judged, |_| vec![carol], |_| true);
+        assert_eq!(counted[&carol], covered(2, 2));
+        assert_eq!(counted[&bob], covered(0, 0));
+        assert!(!counted[&bob].is_low());
+    }
+
     #[test]
     fn a_judged_member_with_nothing_to_hold_counts_nothing() {
         let (group, _, bob, _) = group();

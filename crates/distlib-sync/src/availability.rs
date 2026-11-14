@@ -243,6 +243,32 @@ mod tests {
         assert!(holdings.recheck(&item).await.unwrap(), "both");
     }
 
+    /// **Pins a defect (review after #185, finding 4); reverse it with the
+    /// fix.** Every file the item was born with is complete and kept, and
+    /// one more `role: content` record, which any member can write, makes
+    /// the item not held: its files no longer fingerprint to its id.
+    #[tokio::test]
+    async fn one_more_content_record_makes_a_whole_item_not_held() {
+        let store = MemStore::new();
+        let holdings = Holdings::new((*store).clone());
+        let content = store.add_bytes(b"dune".to_vec()).await.unwrap().hash;
+        let hash = ContentHash::from_bytes(*content.as_bytes());
+        let mut item = Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]));
+        item.files.insert(hash, content_record("dune.epub"));
+        let tag = KeepReason::Custody.tag(item.id, hash);
+        store.tags().set(tag, content).await.unwrap();
+        assert!(holdings.recheck(&item).await.unwrap());
+
+        // A file nobody has, named by a record somebody wrote.
+        let stray = ContentHash::from_bytes([9; 32]);
+        item.files.insert(stray, content_record("stray.epub"));
+        assert!(
+            !holdings.recheck(&item).await.unwrap(),
+            "the born file is still complete and kept"
+        );
+        assert!(!holdings.holds(item.id));
+    }
+
     fn content_record(filename: &str) -> FileRecord {
         FileRecord {
             role: FileRole::Content,

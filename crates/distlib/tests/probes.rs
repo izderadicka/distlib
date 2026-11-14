@@ -155,13 +155,24 @@ async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) ->
 /// The founder adds a book, which it and the second member have projected:
 /// the book and its one file.
 async fn add_a_book(founder: &Node, second: &Node, dir: &Path) -> (ItemId, ContentHash) {
+    add_a_book_called("Dune", founder, second, dir).await
+}
+
+/// [`add_a_book`], the book called `title`.
+async fn add_a_book_called(
+    title: &str,
+    founder: &Node,
+    second: &Node,
+    dir: &Path,
+) -> (ItemId, ContentHash) {
     founder.runtime.catalogue().ready().await;
-    let file = dir.join("dune.epub");
-    std::fs::write(&file, "Dune\n".repeat(BOOK / 5)).unwrap();
+    let file = dir.join(format!("{title}.epub"));
+    let line = format!("{title}\n");
+    std::fs::write(&file, line.repeat(BOOK / line.len())).unwrap();
     let added = api(&founder.runtime, &founder.key)
         .call(
             "library.add",
-            Some(json!({ "kind": "ebook", "files": [&file], "title": "Dune" })),
+            Some(json!({ "kind": "ebook", "files": [&file], "title": title })),
         )
         .await
         .unwrap();
@@ -232,6 +243,71 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
         })
         .await;
     }
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// **Pins a defect (review after #185, finding 2); reverse it with the fix.**
+/// The custodian keeps two books and loses one. The founder's failure of it
+/// names the lost book, and the copy stops counting as a real one; then a
+/// probe of the *other* book passes and clears the failure, so the lost copy
+/// counts as real again, its bytes as wrong as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_another_book_clears_the_failure_of_a_book_still_lost() {
+    let dir = TempDir::new().unwrap();
+    // The third member is below the minimum, so it makes no probes. With
+    // none, it would re-check the founder's failure, record its own, and
+    // hold no other book whose pass could clear it: seen on CI, where its
+    // failure kept the lost copy from counting again.
+    let founder_alone_probes = GroupSettings {
+        min_pledge_bytes: 100 * GB,
+        ..settings()
+    };
+    let [founder, second, third] = three_nodes(dir.path(), &founder_alone_probes, PLEDGES).await;
+    let (lost, lost_blob) = add_a_book(&founder, &second, dir.path()).await;
+    let (whole, _) = add_a_book_called("Emma", &founder, &second, dir.path()).await;
+    until("the custodian holds both books", || async {
+        let holdings = second.runtime.catalogue().holdings();
+        holdings.holds(lost) && holdings.holds(whole)
+    })
+    .await;
+    let counts_as_real = || {
+        founder
+            .runtime
+            .availability()
+            .real_holders(&lost)
+            .contains(&second.id)
+    };
+    until("the founder sees the custodian's copy", || async {
+        counts_as_real()
+    })
+    .await;
+
+    let bytes = second.bytes_of(lost_blob);
+    let wrong = vec![0; std::fs::read(&bytes).unwrap().len()];
+    std::fs::write(&bytes, &wrong).unwrap();
+    until("the lost copy stops counting as real", || async {
+        !counts_as_real()
+    })
+    .await;
+    assert!(
+        founder
+            .failures()
+            .await
+            .iter()
+            .any(|recorded| { (recorded.custodian, recorded.failure.item) == (second.id, lost) }),
+        "the failure names the lost book"
+    );
+
+    // Nothing is repaired, and the failure goes all the same.
+    until("the failure is cleared and the copy real again", || async {
+        founder.failures().await.is_empty() && counts_as_real()
+    })
+    .await;
+    assert_eq!(std::fs::read(&bytes).unwrap(), wrong, "still lost");
+    assert!(founder.probed().passed > 0, "by a pass, on the other book");
 
     for node in [founder, second, third] {
         node.runtime.shutdown().await;
