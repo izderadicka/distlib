@@ -1048,30 +1048,18 @@ impl Api {
             return Err(Error::failed(requirement.far_under("adding these files")));
         }
         // Kept before the item is written, so the catalogue never names files
-        // nothing keeps (#185). An add that fails, or stops, before its write
-        // leaves tags of an item nobody can see: let go of here, or at the
-        // next start.
-        let published = async {
-            for file in &imported {
-                self.blobs
-                    .keep(KeepReason::Own, id, file.hash)
-                    .await
-                    .map_err(net_error)?;
-            }
-            match existing {
-                Some(existing) => self.add_missing_files(item, &existing).await,
-                None => self.write_new_item(item, params).await,
-            }
+        // nothing keeps (#185). An add that fails or stops in between leaves
+        // tags of an item nobody can see, let go of at the next start, when no
+        // other add can need them.
+        for file in &imported {
+            self.blobs
+                .keep(KeepReason::Own, id, file.hash)
+                .await
+                .map_err(net_error)?;
         }
-        .await;
-        let mut answer = match published {
-            Ok(answer) => answer,
-            Err(error) => {
-                if let Err(release) = self.release_own_if_unpublished(id).await {
-                    tracing::warn!(%id, %release, "could not let go of a failed add's files; the next start does");
-                }
-                return Err(error);
-            }
+        let mut answer = match existing {
+            Some(existing) => self.add_missing_files(item, &existing).await?,
+            None => self.write_new_item(item, params).await?,
         };
         answer["under_pledged"] = requirement.under_pledged();
         self.recheck_holdings(id).await;

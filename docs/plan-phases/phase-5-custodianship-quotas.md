@@ -807,7 +807,7 @@ The end-of-phase mutation pass follows 5e.
   D6. **Acceptance:** an item whose second file record has not arrived is not held; it is once the
   record lands and its file is kept.
 - **5e-5 — an add keeps before it publishes (#185 finding 2).** *Done (P5-59): the sweep runs when
-  the API starts serving; a failed write releases only an item with no entry.* The own tags first, then the
+  the API starts serving; a failed add leaves its tags to it.* The own tags first, then the
   catalogue write; a failed write releases them. At start, an own tag whose item the catalogue does
   not have is released, which cleans up an add stopped before its write. A partly written item keeps
   its tags, and adding it again completes it. **Acceptance:** an add whose catalogue write fails
