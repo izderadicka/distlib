@@ -1,7 +1,7 @@
 //! The pin manager (phase 5's D7): keeps what this node is custodian of with a
 //! `custody/` tag on each of the item's files, fetching what is not here
 //! within the storage limit, and lets go of what it no longer is, into the
-//! cache, once the item has `replicas` live copies elsewhere.
+//! cache, once `replicas` members obliged to keep the item hold it elsewhere.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -487,7 +487,7 @@ impl Pins {
     async fn release_if_safe(&mut self, item: ItemId) {
         let behind_the_group = self.upgrade_required.borrow().is_some();
         if behind_the_group
-            || (self.keeper.holdings.holds(item) && !self.keeper.enough_copies_elsewhere(item))
+            || (self.keeper.holdings.holds(item) && !self.enough_copies_elsewhere(item).await)
         {
             self.pins.insert(item, Pin::Releasing);
             return;
@@ -501,6 +501,25 @@ impl Pins {
             Err(error) => {
                 tracing::error!(%item, %error, "could not release an item into the cache; trying again when availability changes");
                 self.pins.insert(item, Pin::Releasing);
+            }
+        }
+    }
+
+    /// Whether `item`'s copies elsewhere make up for this one, counting only
+    /// the members obliged to keep it under the settled group. Not while
+    /// custody or the item is unknown here.
+    async fn enough_copies_elsewhere(&self, item: ItemId) -> bool {
+        let Some(group) = self.custody.group() else {
+            return false;
+        };
+        match self.keeper.store.item(item).await {
+            Ok(Some(stored)) => self
+                .keeper
+                .enough_copies_elsewhere(item, &group.obliged_holders(&stored.custody_item())),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%item, %error, "could not read an item to let go of; trying again when availability changes");
+                false
             }
         }
     }
@@ -656,9 +675,10 @@ impl Keeper {
         ask_order(&self.availability.holders(&item), &online, members)
     }
 
-    /// Whether `replicas` online members other than this node hold `item`.
-    /// Not while anyone online has not said what they hold.
-    fn enough_copies_elsewhere(&self, item: ItemId) -> bool {
+    /// Whether `replicas` online members of `obliged`, other than this node,
+    /// hold a real copy of `item`. Not while anyone online has not said what
+    /// they hold.
+    fn enough_copies_elsewhere(&self, item: ItemId, obliged: &[MemberId]) -> bool {
         let online = self.availability.online().borrow().clone();
         if online
             .iter()
@@ -666,8 +686,14 @@ impl Keeper {
         {
             return false;
         }
-        self.live_copies(item, &online)
-            >= usize::from(self.membership.borrow().settings().replicas.get())
+        let real_holders = self.availability.real_holders(&item);
+        let obliged_copies = obliged
+            .iter()
+            .filter(|member| {
+                **member != self.me && online.contains(member) && real_holders.contains(member)
+            })
+            .count();
+        obliged_copies >= usize::from(self.membership.borrow().settings().replicas.get())
     }
 
     /// How many members in `online`, other than this node, hold a real copy

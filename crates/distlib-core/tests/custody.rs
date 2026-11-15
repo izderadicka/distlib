@@ -307,6 +307,33 @@ fn the_load_factor_is_each_items_size_per_slot_over_the_total_weight() {
     assert_eq!(weightless.load_factor(demand), None);
 }
 
+/// Who must keep a copy: the custodians and a creator still a member, never
+/// a member with no slot, nor a creator that has left.
+#[test]
+fn the_obliged_holders_are_the_custodians_and_a_creator_still_a_member() {
+    let [a, b, c, d, outsider] = [POOL[0], POOL[1], POOL[2], POOL[3], POOL[4]];
+    let group = CustodyGroup::new(REPLICAS, RULE, [(a, 500), (b, 500), (c, 500), (d, 500)]);
+    let by = |creator| CustodyItem {
+        item: item(1),
+        creators: vec![creator],
+        size_bytes: 0,
+    };
+
+    let by_a_member = by(a);
+    let mut expected = group.custodians(&by_a_member);
+    assert_eq!(expected.len(), 2);
+    expected.push(a);
+    assert_eq!(
+        as_set(group.obliged_holders(&by_a_member)),
+        as_set(expected)
+    );
+
+    let by_an_outsider = by(outsider);
+    let custodians = group.custodians(&by_an_outsider);
+    assert_eq!(custodians.len(), 3);
+    assert_eq!(group.obliged_holders(&by_an_outsider), custodians);
+}
+
 /// Who keeps what in one fixed group: the ranking every node must agree on,
 /// pinned, so that a change to scores, weights or slots fails here rather
 /// than splitting a live group's view of custody (5d-5). Members by their
