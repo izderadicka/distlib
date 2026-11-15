@@ -861,15 +861,15 @@ The end-of-phase mutation pass follows 5f.
   authority stays with the signed log. **Acceptance:** the review's reproduction, restarting C on
   the same address: C catches up under leader D (`core_turnover.rs`).
 
-### 5f — the review in #200 (4 PRs)
+### 5f — the review in #200, and the availability topic's rejoin (5 PRs)
 
 #200 holds a review after #185: six findings in custody, five with a test that passes by asserting
 today's behaviour. Each was checked against `ed88649` and holds. #200 is not merged, since its
 tests would pin the defects on master: each fix below takes its test from #200, reversed, which
 fails before the fix and passes after; #200 is closed once 5f-1 lands. Findings 4, 3 and 2 can
 lose an item or count a lost copy as real, so v1 fixes them, most dangerous first; finding 1 is
-fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. The designs
-below are decided (Ivan). The end-of-phase mutation pass follows 5f.
+fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. 5f-6, found on
+#207's CI, goes first: it makes custody tests flake. The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f.
 
 - **5f-1 — the plan.** This section, its C-items and P5-64.
 - **5f-2 — an item is its born files (#200 finding 4).** One `role: content` record more than the
@@ -906,6 +906,15 @@ below are decided (Ivan). The end-of-phase mutation pass follows 5f.
   is back if the delay has passed. That the time is forgotten at a restart is C60. **Acceptance:**
   #200's `a_last_holder_away_at_one_look_in_every_delay_never_makes_the_item_due` and
   `an_item_whose_last_holder_is_offline_is_not_listed_at_all`, reversed.
+- **5f-6 — the availability topic joins again while it has no neighbours (phase 4's D7(c)).**
+  The topic is joined once, with the members reachable at that moment, and never again: D7(c)'s
+  `join_peers` at zero neighbours was not built, and no delta says so. A node restarted while its
+  peers' addresses are stale, or not yet known, hears no heartbeat, so it cannot tell who holds
+  what or who is online: on #207's macOS CI a restarted custodian never let go of a book whose new
+  custodian held it, in `a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere`.
+  **Decided:** while the topic has no neighbour, it calls `join_peers` with every reachable
+  member, backing off, and again as soon as an address is learned. **Acceptance:** a node
+  restarted with stale addresses for its peers hears their heartbeats again.
 
 ---
 
