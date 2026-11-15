@@ -380,3 +380,64 @@ async fn change_core(proposer: &Peer, approvers: &[&Peer], core: &[&Peer]) {
             .unwrap();
     }
 }
+
+/// #194 finding 1: C, away while D was admitted and promoted, comes back to D
+/// leading. Neither its allowlist nor its Raft voters name D, and only D
+/// replicates the entries that would; C reads them from the log itself.
+#[tokio::test]
+async fn a_voter_away_during_a_promotion_follows_the_promoted_leader() {
+    let mut peers = a_founded_trio().await;
+    let c = peers.pop().unwrap();
+    let (a, b) = (&peers[0], &peers[1]);
+    c.shutdown().await;
+
+    let key = SecretKey::generate();
+    let id = MemberId::from(key.public());
+    a.node
+        .propose(
+            MembershipEvent::MemberAdded {
+                member: MemberProfile {
+                    member_id: id,
+                    display_name: "d".into(),
+                },
+            },
+            &a.secret,
+        )
+        .await
+        .unwrap();
+    let d = Peer::start_with(
+        key,
+        vec![a.id, b.id],
+        vec![(a.id, a.addr.clone()), (b.id, b.addr.clone())],
+    )
+    .await;
+    wait_for_upto(&d, PATIENTLY, "d follows", |m| m.is_member(&id)).await;
+
+    change_core(a, &[b], &[a, b, &c, &d]).await;
+    until_upto(PATIENTLY * 2, "d votes", || {
+        uniform_voters(&d).is_some_and(|voters| voters.len() == 4)
+    })
+    .await;
+    until_leading(&d, &[a, b]).await;
+
+    let c = c.restart_in_place(vec![a.id, b.id]).await;
+    d.node
+        .propose(
+            MembershipEvent::PledgeChanged {
+                member: d.id,
+                pledge_bytes: 100_000_000_000,
+            },
+            &d.secret,
+        )
+        .await
+        .unwrap();
+    wait_for_upto(&c, PATIENTLY, "c catches up under leader d", |m| {
+        m.member(&d.id)
+            .is_some_and(|record| record.pledge_bytes == 100_000_000_000)
+    })
+    .await;
+
+    for peer in peers.iter().chain([&c, &d]) {
+        peer.shutdown().await;
+    }
+}

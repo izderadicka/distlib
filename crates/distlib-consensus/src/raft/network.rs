@@ -44,7 +44,9 @@ use openraft::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
-use crate::raft::{seat::Seat, state_machine::StateMachineStore, types::TypeConfig};
+use crate::raft::{
+    catch_up::CatchUp, seat::Seat, state_machine::StateMachineStore, types::TypeConfig,
+};
 
 /// Largest encoded RPC accepted in either direction.
 ///
@@ -165,6 +167,9 @@ pub struct RaftProtocol {
     state_machine: StateMachineStore,
     /// The only voters this node will accept before Raft knows its own.
     trusted: TrustedCore,
+    /// The core the signed log names past what this node applied, while it
+    /// hears from no leader.
+    catch_up: CatchUp,
 }
 
 // `ProtocolHandler` requires `Debug`, and `Raft` does not implement it. There is
@@ -182,11 +187,17 @@ impl RaftProtocol {
     /// `trusted` is who to accept from while Raft knows no voters of its own —
     /// see [`TrustedCore`]. Empty for a node that is neither founding nor being
     /// promoted, which is exactly right: it should serve consensus to nobody.
-    pub(crate) fn new(seat: Seat, state_machine: StateMachineStore, trusted: TrustedCore) -> Self {
+    pub(crate) fn new(
+        seat: Seat,
+        state_machine: StateMachineStore,
+        trusted: TrustedCore,
+        catch_up: CatchUp,
+    ) -> Self {
         Self {
             seat,
             state_machine,
             trusted,
+            catch_up,
         }
     }
 
@@ -206,6 +217,7 @@ impl RaftProtocol {
             Seat::holding(raft),
             state_machine,
             TrustedCore::new(founding_core),
+            CatchUp::default(),
         )
     }
 
@@ -226,7 +238,9 @@ impl RaftProtocol {
     /// During promotion, persisted replay authority also admits the voters
     /// captured from the followed log, until an applied Raft configuration
     /// reaches that promotion's index. Old log replay cannot close it early.
-    /// Outside that window, Raft's applied and effective voters decide. During
+    /// Outside that window, Raft's applied and effective voters decide, and,
+    /// while this node hears from no leader, the core the signed log names past
+    /// what it applied ([`CatchUp`]). During
     /// founding, the configured core stands in for the missing voter set: a
     /// founder sends `Vote` to peers whose Raft membership is still empty and
     /// founding could never happen if they refused it.
@@ -259,7 +273,11 @@ impl RaftProtocol {
         {
             return true;
         }
-        if self.applied_voter(peer) {
+        if self.applied_voter(peer)
+            || self
+                .catch_up
+                .admits(&peer, self.state_machine.last_applied_index())
+        {
             return true;
         }
         {

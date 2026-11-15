@@ -33,7 +33,9 @@ use crate::{
     gossip,
     raft::{
         LogStore, MemberlogClient, MemberlogProtocol, ProposeError, RaftNetworkFactoryImpl,
-        RaftProtocol, Seat, StateMachineStore, TypeConfig, core_group,
+        RaftProtocol, Seat, StateMachineStore, TypeConfig,
+        catch_up::{self, CatchUp},
+        core_group,
         follower::{self, SharedSources, Sources, UpgradeRequired},
         network::TrustedCore,
     },
@@ -88,7 +90,7 @@ const PROPOSE_ATTEMPTS: usize = 3;
 
 /// The longest Raft waits without hearing from a leader before it stands for
 /// election itself, in milliseconds. See [`raft_config`].
-const ELECTION_TIMEOUT_MAX: u64 = 2_000;
+pub(crate) const ELECTION_TIMEOUT_MAX: u64 = 2_000;
 
 /// How long a proposal waits, after a forward failed, for this node to stop
 /// naming the leader that did not answer.
@@ -401,7 +403,7 @@ fn start_first_role(role: &Role) {
     };
     let asking =
         ask_once_for_the_directory(role.me, role.client.clone(), Arc::clone(&role.sources));
-    let enacting = core_group::enact(raft, role.state_machine.clone(), role.network.clone());
+    let enacting = role.voting(raft);
     start(
         &role.core_group,
         // Joined rather than spawned beside it, so the one-shot ask lives and
@@ -451,6 +453,7 @@ fn protocols_for(
         role.seat.clone(),
         role.state_machine.clone(),
         role.trusted.clone(),
+        role.catch_up.clone(),
     );
     let memberlog = MemberlogProtocol::new(
         role.seat.clone(),
@@ -753,6 +756,7 @@ impl MembershipNode {
             listens,
             seat: Seat::empty(),
             trusted,
+            catch_up: CatchUp::default(),
             follow: Arc::new(Mutex::new(None)),
             core_group: Arc::new(Mutex::new(None)),
         };
@@ -766,20 +770,13 @@ impl MembershipNode {
             spawn_join_topic(&role, swarm.clone(), &endpoint, &directory, &hints);
 
         let (allowlist_updates, enforced) =
-            enforce_membership(&state_machine, allowlist, addresses, hooks.clone());
+            enforce_membership(&role, allowlist, addresses, hooks.clone());
         let evictions = tokio::spawn(hooks.evict_expelled());
 
         start_first_role(&role);
-        let (seat, follow, core_group) = (
-            role.seat.clone(),
-            Arc::clone(&role.follow),
-            Arc::clone(&role.core_group),
-        );
-        let role = tokio::spawn(serve_role(role));
-
         Ok(Self {
             id,
-            seat,
+            seat: role.seat.clone(),
             sources,
             state_machine,
             enforced,
@@ -796,9 +793,10 @@ impl MembershipNode {
             memberlog,
             connections,
             gossip,
-            follow,
-            core_group,
-            role,
+            follow: Arc::clone(&role.follow),
+            core_group: Arc::clone(&role.core_group),
+            // Last of the role's fields: it hands the role over.
+            role: tokio::spawn(serve_role(role)),
             expelled,
             upgrade_required,
             hints,
@@ -1343,11 +1341,30 @@ struct Role {
     listens: gossip::Hints,
     seat: Seat,
     trusted: TrustedCore,
+    catch_up: CatchUp,
     follow: RoleTask,
     core_group: RoleTask,
 }
 
 impl Role {
+    /// What a voter runs for as long as it holds `raft`: putting the log's
+    /// core group into effect, and reading the log itself whenever it hears
+    /// from no leader. One task, so that standing down stops both.
+    fn voting(&self, raft: Raft<TypeConfig>) -> impl Future<Output = ()> + use<> {
+        let catching = catch_up::catch_up_when_leaderless(catch_up::Catching {
+            me: self.me,
+            raft: raft.clone(),
+            state_machine: self.state_machine.clone(),
+            client: self.client.clone(),
+            sources: Arc::clone(&self.sources),
+            catch_up: self.catch_up.clone(),
+        });
+        let enacting = core_group::enact(raft, self.state_machine.clone(), self.network.clone());
+        async move {
+            tokio::join!(enacting, catching);
+        }
+    }
+
     /// What the follow loop is started with, built fresh each time: a node can
     /// be started as a follower, promoted, and demoted back again, and the
     /// loop is a new task on each pass.
@@ -1662,14 +1679,7 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
     };
 
     seat.take(raft.clone());
-    start(
-        core_group,
-        tokio::spawn(core_group::enact(
-            raft,
-            state_machine.clone(),
-            role.network.clone(),
-        )),
-    );
+    start(core_group, tokio::spawn(role.voting(raft)));
     tracing::info!("this node is now a voter");
     Some(seated_at)
 }
@@ -1774,16 +1784,17 @@ async fn join_topic(
 
 /// Starts [`follow_membership`], and answers with the membership it enforces.
 fn enforce_membership(
-    state_machine: &StateMachineStore,
+    role: &Role,
     writer: AllowlistWriter,
     addresses: AddressBook,
     hooks: AllowlistHooks,
 ) -> (JoinHandle<()>, watch::Receiver<MembershipState>) {
     // Starts from what the log holds: until the router serves, nobody can
     // connect to be refused.
-    let (enforced_tx, enforced) = watch::channel(state_machine.membership());
+    let (enforced_tx, enforced) = watch::channel(role.state_machine.membership());
     let task = tokio::spawn(follow_membership(
-        state_machine.clone(),
+        role.state_machine.clone(),
+        role.catch_up.clone(),
         writer,
         addresses,
         hooks,
@@ -1798,6 +1809,7 @@ fn enforce_membership(
 /// state machine is dropped, which only happens when the node shuts down.
 async fn follow_membership(
     state_machine: StateMachineStore,
+    catch_up: CatchUp,
     writer: AllowlistWriter,
     addresses: AddressBook,
     hooks: AllowlistHooks,
@@ -1805,6 +1817,7 @@ async fn follow_membership(
 ) {
     let mut memberships = state_machine.subscribe();
     let mut raft_memberships = state_machine.raft_membership();
+    let mut catch_up_views = catch_up.subscribe();
     // What this task last published, so it can tell a core node that has
     // *moved* from one it is merely seeing again. Empty at startup, which is
     // right: there are no connections yet to be pointing anywhere stale.
@@ -1819,6 +1832,7 @@ async fn follow_membership(
         // Both watches publish after storage commits, including Raft-only
         // entries, so cleanup also closes obsolete Raft connections.
         let raft_membership = raft_memberships.borrow_and_update().clone();
+        catch_up_views.borrow_and_update();
         hooks.set_raft_peers(
             raft_membership
                 .nodes()
@@ -1828,7 +1842,8 @@ async fn follow_membership(
                         .promotion()
                         .into_iter()
                         .flat_map(|promotion| promotion.voters),
-                ),
+                )
+                .chain(catch_up.admitted(state_machine.last_applied_index())),
         );
 
         let replaying = state_machine
@@ -1870,6 +1885,7 @@ async fn follow_membership(
         tokio::select! {
             changed = memberships.changed() => { if changed.is_err() { return; } }
             changed = raft_memberships.changed() => { if changed.is_err() { return; } }
+            changed = catch_up_views.changed() => { if changed.is_err() { return; } }
         }
     }
 }
@@ -2103,6 +2119,7 @@ mod retirement_tests {
             listens: watch::channel(gossip::Hint::MayHaveMissed).1,
             seat: Seat::default(),
             trusted: TrustedCore::default(),
+            catch_up: CatchUp::default(),
             follow: RoleTask::default(),
             core_group: RoleTask::default(),
         };
@@ -2151,6 +2168,7 @@ mod retirement_tests {
         let (published, mut enforced) = watch::channel(current.clone());
         let observer = tokio::spawn(follow_membership(
             state.clone(),
+            CatchUp::default(),
             writer,
             AddressBook::default(),
             hooks,
