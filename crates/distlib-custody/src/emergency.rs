@@ -3,7 +3,8 @@
 //! in score order that is online and does not hold it. A copy that failed a
 //! probe is not a live one (D11). It is kept, past the storage limit if need
 //! be, until the members obliged to keep the item hold enough copies (5e-6),
-//! and then moved to the cache (5e-7).
+//! and then moved to the cache (5e-7). Its fetch takes one of custody's
+//! `max_fetches` places, so many due at once arrive no faster than custody.
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may

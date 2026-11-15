@@ -11,7 +11,8 @@
 //! failed a probe does not count towards letting go. 5d-8b's: a node that
 //! waits for an upgrade lets go of nothing. 5e-6's: only copies someone
 //! must keep count towards letting go, not a cached one. 5e-7's: an
-//! emergency copy stays, past the limit, until the custodians hold the item.
+//! emergency copy stays, past the limit, until the custodians hold the item,
+//! and is fetched within `max_fetches`.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -1374,6 +1375,77 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     node(&nodes, bystander)
         .until_keeps(true, KeepReason::Emergency, item, file)
         .await;
+}
+
+/// **Emergency copies take places among `max_fetches`** (5e-7). The
+/// custodian of three books has room for half of one, so all three are left
+/// with the founder's copy alone; the other, fetching one item at a time at
+/// the group's minimum, keeps an emergency copy of each, one after another:
+/// never two tagged while their bytes are still to come.
+#[tokio::test(flavor = "multi_thread")]
+async fn emergency_copies_are_fetched_within_max_fetches() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let one_at_a_time = Tuning {
+        transfer: TransferConfig {
+            max_fetches: NonZeroUsize::MIN,
+            max_download_rate: NonZeroU64::new(MIN_TRANSFER_RATE),
+            ..TransferConfig::default()
+        },
+        ..Tuning::default()
+    };
+    let half_a_book = Tuning {
+        storage_limit: NonZeroU64::new(BOOK as u64 / 2),
+        ..Tuning::default()
+    };
+    let tunings = [Tuning::default(), half_a_book, one_at_a_time];
+    let nodes = founded(dir.path(), &[100 * GB; 3], tunings, &settings).await;
+    let [founder, custodian, copier] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let group = CustodyGroup::new(
+        2,
+        settings.weight_rule(),
+        [founder.id, custodian.id, copier.id].map(|id| (id, 100 * GB)),
+    );
+    let mut books = Vec::new();
+    for prefix in ["First", "Second", "Third"] {
+        let (title, _) = a_title_ranked(prefix, BOOK, founder.id, &[(&group, custodian.id)]);
+        books.push(add_a_book(&founder, dir.path(), &title, BOOK).await);
+    }
+
+    let blobs = copier.runtime.blobs();
+    let mut most_at_once = 0;
+    tokio::time::timeout(SOON, async {
+        loop {
+            let tagged = blobs.kept(KeepReason::Emergency).await.unwrap();
+            let mut arriving = 0;
+            let mut kept = 0;
+            for book in &books {
+                if tagged.contains(book) {
+                    if blobs.has(book.1).await.unwrap() {
+                        kept += 1;
+                    } else {
+                        arriving += 1;
+                    }
+                }
+            }
+            most_at_once = most_at_once.max(arriving);
+            if kept == books.len() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the other keeps an emergency copy of every book");
+    assert_eq!(most_at_once, 1, "emergency copies fetched past max_fetches");
+
+    for node in [founder, custodian, copier] {
+        node.stop().await;
+    }
 }
 
 /// **An emergency copy stays past the storage limit until the custodian
