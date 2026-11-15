@@ -20,7 +20,7 @@ use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedE
 use distlib_core::{
     Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId,
     ItemKind, MemberId, NodeAddr, ProbeFailure, Rating, Review, SignedAddress, Wish, WishFields,
-    WishId, WishStatus,
+    WishId, WishStatus, community::CLEARED,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, CatalogueStorage, catalogue_key};
@@ -388,6 +388,21 @@ async fn a_probe_failure_reaches_every_node_until_its_prober_clears_it() {
     }
 
     nodes[0].catalogue.clear_probe_failure(bob).await.unwrap();
+    // Cleared by a newer value, never deleted: a delete an older copy from a
+    // peer would undo (C58).
+    let alices = CommunityKey::ProbeFailure {
+        custodian: bob,
+        prober: alice,
+    };
+    assert_eq!(
+        nodes[0]
+            .catalogue
+            .get(alices.encode())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(CLEARED)
+    );
     for (name, node) in ["alice", "bob", "carol"].into_iter().zip(&nodes) {
         until(&format!("the clearing reaches {name}"), || async {
             failures_on(node).await.is_empty()

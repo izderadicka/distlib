@@ -28,6 +28,11 @@ const WISH: &str = "wish";
 const WISH_COMMENT: &str = "wish_comment";
 const PROBE: &str = "probe";
 
+/// The value of a community entry its member cleared: JSON `null`, which no
+/// value here decodes from. Written in place of a delete, which iroh-docs
+/// lets an older copy of the entry from a peer undo (C58).
+pub const CLEARED: &[u8] = b"null";
+
 /// The longest review there may be, in bytes of UTF-8: 16 KiB.
 pub const REVIEW_MAX_BYTES: usize = 16 * 1024;
 

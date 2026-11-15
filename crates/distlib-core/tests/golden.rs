@@ -311,6 +311,20 @@ fn every_community_value_is_fixed_json() {
     );
 }
 
+/// A cleared community entry's value: no value of any community key reads
+/// from it, so a reader cannot take it for one.
+#[test]
+fn a_cleared_community_value_is_fixed_and_no_value() {
+    assert_eq!(distlib_core::community::CLEARED, b"null");
+    let cleared = distlib_core::community::CLEARED;
+    assert_eq!(Rating::decode(cleared), None);
+    assert_eq!(Review::decode(cleared), None);
+    assert_eq!(Bookmark::decode(cleared), None);
+    assert_eq!(Wish::decode(cleared), None);
+    assert_eq!(Comment::decode(cleared), None);
+    assert_eq!(ProbeFailure::decode(cleared), None);
+}
+
 #[test]
 fn a_signed_heartbeat_is_fixed_signature_included() {
     let heartbeat = Heartbeat {
