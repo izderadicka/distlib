@@ -450,7 +450,44 @@ async fn a_founder_and_two_followers(dir: &Path, settings: &GroupSettings) -> (N
     }
     let third = followers.pop().unwrap();
     let second = followers.pop().unwrap();
+    until_each_ranks_the_other(&founder, [&second, &third], settings).await;
     (founder, second, third)
+}
+
+/// Waits until each follower's custody ranks the other too. Until then a
+/// follower whose view lacks the other is the only one ranked, so custodian
+/// of every item: one added meanwhile is fetched by both, and stays cached
+/// with the one that is not its custodian.
+async fn until_each_ranks_the_other(
+    founder: &Node,
+    followers: [&Node; 2],
+    settings: &GroupSettings,
+) {
+    let ids = [founder.id, followers[0].id, followers[1].id];
+    let group = CustodyGroup::new(2, settings.weight_rule(), ids.map(|id| (id, 100 * GB)));
+    for (follower, other) in [(followers[0], followers[1]), (followers[1], followers[0])] {
+        let probe = (0..=u8::MAX)
+            .map(|seed| CustodyItem {
+                item: ItemId::from_bytes([seed; 32]),
+                creators: vec![founder.id],
+                size_bytes: 0,
+            })
+            .find(|item| group.custodians(item) == [other.id])
+            .expect("some item is the other follower's");
+        tokio::time::timeout(SOON, async {
+            while follower.runtime.custody().custodians(&probe) != Some(vec![other.id]) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} never ranked {} within {SOON:?}",
+                follower.id.fmt_short(),
+                other.id.fmt_short()
+            )
+        });
+    }
 }
 
 /// **A node that waits for an upgrade lets go of nothing** (5d-8). As the
