@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (P5-63).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -224,7 +224,8 @@ space is short.
     disk space distlib may use on this machine for all three reasons together. It must be larger than
     the pledge — the difference is room for own items and the cache.
   - **Pressure** is own + custody + cache above the limit, and it evicts the cache, least recently
-    used first, until the total fits.
+    used first, until the total fits. *(Changed in 5e-8: the items with the most real copies on
+    other online members go first, counted up to `replicas`; then least recently used.)*
   - **Mandatory alone over the limit** evicts the whole cache and is then reported in `node.status`
     and on the Node page; `library.add` refuses an add that would make it worse, and
     `group.pledge_set` refuses a pledge that is not below the limit. *(P5-26: a custody fetch that
@@ -256,7 +257,8 @@ distlib gives each reason its own tag, one per content blob of the item:
 ```text
 own/<item>/<blob>        set by library.add, kept while the member is a member
 custody/<item>/<blob>    set and deleted by the pin manager
-cache/<item>/<blob>      set by library.download and by an emergency copy; evicted under pressure
+emergency/<item>/<blob>  set by an emergency copy, moved to cache/ once it is not needed (5e-7)
+cache/<item>/<blob>      set by library.download; evicted under pressure
 ```
 
 The tag *is* the reason: listing `custody/` is the pin manager's view of what it holds, and a blob
@@ -360,6 +362,8 @@ elsewhere.
 `emergency_after_secs`, each node checks whether it is the first member after the item's custodians
 in score order that is online and has room. If it is, it fetches the item as **cache**. When the
 custodians come back nothing is recomputed: the extra copy simply ages out of the cache.
+*(Changed in 5e-7a, P5-60: kept under its own mandatory reason, past the storage limit, and moved
+to the cache once the members obliged to keep the item hold `replicas` copies.)*
 
 - **Per observer, like availability itself.** Two nodes may disagree about who is online and both
   fetch, or neither; the next check settles it.
@@ -806,13 +810,16 @@ The end-of-phase mutation pass follows 5e.
   item whose files are still arriving is not advertised, so it counts neither for a release nor for
   D6. **Acceptance:** an item whose second file record has not arrived is not held; it is once the
   record lands and its file is kept.
-- **5e-5 — an add keeps before it publishes (#185 finding 2).** The own tags first, then the
+- **5e-5 — an add keeps before it publishes (#185 finding 2).** *Done (P5-59): the sweep runs when
+  the API starts serving; a failed add leaves its tags to it.* The own tags first, then the
   catalogue write; a failed write releases them. At start, an own tag whose item the catalogue does
   not have is released, which cleans up an add stopped before its write. A partly written item keeps
   its tags, and adding it again completes it. **Acceptance:** an add whose catalogue write fails
   keeps nothing; an own tag with no item is released at start; a published item's files survive GC
   whenever the add stopped.
-- **5e-6 — a hand-off counts only copies someone must keep (#185 finding 3; Ivan).** An old
+- **5e-6 — a hand-off counts only copies someone must keep (#185 finding 3; Ivan).** *Done:
+  `CustodyGroup::obliged_holders`, under the settled group custody follows; the fetch queue's order
+  (D7) still counts every real copy, since it only says which item goes first.* An old
   custodian lets go only when `replicas` online members other than itself hold a real copy and are
   obliged to keep it: the item's current custodians, and its creator while it is a member. Cached
   copies, emergency copies and other former custodians no longer count. Worked out locally from the
@@ -820,7 +827,12 @@ The end-of-phase mutation pass follows 5e.
   old one holding, at no new cost: the old one has the copy already. **Acceptance:** new custodians
   waiting for room and cached copies elsewhere — the old custodians keep custody; once the new ones
   hold the item, they let go.
-- **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** A new keep
+- **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** *Split in
+  two (P5-60):* **5e-7a** *(done; the move follows availability changes and recomputed custody, never while
+  waiting for an upgrade, and wakes custody waiting for room)* — the reason, the move to the cache,
+  the counts and the golden;
+  **5e-7b** *(done, P5-61: one semaphore of `max_fetches` places in `Keeper::keep`)* — emergency
+  fetches within `max_fetches`. A new keep
   reason, `Emergency`, mandatory: D6's copy is kept under it, past the storage limit if need be, and
   moved to the cache once 5e-6's test passes for the item. `node.status`, `distlib status` and the
   Node page count it apart from custody. The `emergency/` tag prefix gets a golden test, with the
@@ -828,7 +840,9 @@ The end-of-phase mutation pass follows 5e.
   copies that cannot be evicted do not arrive in a burst. **Acceptance:** the emergency holder under
   storage pressure while the custodians are away keeps the copy; when they return and hold the item,
   it moves to the cache; many items due at once fetch at most `max_fetches` at a time.
-- **5e-8 — eviction by copies elsewhere (#185 finding 3; Ivan).** The cache goes first where the
+- **5e-8 — eviction by copies elsewhere (#185 finding 3; Ivan).** *Done: `eviction_order` in
+  `Storage`, copies counted from this node's view of availability, as the fetch queue counts them.*
+  The cache goes first where the
   item has the most real copies on other online members, counted up to `replicas`; then least
   recently used; then by item id. The user's own file is the one exported, so a cached copy serves
   the group, as a source and as redundancy; past `replicas` copies an item is safe, and recency, which
@@ -840,12 +854,12 @@ The end-of-phase mutation pass follows 5e.
   `may_speak_raft`, since its view predates D, and only the leader replicates the entry that would
   admit D: C is stuck for as long as D leads, enforcing a stale allowlist meanwhile. A node in the
   middle of its own promotion refuses a leader promoted after `Promotion::voters` was fixed, for the
-  same reason. **Proposed** (the review's option 1, decided before code): a seated voter that has
-  heard from no leader for a few election timeouts fetches the signed log from the voters it knows,
-  as a follower does, and admits for Raft whoever that log names as core; the allowlist hook and
-  `may_speak_raft` both read it, so authority stays with the signed log. **Acceptance:** the review's
-  reproduction, restarting C on the same address: C catches up under leader D. It may split once
-  designed.
+  same reason. *Done (P5-63): the review's option 1.* A seated node that has accepted no `AppendEntries`
+  for three election timeouts, and does not lead, fetches the signed log past what it applied from
+  the voters it knows and those they point to, as a follower does, folds it onto a copy of its membership, and admits for Raft whoever that log
+  names as core (`raft::catch_up`); the allowlist hook and `may_speak_raft` both read it, so
+  authority stays with the signed log. **Acceptance:** the review's reproduction, restarting C on
+  the same address: C catches up under leader D (`core_turnover.rs`).
 
 ---
 
@@ -899,7 +913,8 @@ Every open C-number appears here once.
 | **C55** | **Lookup by id only through n0** — `relay_mode = "default"` uses n0's pkarr and DNS, which publish the relay URL only; `custom` and `disabled` have no lookup at all, so self-hosted DNS or pkarr is not configurable (#194) | **A later version.** |
 | **C56** | **No hostnames for core members** — `addrs` and the address in the log are socket addresses, so a dyndns name cannot be given (#194) | **A later version.** |
 | **C57** | **No consensus test with a relay-addressed core member** — every consensus test runs on loopback with relays off (#194) | **Phase 6.** |
-| **C58** | **A re-check at a recorded chunk passed once on macOS CI** — `check_now_probes_a_member_at_once_and_records_how_it_came_out`: the custodian's chunk 500 overwritten, the third member's failure there read by the founder, and `group.check` still said `passed` (run 43581593608, PR #196). Either the check did not go to that chunk, or the custodian served it as valid; the code points to the second. Not reproduced in 108 local Linux runs, 72 of them under load. Its sibling, `a_failure_another_member_recorded_is_rechecked_at_its_chunk`, timed out once on macOS (run 41791183932) | **Diagnose on the next failure**: each probe now logs its chunk and outcome at debug, which CI's failure output carries (5e-2). |
+| **C58** | **A re-check at a recorded chunk passed once on macOS CI** — `check_now_probes_a_member_at_once_and_records_how_it_came_out`: the custodian's chunk 500 overwritten, the third member's failure there read by the founder, and `group.check` still said `passed` (run 43581593608, PR #196). Either the check did not go to that chunk, or the custodian served it as valid; the code points to the second. Not reproduced in 108 local Linux runs, 72 of them under load. Its sibling, `a_failure_another_member_recorded_is_rechecked_at_its_chunk`, timed out once on macOS (run 41791183932) | **Closed (P5-62).** Neither: the founder's own failure, cleared a moment before, was back, and the check went to its chunk. An iroh-docs 0.101 delete is an empty entry, and before taking a peer's entry iroh-docs asks for a newer one reading without empty entries: a peer's older copy replaced the delete (pinned in `distlib-sync/tests/iroh_docs.rs`). Every catalogue clear now writes a newer `null` value instead. |
+| **C59** | **iroh-docs lets an older entry from a peer undo a delete** — the root of C58. `parents` in iroh-docs 0.101's `store/fs.rs`, which `insert_remote_entry` uses to look for a newer entry, calls `get_exact(…, false)`, leaving out the empty entries a delete writes. The one-line fix is `true` there. `distlib-sync/tests/iroh_docs.rs` reproduces it without a network | **Not filed upstream** (Ivan: an earlier issue there had no answer). Kept here for when it is worth filing; until then the catalogue clears with a newer value (P5-62), and that test fails once a fixed iroh-docs arrives. |
 
 ---
 

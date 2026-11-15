@@ -28,7 +28,7 @@ use std::{
 use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{
     Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
-    MemberId, ProbeFailure, Rating, Review, Wish, WishId,
+    MemberId, ProbeFailure, Rating, Review, Wish, WishId, community::CLEARED,
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -391,16 +391,14 @@ impl Catalogue {
         Ok(())
     }
 
-    /// Deletes what this node wrote at `key`. Reads leave a deleted entry out.
+    /// Clears what this node wrote at `key`: writes [`CLEARED`] over it,
+    /// which reads leave out.
     ///
-    /// iroh-docs deletes by prefix (ground truth 10), so `key` must be a whole
-    /// community key: one that is no other key's prefix.
-    async fn delete(&self, key: String) -> Result<()> {
-        let doc = self.document()?;
-        doc.del(self.inner.author, key.into_bytes())
-            .await
-            .map_err(SyncError::docs("deleted from"))?;
-        Ok(())
+    /// Never an iroh-docs delete: an older copy of the entry, synced back by a
+    /// peer that had not seen the delete yet, replaces it (C58,
+    /// `tests/iroh_docs.rs`); a newer value it cannot.
+    async fn clear(&self, key: String) -> Result<()> {
+        self.put(key, CLEARED).await
     }
 
     /// Reads one entry: the latest value any member wrote at `key`.
@@ -665,7 +663,7 @@ impl Catalogue {
             item,
             member: self.inner.me,
         };
-        self.delete(key.encode()).await
+        self.clear(key.encode()).await
     }
 
     /// Clears this node's member's review of `item`, if it has one.
@@ -674,7 +672,7 @@ impl Catalogue {
             item,
             member: self.inner.me,
         };
-        self.delete(key.encode()).await
+        self.clear(key.encode()).await
     }
 
     /// Leaves bookmark `id` on `item` as this node's member, or replaces it.
@@ -694,7 +692,7 @@ impl Catalogue {
             member: self.inner.me,
             bookmark: id,
         };
-        self.delete(key.encode()).await
+        self.clear(key.encode()).await
     }
 
     /// Writes this node's member's entry for `wish`: creating it, or
@@ -722,7 +720,7 @@ impl Catalogue {
             wish,
             member: self.inner.me,
         };
-        self.delete(key.encode()).await
+        self.clear(key.encode()).await
     }
 
     /// Records this node's member's latest failed probe of `custodian`
@@ -745,7 +743,7 @@ impl Catalogue {
             custodian,
             prober: self.inner.me,
         };
-        self.delete(key.encode()).await
+        self.clear(key.encode()).await
     }
 
     /// Every prober's failures of every custodian this node holds, each
@@ -955,6 +953,9 @@ impl Catalogue {
                 waiting_for_content = true;
                 continue;
             };
+            if value == CLEARED {
+                continue;
+            }
             let Some(value) = decode(&value) else {
                 tracing::warn!(%key, "a community entry holds a value this build cannot read");
                 continue;

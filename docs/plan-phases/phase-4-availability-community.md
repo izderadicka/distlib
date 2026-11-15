@@ -163,7 +163,9 @@ below exists because the prose and the code disagree.
     every `bookmark/X/m/…` that `m` had written. **Community keys must never be a prefix of another
     key by the same author**, which holds as long as every key ends in a fixed-length id and nothing
     writes the bare prefix. Deleting is `Doc::del(author, prefix)` (`iroh-docs api.rs:356`), which
-    clears only that author's entries.
+    clears only that author's entries. *(Phase 5, P5-62: and which a peer's older copy of the entry
+    undoes, `store/fs.rs` `parents()` reading without empty entries; the catalogue clears by writing
+    a newer value instead.)*
 
 11. **The pump already sees what C14 needs, and throws it away — and must stay trivial.**
     `NeighborUp`, `NeighborDown` and `SyncFinished(peer)` reach it and answer `false`
@@ -438,7 +440,8 @@ A `CommunityKey` enum in `distlib-core::community`, with §5.3's key formats exc
 **Bookmarks gain a fourth segment — Ivan's call, and a delta against §5.3.** A bookmark is a
 **shared pointer**, so a member may leave several on one item: `bookmark` is 16 random bytes in hex,
 `position` is free text (a page, a chapter, `01:23:45`), and `note` is capped at 4 KiB. Clearing or
-deleting anything is `Doc::del` on your own full key (ground truth 10).
+deleting anything is `Doc::del` on your own full key (ground truth 10). *(Changed in phase 5, P5-62:
+a newer `null` value instead, since iroh-docs lets a peer's older copy undo a delete.)*
 
 **D9 — An entry counts only if its author is the member its key names.**
 Reads are flat `Query::author(m).key_exact(k)`, or a prefix scan that keeps only entries whose author

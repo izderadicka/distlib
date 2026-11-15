@@ -10,8 +10,9 @@ use std::{path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_consensus::MembershipEvent;
-use distlib_core::{ContentHash, DataDir, ItemId, MemberId};
+use distlib_core::{ContentHash, DataDir, ItemId, KeepReason, MemberId};
 use iroh::SecretKey;
+use secrecy::SecretString;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -140,5 +141,72 @@ async fn a_collection_pass_keeps_what_was_added_downloaded_and_synced() {
     );
 
     bob.shutdown().await;
+    alice.shutdown().await;
+}
+
+/// #185 finding 2: an add keeps its files before it writes the item, so one
+/// that stopped in between leaves own tags of an item the catalogue does not
+/// have. Starting the api lets go of them, before any add can be under way;
+/// a written item keeps its own.
+///
+/// **Mutation check:** no sweep at the top of `distlib_api::serve` keeps the
+/// unwritten add's tag.
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_the_api_lets_go_of_an_add_that_stopped_before_it_was_written() {
+    let dir = TempDir::new().unwrap();
+    let key = SecretKey::generate();
+    let alice = Runtime::start(
+        &key,
+        &config(&[MemberId::from(key.public())]),
+        &DataDir::new(dir.path().join("alice")),
+    )
+    .await
+    .unwrap();
+    found(&[&alice], &[(&key, PLEDGE)], &group_settings()).await;
+    tokio::time::timeout(SOON, alice.catalogue().ready())
+        .await
+        .unwrap();
+
+    let book = dir.path().join("dune.epub");
+    std::fs::write(&book, b"the spice must flow\n".repeat(1_000)).unwrap();
+    let added = api(&alice, &key)
+        .call(
+            "library.add",
+            Some(json!({ "kind": "ebook", "files": [&book], "title": "Dune" })),
+        )
+        .await
+        .unwrap();
+    let written: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+
+    // What an add leaves when it stops after its tags, before its write.
+    let stopped = dir.path().join("stopped.epub");
+    std::fs::write(&stopped, b"never written\n".repeat(1_000)).unwrap();
+    let imported = alice.catalogue().add_file(&stopped).await.unwrap();
+    let unwritten = ItemId::from_content_hashes(&[*imported.hash.as_bytes()]);
+    alice
+        .blobs()
+        .keep(KeepReason::Own, unwritten, imported.hash)
+        .await
+        .unwrap();
+    drop(imported);
+
+    let server = distlib_api::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        api(&alice, &key),
+        SecretString::from("token"),
+    )
+    .await
+    .unwrap();
+
+    let own = |item| {
+        let blobs = alice.blobs().clone();
+        async move { blobs.kept_for(KeepReason::Own, item).await.unwrap() }
+    };
+    assert!(
+        own(unwritten).await.is_empty(),
+        "the unwritten add's files let go of"
+    );
+    assert_eq!(own(written).await.len(), 1, "the written item's kept");
+    drop(server);
     alice.shutdown().await;
 }

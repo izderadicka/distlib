@@ -8,7 +8,7 @@ use std::{num::NonZeroU64, path::Path, time::Duration};
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_core::{Config, DataDir, MemberId};
-use distlib_custody::Storage;
+use distlib_custody::{Storage, StorageSources};
 use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -67,6 +67,7 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
             "limit_bytes": 1_000,
             "own_bytes": 600,
             "custody_bytes": 0,
+            "emergency_bytes": 0,
             "cache_bytes": 0,
             "mandatory_over_limit": false,
             "last_collection_at": null,
@@ -82,9 +83,14 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
     let lowered = Api {
         storage: Storage::new(
             NonZeroU64::new(500),
-            runtime.blobs().clone(),
-            runtime.store().clone(),
-            runtime.catalogue().holdings().clone(),
+            StorageSources {
+                me: runtime.node().id(),
+                blobs: runtime.blobs().clone(),
+                store: runtime.store().clone(),
+                holdings: runtime.catalogue().holdings().clone(),
+                availability: runtime.availability().clone(),
+                membership: runtime.node().subscribe(),
+            },
         ),
         ..api
     };

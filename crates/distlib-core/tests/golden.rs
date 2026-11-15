@@ -21,9 +21,9 @@ use data_encoding::HEXLOWER;
 use distlib_core::{
     ApiConfig, AvailabilityConfig, Bookmark, BookmarkId, Comment, CommunityKey, Config,
     ConsensusConfig, ContentHash, CoreMember, FileRecord, FileRole, GroupId, GroupSettings,
-    Heartbeat, Holdings, Item, ItemId, ItemKind, LibraryConfig, MemberId, NetConfig, NodeAddr,
-    ProbeFailure, Rating, RelayMode, Review, Series, SignedAddress, SignedHeartbeat, StorageConfig,
-    Ticket, TransferConfig, Wish, WishFields, WishId, WishStatus,
+    Heartbeat, Holdings, Item, ItemId, ItemKind, KeepReason, LibraryConfig, MemberId, NetConfig,
+    NodeAddr, ProbeFailure, Rating, RelayMode, Review, Series, SignedAddress, SignedHeartbeat,
+    StorageConfig, Ticket, TransferConfig, Wish, WishFields, WishId, WishStatus,
     availability::{decode_base, encode_base},
 };
 use figment::Jail;
@@ -161,6 +161,30 @@ fn every_item_kind_and_file_role_has_a_fixed_name() {
     }
 }
 
+/// The tags in every node's blob store: a renamed reason would leave what it
+/// kept untagged, for collection to delete.
+#[test]
+fn every_keep_reason_has_a_fixed_tag() {
+    let (item, blob) = (
+        ItemId::from_bytes([1; 32]),
+        ContentHash::from_bytes([2; 32]),
+    );
+    let tags: Vec<String> = KeepReason::ALL
+        .iter()
+        .map(|reason| reason.tag(item, blob))
+        .collect();
+    const ITEM_AND_BLOB: &str = concat!(
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "/0202020202020202020202020202020202020202020202020202020202020202"
+    );
+    let golden = ["own/", "custody/", "emergency/", "cache/"]
+        .map(|prefix| format!("{prefix}{ITEM_AND_BLOB}"));
+    assert_eq!(tags, golden);
+    for (reason, tag) in KeepReason::ALL.iter().zip(&golden) {
+        assert_eq!(reason.parse(tag), Some((item, blob)));
+    }
+}
+
 #[test]
 fn an_items_fingerprint_is_fixed() {
     assert_eq!(
@@ -285,6 +309,20 @@ fn every_community_value_is_fixed_json() {
         ProbeFailure::decode,
         &format!(r#"{{"item":"{ITEM_HEX}","blob":"{BLOB_HEX}","chunk":9,"in_a_row":2}}"#),
     );
+}
+
+/// A cleared community entry's value: no value of any community key reads
+/// from it, so a reader cannot take it for one.
+#[test]
+fn a_cleared_community_value_is_fixed_and_no_value() {
+    assert_eq!(distlib_core::community::CLEARED, b"null");
+    let cleared = distlib_core::community::CLEARED;
+    assert_eq!(Rating::decode(cleared), None);
+    assert_eq!(Review::decode(cleared), None);
+    assert_eq!(Bookmark::decode(cleared), None);
+    assert_eq!(Wish::decode(cleared), None);
+    assert_eq!(Comment::decode(cleared), None);
+    assert_eq!(ProbeFailure::decode(cleared), None);
 }
 
 #[test]

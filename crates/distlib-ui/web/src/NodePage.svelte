@@ -235,6 +235,8 @@
       <dd>{bytes(storage.own_bytes)}</dd>
       <dt>Kept for the group</dt>
       <dd>{bytes(storage.custody_bytes)}</dd>
+      <dt>Emergency copies</dt>
+      <dd>{bytes(storage.emergency_bytes)}</dd>
       <dt>Cache</dt>
       <dd>{bytes(storage.cache_bytes)}</dd>
     </dl>
@@ -244,7 +246,7 @@
         the limit, or lower this node's pledge.
       </p>
     {:else if storage.limit_bytes !== null}
-      <p class="hint">When there is no room, the cache goes first, what was used longest ago first.</p>
+      <p class="hint">When there is no room, the cache goes first: what has the most copies elsewhere, then what was used longest ago.</p>
     {/if}
     {#if status.pins.waiting_for_room > 0}
       {@const waiting = status.pins.waiting_for_room}

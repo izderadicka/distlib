@@ -28,7 +28,7 @@ use distlib_core::{
 };
 use distlib_custody::{
     COVERAGE_EVERY, Coverage, CoverageSources, Custody, CustodySources, PinManager, PinSources,
-    PledgedOnly, ProbeSources, Probes, Storage,
+    PledgedOnly, ProbeSources, Probes, Storage, StorageSources,
 };
 use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
@@ -566,9 +566,14 @@ fn set_once_the_group_is_known(
 fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
     let storage = Storage::new(
         inputs.config.storage.limit_bytes,
-        inputs.blobs.clone(),
-        inputs.store.clone(),
-        inputs.catalogue.holdings().clone(),
+        StorageSources {
+            me,
+            blobs: inputs.blobs.clone(),
+            store: inputs.store.clone(),
+            holdings: inputs.catalogue.holdings().clone(),
+            availability: inputs.availability.clone(),
+            membership: inputs.node.subscribe(),
+        },
     );
     let custody = Custody::start(
         me,

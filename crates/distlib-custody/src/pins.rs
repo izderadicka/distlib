@@ -1,23 +1,24 @@
 //! The pin manager (phase 5's D7): keeps what this node is custodian of with a
 //! `custody/` tag on each of the item's files, fetching what is not here
 //! within the storage limit, and lets go of what it no longer is, into the
-//! cache, once the item has `replicas` live copies elsewhere.
+//! cache, once `replicas` members obliged to keep the item hold it elsewhere.
 
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroUsize,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
 
 use distlib_consensus::{MembershipState, UpgradeRequired};
-use distlib_core::{ContentHash, Event, ItemId, KeepReason, MemberId};
+use distlib_core::{ContentHash, CustodyGroup, Event, ItemId, KeepReason, MemberId};
 use distlib_net::{Blobs, NetError};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Catalogue, Holdings, SyncError, availability::ask_order};
 use serde::Serialize;
 use tokio::{
     sync::{
+        Notify, Semaphore,
         broadcast::{self, error::RecvError},
         watch,
     },
@@ -29,7 +30,7 @@ use crate::{
     Custody, CustodyChange,
     emergency::Emergency,
     failed_copies,
-    storage::{Room, Storage, StorageError},
+    storage::{Room, Storage, StorageError, copies_elsewhere},
 };
 
 /// How long a fetch may go without a byte arriving before it is given up,
@@ -120,8 +121,15 @@ impl PinManager {
             availability,
             holdings,
             storage,
+            fetch_slots: Arc::new(Semaphore::new(max_fetches.get())),
         };
-        let emergency = Emergency::new(keeper.clone());
+        let room_made = Arc::new(Notify::new());
+        let emergency = Emergency::new(
+            keeper.clone(),
+            custody.clone(),
+            upgrade_required.clone(),
+            Arc::clone(&room_made),
+        );
         let emergency_events = events.resubscribe();
         let pins = Pins {
             keeper,
@@ -131,14 +139,15 @@ impl PinManager {
             max_fetches,
             counts: counts_sender,
             upgrade_required,
+            room_made,
         };
-        // Subscribed here, before the task runs: a pass that finishes while
-        // it starts is still heard.
-        let changes = custody.changes();
+        // Subscribed here, before the tasks run: a pass that finishes while
+        // they start is still heard.
+        let (changes, emergency_changes) = (custody.changes(), custody.changes());
         Self {
             tasks: Mutex::new(vec![
                 tokio::spawn(pins.run(changes, events)),
-                tokio::spawn(emergency.run(emergency_events)),
+                tokio::spawn(emergency.run(emergency_events, emergency_changes)),
                 tokio::spawn(following_failed_copies),
             ]),
             counts,
@@ -167,7 +176,8 @@ enum Pin {
     /// copies come and go and a fetch under way is never restarted. Among
     /// items with as many copies, the earliest `turn` goes first.
     Queued { turn: Turn },
-    /// Being fetched by `task`, and what happened meanwhile.
+    /// Being fetched by `task`, or waiting in it for a fetch slot an
+    /// emergency copy holds, and what happened meanwhile.
     Fetching {
         task: task::Id,
         /// The item changed: it is fetched again however this fetch ends,
@@ -212,6 +222,8 @@ struct Pins {
     max_fetches: NonZeroUsize,
     counts: watch::Sender<PinCounts>,
     upgrade_required: watch::Receiver<Option<UpgradeRequired>>,
+    /// Told when an emergency copy becomes cache, which is room to evict.
+    room_made: Arc<Notify>,
 }
 
 impl Pins {
@@ -272,6 +284,7 @@ impl Pins {
                     Ok((_, (item, kept))) => self.fetched(item, kept).await,
                     Err(error) => self.fetch_panicked(&error),
                 },
+                () = self.room_made.notified() => self.ask_again_for_room(),
             }
         }
     }
@@ -392,7 +405,7 @@ impl Pins {
         // Cloned rather than borrowed: the holders' lock is taken per item.
         let online = self.keeper.availability.online().borrow().clone();
         next_to_fetch(&self.pins, count, |item| {
-            self.keeper.live_copies(item, &online)
+            copies_elsewhere(&self.keeper.availability, self.keeper.me, item, &online)
         })
     }
 
@@ -487,12 +500,12 @@ impl Pins {
     async fn release_if_safe(&mut self, item: ItemId) {
         let behind_the_group = self.upgrade_required.borrow().is_some();
         if behind_the_group
-            || (self.keeper.holdings.holds(item) && !self.keeper.enough_copies_elsewhere(item))
+            || (self.keeper.holdings.holds(item) && !self.enough_copies_elsewhere(item).await)
         {
             self.pins.insert(item, Pin::Releasing);
             return;
         }
-        match self.keeper.release(item).await {
+        match self.keeper.move_to_cache(item, KeepReason::Custody).await {
             Ok(()) => {
                 self.pins.remove(&item);
                 tracing::debug!(%item, "no longer custodian; kept as cache");
@@ -505,8 +518,24 @@ impl Pins {
         }
     }
 
-    /// What waits for room is asked again: an item let go of into the cache
-    /// is room that can be evicted.
+    /// Whether `item`'s copies elsewhere make up for this one, counting only
+    /// the members obliged to keep it under the settled group. Not while
+    /// custody or the item is unknown here.
+    async fn enough_copies_elsewhere(&self, item: ItemId) -> bool {
+        let Some(group) = self.custody.group() else {
+            return false;
+        };
+        self.keeper
+            .enough_copies_elsewhere(item, &group)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%item, %error, "could not read an item to let go of; trying again when availability changes");
+                false
+            })
+    }
+
+    /// What waits for room is asked again: an item let go of into the cache,
+    /// or an emergency copy that became cache, is room that can be evicted.
     fn ask_again_for_room(&mut self) {
         for pin in self.pins.values_mut() {
             if *pin == Pin::WaitingForRoom {
@@ -596,6 +625,9 @@ pub(crate) struct Keeper {
     pub(crate) availability: Availability,
     pub(crate) holdings: Holdings,
     storage: Storage,
+    /// `max_fetches` places, shared by custody and the emergency copies, so
+    /// that copies which cannot be evicted arrive no faster than custody.
+    fetch_slots: Arc<Semaphore>,
 }
 
 impl Keeper {
@@ -608,7 +640,15 @@ impl Keeper {
     /// enough, custody evicts nothing and is not fetched; an emergency copy
     /// is fetched all the same, since a last copy matters more than the
     /// limit.
+    ///
+    /// Waits for one of the fetch slots first, and holds it throughout, so
+    /// nothing is tagged or evicted for an item still waiting its turn.
     pub(crate) async fn keep(&self, item_id: ItemId, reason: KeepReason) -> Result<(), KeepError> {
+        let _slot = self
+            .fetch_slots
+            .acquire()
+            .await
+            .expect("the fetch slots are never closed");
         let Some(stored) = self.store.item(item_id).await? else {
             return Ok(());
         };
@@ -656,9 +696,23 @@ impl Keeper {
         ask_order(&self.availability.holders(&item), &online, members)
     }
 
-    /// Whether `replicas` online members other than this node hold `item`.
-    /// Not while anyone online has not said what they hold.
-    fn enough_copies_elsewhere(&self, item: ItemId) -> bool {
+    /// Whether `item`'s copies elsewhere make up for this one under `group`:
+    /// those of the members obliged to keep it (5e-6). Not while the item is
+    /// unknown here.
+    pub(crate) async fn enough_copies_elsewhere(
+        &self,
+        item: ItemId,
+        group: &CustodyGroup,
+    ) -> Result<bool, StoreError> {
+        Ok(self.store.item(item).await?.is_some_and(|stored| {
+            self.enough_obliged_copies(item, &group.obliged_holders(&stored.custody_item()))
+        }))
+    }
+
+    /// Whether `replicas` online members of `obliged`, other than this node,
+    /// hold a real copy of `item`. Not while anyone online has not said what
+    /// they hold.
+    fn enough_obliged_copies(&self, item: ItemId, obliged: &[MemberId]) -> bool {
         let online = self.availability.online().borrow().clone();
         if online
             .iter()
@@ -666,27 +720,41 @@ impl Keeper {
         {
             return false;
         }
-        self.live_copies(item, &online)
-            >= usize::from(self.membership.borrow().settings().replicas.get())
-    }
-
-    /// How many members in `online`, other than this node, hold a real copy
-    /// of `item`.
-    fn live_copies(&self, item: ItemId, online: &BTreeSet<MemberId>) -> usize {
-        self.availability
-            .real_holders(&item)
+        let real_holders = self.availability.real_holders(&item);
+        let obliged_copies = obliged
             .iter()
-            .filter(|member| **member != self.me && online.contains(member))
-            .count()
+            .filter(|member| {
+                **member != self.me && online.contains(member) && real_holders.contains(member)
+            })
+            .count();
+        obliged_copies >= usize::from(self.membership.borrow().settings().replicas.get())
     }
 
-    /// Moves `item`'s blobs from custody to the cache: the cache's tag first,
-    /// so no collection in between finds them unkept. Arriving in the cache
-    /// counts as a use, so it is not the first to go.
-    async fn release(&self, item: ItemId) -> Result<(), KeepError> {
-        for hash in self.blobs.kept_for(KeepReason::Custody, item).await? {
+    /// The items this node keeps blobs of for `reason`.
+    pub(crate) async fn kept_items(
+        &self,
+        reason: KeepReason,
+    ) -> Result<BTreeSet<ItemId>, NetError> {
+        Ok(self
+            .blobs
+            .kept(reason)
+            .await?
+            .into_iter()
+            .map(|(item, _)| item)
+            .collect())
+    }
+
+    /// Moves `item`'s blobs kept for `from` to the cache: the cache's tag
+    /// first, so no collection in between finds them unkept. Arriving in the
+    /// cache counts as a use, so it is not the first to go.
+    pub(crate) async fn move_to_cache(
+        &self,
+        item: ItemId,
+        from: KeepReason,
+    ) -> Result<(), KeepError> {
+        for hash in self.blobs.kept_for(from, item).await? {
             self.blobs.keep(KeepReason::Cache, item, hash).await?;
-            self.blobs.release(KeepReason::Custody, item, hash).await?;
+            self.blobs.release(from, item, hash).await?;
         }
         self.store.mark_used(item, SystemTime::now()).await?;
         Ok(())
