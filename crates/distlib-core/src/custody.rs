@@ -113,6 +113,19 @@ impl CustodyGroup {
         ranked.into_iter().map(|ranked| ranked.member).collect()
     }
 
+    /// Who must keep a copy of `item`: its custodians, and its creators while
+    /// they are members. Only their copies make up for a custodian letting go.
+    pub fn obliged_holders(&self, item: &CustodyItem) -> Vec<MemberId> {
+        let mut obliged = self.custodians(item);
+        obliged.extend(
+            item.creators
+                .iter()
+                .copied()
+                .filter(|creator| self.is_member(*creator)),
+        );
+        obliged
+    }
+
     /// Whether `me` is one of `item`'s custodians: what
     /// [`Self::custodians`] says, without scoring every member.
     ///
@@ -190,12 +203,14 @@ impl CustodyGroup {
 
     /// How many custodians `item` has: one fewer while a creator is a member.
     fn slots(&self, item: &CustodyItem) -> usize {
-        let created_here = item.creators.iter().any(|creator| {
-            self.members
-                .binary_search_by_key(creator, |(member, _)| *member)
-                .is_ok()
-        });
+        let created_here = item.creators.iter().any(|creator| self.is_member(*creator));
         usize::from(self.replicas).saturating_sub(usize::from(created_here))
+    }
+
+    fn is_member(&self, member: MemberId) -> bool {
+        self.members
+            .binary_search_by_key(&member, |(member, _)| *member)
+            .is_ok()
     }
 
     /// The members ranked for `item`: everyone with a weight but its creators.

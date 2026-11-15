@@ -9,7 +9,8 @@
 //! 5c-1c's: custody that would not fit even so waits, evicting nothing,
 //! until letting go of another custody makes room. 5c-2b's: a copy that
 //! failed a probe does not count towards letting go. 5d-8b's: a node that
-//! waits for an upgrade lets go of nothing.
+//! waits for an upgrade lets go of nothing. 5e-6's: only copies someone
+//! must keep count towards letting go, not a cached one.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -602,6 +603,88 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
         .await;
 
     for node in [founder, custodian, other] {
+        node.stop().await;
+    }
+}
+
+/// **Only copies someone must keep count towards letting go** (5e-6). Four
+/// members; custody ranks the first after the founder before it pledges
+/// nothing and the second after, which has room for half a book. The third
+/// caches the book. Once the first pledges nothing, the second waits for
+/// room: the founder's copy and the cached one make two, as many as
+/// `replicas`, but only the founder must keep its own, so the first keeps
+/// custody. The second is restarted with room, keeps the book, and the first
+/// lets go.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_does_not_let_go_while_its_successor_waits_for_room() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let mut nodes = founded(
+        dir.path(),
+        &[100 * GB; 4],
+        [
+            Tuning::default(),
+            Tuning::default(),
+            Tuning {
+                storage_limit: NonZeroU64::new(BOOK as u64 / 2),
+                ..Tuning::default()
+            },
+            Tuning::default(),
+        ],
+        &settings(),
+    )
+    .await;
+    let bystander = nodes.pop().unwrap();
+    let successor = nodes.pop().unwrap();
+    let custodian = nodes.pop().unwrap();
+    let founder = nodes.pop().unwrap();
+    let core = [founder.id, custodian.id, successor.id, bystander.id];
+    let ranking = |custodians_pledge| {
+        let pledges = [100 * GB, custodians_pledge, 100 * GB, 100 * GB];
+        CustodyGroup::new(2, settings().weight_rule(), core.into_iter().zip(pledges))
+    };
+    let (before, after) = (ranking(100 * GB), ranking(0));
+    let (title, ranked) = a_title_ranked(
+        "Dune",
+        BOOK,
+        founder.id,
+        &[(&before, custodian.id), (&after, successor.id)],
+    );
+    let (item, file) = add_a_book(&founder, dir.path(), &title, BOOK).await;
+    assert_eq!(item, ranked, "the item ranked is the item added");
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+    until_projected(&bystander.runtime, item, 1, "the bystander").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&bystander.runtime, &bystander.key), item, &dest).await;
+    custodian.until_it_sees(bystander.id, item).await;
+
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+    successor.until_pins("waiting_for_room", 1).await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while only a cached copy made up the count"
+    );
+
+    let (successors_key, successors_dir) = successor.stop().await;
+    let successor = Node::start(successors_key, &core, successors_dir).await;
+    successor
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian
+        .until_keeps(false, KeepReason::Custody, item, file)
+        .await;
+    assert!(custodian.keeps(KeepReason::Cache, item, file).await);
+
+    for node in [founder, custodian, successor, bystander] {
         node.stop().await;
     }
 }
