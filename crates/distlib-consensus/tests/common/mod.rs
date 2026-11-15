@@ -65,6 +65,35 @@ impl Peer {
     /// Stops this node and starts it again on the same data directory, with
     /// the configuration [`Peer::start`] gives it.
     pub async fn restart(self, bootstrap: Vec<MemberId>) -> Self {
+        let (dir, secret) = self.stop_keeping_data().await;
+        let core = founding_core(&secret, &bootstrap);
+        Self::start_in(dir, secret, bootstrap, core, any_port()).await
+    }
+
+    /// [`Peer::restart`] on the socket address it had, so peers that dial the
+    /// address they knew reach it again.
+    pub async fn restart_in_place(self, bootstrap: Vec<MemberId>) -> Self {
+        let bind = self
+            .addr
+            .direct
+            .iter()
+            .copied()
+            .find(SocketAddr::is_ipv4)
+            .expect("bound on IPv4 localhost");
+        let (dir, secret) = self.stop_keeping_data().await;
+        let core = founding_core(&secret, &bootstrap);
+        Self::start_in(dir, secret, bootstrap, core, bind).await
+    }
+
+    /// Restarts with an explicitly selected core, preserving storage.
+    pub async fn restart_with_core(self, core: Vec<(MemberId, NodeAddr)>) -> Self {
+        let (dir, secret) = self.stop_keeping_data().await;
+        let bootstrap = core.iter().map(|(id, _)| *id).collect();
+        Self::start_in(dir, secret, bootstrap, core, any_port()).await
+    }
+
+    /// Stops this node and answers what a restart starts it again with.
+    async fn stop_keeping_data(self) -> (TempDir, SecretKey) {
         self.shutdown().await;
         let Self {
             secret,
@@ -77,25 +106,7 @@ impl Peer {
         // for as long as it is alive, and a second start would be refused it.
         drop((node, router));
         until_released(&_dir.path().join(distlib_consensus::RAFT_DB)).await;
-        let core = founding_core(&secret, &bootstrap);
-        Self::start_in(_dir, secret, bootstrap, core).await
-    }
-
-    /// Restarts with an explicitly selected core, preserving storage.
-    #[allow(dead_code)]
-    pub async fn restart_with_core(self, core: Vec<(MemberId, NodeAddr)>) -> Self {
-        self.shutdown().await;
-        let Self {
-            secret,
-            _dir,
-            node,
-            router,
-            ..
-        } = self;
-        drop((node, router));
-        until_released(&_dir.path().join(distlib_consensus::RAFT_DB)).await;
-        let bootstrap = core.iter().map(|(id, _)| *id).collect();
-        Self::start_in(_dir, secret, bootstrap, core).await
+        (_dir, secret)
     }
 
     /// Starts a node whose founding core group is stated separately.
@@ -109,7 +120,7 @@ impl Peer {
         bootstrap: Vec<MemberId>,
         core: Vec<(MemberId, NodeAddr)>,
     ) -> Self {
-        Self::start_in(TempDir::new().unwrap(), secret, bootstrap, core).await
+        Self::start_in(TempDir::new().unwrap(), secret, bootstrap, core, any_port()).await
     }
 
     async fn start_in(
@@ -117,6 +128,7 @@ impl Peer {
         secret: SecretKey,
         bootstrap: Vec<MemberId>,
         core: Vec<(MemberId, NodeAddr)>,
+        bind: SocketAddr,
     ) -> Self {
         init_logging();
         let id = MemberId::from(secret.public());
@@ -132,7 +144,7 @@ impl Peer {
             hooks.clone(),
             distlib_consensus::alpns(),
         )
-        .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .bind_addr(bind)
         .unwrap()
         .bind()
         .await
@@ -185,6 +197,11 @@ impl Peer {
             display_name: name.to_owned(),
         }
     }
+}
+
+/// Any free port on localhost.
+fn any_port() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
 /// Waits until nothing holds the Raft database at `path` open.
