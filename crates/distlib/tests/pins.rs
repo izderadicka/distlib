@@ -11,7 +11,8 @@
 //! failed a probe does not count towards letting go. 5d-8b's: a node that
 //! waits for an upgrade lets go of nothing. 5e-6's: only copies someone
 //! must keep count towards letting go, not a cached one. 5e-7's: an
-//! emergency copy stays, past the limit, until the custodians hold the item.
+//! emergency copy stays, past the limit, until the custodians hold the item,
+//! and is fetched within `max_fetches`.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -449,7 +450,44 @@ async fn a_founder_and_two_followers(dir: &Path, settings: &GroupSettings) -> (N
     }
     let third = followers.pop().unwrap();
     let second = followers.pop().unwrap();
+    until_each_ranks_the_other(&founder, [&second, &third], settings).await;
     (founder, second, third)
+}
+
+/// Waits until each follower's custody ranks the other too. Until then a
+/// follower whose view lacks the other is the only one ranked, so custodian
+/// of every item: one added meanwhile is fetched by both, and stays cached
+/// with the one that is not its custodian.
+async fn until_each_ranks_the_other(
+    founder: &Node,
+    followers: [&Node; 2],
+    settings: &GroupSettings,
+) {
+    let ids = [founder.id, followers[0].id, followers[1].id];
+    let group = CustodyGroup::new(2, settings.weight_rule(), ids.map(|id| (id, 100 * GB)));
+    for (follower, other) in [(followers[0], followers[1]), (followers[1], followers[0])] {
+        let probe = (0..=u8::MAX)
+            .map(|seed| CustodyItem {
+                item: ItemId::from_bytes([seed; 32]),
+                creators: vec![founder.id],
+                size_bytes: 0,
+            })
+            .find(|item| group.custodians(item) == [other.id])
+            .expect("some item is the other follower's");
+        tokio::time::timeout(SOON, async {
+            while follower.runtime.custody().custodians(&probe) != Some(vec![other.id]) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} never ranked {} within {SOON:?}",
+                follower.id.fmt_short(),
+                other.id.fmt_short()
+            )
+        });
+    }
 }
 
 /// **A node that waits for an upgrade lets go of nothing** (5d-8). As the
@@ -1374,6 +1412,77 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     node(&nodes, bystander)
         .until_keeps(true, KeepReason::Emergency, item, file)
         .await;
+}
+
+/// **Emergency copies take places among `max_fetches`** (5e-7). The
+/// custodian of three books has room for half of one, so all three are left
+/// with the founder's copy alone; the other, fetching one item at a time at
+/// the group's minimum, keeps an emergency copy of each, one after another:
+/// never two tagged while their bytes are still to come.
+#[tokio::test(flavor = "multi_thread")]
+async fn emergency_copies_are_fetched_within_max_fetches() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let one_at_a_time = Tuning {
+        transfer: TransferConfig {
+            max_fetches: NonZeroUsize::MIN,
+            max_download_rate: NonZeroU64::new(MIN_TRANSFER_RATE),
+            ..TransferConfig::default()
+        },
+        ..Tuning::default()
+    };
+    let half_a_book = Tuning {
+        storage_limit: NonZeroU64::new(BOOK as u64 / 2),
+        ..Tuning::default()
+    };
+    let tunings = [Tuning::default(), half_a_book, one_at_a_time];
+    let nodes = founded(dir.path(), &[100 * GB; 3], tunings, &settings).await;
+    let [founder, custodian, copier] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let group = CustodyGroup::new(
+        2,
+        settings.weight_rule(),
+        [founder.id, custodian.id, copier.id].map(|id| (id, 100 * GB)),
+    );
+    let mut books = Vec::new();
+    for prefix in ["First", "Second", "Third"] {
+        let (title, _) = a_title_ranked(prefix, BOOK, founder.id, &[(&group, custodian.id)]);
+        books.push(add_a_book(&founder, dir.path(), &title, BOOK).await);
+    }
+
+    let blobs = copier.runtime.blobs();
+    let mut most_at_once = 0;
+    tokio::time::timeout(SOON, async {
+        loop {
+            let tagged = blobs.kept(KeepReason::Emergency).await.unwrap();
+            let mut arriving = 0;
+            let mut kept = 0;
+            for book in &books {
+                if tagged.contains(book) {
+                    if blobs.has(book.1).await.unwrap() {
+                        kept += 1;
+                    } else {
+                        arriving += 1;
+                    }
+                }
+            }
+            most_at_once = most_at_once.max(arriving);
+            if kept == books.len() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the other keeps an emergency copy of every book");
+    assert_eq!(most_at_once, 1, "emergency copies fetched past max_fetches");
+
+    for node in [founder, custodian, copier] {
+        node.stop().await;
+    }
 }
 
 /// **An emergency copy stays past the storage limit until the custodian

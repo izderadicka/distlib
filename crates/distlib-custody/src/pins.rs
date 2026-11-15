@@ -18,7 +18,7 @@ use distlib_sync::{Availability, Catalogue, Holdings, SyncError, availability::a
 use serde::Serialize;
 use tokio::{
     sync::{
-        Notify,
+        Notify, Semaphore,
         broadcast::{self, error::RecvError},
         watch,
     },
@@ -121,6 +121,7 @@ impl PinManager {
             availability,
             holdings,
             storage,
+            fetch_slots: Arc::new(Semaphore::new(max_fetches.get())),
         };
         let room_made = Arc::new(Notify::new());
         let emergency = Emergency::new(
@@ -175,7 +176,8 @@ enum Pin {
     /// copies come and go and a fetch under way is never restarted. Among
     /// items with as many copies, the earliest `turn` goes first.
     Queued { turn: Turn },
-    /// Being fetched by `task`, and what happened meanwhile.
+    /// Being fetched by `task`, or waiting in it for a fetch slot an
+    /// emergency copy holds, and what happened meanwhile.
     Fetching {
         task: task::Id,
         /// The item changed: it is fetched again however this fetch ends,
@@ -623,6 +625,9 @@ pub(crate) struct Keeper {
     pub(crate) availability: Availability,
     pub(crate) holdings: Holdings,
     storage: Storage,
+    /// `max_fetches` places, shared by custody and the emergency copies, so
+    /// that copies which cannot be evicted arrive no faster than custody.
+    fetch_slots: Arc<Semaphore>,
 }
 
 impl Keeper {
@@ -635,7 +640,15 @@ impl Keeper {
     /// enough, custody evicts nothing and is not fetched; an emergency copy
     /// is fetched all the same, since a last copy matters more than the
     /// limit.
+    ///
+    /// Waits for one of the fetch slots first, and holds it throughout, so
+    /// nothing is tagged or evicted for an item still waiting its turn.
     pub(crate) async fn keep(&self, item_id: ItemId, reason: KeepReason) -> Result<(), KeepError> {
+        let _slot = self
+            .fetch_slots
+            .acquire()
+            .await
+            .expect("the fetch slots are never closed");
         let Some(stored) = self.store.item(item_id).await? else {
             return Ok(());
         };
