@@ -868,8 +868,8 @@ today's behaviour. Each was checked against `ed88649` and holds. #200 is not mer
 tests would pin the defects on master: each fix below takes its test from #200, reversed, which
 fails before the fix and passes after; #200 is closed once 5f-1 lands. Findings 4, 3 and 2 can
 lose an item or count a lost copy as real, so v1 fixes them, most dangerous first; finding 1 is
-fixed where it is cheap; findings 5 and 6 are carried forward. The designs are proposed, for Ivan,
-before code. The end-of-phase mutation pass follows 5f.
+fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. The designs
+below are decided (Ivan). The end-of-phase mutation pass follows 5f.
 
 - **5f-1 — the plan.** This section, its C-items and P5-64.
 - **5f-2 — an item is its born files (#200 finding 4).** One `role: content` record more than the
@@ -877,7 +877,7 @@ before code. The end-of-phase mutation pass follows 5f.
   held on every node, since its files no longer fingerprint to its id (5e-4's check): nobody
   announces it, and a custodian lets go with no copy elsewhere. Whoever wrote the record also
   becomes one of the item's creators, which counts as an obliged copy (5e-6) and changes custody's
-  slots. **Proposed:** the born files are the content files one author wrote whose set fingerprints
+  slots. **Decided:** the born files are the content files one author wrote whose set fingerprints
   to the id; holding, custody's fetch, the item's size and its creators count those only. Other
   content records are shown and count for nothing. `Keeper::keep` rechecks holdings with the item
   as the catalogue has it after the fetch, not as it read it before (finding 6). **Acceptance:**
@@ -887,20 +887,21 @@ before code. The end-of-phase mutation pass follows 5f.
 - **5f-3 — a creator's copy is checked like a custodian's (#200 finding 3).** 5e-6 counts a
   creator's copy as an obliged one, but probes and coverage judge custodians only: a creator's
   corrupted copy is never probed, still counts as real, and an old custodian can let go on it.
-  **Proposed:** probes and coverage judge `obliged_holders`, custodians and creators who are
+  **Decided:** probes and coverage judge `obliged_holders`, custodians and creators who are
   members, the set the hand-off counts. **Acceptance:** #200's
   `a_creator_that_announces_nothing_of_its_own_item_is_not_low`, reversed; a creator's copy is
   probed, and a failure of it stops it counting as real.
 - **5f-4 — a pass clears only a failure of the same item (#200 finding 2).** A probe that passes on
   another item clears this node's failure of the custodian, so a copy still lost counts as real
-  again. **Proposed:** a pass clears the failure only when it names the item that passed. A later
-  failure of another item still replaces the first, since a prober keeps one failure per custodian
-  (D12): C61, for Ivan to take into 5f-4 or leave. **Acceptance:** #200's
-  `a_pass_on_another_book_clears_the_failure_of_a_book_still_lost`, reversed.
+  again. **Decided:** a pass clears the failure only when it names the item that passed. A later
+  failure of another item no longer replaces the first (C61): a prober keeps one failure per
+  custodian and item, a key format change with its golden test; the window still ages each out. **Acceptance:** #200's
+  `a_pass_on_another_book_clears_the_failure_of_a_book_still_lost`, reversed; a failure of a second
+  item leaves the first in place.
 - **5f-5 — an item stays alone while its last holder is away (#200 finding 1).** A look lists an
   item only while exactly one online member holds it, so at a look with its holder offline the item
   drops out, and its delay starts over when the holder returns: a last copy on a node away once in
-  every delay never gets its emergency copy. **Proposed:** an item leaves the alone list only once it
+  every delay never gets its emergency copy. **Decided:** an item leaves the alone list only once it
   has a second copy; with its holder offline it keeps its time, and is due as soon as the holder
   is back if the delay has passed. That the time is forgotten at a restart is C60. **Acceptance:**
   #200's `a_last_holder_away_at_one_look_in_every_delay_never_makes_the_item_due` and
@@ -961,7 +962,7 @@ Every open C-number appears here once.
 | **C58** | **A re-check at a recorded chunk passed once on macOS CI** — `check_now_probes_a_member_at_once_and_records_how_it_came_out`: the custodian's chunk 500 overwritten, the third member's failure there read by the founder, and `group.check` still said `passed` (run 43581593608, PR #196). Either the check did not go to that chunk, or the custodian served it as valid; the code points to the second. Not reproduced in 108 local Linux runs, 72 of them under load. Its sibling, `a_failure_another_member_recorded_is_rechecked_at_its_chunk`, timed out once on macOS (run 41791183932) | **Closed (P5-62).** Neither: the founder's own failure, cleared a moment before, was back, and the check went to its chunk. An iroh-docs 0.101 delete is an empty entry, and before taking a peer's entry iroh-docs asks for a newer one reading without empty entries: a peer's older copy replaced the delete (pinned in `distlib-sync/tests/iroh_docs.rs`). Every catalogue clear now writes a newer `null` value instead. |
 | **C59** | **iroh-docs lets an older entry from a peer undo a delete** — the root of C58. `parents` in iroh-docs 0.101's `store/fs.rs`, which `insert_remote_entry` uses to look for a newer entry, calls `get_exact(…, false)`, leaving out the empty entries a delete writes. The one-line fix is `true` there. `distlib-sync/tests/iroh_docs.rs` reproduces it without a network | **Not filed upstream** (Ivan: an earlier issue there had no answer). Kept here for when it is worth filing; until then the catalogue clears with a newer value (P5-62), and that test fails once a fixed iroh-docs arrives. |
 | **C60** | **A restart forgets how long an item has been alone** — the emergency delay is kept in memory, so a node restarted more often than the delay never finds an item due (#200 finding 1; pinned by its `a_restart_forgets_how_long_an_item_has_been_alone`) | **Phase 6.** Persist the time each item has been alone, or start it from the holdings' history. |
-| **C61** | **A later failure of another item hides the first** — a prober keeps one failure per custodian (D12), so a failure of a second item replaces that of a first still lost, which counts as a real copy again (found planning 5f-4) | **For Ivan:** into 5f-4, keying a failure by item as well (a key format change, with its golden test), or phase 6. |
+| **C61** | **A later failure of another item hides the first** — a prober keeps one failure per custodian (D12), so a failure of a second item replaces that of a first still lost, which counts as a real copy again (found planning 5f-4) | **Into 5f-4** (Ivan): a failure is kept per custodian and item. |
 
 ---
 

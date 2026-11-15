@@ -353,7 +353,7 @@ a timeout or an untrusted referral must not discard acknowledged Raft state or i
 
 | # | §  | Doc says | We do | Why |
 |---|---|---|---|---|
-| P5-64 | phase 5's sub-phases; #200 | Phase 5 ends with 5e and the mutation pass | **A sub-phase 5f before the mutation pass**, from #200's review: 5f-2 an item is its born files (finding 4, and finding 6 with it), 5f-3 a creator's copy is checked (finding 3), 5f-4 a pass clears only its item's failure (finding 2), 5f-5 an item stays alone while its holder is away (finding 1). Finding 5 joins C52; a restart forgetting the delay is C60; one failure per custodian is C61. **#200 is not merged:** each fix takes its test from it, reversed | Findings 4, 3 and 2 lose an item or count a lost copy as real, which v1 should not ship with; tests that assert a defect would pin it on master |
+| P5-64 | phase 5's sub-phases; #200 | Phase 5 ends with 5e and the mutation pass | **A sub-phase 5f before the mutation pass**, from #200's review: 5f-2 an item is its born files (finding 4, and finding 6 with it), 5f-3 a creator's copy is checked (finding 3), 5f-4 a pass clears only its item's failure (finding 2), 5f-5 an item stays alone while its holder is away (finding 1). Finding 5 joins C52; a restart forgetting the delay is C60; one failure per custodian (C61) goes into 5f-4, keyed by item as well. **Decided** (Ivan), all four designs as proposed. **#200 is not merged:** each fix takes its test from it, reversed | Findings 4, 3 and 2 lose an item or count a lost copy as real, which v1 should not ship with; tests that assert a defect would pin it on master |
 
 ## Phase 6 — Hardening & release
 
