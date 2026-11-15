@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (P5-60).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -256,7 +256,8 @@ distlib gives each reason its own tag, one per content blob of the item:
 ```text
 own/<item>/<blob>        set by library.add, kept while the member is a member
 custody/<item>/<blob>    set and deleted by the pin manager
-cache/<item>/<blob>      set by library.download and by an emergency copy; evicted under pressure
+emergency/<item>/<blob>  set by an emergency copy, moved to cache/ once it is not needed (5e-7)
+cache/<item>/<blob>      set by library.download; evicted under pressure
 ```
 
 The tag *is* the reason: listing `custody/` is the pin manager's view of what it holds, and a blob
@@ -360,6 +361,8 @@ elsewhere.
 `emergency_after_secs`, each node checks whether it is the first member after the item's custodians
 in score order that is online and has room. If it is, it fetches the item as **cache**. When the
 custodians come back nothing is recomputed: the extra copy simply ages out of the cache.
+*(Changed in 5e-7a, P5-60: kept under its own mandatory reason, past the storage limit, and moved
+to the cache once the members obliged to keep the item hold `replicas` copies.)*
 
 - **Per observer, like availability itself.** Two nodes may disagree about who is online and both
   fetch, or neither; the next check settles it.
@@ -823,7 +826,11 @@ The end-of-phase mutation pass follows 5e.
   old one holding, at no new cost: the old one has the copy already. **Acceptance:** new custodians
   waiting for room and cached copies elsewhere — the old custodians keep custody; once the new ones
   hold the item, they let go.
-- **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** A new keep
+- **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** *Split in
+  two (P5-60):* **5e-7a** *(done; the move follows availability changes and recomputed custody, never while
+  waiting for an upgrade, and wakes custody waiting for room)* — the reason, the move to the cache,
+  the counts and the golden;
+  **5e-7b** — emergency fetches within `max_fetches`. A new keep
   reason, `Emergency`, mandatory: D6's copy is kept under it, past the storage limit if need be, and
   moved to the cache once 5e-6's test passes for the item. `node.status`, `distlib status` and the
   Node page count it apart from custody. The `emergency/` tag prefix gets a golden test, with the

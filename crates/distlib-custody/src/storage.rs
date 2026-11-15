@@ -76,7 +76,7 @@ impl Storage {
 
     /// Evicts cached items, least recently used first, until `files` of
     /// `item` fit under the limit alongside everything kept. Never `item`
-    /// itself, nor anything kept as own or custody. When even that is not
+    /// itself, nor anything kept for a mandatory reason. When even that is not
     /// enough, all that can go is evicted anyway: whoever wanted the room is
     /// likely to want it again.
     pub async fn make_room(

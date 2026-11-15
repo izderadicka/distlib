@@ -245,7 +245,7 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     let alone_from = Instant::now();
     next.runtime.shutdown().await;
     until("the member left keeps an emergency copy", || {
-        last.keeps(KeepReason::Cache, book, blob)
+        last.keeps(KeepReason::Emergency, book, blob)
     })
     .await;
     assert!(

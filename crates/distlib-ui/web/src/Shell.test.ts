@@ -33,6 +33,7 @@ const STATUS: NodeStatus = {
     limit_bytes: null,
     own_bytes: 0,
     custody_bytes: 0,
+    emergency_bytes: 0,
     cache_bytes: 0,
     mandatory_over_limit: false,
     last_collection_at: null,

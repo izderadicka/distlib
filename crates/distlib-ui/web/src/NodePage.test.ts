@@ -59,6 +59,7 @@ const STATUS: NodeStatus = {
     limit_bytes: 500_000_000_000,
     own_bytes: 1_500_000_000,
     custody_bytes: 120_000_000_000,
+    emergency_bytes: 3_000_000_000,
     cache_bytes: 7_000_000,
     mandatory_over_limit: false,
     last_collection_at: null,
@@ -298,6 +299,7 @@ describe("the node page", () => {
       Limit: "500 GB",
       "Added here": "1.5 GB",
       "Kept for the group": "120 GB",
+      "Emergency copies": "3 GB",
       Cache: "7 MB",
     });
     expect(screen.getByText(/the cache goes first/)).toBeTruthy();

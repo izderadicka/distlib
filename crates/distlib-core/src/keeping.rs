@@ -24,6 +24,9 @@ pub enum KeepReason {
     Own,
     /// This node is one of the item's custodians: kept while it is.
     Custody,
+    /// The item was down to one copy and this node fetched another (D6):
+    /// kept until the members obliged to keep it hold enough copies.
+    Emergency,
     /// This node downloaded the item, or was its custodian: kept while there
     /// is room.
     Cache,
@@ -31,10 +34,10 @@ pub enum KeepReason {
 
 impl KeepReason {
     /// Every reason, strongest first.
-    pub const ALL: [Self; 3] = [Self::Own, Self::Custody, Self::Cache];
+    pub const ALL: [Self; 4] = [Self::Own, Self::Custody, Self::Emergency, Self::Cache];
 
-    /// Whether what is kept for this reason stays when space is short: own
-    /// and custody do, the cache does not.
+    /// Whether what is kept for this reason stays when space is short: all
+    /// but the cache.
     pub fn is_mandatory(self) -> bool {
         self != Self::Cache
     }
@@ -50,6 +53,7 @@ impl KeepReason {
         match self {
             Self::Own => "own/",
             Self::Custody => "custody/",
+            Self::Emergency => "emergency/",
             Self::Cache => "cache/",
         }
     }
@@ -118,6 +122,7 @@ impl KeptBlobs {
                 *match reason {
                     KeepReason::Own => &mut usage.own_bytes,
                     KeepReason::Custody => &mut usage.custody_bytes,
+                    KeepReason::Emergency => &mut usage.emergency_bytes,
                     KeepReason::Cache => &mut usage.cache_bytes,
                 } += kept.bytes;
             }
@@ -126,7 +131,7 @@ impl KeptBlobs {
     }
 
     /// How many bytes keeping `blobs` as this node's own adds to what stays
-    /// when space is short: the blobs not kept as own or custody already.
+    /// when space is short: the blobs not kept for a mandatory reason already.
     /// Each blob is named once, as in an item's files.
     pub fn mandatory_growth(&self, blobs: impl IntoIterator<Item = (ContentHash, u64)>) -> u64 {
         blobs
@@ -155,8 +160,8 @@ impl KeptBlobs {
     /// The cached items to let go of for `needed` more bytes to fit under
     /// `limit`, least recently used first, and no more than that takes.
     ///
-    /// Never `keeping`, the item room is made for, nor an item also kept as
-    /// own or custody, which frees nothing. An item `last_used` has no time
+    /// Never `keeping`, the item room is made for, nor an item also kept for
+    /// a mandatory reason, which frees nothing. An item `last_used` has no time
     /// for counts as the oldest; ties go by item id. A blob two items share
     /// is freed only with the last of them.
     pub fn evictions(
@@ -218,13 +223,14 @@ impl KeptBlobs {
 pub struct StorageUse {
     pub own_bytes: u64,
     pub custody_bytes: u64,
+    pub emergency_bytes: u64,
     pub cache_bytes: u64,
 }
 
 impl StorageUse {
-    /// What stays when space is short: own and custody.
+    /// What stays when space is short: all but the cache.
     pub fn mandatory_bytes(self) -> u64 {
-        self.own_bytes + self.custody_bytes
+        self.own_bytes + self.custody_bytes + self.emergency_bytes
     }
 
     /// Everything kept.
@@ -248,6 +254,10 @@ mod tests {
         assert_eq!(
             KeepReason::Custody.tag(item, blob),
             format!("custody/{item}/{blob}")
+        );
+        assert_eq!(
+            KeepReason::Emergency.tag(item, blob),
+            format!("emergency/{item}/{blob}")
         );
         assert_eq!(
             KeepReason::Cache.tag(item, blob),
@@ -282,16 +292,19 @@ mod tests {
         kept.add(KeepReason::Custody, item(3), blob(2), 20);
         kept.add(KeepReason::Cache, item(3), blob(2), 20);
         kept.add(KeepReason::Cache, item(4), blob(3), 3);
+        kept.add(KeepReason::Emergency, item(5), blob(4), 7);
+        kept.add(KeepReason::Cache, item(5), blob(4), 7);
         assert_eq!(
             kept.usage(),
             StorageUse {
                 own_bytes: 100,
                 custody_bytes: 20,
+                emergency_bytes: 7,
                 cache_bytes: 3,
             }
         );
-        assert_eq!(kept.usage().mandatory_bytes(), 120);
-        assert_eq!(kept.usage().total_bytes(), 123);
+        assert_eq!(kept.usage().mandatory_bytes(), 127);
+        assert_eq!(kept.usage().total_bytes(), 130);
     }
 
     #[test]
@@ -352,6 +365,8 @@ mod tests {
     fn what_is_kept_otherwise_or_made_room_for_is_never_evicted() {
         let mut kept = KeptBlobs::default();
         kept.add(KeepReason::Own, item(1), blob(1), 10);
+        kept.add(KeepReason::Cache, item(5), blob(5), 10);
+        kept.add(KeepReason::Emergency, item(5), blob(5), 10);
         kept.add(KeepReason::Cache, item(2), blob(2), 10);
         kept.add(KeepReason::Custody, item(2), blob(2), 10);
         kept.add(KeepReason::Cache, item(3), blob(3), 10);
@@ -361,7 +376,7 @@ mod tests {
             plan,
             Evictions {
                 items: vec![item(4)],
-                short_by: 25,
+                short_by: 35,
             },
             "only 4 may go, and it is not enough"
         );
