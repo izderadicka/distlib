@@ -419,8 +419,8 @@ fn custodian_and_other(founder: &Node, second: Node, third: Node, item: ItemId) 
 
 /// A founder that is the whole core, and two followers, all three pledging
 /// the same; returns once both followers' custody counts their pledge.
-async fn a_founder_and_two_followers(dir: &Path) -> (Node, Node, Node) {
-    let mut nodes = founded(dir, &[100 * GB], [Tuning::default()], &settings()).await;
+async fn a_founder_and_two_followers(dir: &Path, settings: &GroupSettings) -> (Node, Node, Node) {
+    let mut nodes = founded(dir, &[100 * GB], [Tuning::default()], settings).await;
     let founder = nodes.pop().unwrap();
     let mut followers = Vec::new();
     for index in 1..=2 {
@@ -461,7 +461,7 @@ async fn a_founder_and_two_followers(dir: &Path) -> (Node, Node, Node) {
 async fn a_node_that_waits_for_an_upgrade_lets_go_of_nothing() {
     init_logging();
     let dir = TempDir::new().unwrap();
-    let (founder, second, third) = a_founder_and_two_followers(dir.path()).await;
+    let (founder, second, third) = a_founder_and_two_followers(dir.path(), &settings()).await;
     let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
     let (custodian, other) = custodian_and_other(&founder, second, third, item);
     custodian
@@ -479,6 +479,28 @@ async fn a_node_that_waits_for_an_upgrade_lets_go_of_nothing() {
         .await;
     custodian.until_custodian_of(0).await;
 
+    raise_the_protocol_past(&founder, &custodian).await;
+
+    let other = Node::follow(others_key, &founder, others_dir).await;
+    other
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(other.id, item).await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while waiting for an upgrade"
+    );
+
+    for node in [founder, custodian, other] {
+        node.stop().await;
+    }
+}
+
+/// Has `founder`, the whole core, raise the group's protocol past this build,
+/// and waits until `follower` stops for an upgrade.
+async fn raise_the_protocol_past(founder: &Node, follower: &Node) {
     for event in [
         MembershipEvent::ProtocolSupported {
             member: founder.id,
@@ -495,29 +517,128 @@ async fn a_node_that_waits_for_an_upgrade_lets_go_of_nothing() {
     }
     tokio::time::timeout(
         SOON,
-        custodian
+        follower
             .runtime
             .node()
             .subscribe_upgrade_required()
             .wait_for(Option::is_some),
     )
     .await
-    .expect("the custodian stops for an upgrade")
+    .unwrap_or_else(|_| panic!("{} never stopped for an upgrade", follower.id.fmt_short()))
     .unwrap();
+}
 
-    let other = Node::follow(others_key, &founder, others_dir).await;
-    other
+/// **A node that waits for an upgrade keeps its emergency copies** (5d-8,
+/// 5e-7). The custodian and the other are followers of a founder that is the
+/// whole core. The custodian stops, and after the delay the other keeps an
+/// emergency copy. The group raises its protocol past this build, so the
+/// other stops following; the custodian is back and holds the book, which
+/// would move the copy to the cache. It stays an emergency copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_waits_for_an_upgrade_keeps_its_emergency_copies() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let (founder, second, third) = a_founder_and_two_followers(dir.path(), &settings).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
         .until_keeps(true, KeepReason::Custody, item, file)
         .await;
-    custodian.until_it_sees(other.id, item).await;
-    // Time for the pin manager to act on it, had it been going to.
+    let (custodians_key, custodians_dir) = custodian.stop().await;
+    other
+        .until_keeps(true, KeepReason::Emergency, item, file)
+        .await;
+
+    raise_the_protocol_past(&founder, &other).await;
+    let custodian = Node::follow(custodians_key, &founder, custodians_dir).await;
+    other.until_it_sees(custodian.id, item).await;
+    // Time for the emergency task to act on it, had it been going to.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
-        custodian.keeps(KeepReason::Custody, item, file).await,
-        "let go of the book while waiting for an upgrade"
+        other.keeps(KeepReason::Emergency, item, file).await,
+        "moved the emergency copy to the cache while waiting for an upgrade"
     );
 
     for node in [founder, custodian, other] {
+        node.stop().await;
+    }
+}
+
+/// **An emergency copy is looked at again when custody is recomputed**
+/// (5e-7). Four members, the last pledging nothing at first; custody ranks
+/// the first after the founder, so the second is next. The first stops, and
+/// after the delay the second keeps an emergency copy. The third downloads
+/// the book, which obliges it to nothing, so the copy stays. The third then
+/// pledges, and custody moves to it: nobody's availability changes, but the
+/// group's obliged copies are now enough, and the copy moves to the cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_emergency_copy_moves_to_the_cache_when_a_holder_becomes_custodian() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let tunings = (0..4).map(|_| Tuning::default());
+    let mut nodes = founded(
+        dir.path(),
+        &[100 * GB, 100 * GB, 100 * GB, 0],
+        tunings,
+        &settings,
+    )
+    .await;
+    let bystander = nodes.pop().unwrap();
+    let copier = nodes.pop().unwrap();
+    let custodian = nodes.pop().unwrap();
+    let founder = nodes.pop().unwrap();
+    let ranking = |bystanders_pledge| {
+        let pledges = [100 * GB, 100 * GB, 100 * GB, bystanders_pledge];
+        let ids = [founder.id, custodian.id, copier.id, bystander.id];
+        CustodyGroup::new(2, settings.weight_rule(), ids.into_iter().zip(pledges))
+    };
+    let (before, after) = (ranking(0), ranking(1_000 * GB));
+    let (title, ranked) = a_title_ranked(
+        "Dune",
+        BOOK,
+        founder.id,
+        &[(&before, custodian.id), (&after, bystander.id)],
+    );
+    let (item, file) = add_a_book(&founder, dir.path(), &title, BOOK).await;
+    assert_eq!(item, ranked, "the item ranked is the item added");
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.stop().await;
+    copier
+        .until_keeps(true, KeepReason::Emergency, item, file)
+        .await;
+
+    until_projected(&bystander.runtime, item, 1, "the bystander").await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    download(&api(&bystander.runtime, &bystander.key), item, &dest).await;
+    copier.until_it_sees(bystander.id, item).await;
+    // Time for the emergency task to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        copier.keeps(KeepReason::Emergency, item, file).await,
+        "a cached copy, which nobody must keep, let the emergency copy go"
+    );
+
+    bystander
+        .call("group.pledge_set", json!({ "bytes": 1_000 * GB }))
+        .await;
+    bystander.until_custodian_of(1).await;
+    copier
+        .until_keeps(false, KeepReason::Emergency, item, file)
+        .await;
+    assert!(copier.keeps(KeepReason::Cache, item, file).await);
+
+    for node in [founder, copier, bystander] {
         node.stop().await;
     }
 }
@@ -1259,10 +1380,10 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
 /// holds the item** (D6, 5e-7). Both others have room for half a book: the
 /// custodian waits for room, so the founder's copy stays the only one, and
 /// after the delay the other makes the emergency copy all the same. A
-/// download there that needs the room is refused, and evicts nothing of it.
-/// The custodian, restarted with room, keeps the book: with the founder's,
-/// that is `replicas` copies someone must keep, and the emergency copy moves
-/// to the cache.
+/// smaller book the copier is custodian of waits for room there, and evicts
+/// nothing of it. The custodian, restarted with room, keeps the book: with
+/// the founder's, that is `replicas` copies someone must keep, so the
+/// emergency copy moves to the cache, and that is room for the one waiting.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_emergency_copy_stays_past_the_limit_until_the_custodian_holds_the_item() {
     init_logging();
@@ -1298,30 +1419,20 @@ async fn an_emergency_copy_stays_past_the_limit_until_the_custodian_holds_the_it
         .await;
     assert!(!custodian.keeps(KeepReason::Custody, item, file).await);
 
-    // A smaller book, which the custodian has room for and keeps, so it is
-    // never alone: the copier's download of it needs the emergency copy's room.
+    // A smaller book in the copier's custody needs the emergency copy's room.
+    // Left alone, the custodian makes an emergency copy of it: an
+    // availability change the copier looks at, with its own copy still needed.
     let quarter = BOOK / 4;
-    let (title, _) = a_title_ranked("Small", quarter, founder.id, &[(&group, custodian.id)]);
-    let (small, _) = add_a_book(&founder, dir.path(), &title, quarter).await;
-    until_projected(&copier.runtime, small, 1, "the copier").await;
-    // An availability change the copier looks at: the copy is still needed.
+    let (title, _) = a_title_ranked("Small", quarter, founder.id, &[(&group, copier.id)]);
+    let (small, small_file) = add_a_book(&founder, dir.path(), &title, quarter).await;
+    copier.until_pins("waiting_for_room", 1).await;
     copier.until_it_sees(custodian.id, small).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let dest = dir.path().join("downloads");
-    std::fs::create_dir_all(&dest).unwrap();
-    let refused = api(&copier.runtime, &copier.key)
-        .call(
-            "library.download",
-            Some(json!({ "item_id": small, "dest": &dest })),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("no room for this download"), "{refused}");
     assert!(
         copier.keeps(KeepReason::Emergency, item, file).await,
         "the emergency copy was evicted while it was still needed"
     );
+    assert!(!copier.keeps(KeepReason::Custody, small, small_file).await);
 
     let (custodians_key, custodians_dir) = custodian.stop().await;
     let custodian = Node::start(custodians_key, &core, custodians_dir).await;
@@ -1331,7 +1442,9 @@ async fn an_emergency_copy_stays_past_the_limit_until_the_custodian_holds_the_it
     copier
         .until_keeps(false, KeepReason::Emergency, item, file)
         .await;
-    assert!(copier.keeps(KeepReason::Cache, item, file).await);
+    copier
+        .until_keeps(true, KeepReason::Custody, small, small_file)
+        .await;
 
     for node in [founder, custodian, copier] {
         node.stop().await;

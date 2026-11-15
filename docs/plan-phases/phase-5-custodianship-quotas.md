@@ -827,7 +827,9 @@ The end-of-phase mutation pass follows 5e.
   waiting for room and cached copies elsewhere — the old custodians keep custody; once the new ones
   hold the item, they let go.
 - **5e-7 — the emergency copy stays while it is needed (#185 findings 3 and 7; Ivan).** *Split in
-  two (P5-60):* **5e-7a** *(done)* — the reason, the move to the cache, the counts and the golden;
+  two (P5-60):* **5e-7a** *(done; the move follows availability changes and recomputed custody, never while
+  waiting for an upgrade, and wakes custody waiting for room)* — the reason, the move to the cache,
+  the counts and the golden;
   **5e-7b** — emergency fetches within `max_fetches`. A new keep
   reason, `Emergency`, mandatory: D6's copy is kept under it, past the storage limit if need be, and
   moved to the cache once 5e-6's test passes for the item. `node.status`, `distlib status` and the

@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroUsize,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
 
@@ -18,6 +18,7 @@ use distlib_sync::{Availability, Catalogue, Holdings, SyncError, availability::a
 use serde::Serialize;
 use tokio::{
     sync::{
+        Notify,
         broadcast::{self, error::RecvError},
         watch,
     },
@@ -121,7 +122,13 @@ impl PinManager {
             holdings,
             storage,
         };
-        let emergency = Emergency::new(keeper.clone(), custody.clone());
+        let room_made = Arc::new(Notify::new());
+        let emergency = Emergency::new(
+            keeper.clone(),
+            custody.clone(),
+            upgrade_required.clone(),
+            Arc::clone(&room_made),
+        );
         let emergency_events = events.resubscribe();
         let pins = Pins {
             keeper,
@@ -131,14 +138,15 @@ impl PinManager {
             max_fetches,
             counts: counts_sender,
             upgrade_required,
+            room_made,
         };
-        // Subscribed here, before the task runs: a pass that finishes while
-        // it starts is still heard.
-        let changes = custody.changes();
+        // Subscribed here, before the tasks run: a pass that finishes while
+        // they start is still heard.
+        let (changes, emergency_changes) = (custody.changes(), custody.changes());
         Self {
             tasks: Mutex::new(vec![
                 tokio::spawn(pins.run(changes, events)),
-                tokio::spawn(emergency.run(emergency_events)),
+                tokio::spawn(emergency.run(emergency_events, emergency_changes)),
                 tokio::spawn(following_failed_copies),
             ]),
             counts,
@@ -212,6 +220,8 @@ struct Pins {
     max_fetches: NonZeroUsize,
     counts: watch::Sender<PinCounts>,
     upgrade_required: watch::Receiver<Option<UpgradeRequired>>,
+    /// Told when an emergency copy becomes cache, which is room to evict.
+    room_made: Arc<Notify>,
 }
 
 impl Pins {
@@ -272,6 +282,7 @@ impl Pins {
                     Ok((_, (item, kept))) => self.fetched(item, kept).await,
                     Err(error) => self.fetch_panicked(&error),
                 },
+                () = self.room_made.notified() => self.ask_again_for_room(),
             }
         }
     }
@@ -521,8 +532,8 @@ impl Pins {
             })
     }
 
-    /// What waits for room is asked again: an item let go of into the cache
-    /// is room that can be evicted.
+    /// What waits for room is asked again: an item let go of into the cache,
+    /// or an emergency copy that became cache, is room that can be evicted.
     fn ask_again_for_room(&mut self) {
         for pin in self.pins.values_mut() {
             if *pin == Pin::WaitingForRoom {
