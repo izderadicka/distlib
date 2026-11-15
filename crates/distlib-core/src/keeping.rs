@@ -9,7 +9,6 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
-    time::SystemTime,
 };
 
 use crate::{ContentHash, ItemId};
@@ -94,7 +93,7 @@ impl KeptBlob {
 /// The cached items to let go of, and whether that makes room.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evictions {
-    /// Least recently used first.
+    /// In the order they go.
     pub items: Vec<ItemId>,
     /// How many bytes are still over the limit once they are gone.
     pub short_by: u64,
@@ -158,18 +157,17 @@ impl KeptBlobs {
     }
 
     /// The cached items to let go of for `needed` more bytes to fit under
-    /// `limit`, least recently used first, and no more than that takes.
+    /// `limit`, the lowest `first_to_go` first, and no more than that takes.
     ///
     /// Never `keeping`, the item room is made for, nor an item also kept for
-    /// a mandatory reason, which frees nothing. An item `last_used` has no time
-    /// for counts as the oldest; ties go by item id. A blob two items share
-    /// is freed only with the last of them.
-    pub fn evictions(
+    /// a mandatory reason, which frees nothing. Ties go by item id. A blob two
+    /// items share is freed only with the last of them.
+    pub fn evictions<Order: Ord>(
         &self,
         keeping: ItemId,
         needed: u64,
         limit: u64,
-        last_used: impl Fn(ItemId) -> Option<SystemTime>,
+        first_to_go: impl Fn(ItemId) -> Order,
     ) -> Evictions {
         let mut cached: HashMap<ItemId, Vec<ContentHash>> = HashMap::new();
         let mut mandatory: HashSet<ItemId> = HashSet::new();
@@ -182,10 +180,10 @@ impl KeptBlobs {
                 }
             }
         }
-        let mut candidates: Vec<(Option<SystemTime>, ItemId)> = cached
+        let mut candidates: Vec<(Order, ItemId)> = cached
             .keys()
             .filter(|item| **item != keeping && !mandatory.contains(item))
-            .map(|item| (last_used(*item), *item))
+            .map(|item| (first_to_go(*item), *item))
             .collect();
         candidates.sort_unstable();
 
@@ -241,6 +239,8 @@ impl StorageUse {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn the_least_recently_used_go_first_and_no_more_than_needed() {
+    fn the_first_in_order_go_first_and_no_more_than_needed() {
         let mut kept = KeptBlobs::default();
         for byte in 1..=4 {
             kept.add(KeepReason::Cache, item(byte), blob(byte), 10);
@@ -371,7 +371,7 @@ mod tests {
         kept.add(KeepReason::Custody, item(2), blob(2), 10);
         kept.add(KeepReason::Cache, item(3), blob(3), 10);
         kept.add(KeepReason::Cache, item(4), blob(4), 10);
-        let plan = kept.evictions(item(3), 15, 20, |_| None);
+        let plan = kept.evictions(item(3), 15, 20, |_| ());
         assert_eq!(
             plan,
             Evictions {

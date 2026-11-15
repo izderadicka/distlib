@@ -12,7 +12,8 @@
 //! waits for an upgrade lets go of nothing. 5e-6's: only copies someone
 //! must keep count towards letting go, not a cached one. 5e-7's: an
 //! emergency copy stays, past the limit, until the custodians hold the item,
-//! and is fetched within `max_fetches`.
+//! and is fetched within `max_fetches`. 5e-8's: the cache goes first where
+//! the item has the most copies elsewhere.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -1160,6 +1161,75 @@ async fn a_download_evicts_the_oldest_cached_item_and_one_without_room_is_refuse
         "refused, with the cache kept for a download that will be asked for again"
     );
     assert!(second.keeps(KeepReason::Own, added, added_file).await);
+}
+
+/// **The cache goes first where the item has the most copies elsewhere**
+/// (5e-8), though used more recently. Nobody but the founder pledges, so no
+/// book has a custodian. The second member, with room for two and a half
+/// books, downloads the older book, then the newer, which the third downloads
+/// too; a third download evicts the newer, with two copies elsewhere, and
+/// keeps the older, with only the founder's. With as many copies the oldest
+/// goes first: the test above, every book there the founder's alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_evicts_the_cached_item_with_the_most_copies_elsewhere_first() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes_with(
+        dir.path(),
+        [100 * GB, 0, 0],
+        [
+            Tuning::default(),
+            Tuning {
+                storage_limit: NonZeroU64::new(2 * BOOK as u64 + BOOK as u64 / 2),
+                ..Tuning::default()
+            },
+            Tuning::default(),
+        ],
+    )
+    .await;
+    let mut books = Vec::new();
+    for title in ["Older", "Newer", "Wanted"] {
+        books.push(add_a_book(&founder, dir.path(), title, BOOK).await);
+    }
+    let [
+        (older, older_file),
+        (newer, newer_file),
+        (wanted, wanted_file),
+    ] = books[..]
+    else {
+        unreachable!("three books were added")
+    };
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    let (seconds, thirds) = (
+        api(&second.runtime, &second.key),
+        api(&third.runtime, &third.key),
+    );
+    for item in [older, newer, wanted] {
+        until_projected(&second.runtime, item, 1, "the second member").await;
+    }
+    download(&seconds, older, &dest).await;
+    download(&seconds, newer, &dest).await;
+    until_projected(&third.runtime, newer, 1, "the third member").await;
+    let thirds_dest = dest.join("third");
+    std::fs::create_dir_all(&thirds_dest).unwrap();
+    download(&thirds, newer, &thirds_dest).await;
+    second.until_it_sees(third.id, newer).await;
+
+    download(&seconds, wanted, &dest).await;
+
+    assert!(
+        !second.keeps(KeepReason::Cache, newer, newer_file).await,
+        "the newer book, with two copies elsewhere, stayed cached"
+    );
+    assert!(second.keeps(KeepReason::Cache, older, older_file).await);
+    assert!(second.keeps(KeepReason::Cache, wanted, wanted_file).await);
+
+    // They hold the runtimes' databases open.
+    drop((seconds, thirds));
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
 }
 
 /// The title of a book of `size` [`add_a_book`] would add through `founder`
