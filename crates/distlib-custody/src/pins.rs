@@ -30,7 +30,7 @@ use crate::{
     Custody, CustodyChange,
     emergency::Emergency,
     failed_copies,
-    storage::{Room, Storage, StorageError},
+    storage::{Room, Storage, StorageError, copies_elsewhere},
 };
 
 /// How long a fetch may go without a byte arriving before it is given up,
@@ -405,7 +405,7 @@ impl Pins {
         // Cloned rather than borrowed: the holders' lock is taken per item.
         let online = self.keeper.availability.online().borrow().clone();
         next_to_fetch(&self.pins, count, |item| {
-            self.keeper.live_copies(item, &online)
+            copies_elsewhere(&self.keeper.availability, self.keeper.me, item, &online)
         })
     }
 
@@ -728,16 +728,6 @@ impl Keeper {
             })
             .count();
         obliged_copies >= usize::from(self.membership.borrow().settings().replicas.get())
-    }
-
-    /// How many members in `online`, other than this node, hold a real copy
-    /// of `item`.
-    fn live_copies(&self, item: ItemId, online: &BTreeSet<MemberId>) -> usize {
-        self.availability
-            .real_holders(&item)
-            .iter()
-            .filter(|member| **member != self.me && online.contains(member))
-            .count()
     }
 
     /// The items this node keeps blobs of for `reason`.

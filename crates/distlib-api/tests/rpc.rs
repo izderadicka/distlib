@@ -28,6 +28,7 @@ use distlib_core::{
 };
 use distlib_custody::{
     Coverage, CoverageSources, Custody, CustodySources, PinCounts, ProbeSources, Probes, Storage,
+    StorageSources,
 };
 use distlib_net::{AllowlistHooks, Transport, allowlist, endpoint::configure};
 use distlib_store::{
@@ -294,6 +295,7 @@ impl Harness {
         let custody = custody(&node, &store, &tasks);
         let (coverage, probes) =
             coverage_and_probes(&custody, &node, &store, &blobs, &availability, &catalogue);
+        let storage = unlimited_storage(&node, &blobs, &store, &catalogue, &availability);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -313,12 +315,7 @@ impl Harness {
                 coverage,
                 probes,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
-                storage: Storage::new(
-                    None,
-                    blobs.clone(),
-                    store.clone(),
-                    catalogue.holdings().clone(),
-                ),
+                storage,
                 collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
@@ -491,6 +488,7 @@ impl Harness {
             &availability,
             &catalogue,
         );
+        let storage = unlimited_storage(&nodes[0], &blobs, &store, &catalogue, &availability);
         let server = serve(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             Api {
@@ -510,12 +508,7 @@ impl Harness {
                 coverage,
                 probes,
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
-                storage: Storage::new(
-                    None,
-                    blobs.clone(),
-                    store.clone(),
-                    catalogue.holdings().clone(),
-                ),
+                storage,
                 collections: tokio::sync::watch::channel(None).1,
             },
             SecretString::from(token.clone()),
@@ -2700,4 +2693,25 @@ async fn a_raise_waits_for_a_majority_of_the_core_and_says_so() {
     );
 
     harness.shutdown().await;
+}
+
+/// Storage with no limit, which then evicts nothing.
+fn unlimited_storage(
+    node: &MembershipNode,
+    blobs: &distlib_net::Blobs,
+    store: &Store,
+    catalogue: &Catalogue,
+    availability: &Availability,
+) -> Storage {
+    Storage::new(
+        None,
+        StorageSources {
+            me: node.id(),
+            blobs: blobs.clone(),
+            store: store.clone(),
+            holdings: catalogue.holdings().clone(),
+            availability: availability.clone(),
+            membership: node.subscribe(),
+        },
+    )
 }
