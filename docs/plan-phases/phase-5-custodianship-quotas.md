@@ -854,9 +854,9 @@ The end-of-phase mutation pass follows 5e.
   `may_speak_raft`, since its view predates D, and only the leader replicates the entry that would
   admit D: C is stuck for as long as D leads, enforcing a stale allowlist meanwhile. A node in the
   middle of its own promotion refuses a leader promoted after `Promotion::voters` was fixed, for the
-  same reason. *Done (P5-63): the review's option 1.* A seated voter that has heard from no leader
-  for three election timeouts fetches the signed log past what it applied from the voters it knows,
-  as a follower does, folds it onto a copy of its membership, and admits for Raft whoever that log
+  same reason. *Done (P5-63): the review's option 1.* A seated node that has accepted no `AppendEntries`
+  for three election timeouts, and does not lead, fetches the signed log past what it applied from
+  the voters it knows and those they point to, as a follower does, folds it onto a copy of its membership, and admits for Raft whoever that log
   names as core (`raft::catch_up`); the allowlist hook and `may_speak_raft` both read it, so
   authority stays with the signed log. **Acceptance:** the review's reproduction, restarting C on
   the same address: C catches up under leader D (`core_turnover.rs`).

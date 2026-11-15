@@ -168,7 +168,7 @@ pub struct RaftProtocol {
     /// The only voters this node will accept before Raft knows its own.
     trusted: TrustedCore,
     /// The core the signed log names past what this node applied, while it
-    /// hears from no leader.
+    /// hears from no leader; told of each `AppendEntries` accepted.
     catch_up: CatchUp,
 }
 
@@ -225,7 +225,17 @@ impl RaftProtocol {
         match request {
             Request::Retired => Response::Retired(self.seat.raft().is_none()),
             Request::ForgetMe => Response::Forgotten(false),
-            Request::AppendEntries(rpc) => Response::AppendEntries(raft.append_entries(rpc).await),
+            Request::AppendEntries(rpc) => {
+                let response = raft.append_entries(rpc).await;
+                // A stale leader's is answered with the newer vote: not heard.
+                if response
+                    .as_ref()
+                    .is_ok_and(|accepted| !matches!(accepted, AppendEntriesResponse::HigherVote(_)))
+                {
+                    self.catch_up.heard_from_leader();
+                }
+                Response::AppendEntries(response)
+            }
             Request::Vote(rpc) => Response::Vote(raft.vote(rpc).await),
             Request::InstallSnapshot(rpc) => {
                 Response::InstallSnapshot(raft.install_snapshot(rpc).await)

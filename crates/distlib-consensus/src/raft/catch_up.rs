@@ -5,11 +5,13 @@
 //! that member as a leader: it decides who may speak Raft, and who may connect
 //! at all, from its own view, which predates the newcomer. Only the leader
 //! replicates, so it would never receive the entries that make the newcomer
-//! legitimate to it. So a seated voter that has heard from no leader for
-//! [`LEADERLESS_AFTER`] fetches the signed log past what it applied from the
-//! voters it knows, folds it onto a copy of its membership, and lets whoever
-//! that names as core speak Raft to it, until its own state machine has
-//! applied that far.
+//! legitimate to it. A node in the middle of its own promotion refuses a
+//! leader promoted after it sat down the same way, as a learner that goes on
+//! naming its old leader. So a seated node that has accepted no
+//! `AppendEntries` for [`UNHEARD_AFTER`], and does not lead, fetches the signed
+//! log past what it applied from every voter it knows or is pointed to, folds
+//! it onto a copy of its membership, and lets whoever that names as core speak
+//! Raft to it, until its own state machine has applied that far.
 //!
 //! **Authority stays with the signed log.** The fold is the one every node
 //! runs, so a source can withhold entries, which leaves this node as stuck as
@@ -22,7 +24,7 @@ use std::{
 };
 
 use distlib_core::{MemberId, NodeAddr, RawMemberId};
-use openraft::{Raft, metrics::RaftServerMetrics};
+use openraft::Raft;
 use tokio::sync::watch;
 
 use crate::{
@@ -36,9 +38,9 @@ use crate::{
     state::PROTOCOL_MAX,
 };
 
-/// How long a seated voter goes without a leader before it reads the log
-/// itself: a few election timeouts, so an ordinary election never does.
-pub(crate) const LEADERLESS_AFTER: Duration =
+/// How long a seated node goes without an `AppendEntries` before it reads the
+/// log itself: a few election timeouts, so an ordinary election never does.
+pub(crate) const UNHEARD_AFTER: Duration =
     Duration::from_millis(3 * crate::node::ELECTION_TIMEOUT_MAX);
 
 /// The core the signed log names past what this node has applied, and how
@@ -59,13 +61,20 @@ impl CatchUpView {
     }
 }
 
-/// The catch-up view of this node, shared by what decides who may speak Raft.
+/// The catch-up view of this node, shared by what decides who may speak Raft,
+/// and word of each `AppendEntries` it accepts.
 #[derive(Debug, Clone)]
-pub(crate) struct CatchUp(watch::Sender<Option<CatchUpView>>);
+pub(crate) struct CatchUp {
+    view: watch::Sender<Option<CatchUpView>>,
+    heard: watch::Sender<()>,
+}
 
 impl Default for CatchUp {
     fn default() -> Self {
-        Self(watch::channel(None).0)
+        Self {
+            view: watch::channel(None).0,
+            heard: watch::channel(()).0,
+        }
     }
 }
 
@@ -73,7 +82,7 @@ impl CatchUp {
     /// Whether the view admits `peer` to a node that has applied up to
     /// `applied`.
     pub(crate) fn admits(&self, peer: &MemberId, applied: u64) -> bool {
-        self.0
+        self.view
             .borrow()
             .as_ref()
             .is_some_and(|view| view.admits(peer, applied))
@@ -81,7 +90,7 @@ impl CatchUp {
 
     /// The members the view admits to a node that has applied up to `applied`.
     pub(crate) fn admitted(&self, applied: u64) -> Vec<MemberId> {
-        self.0.borrow().as_ref().map_or_else(Vec::new, |view| {
+        self.view.borrow().as_ref().map_or_else(Vec::new, |view| {
             view.core
                 .iter()
                 .filter(|peer| view.admits(peer, applied))
@@ -92,15 +101,22 @@ impl CatchUp {
 
     /// Each new view, for whoever turns it into a transport exception.
     pub(crate) fn subscribe(&self) -> watch::Receiver<Option<CatchUpView>> {
-        self.0.subscribe()
+        self.view.subscribe()
+    }
+
+    /// A leader's `AppendEntries` was accepted: someone this node admits
+    /// leads, and is replicating to it.
+    pub(crate) fn heard_from_leader(&self) {
+        self.heard.send_replace(());
     }
 
     fn clear(&self) {
-        self.0.send_if_modified(|current| current.take().is_some());
+        self.view
+            .send_if_modified(|current| current.take().is_some());
     }
 
     fn set(&self, view: CatchUpView) {
-        self.0.send_if_modified(|current| {
+        self.view.send_if_modified(|current| {
             let changed = current.as_ref() != Some(&view);
             *current = Some(view);
             changed
@@ -108,7 +124,7 @@ impl CatchUp {
     }
 }
 
-/// What reading the log for a leaderless voter needs.
+/// What reading the log for an unheard voter needs.
 pub(crate) struct Catching {
     pub(crate) me: MemberId,
     pub(crate) raft: Raft<TypeConfig>,
@@ -118,15 +134,24 @@ pub(crate) struct Catching {
     pub(crate) catch_up: CatchUp,
 }
 
-/// For as long as this node has `raft`: each time it has heard from no
-/// leader for [`LEADERLESS_AFTER`], reads the log past what it applied and
-/// publishes the core it names.
-pub(crate) async fn catch_up_when_leaderless(catching: Catching) {
+/// For as long as this node is seated: each time it has accepted no
+/// `AppendEntries` for [`UNHEARD_AFTER`] and does not lead, reads the log past
+/// what it applied and publishes the core it names.
+pub(crate) async fn catch_up_when_unheard(catching: Catching) {
     // A view from an earlier seat would outlive it: a promotion replays the
     // log from the start, so this node would be behind it again.
     catching.catch_up.clear();
-    let mut server = catching.raft.server_metrics();
-    while until_leaderless(&mut server).await {
+    let mut heard = catching.catch_up.heard.subscribe();
+    loop {
+        match tokio::time::timeout(UNHEARD_AFTER, heard.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => return,
+            Err(_) => {}
+        }
+        let me = RawMemberId::from(catching.me);
+        if catching.raft.server_metrics().borrow().current_leader == Some(me) {
+            continue;
+        }
         if let Some(view) = read_ahead(&catching).await {
             tracing::info!(
                 at = view.at,
@@ -138,34 +163,17 @@ pub(crate) async fn catch_up_when_leaderless(catching: Catching) {
     }
 }
 
-/// Waits until no leader has been heard for [`LEADERLESS_AFTER`]. `false`
-/// once the Raft is gone.
-async fn until_leaderless(
-    server: &mut watch::Receiver<RaftServerMetrics<RawMemberId, NodeAddr>>,
-) -> bool {
-    loop {
-        if server
-            .wait_for(|seen| seen.current_leader.is_none())
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        match tokio::time::timeout(
-            LEADERLESS_AFTER,
-            server.wait_for(|seen| seen.current_leader.is_some()),
-        )
-        .await
-        {
-            Err(_) => return true,
-            Ok(Err(_)) => return false,
-            Ok(Ok(_)) => {}
-        }
-    }
+/// The signed log past what this node applied, folded onto its membership.
+struct Reading {
+    membership: MembershipState,
+    cursor: u64,
 }
 
-/// The core the signed log names past what this node applied, from the first
-/// voter it knows that has more; `None` if none has.
+/// The core the signed log names past what this node applied, read from every
+/// voter it knows and every voter they point to; `None` if none has more.
+///
+/// One fold across all of them, so a retired voter's prefix and its
+/// successors' entries add up, as a follower's reads do.
 async fn read_ahead(catching: &Catching) -> Option<CatchUpView> {
     let Catching {
         me,
@@ -175,72 +183,76 @@ async fn read_ahead(catching: &Catching) -> Option<CatchUpView> {
         ..
     } = catching;
     let applied = state_machine.last_applied_index();
+    let mut reading = Reading {
+        membership: state_machine.membership(),
+        cursor: applied,
+    };
     let mut candidates: VecDeque<(MemberId, NodeAddr)> =
         follower::read(sources).candidates(*me).into();
-    candidates.extend(
-        state_machine
-            .membership()
-            .core()
-            .iter()
-            .filter(|(id, _)| *id != me)
-            .map(|(id, addr)| (*id, addr.clone())),
-    );
-    let mut asked = BTreeSet::new();
+    candidates.extend(core_of(&reading.membership));
+    let mut asked = BTreeSet::from([*me]);
     while let Some((member, addr)) = candidates.pop_front() {
         if !asked.insert(member) {
             continue;
         }
-        let mut membership = state_machine.membership();
-        let at = fold_from(client, member, &addr, applied, &mut membership).await;
-        if at > applied {
-            return Some(CatchUpView {
-                core: membership.core().keys().copied().collect(),
-                at,
-            });
-        }
+        candidates.extend(reading.fold_from(client, member, &addr).await);
+        candidates.extend(core_of(&reading.membership));
     }
-    None
+    (reading.cursor > applied).then(|| CatchUpView {
+        core: reading.membership.core().keys().copied().collect(),
+        at: reading.cursor,
+    })
 }
 
-/// Folds onto `membership` what `member` serves past `cursor`, every page of
-/// it, and answers the last index folded.
-async fn fold_from(
-    client: &MemberlogClient,
-    member: MemberId,
-    addr: &NodeAddr,
-    mut cursor: u64,
-    membership: &mut MembershipState,
-) -> u64 {
-    loop {
-        let fetched = match client.fetch(member, addr, cursor).await {
-            Ok(fetched) => fetched,
-            Err(error) => {
-                tracing::debug!(%error, "could not read the log from a voter to catch up; trying another");
-                return cursor;
+fn core_of(membership: &MembershipState) -> Vec<(MemberId, NodeAddr)> {
+    membership
+        .core()
+        .iter()
+        .map(|(member, addr)| (*member, addr.clone()))
+        .collect()
+}
+
+impl Reading {
+    /// Folds what `member` serves past the cursor, every page of it, and
+    /// answers the voters it points to.
+    async fn fold_from(
+        &mut self,
+        client: &MemberlogClient,
+        member: MemberId,
+        addr: &NodeAddr,
+    ) -> Vec<(MemberId, NodeAddr)> {
+        loop {
+            let fetched = match client.fetch(member, addr, self.cursor).await {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    tracing::debug!(%error, "could not read the log from a voter to catch up; trying another");
+                    return Vec::new();
+                }
+            };
+            let (up_to, events, more, source) = match fetched {
+                Fetched::Entries {
+                    up_to,
+                    events,
+                    more,
+                    source,
+                } => (up_to, events, more, source),
+                Fetched::Redirect(source) => return source.core,
+                Fetched::NoGroup => return Vec::new(),
+            };
+            for (index, event) in &events {
+                // Past what this build speaks, the core it would name is unknown.
+                if self.membership.protocol() > PROTOCOL_MAX {
+                    return Vec::new();
+                }
+                if let Err(error) = self.membership.apply(*index, event) {
+                    tracing::debug!(%index, %error, "the fold refuses an event read to catch up; skipping it");
+                }
+                self.cursor = *index;
             }
-        };
-        let Fetched::Entries {
-            up_to,
-            events,
-            more,
-            ..
-        } = fetched
-        else {
-            return cursor;
-        };
-        for (index, event) in &events {
-            // Past what this build speaks, the core it would name is unknown.
-            if membership.protocol() > PROTOCOL_MAX {
-                return cursor;
+            self.cursor = self.cursor.max(up_to);
+            if !more {
+                return source.core;
             }
-            if let Err(error) = membership.apply(*index, event) {
-                tracing::debug!(%index, %error, "the fold refuses an event read to catch up; skipping it");
-            }
-            cursor = *index;
-        }
-        cursor = cursor.max(up_to);
-        if !more {
-            return cursor;
         }
     }
 }

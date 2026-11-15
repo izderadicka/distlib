@@ -1347,11 +1347,11 @@ struct Role {
 }
 
 impl Role {
-    /// What a voter runs for as long as it holds `raft`: putting the log's
-    /// core group into effect, and reading the log itself whenever it hears
-    /// from no leader. One task, so that standing down stops both.
+    /// What a seated node runs for as long as it holds `raft`: putting the
+    /// log's core group into effect, and reading the log itself whenever it
+    /// hears from no leader. One task, so that standing down stops both.
     fn voting(&self, raft: Raft<TypeConfig>) -> impl Future<Output = ()> + use<> {
-        let catching = catch_up::catch_up_when_leaderless(catch_up::Catching {
+        let catching = catch_up::catch_up_when_unheard(catch_up::Catching {
             me: self.me,
             raft: raft.clone(),
             state_machine: self.state_machine.clone(),
