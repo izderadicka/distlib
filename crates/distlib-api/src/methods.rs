@@ -6,7 +6,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error as _,
     iter,
     path::{Path, PathBuf},
@@ -1047,19 +1047,21 @@ impl Api {
         if growth > 0 && requirement.standing() == PledgeStanding::FarUnder {
             return Err(Error::failed(requirement.far_under("adding these files")));
         }
-        let mut answer = match existing {
-            Some(existing) => self.add_missing_files(item, &existing).await?,
-            None => self.write_new_item(item, params).await?,
-        };
-        answer["under_pledged"] = requirement.under_pledged();
-        // After the write, so a refused or failed add leaves nothing kept.
+        // Kept before the item is written, so the catalogue never names files
+        // nothing keeps (#185). An add that fails or stops in between leaves
+        // tags of an item nobody can see, let go of at the next start, when no
+        // other add can need them.
         for file in &imported {
             self.blobs
                 .keep(KeepReason::Own, id, file.hash)
                 .await
                 .map_err(net_error)?;
         }
-        // The projection rechecked it before these tags, when it was not kept.
+        let mut answer = match existing {
+            Some(existing) => self.add_missing_files(item, &existing).await?,
+            None => self.write_new_item(item, params).await?,
+        };
+        answer["under_pledged"] = requirement.under_pledged();
         self.recheck_holdings(id).await;
         self.make_room_for_add(id, &imported).await;
         Ok(answer)
@@ -1156,6 +1158,62 @@ impl Api {
             .fingerprint()
             .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
         Ok((item, imported))
+    }
+
+    /// Lets go of the own tags of every item the catalogue has no entry of:
+    /// adds that stopped between keeping their files and writing (#185).
+    /// Before the first call is served, so no add is half done; a failure is
+    /// logged, and costs only space until the next start.
+    pub(crate) async fn release_unpublished_own(&self) {
+        let items: BTreeSet<ItemId> = match self.blobs.kept(KeepReason::Own).await {
+            Ok(kept) => kept.into_iter().map(|(item, _)| item).collect(),
+            Err(error) => {
+                tracing::warn!(%error, "could not list what this node keeps as its own");
+                return;
+            }
+        };
+        if items.is_empty() {
+            return;
+        }
+        // Own tags mean a group, whose catalogue opens shortly after start.
+        self.catalogue.ready().await;
+        for item in items {
+            match self.release_own_if_unpublished(item).await {
+                Ok(true) => {
+                    tracing::info!(%item, "let go of the files of an add that stopped before it was written")
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%item, %error, "could not let go of an unwritten add's files")
+                }
+            }
+        }
+    }
+
+    /// Lets go of `item`'s own tags if the catalogue has no entry of it; says
+    /// whether it did. An item written in part keeps them.
+    async fn release_own_if_unpublished(&self, item: ItemId) -> Result<bool, Error> {
+        if self
+            .catalogue
+            .item(item)
+            .await
+            .map_err(sync_error)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        for hash in self
+            .blobs
+            .kept_for(KeepReason::Own, item)
+            .await
+            .map_err(net_error)?
+        {
+            self.blobs
+                .release(KeepReason::Own, item, hash)
+                .await
+                .map_err(net_error)?;
+        }
+        Ok(true)
     }
 
     /// Writes the files of `item` that `existing`, at the same id, lacks, and
