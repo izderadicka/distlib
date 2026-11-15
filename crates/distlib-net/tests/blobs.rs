@@ -655,9 +655,10 @@ async fn each_kept_blob_counts_once_under_its_strongest_reason() {
     let endpoint = endpoint(SecretKey::generate(), Vec::new()).await;
     let blobs = Blobs::new(&store, &endpoint);
     let (one, other) = (ItemId::from_bytes([1; 32]), ItemId::from_bytes([2; 32]));
-    let (first, second) = (
+    let (first, second, third) = (
         added(&store, b"first").await,
         added(&store, b"second").await,
+        added(&store, b"emergency").await,
     );
     let absent = ContentHash::from_bytes([9; 32]);
     blobs.keep(KeepReason::Own, one, first).await.unwrap();
@@ -668,12 +669,15 @@ async fn each_kept_blob_counts_once_under_its_strongest_reason() {
         .await
         .unwrap();
     blobs.keep(KeepReason::Cache, other, absent).await.unwrap();
+    blobs.keep(KeepReason::Emergency, one, third).await.unwrap();
+    blobs.keep(KeepReason::Cache, other, third).await.unwrap();
 
     assert_eq!(
         blobs.kept_blobs().await.unwrap().usage(),
         StorageUse {
             own_bytes: 5,
             custody_bytes: 6,
+            emergency_bytes: 9,
             cache_bytes: 0,
         }
     );

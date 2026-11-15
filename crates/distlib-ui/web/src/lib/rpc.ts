@@ -71,9 +71,11 @@ export interface Storage {
   own_bytes: number;
   /** What it keeps for the group's custody. */
   custody_bytes: number;
+  /** Copies of items left with one copy elsewhere, kept until their custodians hold them again. */
+  emergency_bytes: number;
   /** What it downloaded or kept after custody, evicted when space is short. */
   cache_bytes: number;
-  /** Own and custody alone over the limit: nothing left to evict. */
+  /** What is not cache over the limit on its own: nothing left to evict. */
   mandatory_over_limit: boolean;
   /** When the last garbage collection pass began, in microseconds since the epoch. */
   last_collection_at: number | null;

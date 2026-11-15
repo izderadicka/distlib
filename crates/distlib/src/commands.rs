@@ -2067,13 +2067,16 @@ fn print_storage(storage: &Value) {
         .as_u64()
         .map_or_else(|| "no limit".to_owned(), |limit| format!("limit {limit}"));
     let over = if storage["mandatory_over_limit"].as_bool().unwrap_or(false) {
-        " — own and custody alone are over the limit"
+        " — what is not cache is over the limit on its own"
     } else {
         ""
     };
     println!(
-        "storage     {} own, {} custody, {} cache bytes; {limit}{over}",
-        storage["own_bytes"], storage["custody_bytes"], storage["cache_bytes"]
+        "storage     {} own, {} custody, {} emergency, {} cache bytes; {limit}{over}",
+        storage["own_bytes"],
+        storage["custody_bytes"],
+        storage["emergency_bytes"],
+        storage["cache_bytes"]
     );
 }
 

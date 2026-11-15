@@ -67,6 +67,7 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
             "limit_bytes": 1_000,
             "own_bytes": 600,
             "custody_bytes": 0,
+            "emergency_bytes": 0,
             "cache_bytes": 0,
             "mandatory_over_limit": false,
             "last_collection_at": null,

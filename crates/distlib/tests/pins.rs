@@ -10,7 +10,8 @@
 //! until letting go of another custody makes room. 5c-2b's: a copy that
 //! failed a probe does not count towards letting go. 5d-8b's: a node that
 //! waits for an upgrade lets go of nothing. 5e-6's: only copies someone
-//! must keep count towards letting go, not a cached one.
+//! must keep count towards letting go, not a cached one. 5e-7's: an
+//! emergency copy stays, past the limit, until the custodians hold the item.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -126,16 +127,6 @@ impl Node {
     async fn keeps(&self, reason: KeepReason, item: ItemId, file: ContentHash) -> bool {
         let blobs = self.runtime.blobs();
         blobs.kept(reason).await.unwrap().contains(&(item, file)) && blobs.has(file).await.unwrap()
-    }
-
-    /// Whether it has a last-used time for `item`.
-    async fn counts_as_used(&self, item: ItemId) -> bool {
-        self.runtime
-            .store()
-            .last_used()
-            .await
-            .unwrap()
-            .contains_key(&item)
     }
 
     /// Waits until it keeps `file` of `item` for `reason`, or no longer does.
@@ -920,8 +911,8 @@ async fn what_a_node_serves_is_limited_to_no_less_than_the_groups_minimum() {
     }
 }
 
-/// Whether `node`'s storage status says own and custody alone are over its
-/// limit.
+/// Whether `node`'s storage status says what is not cache is over its limit
+/// on its own.
 async fn over_the_limit(node: &Node) -> bool {
     node.call("node.status", json!({})).await["storage"]["mandatory_over_limit"] == json!(true)
 }
@@ -1235,29 +1226,24 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     for index in [copier, bystander] {
         assert!(
             !node(&nodes, index)
-                .keeps(KeepReason::Cache, item, file)
+                .keeps(KeepReason::Emergency, item, file)
                 .await,
             "member {index} copied a book that was never alone"
         );
     }
 
     // The other away too, for longer than the delay: the next in score
-    // order copies, counted as used. A holder back within the delay is
-    // `AloneItems`'s test: a restarted node's holdings take as long to reach
-    // the others.
+    // order copies. A holder back within the delay is `AloneItems`'s test: a
+    // restarted node's holdings take as long to reach the others.
     let _second_away = nodes[custodians[1]].take().unwrap().stop().await;
     node(&nodes, copier)
-        .until_keeps(true, KeepReason::Cache, item, file)
+        .until_keeps(true, KeepReason::Emergency, item, file)
         .await;
-    assert!(
-        node(&nodes, copier).counts_as_used(item).await,
-        "an emergency copy is counted as used"
-    );
     // Long enough for a copy the bystander began alongside to land.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         !node(&nodes, bystander)
-            .keeps(KeepReason::Cache, item, file)
+            .keeps(KeepReason::Emergency, item, file)
             .await
     );
 
@@ -1265,16 +1251,20 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     // after it copies.
     let _founder_away = nodes[0].take().unwrap().stop().await;
     node(&nodes, bystander)
-        .until_keeps(true, KeepReason::Cache, item, file)
+        .until_keeps(true, KeepReason::Emergency, item, file)
         .await;
 }
 
-/// **An emergency copy is made past the storage limit**, where custody
-/// waits. Both others have room for half a book: the custodian waits for
-/// room, so the founder's copy stays the only one, and after the delay the
-/// other makes the emergency copy all the same.
+/// **An emergency copy stays past the storage limit until the custodian
+/// holds the item** (D6, 5e-7). Both others have room for half a book: the
+/// custodian waits for room, so the founder's copy stays the only one, and
+/// after the delay the other makes the emergency copy all the same. A
+/// download there that needs the room is refused, and evicts nothing of it.
+/// The custodian, restarted with room, keeps the book: with the founder's,
+/// that is `replicas` copies someone must keep, and the emergency copy moves
+/// to the cache.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_emergency_copy_goes_past_the_limit_where_custody_waits() {
+async fn an_emergency_copy_stays_past_the_limit_until_the_custodian_holds_the_item() {
     init_logging();
     let dir = TempDir::new().unwrap();
     let settings = GroupSettings {
@@ -1288,30 +1278,62 @@ async fn an_emergency_copy_goes_past_the_limit_where_custody_waits() {
     let tunings = [Tuning::default(), half_a_book(), half_a_book()];
     let nodes = founded(dir.path(), &[100 * GB; 3], tunings, &settings).await;
     let [founder, second, third] = <[Node; 3]>::try_from(nodes).ok().unwrap();
+    let core = [founder.id, second.id, third.id];
+    let group = CustodyGroup::new(2, settings.weight_rule(), core.map(|id| (id, 100 * GB)));
     let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
-    let group = CustodyGroup::new(
-        2,
-        settings.weight_rule(),
-        [founder.id, second.id, third.id].map(|id| (id, 100 * GB)),
-    );
     let ranked = CustodyItem {
         item,
         creators: vec![founder.id],
         size_bytes: 0,
     };
     let (custodian, copier) = if group.custodians(&ranked) == [second.id] {
-        (&second, &third)
+        (second, third)
     } else {
-        (&third, &second)
+        (third, second)
     };
 
     custodian.until_pins("waiting_for_room", 1).await;
     copier
-        .until_keeps(true, KeepReason::Cache, item, file)
+        .until_keeps(true, KeepReason::Emergency, item, file)
         .await;
     assert!(!custodian.keeps(KeepReason::Custody, item, file).await);
 
-    for node in [founder, second, third] {
+    // A smaller book, which the custodian has room for and keeps, so it is
+    // never alone: the copier's download of it needs the emergency copy's room.
+    let quarter = BOOK / 4;
+    let (title, _) = a_title_ranked("Small", quarter, founder.id, &[(&group, custodian.id)]);
+    let (small, _) = add_a_book(&founder, dir.path(), &title, quarter).await;
+    until_projected(&copier.runtime, small, 1, "the copier").await;
+    // An availability change the copier looks at: the copy is still needed.
+    copier.until_it_sees(custodian.id, small).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let dest = dir.path().join("downloads");
+    std::fs::create_dir_all(&dest).unwrap();
+    let refused = api(&copier.runtime, &copier.key)
+        .call(
+            "library.download",
+            Some(json!({ "item_id": small, "dest": &dest })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("no room for this download"), "{refused}");
+    assert!(
+        copier.keeps(KeepReason::Emergency, item, file).await,
+        "the emergency copy was evicted while it was still needed"
+    );
+
+    let (custodians_key, custodians_dir) = custodian.stop().await;
+    let custodian = Node::start(custodians_key, &core, custodians_dir).await;
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    copier
+        .until_keeps(false, KeepReason::Emergency, item, file)
+        .await;
+    assert!(copier.keeps(KeepReason::Cache, item, file).await);
+
+    for node in [founder, custodian, copier] {
         node.stop().await;
     }
 }

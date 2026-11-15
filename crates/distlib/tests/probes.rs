@@ -277,7 +277,7 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
     let emergency_copy = || async {
         let blobs = other.runtime.blobs();
         blobs
-            .kept(KeepReason::Cache)
+            .kept(KeepReason::Emergency)
             .await
             .unwrap()
             .contains(&(book, blob))

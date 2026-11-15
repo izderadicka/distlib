@@ -235,6 +235,8 @@
       <dd>{bytes(storage.own_bytes)}</dd>
       <dt>Kept for the group</dt>
       <dd>{bytes(storage.custody_bytes)}</dd>
+      <dt>Emergency copies</dt>
+      <dd>{bytes(storage.emergency_bytes)}</dd>
       <dt>Cache</dt>
       <dd>{bytes(storage.cache_bytes)}</dd>
     </dl>

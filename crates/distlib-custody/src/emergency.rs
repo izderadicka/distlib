@@ -1,7 +1,9 @@
 //! The emergency copy (D6): an item down to one live copy for the group's
-//! `emergency_after_secs` is fetched, as cache, by the first member after its
-//! custodians in score order that is online and does not hold it. A copy that
-//! failed a probe is not a live one (D11).
+//! `emergency_after_secs` is fetched by the first member after its custodians
+//! in score order that is online and does not hold it. A copy that failed a
+//! probe is not a live one (D11). It is kept, past the storage limit if need
+//! be, until the members obliged to keep the item hold enough copies (5e-6),
+//! and then moved to the cache (5e-7).
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may
@@ -9,7 +11,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use distlib_core::{Event, ItemId, KeepReason, MemberId};
@@ -21,6 +23,7 @@ use tokio::{
 };
 
 use crate::{
+    Custody,
     pins::{AVAILABILITY_GATHERED_FOR, KeepError, Keeper},
     service::custody_group,
 };
@@ -104,13 +107,16 @@ impl AloneItems {
 /// The task's state.
 pub(crate) struct Emergency {
     keeper: Keeper,
+    /// The settled group, which says who is obliged to keep an item.
+    custody: Custody,
     alone: AloneItems,
 }
 
 impl Emergency {
-    pub(crate) fn new(keeper: Keeper) -> Self {
+    pub(crate) fn new(keeper: Keeper, custody: Custody) -> Self {
         Self {
             keeper,
+            custody,
             alone: AloneItems::default(),
         }
     }
@@ -164,9 +170,11 @@ impl Emergency {
         )
     }
 
-    /// Brings the items alone up to date, and starts a copy of each one due
-    /// that is this node's to make.
+    /// Brings the items alone up to date, starts a copy of each one due that
+    /// is this node's to make, and moves to the cache the copies no longer
+    /// needed.
     async fn look(&mut self, copies: &mut JoinSet<(ItemId, Result<(), KeepError>)>) {
+        self.move_unneeded_copies_to_cache().await;
         let online = self.keeper.availability.online().borrow().clone();
         let holders: HashMap<ItemId, MemberId> = self
             .keeper
@@ -185,11 +193,43 @@ impl Emergency {
                     tracing::info!(%item, holder = %holder.fmt_short(), "one copy left for too long; keeping an emergency copy");
                     self.alone.copying(item);
                     let keeper = self.keeper.clone();
-                    copies.spawn(async move { (item, copy(&keeper, item).await) });
+                    copies.spawn(
+                        async move { (item, keeper.keep(item, KeepReason::Emergency).await) },
+                    );
                 }
                 Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(%item, %error, "could not work out whose emergency copy an item is; asked again at the next look");
+                }
+            }
+        }
+    }
+
+    /// Moves each emergency copy whose item has enough copies elsewhere, of
+    /// the members obliged to keep it, to the cache.
+    async fn move_unneeded_copies_to_cache(&self) {
+        let Some(group) = self.custody.group() else {
+            return;
+        };
+        let items = match self.keeper.kept_items(KeepReason::Emergency).await {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!(%error, "could not list the emergency copies; asked again at the next look");
+                return;
+            }
+        };
+        for item in items {
+            let moved = match self.keeper.enough_copies_elsewhere(item, &group).await {
+                Ok(true) => self.keeper.move_to_cache(item, KeepReason::Emergency).await,
+                Ok(false) => continue,
+                Err(error) => Err(error.into()),
+            };
+            match moved {
+                Ok(()) => {
+                    tracing::info!(%item, "the item has its copies again; its emergency copy is now cache")
+                }
+                Err(error) => {
+                    tracing::warn!(%item, %error, "could not move an emergency copy to the cache; asked again at the next look")
                 }
             }
         }
@@ -220,13 +260,6 @@ impl Emergency {
         }
         self.alone.copied(item, copied.is_ok());
     }
-}
-
-/// Keeps `item` as cache, counted as used first so it is never the first to
-/// go, not even just after it lands.
-async fn copy(keeper: &Keeper, item: ItemId) -> Result<(), KeepError> {
-    keeper.store.mark_used(item, SystemTime::now()).await?;
-    keeper.keep(item, KeepReason::Cache).await
 }
 
 #[cfg(test)]

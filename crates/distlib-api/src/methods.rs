@@ -210,8 +210,9 @@ impl Api {
             "limit_bytes": self.storage.limit(),
             "own_bytes": usage.own_bytes,
             "custody_bytes": usage.custody_bytes,
+            "emergency_bytes": usage.emergency_bytes,
             "cache_bytes": usage.cache_bytes,
-            // Own and custody alone over the limit: nothing left to evict.
+            // What is not cache over the limit on its own: nothing left to evict.
             "mandatory_over_limit": self
                 .storage
                 .limit()
@@ -1067,7 +1068,7 @@ impl Api {
         Ok(answer)
     }
 
-    /// Refuses `item` when keeping its files as own would grow own and custody
+    /// Refuses `item` when keeping its files as own would grow what is not cache
     /// past the storage limit. An add that grows them by nothing goes through,
     /// even when they are over it already.
     async fn check_room_for(&self, item: &Item) -> Result<(), Error> {
