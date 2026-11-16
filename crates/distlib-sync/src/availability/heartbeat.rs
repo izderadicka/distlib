@@ -33,7 +33,7 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use tokio::{
-    sync::{Notify, broadcast, watch},
+    sync::{broadcast, watch},
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
@@ -43,6 +43,7 @@ use super::{
     Holdings,
     holders::{Heard, Holders},
     online::{MAX_INTERVAL, Online},
+    rejoin::rejoin_while_alone,
     statement::Statement,
 };
 use crate::error::{Result, SyncError};
@@ -326,9 +327,17 @@ async fn join_when_founded(joining: Joining) {
     };
     tracing::debug!(%group, "joined the availability topic");
     let (sender, receiver) = topic.split();
-    let neighbour_up = Notify::new();
+    // Held here, so it outlives both halves that read it.
+    let (neighbours, neighbour_count) = watch::channel(0);
 
     tokio::join!(
+        rejoin_while_alone(
+            me,
+            transport.clone(),
+            sender.clone(),
+            membership.clone(),
+            neighbour_count.clone(),
+        ),
         beat(
             Beating {
                 sender,
@@ -341,7 +350,7 @@ async fn join_when_founded(joining: Joining) {
                 holdings,
                 said,
             },
-            &neighbour_up,
+            neighbour_count,
         ),
         listen(
             Listening {
@@ -355,7 +364,7 @@ async fn join_when_founded(joining: Joining) {
                 holders,
                 events,
             },
-            &neighbour_up,
+            &neighbours,
         ),
     );
 }
@@ -375,9 +384,10 @@ struct Beating {
 
 /// Beats until aborted, or until this node stops saying where it is.
 ///
-/// Also whenever a neighbour comes up, which has not heard this node yet —
-/// the first beat of all goes out before anyone is connected, to nobody.
-async fn beat(beating: Beating, neighbour_up: &Notify) {
+/// Also whenever the topic's neighbours change: one that comes up has not
+/// heard this node yet, and the first beat of all goes out before anyone is
+/// connected, to nobody.
+async fn beat(beating: Beating, mut neighbours: watch::Receiver<usize>) {
     let Beating {
         sender,
         secret,
@@ -433,7 +443,8 @@ async fn beat(beating: Beating, neighbour_up: &Notify) {
         let due = Instant::now() + jittered(stretched);
         tokio::select! {
             () = tokio::time::sleep_until(due) => {}
-            () = neighbour_up.notified() => {}
+            // Cannot fail: the sender outlives this loop.
+            _ = neighbours.changed() => {}
             moved = own_address.changed() => if moved.is_err() {
                 tracing::error!("this node no longer says where it is; beating no more");
                 return;
@@ -506,7 +517,10 @@ struct Listening {
 /// Base lists are fetched, and taken into the map, by tasks of their own, never
 /// in this loop: a slow or unreachable sender must not hold up every other beat
 /// and every expiry. The tasks end with the loop.
-async fn listen(listening: Listening, neighbour_up: &Notify) {
+///
+/// Says how many neighbours the topic has on `neighbours` as they change, for
+/// the beat and for [`rejoin_while_alone`].
+async fn listen(listening: Listening, neighbours: &watch::Sender<usize>) {
     let Listening {
         mut receiver,
         me,
@@ -554,10 +568,11 @@ async fn listen(listening: Listening, neighbour_up: &Notify) {
                         ),
                     }
                 }
-                Some(Ok(GossipEvent::NeighborUp(_))) => neighbour_up.notify_one(),
-                // Neighbours going, and beats dropped before they were read:
-                // every beat is whole on its own, so the next one makes up for
-                // whatever was missed.
+                Some(Ok(GossipEvent::NeighborUp(_) | GossipEvent::NeighborDown(_))) => {
+                    neighbours.send_replace(receiver.neighbors().count());
+                }
+                // Beats dropped before they were read: every beat is whole on
+                // its own, so the next one makes up for whatever was missed.
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
                     tracing::warn!(%error, "the availability topic failed; hearing no more");

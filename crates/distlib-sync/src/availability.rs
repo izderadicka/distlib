@@ -31,6 +31,7 @@ mod ask_order;
 mod heartbeat;
 mod holders;
 mod online;
+mod rejoin;
 mod statement;
 
 pub use ask_order::ask_order;
