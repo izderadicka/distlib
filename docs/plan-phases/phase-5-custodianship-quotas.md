@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (P5-63).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (P5-64).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -787,7 +787,7 @@ the catalogue and custody: copies counted as protection that nothing obliges any
 finding was checked against `ce9d3f5` and still holds. What v1 needs is below, smallest first; the
 rest is carried forward (C51–C57), #185's finding 4 stays C41 and its finding 8 joins C1 (P5-57).
 The two designs, 5e-6 to 5e-8 (decided) and 5e-9 (proposed), are discussed with Ivan before code.
-The end-of-phase mutation pass follows 5e.
+The end-of-phase mutation pass follows 5f.
 
 - **5e-1 — the plan.** This section, its C-items and P5-57.
 - **5e-2 — a node starts as core only with Raft state (#194 finding 2).** *Done (P5-58): only when
@@ -861,6 +861,61 @@ The end-of-phase mutation pass follows 5e.
   authority stays with the signed log. **Acceptance:** the review's reproduction, restarting C on
   the same address: C catches up under leader D (`core_turnover.rs`).
 
+### 5f — the review in #200, and the availability topic's rejoin (5 PRs)
+
+#200 holds a review after #185: six findings in custody, five with a test that passes by asserting
+today's behaviour. Each was checked against `ed88649` and holds. #200 is not merged, since its
+tests would pin the defects on master: each fix below takes its test from #200, reversed, which
+fails before the fix and passes after; #200 is closed once 5f-1 lands. Findings 4, 3 and 2 can
+lose an item or count a lost copy as real, so v1 fixes them, most dangerous first; finding 1 is
+fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. 5f-6, found on
+#207's CI, goes first: it makes custody tests flake. The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f.
+
+- **5f-1 — the plan.** This section, its C-items and P5-64.
+- **5f-2 — an item is its born files (#200 finding 4).** One `role: content` record more than the
+  item was born with, which any member can write, and which a newer build may, makes the item not
+  held on every node, since its files no longer fingerprint to its id (5e-4's check): nobody
+  announces it, and a custodian lets go with no copy elsewhere. Whoever wrote the record also
+  becomes one of the item's creators, which counts as an obliged copy (5e-6) and changes custody's
+  slots. **Decided:** the born files are the content files one author wrote whose set fingerprints
+  to the id; holding, custody's fetch, the item's size and its creators count those only. Other
+  content records are shown and count for nothing. `Keeper::keep` rechecks holdings with the item
+  as the catalogue has it after the fetch, not as it read it before (finding 6). **Acceptance:**
+  #200's `one_more_content_record_makes_a_whole_item_not_held` and
+  `one_stray_content_record_lets_a_custodian_go_without_copies_elsewhere`, reversed, the latter
+  without its reindex.
+- **5f-3 — a creator's copy is checked like a custodian's (#200 finding 3).** 5e-6 counts a
+  creator's copy as an obliged one, but probes and coverage judge custodians only: a creator's
+  corrupted copy is never probed, still counts as real, and an old custodian can let go on it.
+  **Decided:** probes and coverage judge `obliged_holders`, custodians and creators who are
+  members, the set the hand-off counts. **Acceptance:** #200's
+  `a_creator_that_announces_nothing_of_its_own_item_is_not_low`, reversed; a creator's copy is
+  probed, and a failure of it stops it counting as real.
+- **5f-4 — a pass clears only a failure of the same item (#200 finding 2).** A probe that passes on
+  another item clears this node's failure of the custodian, so a copy still lost counts as real
+  again. **Decided:** a pass clears the failure only when it names the item that passed. A later
+  failure of another item no longer replaces the first (C61): a prober keeps one failure per
+  custodian and item, a key format change with its golden test; the window still ages each out. **Acceptance:** #200's
+  `a_pass_on_another_book_clears_the_failure_of_a_book_still_lost`, reversed; a failure of a second
+  item leaves the first in place.
+- **5f-5 — an item stays alone while its last holder is away (#200 finding 1).** A look lists an
+  item only while exactly one online member holds it, so at a look with its holder offline the item
+  drops out, and its delay starts over when the holder returns: a last copy on a node away once in
+  every delay never gets its emergency copy. **Decided:** an item leaves the alone list only once it
+  has a second copy; with its holder offline it keeps its time, and is due as soon as the holder
+  is back if the delay has passed. That the time is forgotten at a restart is C60. **Acceptance:**
+  #200's `a_last_holder_away_at_one_look_in_every_delay_never_makes_the_item_due` and
+  `an_item_whose_last_holder_is_offline_is_not_listed_at_all`, reversed.
+- **5f-6 — the availability topic joins again while it has no neighbours (phase 4's D7(c)).**
+  The topic is joined once, with the members reachable at that moment, and never again: D7(c)'s
+  `join_peers` at zero neighbours was not built, and no delta says so. A node restarted while its
+  peers' addresses are stale, or not yet known, hears no heartbeat, so it cannot tell who holds
+  what or who is online: on #207's macOS CI a restarted custodian never let go of a book whose new
+  custodian held it, in `a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere`.
+  **Decided:** while the topic has no neighbour, it calls `join_peers` with every reachable
+  member, backing off, and again as soon as an address is learned. **Acceptance:** a node
+  restarted with stale addresses for its peers hears their heartbeats again.
+
 ---
 
 ## Carried forward — take or defer, explicitly
@@ -907,7 +962,7 @@ Every open C-number appears here once.
 | **C49** | **An add refused by the quota imports its files first** — `library.add` hashes each file into the blob store before it knows the requirement, since only new file keys count (D8), so a refused 1 GB add costs about two seconds and leaves an untagged blob for GC (found in 5c-5b4) | **Phase 6.** A check on the files' sizes before importing can refuse only what would be refused whatever is already held; the exact check stays after. |
 | **C50** | **Paging through a role change is not tested** — replaying the log a page at a time publishes each intermediate membership to the role and allowlist watchers; promotion, demotion and re-admission across a page boundary, and a restart mid-replay, have no test (#154's review; no failure found) | **Phase 6.** |
 | **C51** | **Pending custody fetches reserve no space** — admission adds only its own bytes, and a blob whose size has not arrived counts as nothing, so fetches admitted together can pass the storage limit (#185 finding 5) | **Phase 6.** Disk pressure, not a lost copy: a reservation per admitted fetch, released on completion, failure or cancellation. |
-| **C52** | **Any availability change retries every failed custody fetch** — after the one-second gather, whether or not the changed member could serve the item, with no per-item backoff (#185 finding 6) | **Phase 6.** Per-item backoff with jitter, reset early by a new holder of that item. |
+| **C52** | **Any availability change retries every failed custody fetch** — after the one-second gather, whether or not the changed member could serve the item, with no per-item backoff (#185 finding 6). The other side: while the group is quiet a failed fetch is never asked again, even once a holder's copy is put right (#200 finding 5) | **Phase 6.** Per-item backoff with jitter, reset early by a new holder of that item, so a failed fetch is also asked again in a quiet group. |
 | **C53** | **A small holdings change can resend a whole inventory** — a new base list after 384 changed ids, or ten quiet minutes after one, fetched by every observer from its publisher: about 3.2 MB per 100,000 items, to each (#185 finding 9) | **A later version**, measured first (with C27 and C32). |
 | **C54** | **A removed voter that never returns stays a Raft learner** — asked every 2 s whether it has retired, and keeping its Raft-only transport exception (#194 finding 4) | **No phase.** Harmless; a way to clear it if one is ever needed. |
 | **C55** | **Lookup by id only through n0** — `relay_mode = "default"` uses n0's pkarr and DNS, which publish the relay URL only; `custom` and `disabled` have no lookup at all, so self-hosted DNS or pkarr is not configurable (#194) | **A later version.** |
@@ -915,6 +970,8 @@ Every open C-number appears here once.
 | **C57** | **No consensus test with a relay-addressed core member** — every consensus test runs on loopback with relays off (#194) | **Phase 6.** |
 | **C58** | **A re-check at a recorded chunk passed once on macOS CI** — `check_now_probes_a_member_at_once_and_records_how_it_came_out`: the custodian's chunk 500 overwritten, the third member's failure there read by the founder, and `group.check` still said `passed` (run 43581593608, PR #196). Either the check did not go to that chunk, or the custodian served it as valid; the code points to the second. Not reproduced in 108 local Linux runs, 72 of them under load. Its sibling, `a_failure_another_member_recorded_is_rechecked_at_its_chunk`, timed out once on macOS (run 41791183932) | **Closed (P5-62).** Neither: the founder's own failure, cleared a moment before, was back, and the check went to its chunk. An iroh-docs 0.101 delete is an empty entry, and before taking a peer's entry iroh-docs asks for a newer one reading without empty entries: a peer's older copy replaced the delete (pinned in `distlib-sync/tests/iroh_docs.rs`). Every catalogue clear now writes a newer `null` value instead. |
 | **C59** | **iroh-docs lets an older entry from a peer undo a delete** — the root of C58. `parents` in iroh-docs 0.101's `store/fs.rs`, which `insert_remote_entry` uses to look for a newer entry, calls `get_exact(…, false)`, leaving out the empty entries a delete writes. The one-line fix is `true` there. `distlib-sync/tests/iroh_docs.rs` reproduces it without a network | **Not filed upstream** (Ivan: an earlier issue there had no answer). Kept here for when it is worth filing; until then the catalogue clears with a newer value (P5-62), and that test fails once a fixed iroh-docs arrives. |
+| **C60** | **A restart forgets how long an item has been alone** — the emergency delay is kept in memory, so a node restarted more often than the delay never finds an item due (#200 finding 1; pinned by its `a_restart_forgets_how_long_an_item_has_been_alone`) | **Phase 6.** Persist the time each item has been alone, or start it from the holdings' history. |
+| **C61** | **A later failure of another item hides the first** — a prober keeps one failure per custodian (D12), so a failure of a second item replaces that of a first still lost, which counts as a real copy again (found planning 5f-4) | **Into 5f-4** (Ivan): a failure is kept per custodian and item. |
 
 ---
 
