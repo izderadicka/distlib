@@ -5,8 +5,8 @@
 //! holdings are read from.
 //!
 //! **A set this node keeps, not a question asked per row.** Whether an item is
-//! held changes only when its content files do — a download lands, a member
-//! adds a file this node lacks — and each of those passes through something
+//! held changes only when its files do — a download lands, its file list
+//! arrives — and each of those passes through something
 //! that can say so: the projection, which reads every item the document
 //! changes, and `library.download`, which knows when a fetch is done. Asking
 //! the blob store on every read instead would be one lookup per file per row
@@ -37,8 +37,7 @@ mod statement;
 pub use ask_order::ask_order;
 pub use heartbeat::{Availability, Sources, topic_for};
 
-/// The items every one of whose content files is complete in this node's
-/// store.
+/// The items every one of whose files is complete in this node's store.
 ///
 /// Cheap to clone; every clone is the same set.
 #[derive(Debug, Clone)]

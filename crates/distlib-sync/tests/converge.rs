@@ -666,7 +666,7 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
         .unwrap();
 
     let chapters = [[11u8; 32], [12u8; 32]];
-    // The id is the fingerprint of the content files, which is what makes two
+    // The id is the fingerprint of the files, which is what makes two
     // members adding the same files converge on one item (§5.2, P0-7).
     let mut item = Item::new(ItemId::from_content_hashes(&chapters));
     item.kind = Some(ItemKind::Audiobook);

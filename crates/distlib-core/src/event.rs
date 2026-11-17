@@ -59,7 +59,8 @@ pub enum Event {
     ItemAdded { item_id: ItemId },
 
     /// An item this node already held was re-read and written again: a field
-    /// changed, a file was contributed, or content it was waiting for arrived.
+    /// changed, its file list was written, or content it was waiting for
+    /// arrived.
     ///
     /// Occasionally about a write that changed nothing a page shows. The read
     /// model re-reads whole items rather than diffing them, and a spare

@@ -712,7 +712,7 @@ impl Api {
         record["lang"] = json!(stored.item.lang);
         record["description"] = json!(stored.item.description);
         record["files"] = json!(stored.item.files);
-        // Whoever wrote one of its file keys, members or not any more.
+        // Whoever wrote its file list, members or not any more.
         record["added_by"] = json!(stored.creators);
         // Null until custody has been computed.
         record["custodians"] = json!(self.custody.custodians(&stored.custody_item()));
@@ -1618,7 +1618,7 @@ impl Api {
     }
 
     /// Hashes and stores one local file for `library.add`, and describes it
-    /// the way §5.2's per-file record does.
+    /// for the item's file list.
     ///
     /// **`format` is the file's extension, lower-cased.** Sniffing the actual
     /// container would be more honest, but nothing here reads file contents

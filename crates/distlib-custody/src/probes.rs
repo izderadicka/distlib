@@ -295,8 +295,7 @@ async fn latest_evidence(
 /// One probe in this many re-checks a suspect (D11).
 const SUSPECT_ONE_IN: u64 = 4;
 
-/// What one probe asks `custodian` for: `chunk` of `blob`, a content file of
-/// `item`.
+/// What one probe asks `custodian` for: `chunk` of `blob`, a file of `item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     custodian: MemberId,
@@ -402,7 +401,7 @@ fn suspect(
     Ok(pick(low)?.map(Suspect::LowCoverage))
 }
 
-/// A random chunk of a random content file of a random item this node holds,
+/// A random chunk of a random file of a random item this node holds,
 /// of one of its other custodians that announces it: `only`, if given.
 async fn random_target(
     sources: &ProbeSources,

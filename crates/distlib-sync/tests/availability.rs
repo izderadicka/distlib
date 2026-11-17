@@ -171,7 +171,7 @@ impl Node {
             .unwrap();
     }
 
-    /// Makes item `n` held here, its one content file in the store and kept
+    /// Makes item `n` held here, its one file in the store and kept
     /// as its own, and returns its id.
     async fn holds(&self, n: u16) -> ItemId {
         let content = self.content(n).await;
@@ -188,14 +188,16 @@ impl Node {
         item.id
     }
 
-    /// Makes item `n` no longer held here: a second content file is added to
-    /// it, which this node lacks.
+    /// Makes item `n` no longer held here: its file is kept no more, as an
+    /// eviction leaves it.
     async fn no_longer_holds(&self, n: u16) {
-        let mut item = item(n, self.content(n).await);
-        item.files.insert(
-            ContentHash::from_bytes([0xee; 32]),
-            file(&format!("{n}-more")),
-        );
+        let content = self.content(n).await;
+        let item = item(n, content);
+        self.blobs
+            .tags()
+            .delete(KeepReason::Own.tag(item.id, content))
+            .await
+            .unwrap();
         assert!(!self.holdings.recheck(&item).await.unwrap());
     }
 
@@ -260,13 +262,13 @@ fn id(n: u16) -> ItemId {
     item(n, content_of(n)).id
 }
 
-/// Item `n`'s one content file, as [`Node::content`] adds it: `n`'s bytes,
+/// Item `n`'s one file, as [`Node::content`] adds it: `n`'s bytes,
 /// hashed.
 fn content_of(n: u16) -> ContentHash {
     ContentHash::from_bytes(*blake3::hash(&n.to_be_bytes()).as_bytes())
 }
 
-/// Item `n`, born with its one content file: its id is that file's
+/// Item `n`, added with its one file: its id is that file's
 /// fingerprint, as held requires.
 fn item(n: u16, content: ContentHash) -> Item {
     let mut item = Item::new(ItemId::from_content_hashes(&[*content.as_bytes()]));

@@ -1159,7 +1159,7 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
         if contributed == 0 {
             println!("            nothing here that it did not already have");
         } else {
-            println!("            contributed {contributed} file(s) it was missing");
+            println!("            wrote its list of {contributed} file(s), which it was missing");
         }
     }
     print_under_pledged(&answer["under_pledged"]);
