@@ -212,7 +212,6 @@ export type Hit = ItemSummary & Availability;
 
 /** One file of an item. What nobody said is left out, rather than `null`. */
 export interface FileRecord {
-  role: "content" | "cover" | "subtitle" | "metadata" | "other";
   format: string;
   size: number;
   filename: string;

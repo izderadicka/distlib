@@ -13,7 +13,8 @@
 //! must keep count towards letting go, not a cached one. 5e-7's: an
 //! emergency copy stays, past the limit, until the custodians hold the item,
 //! and is fetched within `max_fetches`. 5e-8's: the cache goes first where
-//! the item has the most copies elsewhere.
+//! the item has the most copies elsewhere. 5f-2's: a file list somebody
+//! else writes for an item changes nothing anybody holds or keeps.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -28,8 +29,8 @@ use std::{
 use distlib::Runtime;
 use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
-    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason,
-    MemberId, ProbeFailure, TransferConfig,
+    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, GroupSettings, Item,
+    ItemId, KeepReason, Key, MemberId, ProbeFailure, TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -396,6 +397,164 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
 
     for node in [founder, custodian, other] {
         node.stop().await;
+    }
+}
+
+/// **A file list somebody else writes changes nothing anybody holds or
+/// keeps** (#200 finding 4). As the test above up to the custodian keeping
+/// the book, with the founder's the only other copy. Then the other member
+/// writes a list for the book with one more file, which nobody has: it does
+/// not fingerprint to the book's id, so the custodian and the founder still
+/// hold the book, and nothing fails to fetch. The other is stopped and the
+/// custodian pledges nothing: it keeps the book, since the founder's is the
+/// only other copy online.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stray_file_list_changes_nothing_a_custodian_keeps() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+
+    write_a_stray_list(&other, item, &[&custodian, &founder]).await;
+    for node in [&custodian, &founder] {
+        let stored = node.runtime.store().item(item).await.unwrap().unwrap();
+        assert_eq!(stored.item.files.keys().collect::<Vec<_>>(), [&file]);
+        assert_eq!(
+            stored.creators,
+            [founder.id].into(),
+            "the stray's writer added nothing"
+        );
+        assert!(node.runtime.catalogue().holdings().holds(item));
+    }
+    custodian.until_pins("kept", 1).await;
+    assert_eq!(
+        custodian.call("node.status", json!({})).await["pins"]["failed"],
+        json!(0),
+        "the stray file is not the custodian's to fetch"
+    );
+
+    other.stop().await;
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while the founder's was the only other copy online"
+    );
+
+    for node in [founder, custodian] {
+        node.stop().await;
+    }
+}
+
+/// **A custodian fetches only the files an item was added with** (#200
+/// finding 4). The third member writes a list for the founder's book with one
+/// more file, which nobody has, before the second pledges and becomes the
+/// book's custodian: it keeps the book, and asks nobody for the stray file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_fetches_only_the_files_an_item_was_added_with() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    write_a_stray_list(&third, item, &[&second]).await;
+    second.until_it_sees(founder.id, item).await;
+
+    second
+        .call("group.pledge_set", json!({ "bytes": 100 * GB }))
+        .await;
+    second.until_custodian_of(1).await;
+    second
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    second.until_pins("kept", 1).await;
+    assert!(second.runtime.catalogue().holdings().holds(item));
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// Has `writer` write a file list for `item` with one more file than it was
+/// added with, naming a file nobody has: what any member can write, by a bug
+/// or on purpose. Waits until each of `readers` has the list and has
+/// projected the item since.
+async fn write_a_stray_list(writer: &Node, item: ItemId, readers: &[&Node]) {
+    until_projected(&writer.runtime, item, 1, "the stray's writer").await;
+    let mut files = writer
+        .runtime
+        .store()
+        .item(item)
+        .await
+        .unwrap()
+        .unwrap()
+        .item
+        .files;
+    files.insert(
+        ContentHash::from_bytes([9; 32]),
+        FileRecord {
+            format: "epub".to_owned(),
+            size: 1,
+            filename: "stray.epub".to_owned(),
+            seq: None,
+            disc: None,
+            title: None,
+            duration: None,
+        },
+    );
+    let stray = serde_json::to_vec(&files).unwrap();
+    let key = Key::Files { item }.encode();
+    writer
+        .runtime
+        .catalogue()
+        .put(&key, stray.clone())
+        .await
+        .unwrap();
+    for reader in readers {
+        tokio::time::timeout(SOON, async {
+            while reader
+                .runtime
+                .catalogue()
+                .get(&key)
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(stray.as_slice())
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the stray list reaches every reader");
+    }
+
+    // Written after the list is everywhere, so its projection reads the list.
+    let marker = Item {
+        title: Some("after the stray".to_owned()),
+        ..Item::new(item)
+    };
+    writer.runtime.catalogue().write(&marker).await.unwrap();
+    for reader in readers {
+        tokio::time::timeout(SOON, async {
+            loop {
+                let stored = reader.runtime.store().item(item).await.unwrap();
+                if stored.is_some_and(|stored| stored.item.title == marker.title) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("every reader projects the item after the stray list");
     }
 }
 

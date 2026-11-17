@@ -23,8 +23,7 @@ use std::{
 
 use distlib::Runtime;
 use distlib_core::{
-    Config, ContentHash, DataDir, Event, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId,
-    Series,
+    Config, ContentHash, DataDir, Event, FileRecord, Item, ItemId, ItemKind, MemberId, Series,
 };
 use distlib_store::StoredItem;
 use iroh::SecretKey;
@@ -60,7 +59,6 @@ fn an_item(seed: u8, title: &str) -> Item {
         files: BTreeMap::from([(
             ContentHash::from_bytes([seed; 32]),
             FileRecord {
-                role: FileRole::Content,
                 format: "mp3".to_owned(),
                 size: 1_234_567,
                 filename: format!("{title}.mp3"),
@@ -70,8 +68,13 @@ fn an_item(seed: u8, title: &str) -> Item {
                 duration: Some(3_600),
             },
         )]),
-        ..Item::new(ItemId::from_bytes([seed; 32]))
+        ..Item::new(item_id(seed))
     }
+}
+
+/// The id of [`an_item`] `seed`: the fingerprint of its one file.
+fn item_id(seed: u8) -> ItemId {
+    ItemId::from_content_hashes(&[[seed; 32]])
 }
 
 /// Waits until both nodes' read models hold the same `items` items.
@@ -208,7 +211,7 @@ async fn a_restarted_node_holds_what_a_node_that_never_restarted_holds() {
     // the whole chain against something a person wrote down.
     let projected = bob
         .store()
-        .item(ItemId::from_bytes([1; 32]))
+        .item(item_id(1))
         .await
         .unwrap()
         .expect("the restarted node projected the first item");
@@ -421,7 +424,7 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
         .await
         .unwrap();
 
-    let item_id = ItemId::from_bytes([9; 32]);
+    let item_id = item_id(9);
     runtime.catalogue().ready().await;
     let mut events = runtime.events().subscribe();
     runtime
@@ -550,7 +553,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         .await
         .unwrap();
 
-    let item_id = ItemId::from_bytes([9; 32]);
+    let item_id = item_id(9);
     runtime.catalogue().ready().await;
     runtime
         .catalogue()
@@ -619,10 +622,10 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     runtime.shutdown().await;
 }
 
-/// Two members who each wrote the same file key both added the item: the
-/// read model keeps every author of a key, not only the latest (5b-1a).
+/// Two members who each wrote the same file list both added the item: the
+/// read model keeps every author of a valid list, not only the latest (5b-1a).
 #[tokio::test(flavor = "multi_thread")]
-async fn both_members_who_wrote_a_file_key_are_its_authors() {
+async fn both_members_who_wrote_the_file_list_added_the_item() {
     let dir = TempDir::new().unwrap();
     let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
     alice.catalogue().ready().await;
@@ -633,22 +636,19 @@ async fn both_members_who_wrote_a_file_key_are_its_authors() {
     bob.catalogue().write(&item).await.unwrap();
 
     let both = BTreeSet::from([alice.node().id(), bob.node().id()]);
-    let expected = BTreeMap::from([(ContentHash::from_bytes([4; 32]), both.clone())]);
     for node in [&alice, &bob] {
         tokio::time::timeout(SOON, async {
             loop {
                 let stored = node.store().item(item.id).await.unwrap();
-                if stored.is_some_and(|stored| stored.file_authors == expected) {
+                if stored.is_some_and(|stored| stored.creators == both) {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .expect("each node records both members as the file key's authors");
+        .expect("each node records both members as the item's creators");
     }
-    let stored = alice.store().item(item.id).await.unwrap().unwrap();
-    assert_eq!(stored.creators(), both);
 
     bob.shutdown().await;
     alice.shutdown().await;

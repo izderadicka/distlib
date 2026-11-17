@@ -131,13 +131,12 @@
     <h2>Files <span class="count">{Object.keys(item.files).length}</span></h2>
     <table>
       <thead>
-        <tr><th>Name</th><th>Role</th><th>Format</th><th class="number">Size</th></tr>
+        <tr><th>Name</th><th>Format</th><th class="number">Size</th></tr>
       </thead>
       <tbody>
         {#each inOrder(item.files) as [hash, file] (hash)}
           <tr>
             <td>{file.filename}</td>
-            <td>{file.role}</td>
             <td>{file.format}</td>
             <td class="number">{bytes(file.size)}</td>
           </tr>

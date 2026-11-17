@@ -338,14 +338,11 @@ pub enum Command {
 
     /// Add a file set to the catalogue as one item (2b-2, §6.1).
     ///
-    /// Every file given is `role: content` — the set §5.2's `item_id`
-    /// fingerprints. Covers, subtitles and the rest of a file's possible
-    /// roles are not wired into this command yet; add them straight to an
-    /// existing item's files once there is a caller that needs to.
+    /// The files given are the item for good — the set §5.2's `item_id`
+    /// fingerprints. Nothing is added to an item later.
     ///
     /// If the identical file set is already an item — anywhere in the group,
-    /// not only on this node — its metadata is left exactly as it is and
-    /// only the files here that it was missing are contributed. Two members
+    /// not only on this node — it is left exactly as it is. Two members
     /// adding the same files at the same time need no coordination: they
     /// compute the same item, whichever's metadata lands first is what the
     /// other's write leaves alone.

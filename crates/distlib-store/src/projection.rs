@@ -376,7 +376,7 @@ impl ReadModelWriter {
                     item: read.item,
                     ratings: read.ratings,
                     reviews: read.reviews,
-                    file_authors: read.file_authors,
+                    creators: read.creators,
                     last_modified: read.last_modified,
                 })
                 .await

@@ -243,7 +243,7 @@ impl GroupId {
 pub struct ItemId(#[serde(with = "hex32")] [u8; 32]);
 
 impl ItemId {
-    /// Fingerprints the set of `role: content` blob hashes an item is made of.
+    /// Fingerprints the set of blob hashes an item's files are.
     ///
     /// ```text
     /// BLAKE3( "distlib.item.v1" || n || sorted[ h_i ] )

@@ -8,7 +8,7 @@ use std::{
 };
 
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
-use distlib_core::{ContentHash, FileRecord, FileRole, Item, ItemId, MemberId, NodeAddr};
+use distlib_core::{ContentHash, FileRecord, Item, ItemId, MemberId, NodeAddr};
 use distlib_custody::{Custody, CustodySources};
 use distlib_store::{Store, StoredItem};
 use iroh::SecretKey;
@@ -54,7 +54,6 @@ fn an_item(creator: MemberId) -> StoredItem {
             files: BTreeMap::from([(
                 hash,
                 FileRecord {
-                    role: FileRole::Content,
                     format: "epub".to_owned(),
                     size: GB,
                     filename: "1.epub".to_owned(),
@@ -68,7 +67,7 @@ fn an_item(creator: MemberId) -> StoredItem {
         },
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
-        file_authors: BTreeMap::from([(hash, BTreeSet::from([creator]))]),
+        creators: BTreeSet::from([creator]),
         last_modified: 1,
     }
 }

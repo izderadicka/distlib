@@ -18,9 +18,9 @@ use distlib_consensus::{
     ConsensusError, MemberProfile, MembershipEvent, MembershipNode, MembershipState, PROTOCOL_MAX,
 };
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, FileRole, Item, ItemFields, ItemId,
-    ItemKind, KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish,
-    Review, Series, TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, Item, ItemFields, ItemId, ItemKind,
+    KeepReason, MemberId, NetConfig, NodeAddr, PledgeStanding, Rating, ResolvedWish, Review,
+    Series, TaskId, Ticket, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_custody::{
     Coverage, Custody, PinCounts, ProbeError, Probes, Room, Storage, StorageError, Suspect,
@@ -713,7 +713,7 @@ impl Api {
         record["description"] = json!(stored.item.description);
         record["files"] = json!(stored.item.files);
         // Whoever wrote one of its file keys, members or not any more.
-        record["added_by"] = json!(stored.creators());
+        record["added_by"] = json!(stored.creators);
         // Null until custody has been computed.
         record["custodians"] = json!(self.custody.custodians(&stored.custody_item()));
         record["last_modified"] = json!(stored.last_modified);
@@ -1015,11 +1015,11 @@ impl Api {
     /// `library.add` — hash a file set, store it as blobs, and write a
     /// catalogue entry for it (2b-2; §6.1's "v1 — exact" dedup).
     ///
-    /// Every file is `role: content`: the files `item_id` fingerprints (§5.2,
+    /// The files are the item for good: `item_id` is their fingerprint (§5.2,
     /// D4). An item already at that id keeps its metadata, so a worse guess at
-    /// a title cannot replace a better one, and gains only the files it lacks.
-    /// Two nodes adding the same files compute the same id, so they converge
-    /// on one item without coordinating.
+    /// a title cannot replace a better one, and gets a file list only if it
+    /// has none here. Two nodes adding the same files compute the same id, so
+    /// they converge on one item without coordinating.
     ///
     /// Every file imported is kept as this node's own, whether or not the
     /// item was new: whoever adds files means to share them.
@@ -1033,17 +1033,18 @@ impl Api {
         self.check_room_for(&item).await?;
         let id = item.id;
         let existing = self.catalogue.item(id).await.map_err(sync_error)?;
-        // Only the files the item lacks get a file key by this member.
-        let growth: u64 = item
-            .files
-            .iter()
-            .filter(|(hash, _)| {
-                existing
-                    .as_ref()
-                    .is_none_or(|existing| !existing.files.contains_key(hash))
-            })
-            .map(|(_, file)| file.size)
-            .fold(0, u64::saturating_add);
+        // A file list by this member only where the item has none.
+        let growth: u64 = if existing
+            .as_ref()
+            .is_some_and(|existing| !existing.files.is_empty())
+        {
+            0
+        } else {
+            item.files
+                .values()
+                .map(|file| file.size)
+                .fold(0, u64::saturating_add)
+        };
         let requirement = self.requirement(growth).await?;
         if growth > 0 && requirement.standing() == PledgeStanding::FarUnder {
             return Err(Error::failed(requirement.far_under("adding these files")));
@@ -1059,7 +1060,7 @@ impl Api {
                 .map_err(net_error)?;
         }
         let mut answer = match existing {
-            Some(existing) => self.add_missing_files(item, &existing).await?,
+            Some(existing) => self.add_to_existing(item, &existing).await?,
             None => self.write_new_item(item, params).await?,
         };
         answer["under_pledged"] = requirement.under_pledged();
@@ -1157,7 +1158,7 @@ impl Api {
         }
         item.id = item
             .fingerprint()
-            .expect("`files` is non-empty, and only `role: content` files are ever inserted here");
+            .expect("`files` is non-empty: the params ask for at least one file");
         Ok((item, imported))
     }
 
@@ -1217,21 +1218,21 @@ impl Api {
         Ok(true)
     }
 
-    /// Writes the files of `item` that `existing`, at the same id, lacks, and
-    /// leaves its metadata alone. Usually there are none: only an earlier
-    /// write interrupted partway leaves an item without all of its files.
-    async fn add_missing_files(&self, item: Item, existing: &Item) -> Result<Value, Error> {
+    /// Writes `item`'s file list if `existing`, at the same id, has none here,
+    /// and leaves its metadata alone. Usually it has one: only an earlier
+    /// write interrupted partway, or a list still arriving, leaves it without.
+    async fn add_to_existing(&self, item: Item, existing: &Item) -> Result<Value, Error> {
         let id = item.id;
-        let missing: BTreeMap<ContentHash, FileRecord> = item
-            .files
-            .into_iter()
-            .filter(|(hash, _)| !existing.files.contains_key(hash))
-            .collect();
-        let contributed: Vec<ContentHash> = missing.keys().copied().collect();
-        if !missing.is_empty() {
+        let files = if existing.files.is_empty() {
+            item.files
+        } else {
+            BTreeMap::new()
+        };
+        let contributed: Vec<ContentHash> = files.keys().copied().collect();
+        if !files.is_empty() {
             self.catalogue
                 .write(&Item {
-                    files: missing,
+                    files,
                     ..Item::new(id)
                 })
                 .await
@@ -1656,7 +1657,6 @@ impl Api {
         Ok((
             file,
             FileRecord {
-                role: FileRole::Content,
                 format,
                 size,
                 filename,
@@ -2319,8 +2319,7 @@ struct ItemParams {
 ///
 /// `files` are local paths on the machine this node's API runs on — the
 /// listener is loopback and token-gated (§7.1, P1-25), so "local to the
-/// caller" and "local to this node" are the same machine. Every one is
-/// `role: content`; see [`Api::add`] for why the surface stops there for now.
+/// caller" and "local to this node" are the same machine.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Add {

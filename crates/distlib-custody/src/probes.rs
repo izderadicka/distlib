@@ -11,7 +11,7 @@ use std::{
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{ContentHash, FileRole, ItemId, MemberId, ProbeFailure};
+use distlib_core::{ContentHash, ItemId, MemberId, ProbeFailure};
 use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Catalogue, Holdings, RecordedFailure, SyncError};
@@ -434,14 +434,8 @@ async fn random_target(
         .into_iter()
         .filter(|custodian| may_probe(*custodian, *me, &announcers, only))
         .collect();
-    let contents: Vec<ContentHash> = stored
-        .item
-        .files
-        .iter()
-        .filter(|(_, file)| file.role == FileRole::Content)
-        .map(|(blob, _)| *blob)
-        .collect();
-    let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&contents)?) else {
+    let files: Vec<ContentHash> = stored.item.files.keys().copied().collect();
+    let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&files)?) else {
         return Ok(None);
     };
     // This node's own copy says how many chunks there are, not the catalogue.

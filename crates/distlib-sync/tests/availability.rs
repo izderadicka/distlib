@@ -22,8 +22,8 @@ use std::{
 
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    ContentHash, Event as NodeEvent, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId,
-    KeepReason, MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
+    ContentHash, Event as NodeEvent, FileRecord, GroupId, Heartbeat, Item, ItemId, KeepReason,
+    MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
     availability::{DELTA_MAX, decode_base},
 };
 use distlib_net::Transport;
@@ -276,7 +276,6 @@ fn item(n: u16, content: ContentHash) -> Item {
 
 fn file(name: &str) -> FileRecord {
     FileRecord {
-        role: FileRole::Content,
         format: "epub".to_owned(),
         size: 2,
         filename: format!("{name}.epub"),

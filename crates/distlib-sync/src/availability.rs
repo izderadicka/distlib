@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{FileRole, Item, ItemId, KeepReason};
+use distlib_core::{Item, ItemId, KeepReason};
 use futures_lite::stream::StreamExt as _;
 use iroh_blobs::{Hash, api::Store as BlobStore, api::proto::BlobStatus};
 use tokio::{sync::watch, time::Instant};
@@ -65,11 +65,9 @@ impl Holdings {
 
     /// Works out again whether `item` is held, and records the answer.
     ///
-    /// Held means **every `role: content` file is complete here and kept for
-    /// the item** — covers and other roles do not count, as they do not count
-    /// towards an item's identity. **Every one the item was born with**: its
-    /// content files must fingerprint to its id, so an item whose records are
-    /// still arriving is not held, however complete the ones here are (#185).
+    /// Held means **every one of its files is complete here and kept for
+    /// the item**. An item whose file list has not arrived has no files, and
+    /// is not held (#185).
     ///
     /// **Kept, not only here**: a file whose tags are released, an evicted
     /// item's, stays complete until the next collection deletes it, and is
@@ -78,17 +76,16 @@ impl Holdings {
     pub async fn recheck(&self, item: &Item) -> Result<bool> {
         // Collected first: an iterator of closures held across the await
         // below would make this future not `Send`.
-        let content: Vec<Hash> = item
+        let files: Vec<Hash> = item
             .files
-            .iter()
-            .filter(|(_, record)| record.role == FileRole::Content)
-            .map(|(hash, _)| Hash::from_bytes(*hash.as_bytes()))
+            .keys()
+            .map(|hash| Hash::from_bytes(*hash.as_bytes()))
             .collect();
         let mut held = item.fingerprint() == Some(item.id) && {
             let kept = self.kept_for(item.id).await?;
-            content.iter().all(|hash| kept.contains(hash))
+            files.iter().all(|hash| kept.contains(hash))
         };
-        for hash in content.into_iter().take_while(|_| held) {
+        for hash in files.into_iter().take_while(|_| held) {
             let status = self
                 .blobs
                 .blobs()
@@ -215,11 +212,11 @@ mod tests {
         assert!(!changes.has_changed().unwrap(), "forgotten again: none");
     }
 
-    /// #185 finding 1: an item of two files, only one of whose records has
-    /// arrived, is not held, though that file is complete and kept; it is
-    /// once the second record lands and its file is kept.
+    /// #185 finding 1: an item whose file list has not arrived has no files,
+    /// and is not held, though every file it will list is complete and kept;
+    /// it is once the list lands.
     #[tokio::test]
-    async fn an_item_whose_records_are_still_arriving_is_not_held() {
+    async fn an_item_whose_file_list_is_still_arriving_is_not_held() {
         let store = MemStore::new();
         let holdings = Holdings::new((*store).clone());
         let mut hashes = Vec::new();
@@ -227,26 +224,25 @@ mod tests {
             let added = store.add_bytes(bytes).await.unwrap().hash;
             hashes.push(ContentHash::from_bytes(*added.as_bytes()));
         }
-        let born = hashes
+        let listed = hashes
             .iter()
             .map(|hash| *hash.as_bytes())
             .collect::<Vec<_>>();
-        let mut item = Item::new(ItemId::from_content_hashes(&born));
+        let mut item = Item::new(ItemId::from_content_hashes(&listed));
         for hash in &hashes {
             let tag = KeepReason::Cache.tag(item.id, *hash);
             let blob = Hash::from_bytes(*hash.as_bytes());
             store.tags().set(tag, blob).await.unwrap();
         }
 
+        assert!(!holdings.recheck(&item).await.unwrap(), "no file list yet");
         item.files.insert(hashes[0], content_record("one.mp3"));
-        assert!(!holdings.recheck(&item).await.unwrap(), "one record of two");
         item.files.insert(hashes[1], content_record("two.mp3"));
-        assert!(holdings.recheck(&item).await.unwrap(), "both");
+        assert!(holdings.recheck(&item).await.unwrap(), "its file list");
     }
 
     fn content_record(filename: &str) -> FileRecord {
         FileRecord {
-            role: FileRole::Content,
             format: "epub".to_owned(),
             size: 4,
             filename: filename.to_owned(),

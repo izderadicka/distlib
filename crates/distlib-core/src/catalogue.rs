@@ -6,11 +6,11 @@
 //! each other, and iroh-docs resolves last-writer-wins *per key*. So every
 //! field is its own entry, and a write touches only what it changes.
 //!
-//! **Per-file keys, not a `files` array**, for the sharper version of the same
-//! reason: an item is often a set (a forty-chapter audiobook, an EPUB and its
-//! PDF), and two members adding chapters 1-20 and 21-40 to one array key would
-//! lose half the chapters. Keyed by content hash, concurrent additions are
-//! conflict-free by construction.
+//! **One key for all of an item's files**, written once by whoever adds it.
+//! An item is the files it was added with, fixed as a torrent's are (P5-66):
+//! nobody adds a file to it later, so there is nothing to merge. A list
+//! somebody else writes there is read only if it fingerprints to the item's
+//! id, and any such list is the same set of files.
 //!
 //! **Every value is JSON**, including the ones §5.2 writes as bare strings.
 //! One rule beats a table of exceptions: the reader has one code path, and a
@@ -29,8 +29,8 @@ use crate::id::{ContentHash, ItemId};
 /// The prefix every catalogue item key starts with.
 const ITEMS: &str = "item";
 
-/// The segment that marks a per-file key.
-const FILE: &str = "file";
+/// The last segment of the key holding an item's files.
+const FILES: &str = "files";
 
 /// What kind of thing an item is (§5.2's `type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,21 +39,6 @@ pub enum ItemKind {
     Ebook,
     Audiobook,
     Video,
-    Other,
-}
-
-/// What one file is *to* its item.
-///
-/// Only [`FileRole::Content`] takes part in the item's identity, which is why
-/// this is a field rather than a convention: adding a cover must not make a
-/// different item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FileRole {
-    Content,
-    Cover,
-    Subtitle,
-    Metadata,
     Other,
 }
 
@@ -70,7 +55,6 @@ pub struct Series {
 /// One file of an item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRecord {
-    pub role: FileRole,
     /// Container or codec as an operator would say it: `epub`, `mp3`, `mkv`.
     pub format: String,
     pub size: u64,
@@ -189,8 +173,8 @@ fields! {
 pub enum Key {
     /// `item/{item_id}/{field}`
     Field { item: ItemId, field: Field },
-    /// `item/{item_id}/file/{content_hash}`
-    File { item: ItemId, blob: ContentHash },
+    /// `item/{item_id}/files`
+    Files { item: ItemId },
 }
 
 impl Key {
@@ -198,7 +182,7 @@ impl Key {
     pub fn encode(&self) -> String {
         match self {
             Self::Field { item, field } => format!("{ITEMS}/{item}/{}", field.as_str()),
-            Self::File { item, blob } => format!("{ITEMS}/{item}/{FILE}/{blob}"),
+            Self::Files { item } => format!("{ITEMS}/{item}/{FILES}"),
         }
     }
 
@@ -216,21 +200,21 @@ impl Key {
         }
         let item = ItemId::from_str(parts.next()?).ok()?;
         let third = parts.next()?;
-        if third == FILE {
-            let blob = ContentHash::from_str(parts.next()?).ok()?;
-            return parts.next().is_none().then_some(Self::File { item, blob });
-        }
-        let field = Field::parse(third)?;
-        parts
-            .next()
-            .is_none()
-            .then_some(Self::Field { item, field })
+        let key = if third == FILES {
+            Self::Files { item }
+        } else {
+            Self::Field {
+                item,
+                field: Field::parse(third)?,
+            }
+        };
+        parts.next().is_none().then_some(key)
     }
 
     /// The item this key is about.
     pub const fn item(&self) -> ItemId {
         match self {
-            Self::Field { item, .. } | Self::File { item, .. } => *item,
+            Self::Field { item, .. } | Self::Files { item } => *item,
         }
     }
 
@@ -267,6 +251,9 @@ pub enum Absorbed {
     /// A key we know, holding a value we cannot read. The field keeps
     /// whatever it had.
     Unreadable,
+    /// A file list whose files do not fingerprint to the item's id: not the
+    /// files the item was added with. The item keeps whatever it had.
+    NotItsFiles,
 }
 
 /// One catalogue item, assembled from the entries that make it up.
@@ -311,17 +298,16 @@ impl Item {
     /// `title: null` is a write, and under last-writer-wins it would erase a
     /// title somebody else had just filled in. An `Item` with one field set is
     /// a one-key update.
+    /// The files are one entry, and none when there are no files.
     pub fn entries(&self) -> Vec<(String, Vec<u8>)> {
-        let files = self.files.iter().filter_map(|(blob, record)| {
-            Some((
-                Key::File {
-                    item: self.id,
-                    blob: *blob,
-                }
-                .encode(),
-                encode(Some(record))?,
-            ))
-        });
+        let files = (!self.files.is_empty())
+            .then(|| {
+                Some((
+                    Key::Files { item: self.id }.encode(),
+                    encode(Some(&self.files))?,
+                ))
+            })
+            .flatten();
         self.field_entries().chain(files).collect()
     }
 
@@ -350,36 +336,37 @@ impl Item {
             return Absorbed::NotThisItem;
         }
         match key {
-            Key::File { blob, .. } => match serde_json::from_slice(value) {
-                Ok(record) => {
-                    self.files.insert(blob, record);
-                    Absorbed::Took
-                }
-                Err(_) => Absorbed::Unreadable,
-            },
+            Key::Files { .. } => self.absorb_files(value),
             Key::Field { field, .. } => self.absorb_field(field, value),
         }
     }
 
-    /// The fingerprint this item was born with (§5.2, as amended by P0-7).
-    ///
-    /// **Content files only.** Cover art and subtitles are excluded, so adding
-    /// a cover does not produce a different item — which is exactly the rule
-    /// people get wrong, so the filter lives here, next to the roles, rather
-    /// than at whichever call site is computing an id.
-    ///
-    /// Answers `None` when the item has no content files: an id derived from
-    /// an empty set is the same id for every such item, and two items that are
-    /// not the same thing must not share one.
-    pub fn fingerprint(&self) -> Option<ItemId> {
-        let content: Vec<[u8; 32]> = self
-            .files
-            .iter()
-            .filter(|(_, record)| record.role == FileRole::Content)
-            .map(|(blob, _)| *blob.as_bytes())
-            .collect();
-        (!content.is_empty()).then(|| ItemId::from_content_hashes(&content))
+    /// Takes a file list, if it is the one this item was added with.
+    fn absorb_files(&mut self, value: &[u8]) -> Absorbed {
+        let Ok(files) = serde_json::from_slice::<BTreeMap<ContentHash, FileRecord>>(value) else {
+            return Absorbed::Unreadable;
+        };
+        if fingerprint_of(&files) != Some(self.id) {
+            return Absorbed::NotItsFiles;
+        }
+        self.files = files;
+        Absorbed::Took
     }
+
+    /// The fingerprint of this item's files (§5.2, as amended by P0-7).
+    ///
+    /// Answers `None` when the item has no files: an id derived from an empty
+    /// set is the same id for every such item, and two items that are not the
+    /// same thing must not share one.
+    pub fn fingerprint(&self) -> Option<ItemId> {
+        fingerprint_of(&self.files)
+    }
+}
+
+/// The fingerprint of `files`, or `None` when there are none.
+fn fingerprint_of(files: &BTreeMap<ContentHash, FileRecord>) -> Option<ItemId> {
+    let hashes: Vec<[u8; 32]> = files.keys().map(|blob| *blob.as_bytes()).collect();
+    (!hashes.is_empty()).then(|| ItemId::from_content_hashes(&hashes))
 }
 
 /// Reads one field's value, or reports that this build cannot.

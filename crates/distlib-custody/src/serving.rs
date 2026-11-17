@@ -9,7 +9,7 @@ use distlib_store::Store;
 use tokio::sync::watch;
 
 /// Serves anything to a member pledging the group's minimum, and to one
-/// pledging less everything but items' content files: the catalogue's entries
+/// pledging less everything but items' files: the catalogue's entries
 /// and the availability base lists still reach it, so it can look around
 /// before it pledges.
 #[derive(Debug, Clone)]
@@ -30,10 +30,10 @@ impl ServingGate for PledgedOnly {
         if self.membership.borrow().pledges_the_minimum(&requester) {
             return true;
         }
-        match self.store.is_content_file(hash).await {
-            Ok(content) => !content,
+        match self.store.is_item_file(hash).await {
+            Ok(an_items_file) => !an_items_file,
             Err(error) => {
-                tracing::warn!(%hash, %error, "could not tell whether a blob is an item's content; refused to a member below the minimum pledge");
+                tracing::warn!(%hash, %error, "could not tell whether a blob is an item's file; refused to a member below the minimum pledge");
                 false
             }
         }

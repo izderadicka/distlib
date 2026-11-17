@@ -18,13 +18,11 @@ const MLOCI: ItemRecord = {
     "23ac86d6d127d50c6456fa94bc9018951c425fed59de40993db6b11f0519df2c": {
       filename: "c1.mp3",
       format: "mp3",
-      role: "content",
       size: 11,
     },
     "3e85fa08f61f8347fdbb10d2a420c263250c7f5b1e3a7dd4d8d3aae48e8e9c85": {
       filename: "c2.mp3",
       format: "mp3",
-      role: "content",
       size: 12,
     },
   },
@@ -130,8 +128,8 @@ describe("the item page", () => {
     });
     expect(document.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-27T14:57:34.348Z");
     expect(files()).toEqual([
-      ["c1.mp3", "content", "mp3", "11 B"],
-      ["c2.mp3", "content", "mp3", "12 B"],
+      ["c1.mp3", "mp3", "11 B"],
+      ["c2.mp3", "mp3", "12 B"],
     ]);
     expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   });
@@ -211,7 +209,7 @@ describe("the item page", () => {
   });
 
   it("lists files in the order they are played: by disc, then place, then name", async () => {
-    const file = { format: "mp3", role: "content", size: 1 } as const;
+    const file = { format: "mp3", size: 1 } as const;
     answer = {
       ...MLOCI,
       files: {
