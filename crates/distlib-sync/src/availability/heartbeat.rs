@@ -575,14 +575,18 @@ async fn listen(listening: Listening, neighbours: &watch::Sender<usize>) {
                 // its own, so the next one makes up for whatever was missed.
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "the availability topic failed; hearing no more");
+                    tracing::error!(%error, "the availability topic failed; hearing no more");
                     return;
                 }
-                None => return,
+                None => {
+                    tracing::error!("the availability topic closed; hearing no more");
+                    return;
+                }
             },
             () = until(expiry) => online.expire(Instant::now()),
             changed = membership.changed() => {
                 if changed.is_err() {
+                    tracing::error!("this node is no longer in a group; hearing no more");
                     return;
                 }
                 let now = membership.borrow_and_update();
@@ -590,17 +594,26 @@ async fn listen(listening: Listening, neighbours: &watch::Sender<usize>) {
                 lock(&holders).retain_members(|member| now.is_member(member));
             }
         }
-        let now = online.online();
-        published.send_if_modified(|was| {
-            if *was == now {
-                return false;
-            }
-            was.symmetric_difference(&now)
-                .for_each(|member| tell(&events, *member));
-            *was = now;
-            true
-        });
+        publish_online(&published, &events, online.online());
     }
+}
+
+/// Publishes who is online, if that changed, and tells about each member
+/// whose standing did.
+fn publish_online(
+    published: &watch::Sender<BTreeSet<MemberId>>,
+    events: &broadcast::Sender<Event>,
+    now: BTreeSet<MemberId>,
+) {
+    published.send_if_modified(|was| {
+        if *was == now {
+            return false;
+        }
+        was.symmetric_difference(&now)
+            .for_each(|member| tell(events, *member));
+        *was = now;
+        true
+    });
 }
 
 /// Sleeps until `deadline`, or for ever without one.

@@ -10,7 +10,7 @@
 //! that frees it, so this node dials each reachable member itself and hands
 //! the connection to gossip, as an accepted one would be, before joining.
 
-use std::time::Duration;
+use std::{convert::Infallible, time::Duration};
 
 use distlib_consensus::{MembershipState, gossip};
 use distlib_core::{MemberId, NodeAddr};
@@ -20,7 +20,10 @@ use iroh_gossip::{
     api::GossipSender,
     net::{GOSSIP_ALPN, Gossip},
 };
-use tokio::{sync::watch, task::JoinSet};
+use tokio::{
+    sync::watch::{self, error::RecvError},
+    task::JoinSet,
+};
 
 /// The first wait before joining again, and what any news resets it to.
 const FIRST_WAIT: Duration = Duration::from_secs(1);
@@ -40,9 +43,21 @@ pub(super) async fn rejoin_while_alone(
     me: MemberId,
     transport: Transport,
     sender: GossipSender,
+    membership: watch::Receiver<MembershipState>,
+    neighbours: watch::Receiver<usize>,
+) {
+    let Err(error) = join_again_whenever_alone(me, transport, sender, membership, neighbours).await;
+    tracing::error!(%error, "the availability topic will not be joined again once it has no neighbour");
+}
+
+/// Answers only when a channel it watches has closed.
+async fn join_again_whenever_alone(
+    me: MemberId,
+    transport: Transport,
+    sender: GossipSender,
     mut membership: watch::Receiver<MembershipState>,
     mut neighbours: watch::Receiver<usize>,
-) {
+) -> Result<Infallible, RecvError> {
     let Transport {
         endpoint,
         gossip,
@@ -51,27 +66,19 @@ pub(super) async fn rejoin_while_alone(
     let mut learned = directory.learned();
     let mut wait = FIRST_WAIT;
     loop {
-        if neighbours.wait_for(|count| *count == 0).await.is_err() {
-            return;
-        }
+        neighbours.wait_for(|count| *count == 0).await?;
         tokio::select! {
             () = tokio::time::sleep(wait) => wait = (wait * 2).min(LONGEST_WAIT),
             changed = learned.changed() => {
-                if changed.is_err() {
-                    return;
-                }
+                changed?;
                 wait = FIRST_WAIT;
             }
             changed = membership.changed() => {
-                if changed.is_err() {
-                    return;
-                }
+                changed?;
                 wait = FIRST_WAIT;
             }
             joined = neighbours.wait_for(|count| *count > 0) => {
-                if joined.is_err() {
-                    return;
-                }
+                joined?;
                 wait = FIRST_WAIT;
                 continue;
             }
