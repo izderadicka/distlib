@@ -20,11 +20,17 @@
 //! Nothing here knows about iroh-docs. These are keys and bytes; `distlib-sync`
 //! is what puts them in a document.
 
-use std::{collections::BTreeMap, str::FromStr as _};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr as _,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{ContentHash, ItemId};
+use crate::id::{ContentHash, ItemId, MemberId};
+
+/// Who wrote each of an item's file keys, members or not.
+pub type FileAuthors = BTreeMap<ContentHash, BTreeSet<MemberId>>;
 
 /// The prefix every catalogue item key starts with.
 const ITEMS: &str = "item";
@@ -379,6 +385,33 @@ impl Item {
             .map(|(blob, _)| *blob.as_bytes())
             .collect();
         (!content.is_empty()).then(|| ItemId::from_content_hashes(&content))
+    }
+
+    /// The files this item was born with (5f-2): the content files one author
+    /// wrote whose set fingerprints to the id. `None` until some author's
+    /// does, while its records are still arriving.
+    ///
+    /// **What holding, custody and creators count.** Any member can write a
+    /// file record on any item, and a newer build may: one more than the item
+    /// was born with must not make it a different thing to keep. Other
+    /// records are shown and count for nothing.
+    pub fn born_files(&self, file_authors: &FileAuthors) -> Option<BTreeSet<ContentHash>> {
+        let mut content_by_author: BTreeMap<MemberId, BTreeSet<ContentHash>> = BTreeMap::new();
+        for (blob, authors) in file_authors {
+            if self
+                .files
+                .get(blob)
+                .is_some_and(|record| record.role == FileRole::Content)
+            {
+                for author in authors {
+                    content_by_author.entry(*author).or_default().insert(*blob);
+                }
+            }
+        }
+        content_by_author.into_values().find(|content| {
+            let hashes: Vec<[u8; 32]> = content.iter().map(|blob| *blob.as_bytes()).collect();
+            ItemId::from_content_hashes(&hashes) == self.id
+        })
     }
 }
 

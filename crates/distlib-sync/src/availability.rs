@@ -16,11 +16,11 @@
 //! replay at every start fills it again.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{FileRole, Item, ItemId, KeepReason};
+use distlib_core::{ContentHash, FileAuthors, Item, ItemId, KeepReason};
 use futures_lite::stream::StreamExt as _;
 use iroh_blobs::{Hash, api::Store as BlobStore, api::proto::BlobStatus};
 use tokio::{sync::watch, time::Instant};
@@ -65,41 +65,22 @@ impl Holdings {
 
     /// Works out again whether `item` is held, and records the answer.
     ///
-    /// Held means **every `role: content` file is complete here and kept for
-    /// the item** — covers and other roles do not count, as they do not count
-    /// towards an item's identity. **Every one the item was born with**: its
-    /// content files must fingerprint to its id, so an item whose records are
-    /// still arriving is not held, however complete the ones here are (#185).
+    /// Held means **every file the item was born with is complete here and
+    /// kept for it** ([`Item::born_files`], by `file_authors`): covers and
+    /// other roles do not count, as they do not count towards an item's
+    /// identity, and nor does a content record somebody wrote on top (5f-2).
+    /// An item whose born files are not all known yet is not held, however
+    /// complete the ones here are (#185).
     ///
     /// **Kept, not only here**: a file whose tags are released, an evicted
     /// item's, stays complete until the next collection deletes it, and is
     /// not held meanwhile. A file kept only by another item's tag counts as
     /// not held either, which under-claims rather than over-claims.
-    pub async fn recheck(&self, item: &Item) -> Result<bool> {
-        // Collected first: an iterator of closures held across the await
-        // below would make this future not `Send`.
-        let content: Vec<Hash> = item
-            .files
-            .iter()
-            .filter(|(_, record)| record.role == FileRole::Content)
-            .map(|(hash, _)| Hash::from_bytes(*hash.as_bytes()))
-            .collect();
-        let mut held = item.fingerprint() == Some(item.id) && {
-            let kept = self.kept_for(item.id).await?;
-            content.iter().all(|hash| kept.contains(hash))
+    pub async fn recheck(&self, item: &Item, file_authors: &FileAuthors) -> Result<bool> {
+        let held = match item.born_files(file_authors) {
+            Some(born) => self.all_kept_and_complete(item.id, born).await?,
+            None => false,
         };
-        for hash in content.into_iter().take_while(|_| held) {
-            let status = self
-                .blobs
-                .blobs()
-                .status(hash)
-                .await
-                .map_err(SyncError::content("asked whether an item's file is here"))?;
-            if !matches!(status, BlobStatus::Complete { .. }) {
-                held = false;
-                break;
-            }
-        }
 
         // One insert or remove: a panic elsewhere cannot leave this half done.
         let mut set = self.held.lock().unwrap_or_else(PoisonError::into_inner);
@@ -113,6 +94,34 @@ impl Holdings {
             self.changed.send_replace(Instant::now());
         }
         Ok(held)
+    }
+
+    /// Whether every one of `files` is kept for `item` and complete here.
+    async fn all_kept_and_complete(
+        &self,
+        item: ItemId,
+        files: BTreeSet<ContentHash>,
+    ) -> Result<bool> {
+        let kept = self.kept_for(item).await?;
+        let files: Vec<Hash> = files
+            .iter()
+            .map(|file| Hash::from_bytes(*file.as_bytes()))
+            .collect();
+        if !files.iter().all(|hash| kept.contains(hash)) {
+            return Ok(false);
+        }
+        for hash in files {
+            let status = self
+                .blobs
+                .blobs()
+                .status(hash)
+                .await
+                .map_err(SyncError::content("asked whether an item's file is here"))?;
+            if !matches!(status, BlobStatus::Complete { .. }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The blobs some tag keeps for `item`, whatever the reason.
@@ -173,7 +182,8 @@ impl Holdings {
 mod tests {
     #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-    use distlib_core::{ContentHash, FileRecord};
+    use distlib_core::{ContentHash, FileRecord, FileRole, MemberId};
+    use iroh::SecretKey;
     use iroh_blobs::store::mem::MemStore;
 
     use super::*;
@@ -192,17 +202,30 @@ mod tests {
         item.files.insert(hash, content_record("dune.epub"));
 
         assert!(
-            !holdings.recheck(&item).await.unwrap(),
+            !holdings
+                .recheck(&item, &written_by_the_adder(&item))
+                .await
+                .unwrap(),
             "complete, but kept by nothing"
         );
         assert!(!changes.has_changed().unwrap(), "not held, as before: none");
         let tag = KeepReason::Cache.tag(item.id, *item.files.keys().next().unwrap());
         store.tags().set(tag, content).await.unwrap();
 
-        assert!(holdings.recheck(&item).await.unwrap());
+        assert!(
+            holdings
+                .recheck(&item, &written_by_the_adder(&item))
+                .await
+                .unwrap()
+        );
         assert!(changes.has_changed().unwrap(), "held: a change");
         changes.borrow_and_update();
-        assert!(holdings.recheck(&item).await.unwrap());
+        assert!(
+            holdings
+                .recheck(&item, &written_by_the_adder(&item))
+                .await
+                .unwrap()
+        );
         assert!(!changes.has_changed().unwrap(), "held still: none");
         assert_eq!(holdings.held(), HashSet::from([item.id]));
 
@@ -239,9 +262,60 @@ mod tests {
         }
 
         item.files.insert(hashes[0], content_record("one.mp3"));
-        assert!(!holdings.recheck(&item).await.unwrap(), "one record of two");
+        assert!(
+            !holdings
+                .recheck(&item, &written_by_the_adder(&item))
+                .await
+                .unwrap(),
+            "one record of two"
+        );
         item.files.insert(hashes[1], content_record("two.mp3"));
-        assert!(holdings.recheck(&item).await.unwrap(), "both");
+        assert!(
+            holdings
+                .recheck(&item, &written_by_the_adder(&item))
+                .await
+                .unwrap(),
+            "both"
+        );
+    }
+
+    /// #200 finding 4: one more `role: content` record, which any member can
+    /// write, names a file nobody has; the item is still held, since that
+    /// file is not one it was born with.
+    #[tokio::test]
+    async fn one_more_content_record_leaves_a_whole_item_held() {
+        let store = MemStore::new();
+        let holdings = Holdings::new((*store).clone());
+        let content = store.add_bytes(b"dune".to_vec()).await.unwrap().hash;
+        let hash = ContentHash::from_bytes(*content.as_bytes());
+        let mut item = Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]));
+        item.files.insert(hash, content_record("dune.epub"));
+        let tag = KeepReason::Custody.tag(item.id, hash);
+        store.tags().set(tag, content).await.unwrap();
+        let mut authors = written_by_the_adder(&item);
+        assert!(holdings.recheck(&item, &authors).await.unwrap());
+
+        // A file nobody has, named by a record another member wrote.
+        let stray = ContentHash::from_bytes([9; 32]);
+        item.files.insert(stray, content_record("stray.epub"));
+        authors.insert(stray, BTreeSet::from([member(2)]));
+        assert!(
+            holdings.recheck(&item, &authors).await.unwrap(),
+            "the born file is still complete and kept"
+        );
+        assert!(holdings.holds(item.id));
+    }
+
+    fn member(seed: u8) -> MemberId {
+        MemberId::from(SecretKey::from_bytes(&[seed; 32]).public())
+    }
+
+    /// Every one of `item`'s file keys, written by the member that added it.
+    fn written_by_the_adder(item: &Item) -> FileAuthors {
+        item.files
+            .keys()
+            .map(|file| (*file, BTreeSet::from([member(1)])))
+            .collect()
     }
 
     fn content_record(filename: &str) -> FileRecord {

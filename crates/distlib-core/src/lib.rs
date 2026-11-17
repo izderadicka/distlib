@@ -24,7 +24,7 @@ pub mod token;
 pub use addr::{BadRelayUrl, NodeAddr, SignedAddress};
 pub use availability::{GOSSIP_MAX_MESSAGE, Heartbeat, Holdings, SignedHeartbeat};
 pub use catalogue::{
-    Absorbed, Field, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
+    Absorbed, Field, FileAuthors, FileRecord, FileRole, Item, ItemFields, ItemKind, Key, Series,
 };
 pub use community::{
     Bookmark, BookmarkId, COMMENT_MAX_BYTES, Comment, CommunityKey, NOTE_MAX_BYTES,

@@ -27,8 +27,8 @@ use std::{
 
 use distlib_consensus::{MembershipState, gossip::reachable};
 use distlib_core::{
-    Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, GroupId, Item, ItemId, Key,
-    MemberId, ProbeFailure, Rating, Review, Wish, WishId, community::CLEARED,
+    Absorbed, Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileAuthors, GroupId, Item,
+    ItemId, Key, MemberId, ProbeFailure, Rating, Review, Wish, WishId, community::CLEARED,
 };
 use distlib_net::{Directory, Protocols, Transport};
 use futures_lite::stream::StreamExt as _;
@@ -117,7 +117,7 @@ pub struct ReadItem {
     /// Who wrote each of the item's file keys: every author, not only the
     /// latest, since iroh-docs keeps one entry per key and author. Whoever
     /// wrote one added the item (phase 5's D1 and D8).
-    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
+    pub file_authors: FileAuthors,
     /// The newest timestamp among the item's own entries, in microseconds
     /// since the epoch — iroh-docs' own clock for the record. A rating or a
     /// review is not a change to the item, so neither moves it.
@@ -607,10 +607,7 @@ impl Catalogue {
     }
 
     /// Who wrote each of `id`'s file keys.
-    async fn read_file_authors(
-        &self,
-        id: ItemId,
-    ) -> Result<BTreeMap<ContentHash, BTreeSet<MemberId>>> {
+    async fn read_file_authors(&self, id: ItemId) -> Result<FileAuthors> {
         let doc = self.document()?;
         let entries = doc
             .get_many(Query::all().key_prefix(Key::prefix_of(id)))
@@ -618,7 +615,7 @@ impl Catalogue {
             .map_err(SyncError::docs("read from"))?;
         tokio::pin!(entries);
 
-        let mut authors: BTreeMap<ContentHash, BTreeSet<MemberId>> = BTreeMap::new();
+        let mut authors: FileAuthors = BTreeMap::new();
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             let Some(Key::File { blob, .. }) = Key::parse(entry.key()) else {

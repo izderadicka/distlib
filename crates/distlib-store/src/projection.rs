@@ -356,7 +356,12 @@ impl ReadModelWriter {
             // whether it is held — including another member adding one this
             // node lacks. Before the write below, so a row in the read model is
             // never newer than the holdings behind it.
-            if let Err(error) = self.catalogue.holdings().recheck(&read.item).await {
+            if let Err(error) = self
+                .catalogue
+                .holdings()
+                .recheck(&read.item, &read.file_authors)
+                .await
+            {
                 tracing::warn!(%id, %error, "could not work out whether this node holds an item");
             }
 

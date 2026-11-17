@@ -631,9 +631,9 @@ pub(crate) struct Keeper {
 }
 
 impl Keeper {
-    /// Tags each of `item_id`'s files for `reason`, makes room for them, and
-    /// fetches the ones not here. A file already here, cached by a download
-    /// say, is only tagged.
+    /// Tags each of the files `item_id` was born with for `reason`, makes room
+    /// for them, and fetches the ones not here. A file already here, cached
+    /// by a download say, is only tagged.
     ///
     /// Tagged before room is made, so a cached copy is kept for `reason`
     /// before anything is let go of. When even the whole cache is not room
@@ -653,10 +653,10 @@ impl Keeper {
             return Ok(());
         };
         let files: Vec<(ContentHash, u64)> = stored
-            .item
-            .files
-            .iter()
-            .map(|(hash, file)| (*hash, file.size))
+            .born_files()
+            .into_iter()
+            .flatten()
+            .filter_map(|hash| Some((hash, stored.item.files.get(&hash)?.size)))
             .collect();
         for (hash, _) in &files {
             self.blobs.keep(reason, item_id, *hash).await?;
@@ -679,7 +679,13 @@ impl Keeper {
                 fetch_until_stalled(&self.blobs, hash, providers.clone()).await?;
             }
         }
-        self.holdings.recheck(&stored.item).await?;
+        // Read again: what the projection rechecked while this fetched may be
+        // newer than what this read before it (#200 finding 6).
+        if let Some(stored) = self.store.item(item_id).await? {
+            self.holdings
+                .recheck(&stored.item, &stored.file_authors)
+                .await?;
+        }
         Ok(())
     }
 

@@ -13,7 +13,8 @@
 //! must keep count towards letting go, not a cached one. 5e-7's: an
 //! emergency copy stays, past the limit, until the custodians hold the item,
 //! and is fetched within `max_fetches`. 5e-8's: the cache goes first where
-//! the item has the most copies elsewhere.
+//! the item has the most copies elsewhere. 5f-2's: a file record written on
+//! top of an item changes nothing anybody holds or keeps.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -28,8 +29,8 @@ use std::{
 use distlib::Runtime;
 use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
-    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, GroupSettings, ItemId, KeepReason,
-    MemberId, ProbeFailure, TransferConfig,
+    Config, ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, FileRole, GroupSettings,
+    Item, ItemId, KeepReason, MemberId, ProbeFailure, TransferConfig,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -397,6 +398,109 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
     for node in [founder, custodian, other] {
         node.stop().await;
     }
+}
+
+/// **A file record written on top of an item changes nothing anybody holds
+/// or keeps** (#200 finding 4). As the test above up to the custodian keeping
+/// the book, with the founder's the only other copy. Then the other member
+/// writes one more `role: content` file record on the book, naming a file
+/// nobody has: it is not a file the book was born with, so the custodian and
+/// the founder still hold the book, and nothing fails to fetch. The other is
+/// stopped and the custodian pledges nothing: it keeps the book, since the
+/// founder's is the only other copy online.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_stray_content_record_changes_nothing_a_custodian_keeps() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB; 3]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    custodian.until_it_sees(founder.id, item).await;
+
+    write_a_stray_record(&other, item).await;
+    until_projected(&custodian.runtime, item, 2, "the custodian").await;
+    until_projected(&founder.runtime, item, 2, "the founder").await;
+    assert!(custodian.runtime.catalogue().holdings().holds(item));
+    assert!(founder.runtime.catalogue().holdings().holds(item));
+    custodian.until_pins("kept", 1).await;
+    assert_eq!(
+        custodian.call("node.status", json!({})).await["pins"]["failed"],
+        json!(0),
+        "the stray file is not the custodian's to fetch"
+    );
+
+    other.stop().await;
+    custodian
+        .call("group.pledge_set", json!({ "bytes": 0 }))
+        .await;
+    custodian.until_custodian_of(0).await;
+    // Time for the pin manager to act on it, had it been going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        custodian.keeps(KeepReason::Custody, item, file).await,
+        "let go of the book while the founder's was the only other copy online"
+    );
+
+    for node in [founder, custodian] {
+        node.stop().await;
+    }
+}
+
+/// **A custodian fetches only the files an item was born with** (#200
+/// finding 4). The third member writes one more `role: content` record on the
+/// founder's book, naming a file nobody has, before the second pledges and
+/// becomes the book's custodian: it keeps the book, and asks nobody for the
+/// stray file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_fetches_only_the_files_an_item_was_born_with() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    write_a_stray_record(&third, item).await;
+    until_projected(&second.runtime, item, 2, "the second member").await;
+    second.until_it_sees(founder.id, item).await;
+
+    second
+        .call("group.pledge_set", json!({ "bytes": 100 * GB }))
+        .await;
+    second.until_custodian_of(1).await;
+    second
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    second.until_pins("kept", 1).await;
+    assert!(second.runtime.catalogue().holdings().holds(item));
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// Has `node` write one more `role: content` file record on `item`, naming a
+/// file nobody has: what any member can write, by a bug or a newer build.
+async fn write_a_stray_record(node: &Node, item: ItemId) {
+    let record = FileRecord {
+        role: FileRole::Content,
+        format: "epub".to_owned(),
+        size: 1,
+        filename: "stray.epub".to_owned(),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    node.runtime.catalogue().ready().await;
+    node.runtime
+        .catalogue()
+        .write(&Item {
+            files: [(ContentHash::from_bytes([9; 32]), record)].into(),
+            ..Item::new(item)
+        })
+        .await
+        .unwrap();
 }
 
 /// Of the two members after the founder, all three pledging the same,

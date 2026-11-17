@@ -64,7 +64,7 @@ fn an_item(creator: MemberId) -> StoredItem {
                     duration: None,
                 },
             )]),
-            ..Item::new(ItemId::from_bytes([1; 32]))
+            ..Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]))
         },
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),

@@ -8,8 +8,8 @@ use std::{
 };
 
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, Item, ItemId, MemberId,
-    Rating, Review, Series, Wish, WishId,
+    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileAuthors, FileRecord, Item, ItemId,
+    MemberId, Rating, Review, Series, Wish, WishId,
 };
 use rusqlite::{Connection, Row, Statement, Transaction, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
@@ -58,34 +58,49 @@ pub struct StoredItem {
     /// Each current member's review.
     pub reviews: BTreeMap<MemberId, Review>,
     /// Who wrote each of the item's file keys, members or not.
-    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
+    pub file_authors: FileAuthors,
     /// The newest entry timestamp this item was projected from — §5.2's
     /// `last_modified`, in microseconds since the epoch.
     pub last_modified: u64,
 }
 
 impl StoredItem {
-    /// Who added the item: whoever wrote any of its file keys.
-    pub fn creators(&self) -> BTreeSet<MemberId> {
-        creators_of(&self.file_authors)
+    /// The files the item was born with ([`Item::born_files`]).
+    pub fn born_files(&self) -> Option<BTreeSet<ContentHash>> {
+        self.item.born_files(&self.file_authors)
     }
 
-    /// The item as custody sees it: its creators, and all of its files' size.
+    /// Who added the item: whoever wrote the file key of any file it was born
+    /// with.
+    pub fn creators(&self) -> BTreeSet<MemberId> {
+        creators_of(&self.file_authors, &self.born_files().unwrap_or_default())
+    }
+
+    /// The item as custody sees it: its creators, and the size of the files it
+    /// was born with.
     pub fn custody_item(&self) -> CustodyItem {
-        CustodyItem {
-            item: self.item.id,
-            creators: self.creators().into_iter().collect(),
-            size_bytes: self
-                .item
-                .files
-                .values()
-                .fold(0, |total, file| total.saturating_add(file.size)),
-        }
+        custody_item_of(&self.item, &self.file_authors)
     }
 }
 
-fn creators_of(file_authors: &BTreeMap<ContentHash, BTreeSet<MemberId>>) -> BTreeSet<MemberId> {
-    file_authors.values().flatten().copied().collect()
+fn creators_of(file_authors: &FileAuthors, born: &BTreeSet<ContentHash>) -> BTreeSet<MemberId> {
+    born.iter()
+        .filter_map(|blob| file_authors.get(blob))
+        .flatten()
+        .copied()
+        .collect()
+}
+
+fn custody_item_of(item: &Item, file_authors: &FileAuthors) -> CustodyItem {
+    let born = item.born_files(file_authors).unwrap_or_default();
+    CustodyItem {
+        item: item.id,
+        creators: creators_of(file_authors, &born).into_iter().collect(),
+        size_bytes: born
+            .iter()
+            .filter_map(|blob| item.files.get(blob))
+            .fold(0, |total, file| total.saturating_add(file.size)),
+    }
 }
 
 /// One row of `bookmarks`: a member's bookmark on an item.
@@ -451,51 +466,33 @@ impl Store {
     /// give it, without reading the rest of each item.
     pub async fn custody_items(&self) -> Result<Vec<CustodyItem>> {
         self.read(|conn| {
-            let mut file_authors = file_authors_of(conn, None)?;
-            // `TOTAL` rather than `SUM`, which fails on an overflow: one absurd
-            // size written by one member must not stop every node's custody.
-            let mut statement = conn.prepare(
-                "SELECT items.id, TOTAL(item_files.size) FROM items \
-                 LEFT JOIN item_files ON item_files.item = items.id \
-                 GROUP BY items.id ORDER BY items.id",
-            )?;
-            let mut rows = statement.query([])?;
-            let mut items = Vec::new();
-            while let Some(row) = rows.next()? {
-                let item: ItemId = identifier(row, 0, "id")?;
-                let creators = file_authors
-                    .remove(&item)
-                    .map(|authors| creators_of(&authors).into_iter().collect())
-                    .unwrap_or_default();
-                items.push(CustodyItem {
-                    item,
-                    creators,
-                    // Saturating, as the sum in `custody_item` is.
-                    size_bytes: row.get::<_, f64>(1)? as u64,
-                });
-            }
-            Ok(items)
+            Ok(every_item_with_its_authors(conn)?
+                .iter()
+                .map(|(item, file_authors)| custody_item_of(item, file_authors))
+                .collect())
         })
         .await
     }
 
-    /// The content each member added (phase 5's D8): the sizes of the
-    /// content files whose file key it wrote, per file key, so a file in two
-    /// items counts twice. Members that added nothing are left out.
+    /// The content each member added (phase 5's D8): the sizes of the files
+    /// each item was born with whose file key it wrote, per file key, so a
+    /// file in two items counts twice. Members that added nothing are left
+    /// out.
     pub async fn added_bytes(&self) -> Result<BTreeMap<MemberId, u64>> {
         self.read(|conn| {
-            // `TOTAL`, as in `custody_items`: one absurd size must not fail it.
-            let mut statement = conn.prepare(
-                "SELECT file_authors.member, TOTAL(item_files.size) FROM file_authors \
-                 JOIN item_files ON item_files.item = file_authors.item \
-                 AND item_files.blob = file_authors.blob \
-                 WHERE item_files.role = 'content' GROUP BY file_authors.member",
-            )?;
-            let added = statement
-                .query_map([], |row| {
-                    Ok((identifier(row, 0, "member")?, row.get::<_, f64>(1)? as u64))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
+            let added = every_item_with_its_authors(conn)?.iter().fold(
+                BTreeMap::new(),
+                |mut added: BTreeMap<MemberId, u64>, (item, file_authors)| {
+                    for blob in item.born_files(file_authors).unwrap_or_default() {
+                        let size = item.files.get(&blob).map_or(0, |file| file.size);
+                        for author in file_authors.get(&blob).into_iter().flatten() {
+                            let total = added.entry(*author).or_default();
+                            *total = total.saturating_add(size);
+                        }
+                    }
+                    added
+                },
+            );
             Ok(added)
         })
         .await
@@ -874,7 +871,7 @@ fn files_of(
 /// per table, and handed to each item as it is read.
 struct ItemDetails {
     files: BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>,
-    file_authors: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>,
+    file_authors: BTreeMap<ItemId, FileAuthors>,
     ratings: BTreeMap<ItemId, BTreeMap<MemberId, Rating>>,
     reviews: BTreeMap<ItemId, BTreeMap<MemberId, Review>>,
 }
@@ -903,16 +900,37 @@ impl ItemDetails {
     }
 }
 
+/// Every item with only its files, and who wrote each: what custody and the
+/// pledges work out from the files it was born with. In the order of ids.
+fn every_item_with_its_authors(conn: &Connection) -> rusqlite::Result<Vec<(Item, FileAuthors)>> {
+    let mut files = files_of(conn, None)?;
+    let mut file_authors = file_authors_of(conn, None)?;
+    let mut statement = conn.prepare("SELECT id FROM items ORDER BY id")?;
+    let ids = statement
+        .query_map([], |row| identifier::<ItemId>(row, 0, "id"))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let item = Item {
+                files: files.remove(&id).unwrap_or_default(),
+                ..Item::new(id)
+            };
+            (item, file_authors.remove(&id).unwrap_or_default())
+        })
+        .collect())
+}
+
 /// Every file key's authors, or just one item's, grouped by item, then blob.
 fn file_authors_of(
     conn: &Connection,
     only: Option<ItemId>,
-) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>> {
+) -> rusqlite::Result<BTreeMap<ItemId, FileAuthors>> {
     let (sql, params) = select_item_rows("item, blob, member FROM file_authors", only);
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(params))?;
 
-    let mut grouped: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>> = BTreeMap::new();
+    let mut grouped: BTreeMap<ItemId, FileAuthors> = BTreeMap::new();
     while let Some(row) = rows.next()? {
         grouped
             .entry(identifier(row, 0, "item")?)

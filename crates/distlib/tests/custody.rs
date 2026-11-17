@@ -25,7 +25,7 @@ const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
 const SETTLE: Duration = Duration::from_secs(5);
 
-/// One item of one file, `size_bytes` long.
+/// One item of one file, `size_bytes` long, born with it.
 fn an_item(seed: u8, size_bytes: u64) -> Item {
     Item {
         title: Some(format!("item {seed}")),
@@ -42,7 +42,7 @@ fn an_item(seed: u8, size_bytes: u64) -> Item {
                 duration: None,
             },
         )]),
-        ..Item::new(ItemId::from_bytes([seed; 32]))
+        ..Item::new(ItemId::from_content_hashes(&[[seed; 32]]))
     }
 }
 

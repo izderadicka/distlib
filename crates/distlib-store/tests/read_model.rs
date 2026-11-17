@@ -20,7 +20,7 @@
 #![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -182,13 +182,50 @@ fn stored() -> impl Strategy<Value = StoredItem> {
 
 /// Items with distinct ids, so a set of them has a well-defined projection.
 fn distinct_items(count: std::ops::Range<usize>) -> impl Strategy<Value = Vec<StoredItem>> {
-    proptest::collection::vec(stored(), count).prop_map(|items| {
-        let mut by_id: BTreeMap<ItemId, StoredItem> = BTreeMap::new();
-        for stored in items {
-            by_id.insert(stored.item.id, stored);
+    proptest::collection::vec(stored(), count)
+        .prop_map(|items| distinct_by_id(items, |stored| stored.item.id))
+}
+
+fn distinct_by_id<T>(items: Vec<T>, id: impl Fn(&T) -> ItemId) -> Vec<T> {
+    let by_id: BTreeMap<ItemId, T> = items.into_iter().map(|item| (id(&item), item)).collect();
+    by_id.into_values().collect()
+}
+
+/// An item as an add makes it, and the files it was born with: its id is
+/// what the content files of its adder, the first of `authors`, fingerprint
+/// to, and the others' file records are written on top. One author per file
+/// key; sizes real, so that a sum of them is exact. An adder with no content
+/// file leaves the id as it was, and the item born with nothing.
+fn born_stored() -> impl Strategy<Value = (StoredItem, BTreeSet<ContentHash>)> {
+    (stored(), proptest::collection::vec(member(), 1..3)).prop_map(|(mut stored, authors)| {
+        let adder = authors[0];
+        let mut born = BTreeSet::new();
+        stored.file_authors = stored
+            .item
+            .files
+            .iter_mut()
+            .zip(authors.iter().cycle())
+            .map(|((hash, file), author)| {
+                file.size >>= 20;
+                if *author == adder && file.role == FileRole::Content {
+                    born.insert(*hash);
+                }
+                (*hash, BTreeSet::from([*author]))
+            })
+            .collect();
+        if !born.is_empty() {
+            let hashes: Vec<[u8; 32]> = born.iter().map(|hash| *hash.as_bytes()).collect();
+            stored.item.id = ItemId::from_content_hashes(&hashes);
         }
-        by_id.into_values().collect()
+        (stored, born)
     })
+}
+
+fn distinct_born_items(
+    count: std::ops::Range<usize>,
+) -> impl Strategy<Value = Vec<(StoredItem, BTreeSet<ContentHash>)>> {
+    proptest::collection::vec(born_stored(), count)
+        .prop_map(|items| distinct_by_id(items, |(stored, _)| stored.item.id))
 }
 
 /// One member's entry for a wish: any of its optional fields, open or
@@ -275,14 +312,10 @@ proptest! {
 
     /// Custody's narrow read of every item says what each whole item says.
     #[test]
-    fn custody_items_are_what_each_stored_item_says(items in distinct_items(0..5)) {
+    fn custody_items_are_what_each_stored_item_says(items in distinct_born_items(0..5)) {
         runtime().block_on(async {
             let store = empty().await;
-            for mut stored in items {
-                // Real sizes, so that a sum of them is exact.
-                for file in stored.item.files.values_mut() {
-                    file.size >>= 20;
-                }
+            for (stored, _) in items {
                 store.upsert_item(stored).await.expect("the item is written");
             }
             let whole: Vec<CustodyItem> = store
@@ -297,30 +330,38 @@ proptest! {
         })?;
     }
 
-    /// What each member added is the size of each content file whose key it
-    /// wrote.
+    /// An item's creators and size are those of the files it was born with:
+    /// a record another member wrote on top counts for nothing (5f-2).
     #[test]
-    fn added_bytes_are_the_content_files_each_member_wrote(
-        items in distinct_items(0..5),
-        authors in proptest::collection::vec(member(), 1..3),
-    ) {
+    fn an_item_is_the_files_it_was_born_with(item in born_stored()) {
+        let (stored, born) = item;
+        let custody = stored.custody_item();
+        let creators: Vec<MemberId> = born
+            .iter()
+            .flat_map(|hash| stored.file_authors[hash].iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        prop_assert_eq!(&custody.creators, &creators);
+        prop_assert_eq!(
+            custody.size_bytes,
+            born.iter().map(|hash| stored.item.files[hash].size).sum::<u64>()
+        );
+    }
+
+    /// What each member added is the size of each file an item was born
+    /// with whose key it wrote.
+    #[test]
+    fn added_bytes_are_the_born_files_each_member_wrote(items in distinct_born_items(0..5)) {
         runtime().block_on(async {
             let store = empty().await;
             let mut expected: BTreeMap<MemberId, u64> = BTreeMap::new();
-            for mut stored in items {
-                stored.file_authors = stored
-                    .item
-                    .files
-                    .iter_mut()
-                    .zip(authors.iter().cycle())
-                    .map(|((hash, file), author)| {
-                        file.size >>= 20;
-                        if file.role == FileRole::Content {
-                            *expected.entry(*author).or_default() += file.size;
-                        }
-                        (*hash, [*author].into())
-                    })
-                    .collect();
+            for (stored, born) in items {
+                for hash in &born {
+                    for author in &stored.file_authors[hash] {
+                        *expected.entry(*author).or_default() += stored.item.files[hash].size;
+                    }
+                }
                 store.upsert_item(stored).await.expect("the item is written");
             }
             prop_assert_eq!(store.added_bytes().await.expect("read"), expected);

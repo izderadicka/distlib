@@ -2,9 +2,13 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use distlib_core::{
-    Absorbed, ContentHash, Field, FileRecord, FileRole, Item, ItemId, ItemKind, Key, Series,
+    Absorbed, ContentHash, Field, FileAuthors, FileRecord, FileRole, Item, ItemId, ItemKind, Key,
+    MemberId, Series,
 };
+use iroh::SecretKey;
 
 fn hash(byte: u8) -> ContentHash {
     ContentHash::from_bytes([byte; 32])
@@ -204,6 +208,61 @@ fn an_item_with_nothing_in_it_has_no_fingerprint() {
     assert_eq!(item.fingerprint(), None);
     item.files.insert(hash(1), a_file(FileRole::Cover, "c.jpg"));
     assert_eq!(item.fingerprint(), None, "a cover alone is not an item");
+}
+
+fn member(seed: u8) -> MemberId {
+    MemberId::from(SecretKey::from_bytes(&[seed; 32]).public())
+}
+
+/// `an_item()`'s two chapters, both written by member 1.
+fn born_of_member_one() -> FileAuthors {
+    BTreeMap::from([
+        (hash(1), BTreeSet::from([member(1)])),
+        (hash(2), BTreeSet::from([member(1)])),
+    ])
+}
+
+/// The files an item was born with are one author's content files that
+/// fingerprint to its id; a record another member writes on top is not one
+/// of them, whatever its role.
+#[test]
+fn a_record_another_member_writes_is_not_one_the_item_was_born_with() {
+    let mut item = an_item();
+    let mut authors = born_of_member_one();
+    let born = BTreeSet::from([hash(1), hash(2)]);
+    assert_eq!(item.born_files(&authors), Some(born.clone()));
+
+    item.files
+        .insert(hash(3), a_file(FileRole::Content, "stray.mp3"));
+    item.files
+        .insert(hash(4), a_file(FileRole::Cover, "cover.jpg"));
+    authors.insert(hash(3), BTreeSet::from([member(2)]));
+    authors.insert(hash(4), BTreeSet::from([member(2)]));
+    // Member 2 also rewrites a chapter's record: its set is still not whole.
+    authors.get_mut(&hash(1)).unwrap().insert(member(2));
+    assert_eq!(item.born_files(&authors), Some(born.clone()));
+
+    // A second adder of the same files is born with the same set.
+    authors.get_mut(&hash(2)).unwrap().insert(member(2));
+    authors.remove(&hash(3));
+    item.files.remove(&hash(3));
+    assert_eq!(item.born_files(&authors), Some(born));
+}
+
+/// No author's content files fingerprint to the id: records still arriving,
+/// or an author that wrote one more than the item was born with.
+#[test]
+fn an_item_no_one_authors_whole_has_no_born_files() {
+    let mut item = an_item();
+    let mut authors = born_of_member_one();
+    authors.remove(&hash(2));
+    assert_eq!(item.born_files(&authors), None, "one chapter of two");
+
+    let mut authors = born_of_member_one();
+    authors.insert(hash(3), BTreeSet::from([member(1)]));
+    item.files
+        .insert(hash(3), a_file(FileRole::Content, "03.mp3"));
+    assert_eq!(item.born_files(&authors), None, "one chapter more");
 }
 
 /// Every field an item can hold is a field it writes.

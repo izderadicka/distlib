@@ -1419,10 +1419,13 @@ impl Api {
     /// again, since a file may have been added to it during the download.
     async fn recheck_holdings(&self, item_id: ItemId) {
         let rechecked = async {
-            let Some(item) = self.catalogue.item(item_id).await? else {
+            let Some(read) = self.catalogue.read_item(item_id).await? else {
                 return Ok(false);
             };
-            self.catalogue.holdings().recheck(&item).await
+            self.catalogue
+                .holdings()
+                .recheck(&read.item, &read.file_authors)
+                .await
         };
         if let Err(error) = rechecked.await {
             tracing::warn!(item = %item_id, %error, "could not work out whether this node now holds an item");

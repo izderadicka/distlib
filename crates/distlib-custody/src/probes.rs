@@ -11,7 +11,7 @@ use std::{
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{ContentHash, FileRole, ItemId, MemberId, ProbeFailure};
+use distlib_core::{ContentHash, ItemId, MemberId, ProbeFailure};
 use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Catalogue, Holdings, RecordedFailure, SyncError};
@@ -434,13 +434,7 @@ async fn random_target(
         .into_iter()
         .filter(|custodian| may_probe(*custodian, *me, &announcers, only))
         .collect();
-    let contents: Vec<ContentHash> = stored
-        .item
-        .files
-        .iter()
-        .filter(|(_, file)| file.role == FileRole::Content)
-        .map(|(blob, _)| *blob)
-        .collect();
+    let contents: Vec<ContentHash> = stored.born_files().into_iter().flatten().collect();
     let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&contents)?) else {
         return Ok(None);
     };

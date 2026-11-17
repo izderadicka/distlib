@@ -22,8 +22,8 @@ use std::{
 
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    ContentHash, Event as NodeEvent, FileRecord, FileRole, GroupId, Heartbeat, Item, ItemId,
-    KeepReason, MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
+    ContentHash, Event as NodeEvent, FileAuthors, FileRecord, FileRole, GroupId, Heartbeat, Item,
+    ItemId, KeepReason, MemberId, NodeAddr, SignedAddress, SignedHeartbeat,
     availability::{DELTA_MAX, decode_base},
 };
 use distlib_net::Transport;
@@ -184,19 +184,31 @@ impl Node {
             )
             .await
             .unwrap();
-        assert!(self.holdings.recheck(&item).await.unwrap());
+        assert!(
+            self.holdings
+                .recheck(&item, &written_by_one_member(&item))
+                .await
+                .unwrap()
+        );
         item.id
     }
 
-    /// Makes item `n` no longer held here: a second content file is added to
-    /// it, which this node lacks.
+    /// Makes item `n` no longer held here: its adder writes a second content
+    /// file on it, which this node lacks, so none of its authors' files make
+    /// up its id any more.
     async fn no_longer_holds(&self, n: u16) {
         let mut item = item(n, self.content(n).await);
         item.files.insert(
             ContentHash::from_bytes([0xee; 32]),
             file(&format!("{n}-more")),
         );
-        assert!(!self.holdings.recheck(&item).await.unwrap());
+        assert!(
+            !self
+                .holdings
+                .recheck(&item, &written_by_one_member(&item))
+                .await
+                .unwrap()
+        );
     }
 
     async fn content(&self, n: u16) -> ContentHash {
@@ -268,6 +280,15 @@ fn content_of(n: u16) -> ContentHash {
 
 /// Item `n`, born with its one content file: its id is that file's
 /// fingerprint, as held requires.
+/// Every one of `item`'s file keys, written by the one member that added it.
+fn written_by_one_member(item: &Item) -> FileAuthors {
+    let adder = MemberId::from(SecretKey::from_bytes(&[1; 32]).public());
+    item.files
+        .keys()
+        .map(|file| (*file, BTreeSet::from([adder])))
+        .collect()
+}
+
 fn item(n: u16, content: ContentHash) -> Item {
     let mut item = Item::new(ItemId::from_content_hashes(&[*content.as_bytes()]));
     item.files.insert(content, file(&n.to_string()));

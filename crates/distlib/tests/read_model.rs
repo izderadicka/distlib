@@ -43,7 +43,8 @@ const SOON: Duration = Duration::from_secs(60);
 /// Every kind of value the schema has to carry: a one-word enum, a list, a
 /// struct split across two columns, a fractional number, an optional integer,
 /// and a file row. A projection that lost any one of them would still pass a
-/// test written around a title.
+/// test written around a title. Its id is its one file's fingerprint, as an
+/// add makes it, so the file is one it was born with.
 fn an_item(seed: u8, title: &str) -> Item {
     Item {
         kind: Some(ItemKind::Audiobook),
@@ -70,7 +71,7 @@ fn an_item(seed: u8, title: &str) -> Item {
                 duration: Some(3_600),
             },
         )]),
-        ..Item::new(ItemId::from_bytes([seed; 32]))
+        ..Item::new(ItemId::from_content_hashes(&[[seed; 32]]))
     }
 }
 
@@ -208,7 +209,7 @@ async fn a_restarted_node_holds_what_a_node_that_never_restarted_holds() {
     // the whole chain against something a person wrote down.
     let projected = bob
         .store()
-        .item(ItemId::from_bytes([1; 32]))
+        .item(an_item(1, "Dune").id)
         .await
         .unwrap()
         .expect("the restarted node projected the first item");
@@ -421,7 +422,7 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
         .await
         .unwrap();
 
-    let item_id = ItemId::from_bytes([9; 32]);
+    let item_id = an_item(9, "Dune").id;
     runtime.catalogue().ready().await;
     let mut events = runtime.events().subscribe();
     runtime
@@ -550,7 +551,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
         .await
         .unwrap();
 
-    let item_id = ItemId::from_bytes([9; 32]);
+    let item_id = an_item(9, "Dune").id;
     runtime.catalogue().ready().await;
     runtime
         .catalogue()
