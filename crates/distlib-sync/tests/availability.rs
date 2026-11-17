@@ -504,6 +504,53 @@ async fn a_follower_learns_where_another_follower_is_from_a_heartbeat() {
     }
 }
 
+/// **A node with no neighbour joins the topic again (5f-6).** The log says
+/// nothing of where alice and bob are, so each one's first dial of the other
+/// fails at once, which strands that peer in iroh-gossip on every topic
+/// (phase 4's ground truth 18), as a restarted custodian once stranded the
+/// founder on CI. Once alice learns where bob is, she dials him herself and
+/// hands gossip the connection, and both hear each other's beats.
+#[tokio::test]
+async fn a_node_with_no_neighbour_joins_again_once_it_learns_an_address() {
+    let (alice_key, bob_key) = (SecretKey::generate(), SecretKey::generate());
+    let (to_alice, alice_sees) = watch::channel(MembershipState::new());
+    let (to_bob, bob_sees) = watch::channel(MembershipState::new());
+    let interval = Duration::from_secs(1);
+    let alice = Node::start(alice_key.clone(), alice_sees, interval).await;
+    let bob = Node::start(bob_key.clone(), bob_sees, interval).await;
+
+    let founding = MembershipEvent::found(
+        [alice.id, bob.id]
+            .into_iter()
+            .map(|member| (profile(member), NodeAddr::default()))
+            .collect(),
+        Default::default(),
+        Timestamp::from_millis(1),
+    )
+    .unwrap();
+    let mut founded = MembershipState::new();
+    founded
+        .apply(
+            1,
+            &SignedEvent::sign(&alice_key, founding, Timestamp::from_millis(1), 0).unwrap(),
+        )
+        .unwrap();
+    to_alice.send(founded.clone()).unwrap();
+    to_bob.send(founded).unwrap();
+    // Long enough for both first dials to fail, and a beat or two to go to
+    // nobody.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(alice.availability.online().borrow().is_empty());
+
+    alice.knows(&bob, &bob_key);
+    alice.sees_online(&[bob.id]).await;
+    bob.sees_online(&[alice.id]).await;
+
+    for node in [alice, bob] {
+        node.router.shutdown().await.unwrap();
+    }
+}
+
 /// **A node beats as soon as it knows where it is**, not an interval later.
 ///
 /// Bob has no address statement yet when the two connect, so the beat a new

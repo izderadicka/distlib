@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (P5-64).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (P5-65).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -908,13 +908,17 @@ fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward
   `an_item_whose_last_holder_is_offline_is_not_listed_at_all`, reversed.
 - **5f-6 — the availability topic joins again while it has no neighbours (phase 4's D7(c)).**
   The topic is joined once, with the members reachable at that moment, and never again: D7(c)'s
-  `join_peers` at zero neighbours was not built, and no delta says so. A node restarted while its
-  peers' addresses are stale, or not yet known, hears no heartbeat, so it cannot tell who holds
-  what or who is online: on #207's macOS CI a restarted custodian never let go of a book whose new
+  `join_peers` at zero neighbours was not built (4b-6, C30). A node restarted while its peers'
+  addresses are stale, or not yet known, hears no heartbeat, so it cannot tell who holds what or
+  who is online: on #207's macOS CI a restarted custodian never let go of a book whose new
   custodian held it, in `a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere`.
-  **Decided:** while the topic has no neighbour, it calls `join_peers` with every reachable
-  member, backing off, and again as soon as an address is learned. **Acceptance:** a node
-  restarted with stale addresses for its peers hears their heartbeats again.
+  *Done (P5-65).* `join_peers` alone cannot reach a peer one failed dial stranded (ground truth
+  18), so while the topic has no neighbour the node dials every reachable member on the gossip ALPN
+  itself, hands gossip each connection as an accepted one, which frees a stranded peer and sends
+  what was queued for it, and then joins them: after 1 s, doubling to 60 s, and at once when an
+  address is learned or the membership changes (`availability::rejoin`). **Acceptance:** two
+  members whose log names no address strand each other at their first dials; once one learns the
+  other's address, both hear each other's beats (`a_node_with_no_neighbour_joins_again_once_it_learns_an_address`).
 
 ---
 
@@ -951,6 +955,7 @@ Every open C-number appears here once.
 | **C38** | **No overflow** — custody over a member's pledge leaves items a copy short (D9) | **No phase** (Ivan, P5-25). The load factor warns first, a node says when its custody is past its pledge, coverage shows a custodian that cannot keep up, and an item down to its last copy gets D6's emergency copy. |
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
+| **C30** | **One failed gossip dial strands that peer until it dials us** (phase 4's ground truth 18) | **Narrowed by 5f-6 (P5-65):** a node with no neighbour on the availability topic dials its members itself and hands gossip the connections, which frees them on every topic. A peer stranded while other neighbours remain still waits for it to dial us, or for the catalogue's backstop: **upstream**, n0-computer/iroh-gossip#159 or its like. |
 | **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. **#185 finding 4 asks for it again; still deferred** (P5-57). |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **Closed by 5c-0** (P5-23): never purged, and served a page at a time. |
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
