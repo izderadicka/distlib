@@ -187,7 +187,7 @@ fn a_file_list_that_is_not_the_items_own_is_left_out() {
     for stray in [one_more, one_fewer] {
         assert_eq!(
             read.absorb(key.as_bytes(), &serde_json::to_vec(&stray).unwrap()),
-            Absorbed::NotItsFiles
+            Absorbed::WrongFingerprint
         );
         assert_eq!(read, item);
     }

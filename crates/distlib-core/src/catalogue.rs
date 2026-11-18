@@ -6,11 +6,12 @@
 //! each other, and iroh-docs resolves last-writer-wins *per key*. So every
 //! field is its own entry, and a write touches only what it changes.
 //!
-//! **One key for all of an item's files**, written once by whoever adds it.
-//! An item is the files it was added with, fixed as a torrent's are (P5-66):
-//! nobody adds a file to it later, so there is nothing to merge. A list
-//! somebody else writes there is read only if it fingerprints to the item's
-//! id, and any such list is the same set of files.
+//! **One key for all of an item's files**, written once, with the item. An
+//! item is its files, fixed as a torrent's are (P5-66): its id is their
+//! fingerprint, so nothing is added to it later. Nothing stops a member
+//! writing a key, so a reader checks a list as a torrent client checks the
+//! info against its infohash: a list that does not fingerprint to the id is
+//! left out.
 //!
 //! **Every value is JSON**, including the ones §5.2 writes as bare strings.
 //! One rule beats a table of exceptions: the reader has one code path, and a
@@ -251,9 +252,9 @@ pub enum Absorbed {
     /// A key we know, holding a value we cannot read. The field keeps
     /// whatever it had.
     Unreadable,
-    /// A file list whose files do not fingerprint to the item's id: not the
-    /// files the item was added with. The item keeps whatever it had.
-    NotItsFiles,
+    /// A file list whose files do not fingerprint to the item's id, so not
+    /// the item's: left out, and the item keeps whatever it had.
+    WrongFingerprint,
 }
 
 /// One catalogue item, assembled from the entries that make it up.
@@ -347,10 +348,20 @@ impl Item {
             return Absorbed::Unreadable;
         };
         if fingerprint_of(&files) != Some(self.id) {
-            return Absorbed::NotItsFiles;
+            return Absorbed::WrongFingerprint;
         }
         self.files = files;
         Absorbed::Took
+    }
+
+    /// An item of `files` and nothing else said, under the id they
+    /// fingerprint to; `None` for no files, as [`Self::fingerprint`].
+    pub fn of_files(files: BTreeMap<ContentHash, FileRecord>) -> Option<Self> {
+        let id = fingerprint_of(&files)?;
+        Some(Self {
+            files,
+            ..Self::new(id)
+        })
     }
 
     /// The fingerprint of this item's files (§5.2, as amended by P0-7).

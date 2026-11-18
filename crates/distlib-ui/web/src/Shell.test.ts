@@ -208,7 +208,7 @@ describe("the shell", () => {
         description: null,
         files: {},
         last_modified: 0,
-        added_by: [],
+        added_by: "a".repeat(64),
         custodians: null,
         availability: { held: false, providers: 0, online: [] },
         ratings: { average: null, count: 0, mine: null },

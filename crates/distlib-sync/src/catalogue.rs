@@ -114,9 +114,11 @@ pub struct ReadItem {
     pub ratings: BTreeMap<MemberId, Rating>,
     /// Every member's review, counted the same way.
     pub reviews: BTreeMap<MemberId, Review>,
-    /// Who wrote the item's file list: each author whose list fingerprints to
-    /// the id. Whoever did added the item (phase 5's D1 and D8).
-    pub creators: BTreeSet<MemberId>,
+    /// Who wrote the item's file list first (P5-66): of the lists that
+    /// fingerprint to the id, the one with the earliest timestamp, then the
+    /// lowest author. It added the item (phase 5's D1 and D8). `None` until a
+    /// list is here, and until then this is not an item yet.
+    pub creator: Option<MemberId>,
     /// The newest timestamp among the item's own entries, in microseconds
     /// since the epoch — iroh-docs' own clock for the record. A rating or a
     /// review is not a change to the item, so neither moves it.
@@ -132,9 +134,9 @@ pub struct ReadItem {
 /// What [`Catalogue::read_files`] found besides the files themselves.
 #[derive(Debug, Default)]
 struct ReadFiles {
-    creators: BTreeSet<MemberId>,
+    creator: Option<MemberId>,
     waiting_for_content: bool,
-    /// The newest timestamp among the lists that are the item's own.
+    /// When the list taken was written.
     last_modified: u64,
 }
 
@@ -154,7 +156,7 @@ fn absorb(item: &mut Item, entry: &Entry, value: &[u8]) -> Absorbed {
         Absorbed::NotThisItem => {
             tracing::warn!(%key, id = %item.id, "a prefix search for one item answered with another")
         }
-        Absorbed::NotItsFiles => {
+        Absorbed::WrongFingerprint => {
             tracing::warn!(%key, author = %entry.author(), "a file list that is not the item's own; leaving it out")
         }
     }
@@ -545,13 +547,16 @@ impl Catalogue {
 
     /// Reads one item back out of the entries that make it up.
     ///
-    /// `None` when this node holds no entry for it at all. Otherwise the item
-    /// as far as this node knows it: **an item is its entries**, so one that
-    /// is still arriving reads as a partial item rather than as an error, and
-    /// a field whose content has not landed yet is left out the same way. A
+    /// `None` until this node holds the item's file list: an item is its
+    /// files (P5-66). Otherwise the item as far as this node knows it: a field
+    /// still arriving, or whose content has not landed yet, is left out. A
     /// caller that needs to know the difference watches for it to fill in.
     pub async fn item(&self, id: ItemId) -> Result<Option<Item>> {
-        Ok(self.read_item(id).await?.map(|read| read.item))
+        Ok(self
+            .read_item(id)
+            .await?
+            .filter(|read| read.creator.is_some())
+            .map(|read| read.item))
     }
 
     /// [`Self::item`], with what a read model needs beside it.
@@ -615,7 +620,7 @@ impl Catalogue {
             .await?;
         Ok(Some(ReadItem {
             item,
-            creators: files.creators,
+            creator: files.creator,
             waiting_for_content: waiting_for_content
                 || files.waiting_for_content
                 || ratings.waiting_for_content
@@ -626,9 +631,9 @@ impl Catalogue {
         }))
     }
 
-    /// Reads every author's file list of `item`, takes those that are the
-    /// item's own, which are the same files whoever wrote them, and says who
-    /// wrote them.
+    /// Reads every author's file list of `item` and takes the first written
+    /// of those that are the item's own: any two of them list the same files,
+    /// and (timestamp, author) picks the same one on every node.
     async fn read_files(&self, item: &mut Item) -> Result<ReadFiles> {
         let doc = self.document()?;
         let key = Key::Files { item: item.id }.encode();
@@ -639,6 +644,7 @@ impl Catalogue {
         tokio::pin!(entries);
 
         let mut read = ReadFiles::default();
+        let mut first: Option<(u64, MemberId, Item)> = None;
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             let Some(value) = self.content(&entry).await? else {
@@ -646,18 +652,27 @@ impl Catalogue {
                 tracing::debug!(%key, "the content of a file list has not arrived yet; leaving it out");
                 continue;
             };
-            if absorb(item, &entry, &value) != Absorbed::Took {
+            let Ok(author) = PublicKey::from_bytes(entry.author().as_bytes()) else {
+                tracing::warn!(author = %entry.author(), "a file list's author is not a member id");
+                continue;
+            };
+            let author = MemberId::from(author);
+            let mut listed = Item::new(item.id);
+            if absorb(&mut listed, &entry, &value) != Absorbed::Took {
                 continue;
             }
-            read.last_modified = read.last_modified.max(entry.timestamp());
-            match PublicKey::from_bytes(entry.author().as_bytes()) {
-                Ok(author) => {
-                    read.creators.insert(MemberId::from(author));
-                }
-                Err(_) => {
-                    tracing::warn!(author = %entry.author(), "a file list's author is not a member id")
-                }
+            let written = (entry.timestamp(), author);
+            if first
+                .as_ref()
+                .is_none_or(|(at, by, _)| written < (*at, *by))
+            {
+                first = Some((written.0, written.1, listed));
             }
+        }
+        if let Some((at, by, listed)) = first {
+            item.files = listed.files;
+            read.creator = Some(by);
+            read.last_modified = at;
         }
         Ok(read)
     }

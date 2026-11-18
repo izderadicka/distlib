@@ -65,8 +65,7 @@ impl Holdings {
     /// Works out again whether `item` is held, and records the answer.
     ///
     /// Held means **every one of its files is complete here and kept for
-    /// the item**. An item whose file list has not arrived has no files, and
-    /// is not held (#185).
+    /// the item**.
     ///
     /// **Kept, not only here**: a file whose tags are released, an evicted
     /// item's, stays complete until the next collection deletes it, and is
@@ -80,10 +79,8 @@ impl Holdings {
             .keys()
             .map(|hash| Hash::from_bytes(*hash.as_bytes()))
             .collect();
-        let mut held = item.fingerprint() == Some(item.id) && {
-            let kept = self.kept_for(item.id).await?;
-            files.iter().all(|hash| kept.contains(hash))
-        };
+        let kept = self.kept_for(item.id).await?;
+        let mut held = files.iter().all(|hash| kept.contains(hash));
         for hash in files.into_iter().take_while(|_| held) {
             let status = self
                 .blobs
@@ -185,7 +182,7 @@ mod tests {
         let content = store.add_bytes(b"dune".to_vec()).await.unwrap().hash;
         let hash = ContentHash::from_bytes(*content.as_bytes());
         let mut item = Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]));
-        item.files.insert(hash, content_record("dune.epub"));
+        item.files.insert(hash, file_record("dune.epub"));
 
         assert!(
             !holdings.recheck(&item).await.unwrap(),
@@ -211,36 +208,7 @@ mod tests {
         assert!(!changes.has_changed().unwrap(), "forgotten again: none");
     }
 
-    /// #185 finding 1: an item whose file list has not arrived has no files,
-    /// and is not held, though every file it will list is complete and kept;
-    /// it is once the list lands.
-    #[tokio::test]
-    async fn an_item_whose_file_list_is_still_arriving_is_not_held() {
-        let store = MemStore::new();
-        let holdings = Holdings::new((*store).clone());
-        let mut hashes = Vec::new();
-        for bytes in [b"part one".to_vec(), b"part two".to_vec()] {
-            let added = store.add_bytes(bytes).await.unwrap().hash;
-            hashes.push(ContentHash::from_bytes(*added.as_bytes()));
-        }
-        let listed = hashes
-            .iter()
-            .map(|hash| *hash.as_bytes())
-            .collect::<Vec<_>>();
-        let mut item = Item::new(ItemId::from_content_hashes(&listed));
-        for hash in &hashes {
-            let tag = KeepReason::Cache.tag(item.id, *hash);
-            let blob = Hash::from_bytes(*hash.as_bytes());
-            store.tags().set(tag, blob).await.unwrap();
-        }
-
-        assert!(!holdings.recheck(&item).await.unwrap(), "no file list yet");
-        item.files.insert(hashes[0], content_record("one.mp3"));
-        item.files.insert(hashes[1], content_record("two.mp3"));
-        assert!(holdings.recheck(&item).await.unwrap(), "its file list");
-    }
-
-    fn content_record(filename: &str) -> FileRecord {
+    fn file_record(filename: &str) -> FileRecord {
         FileRecord {
             format: "epub".to_owned(),
             size: 4,

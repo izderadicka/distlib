@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS items (
     year          INTEGER,
     lang          TEXT,
     description   TEXT,
-    last_modified INTEGER NOT NULL
+    last_modified INTEGER NOT NULL,
+    -- Who wrote its file list first (P5-66), member now or not. Their copy is
+    -- their own (phase 5's D1), and its files count towards their pledge (D8).
+    creator       TEXT    NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS item_files (
@@ -80,15 +83,6 @@ CREATE TABLE IF NOT EXISTS item_files (
 -- leads with the item. Asked when a blob arrives or goes, to decide whether
 -- its items are now held here (phase 4).
 CREATE INDEX IF NOT EXISTS item_files_by_blob ON item_files (blob);
-
--- Who added an item: whoever wrote its file list, whoever is a member now.
--- Their copy is their own (phase 5's D1), and the item's files count towards
--- their pledge (D8).
-CREATE TABLE IF NOT EXISTS creators (
-    item   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    member TEXT NOT NULL,
-    PRIMARY KEY (item, member)
-) STRICT;
 
 -- What members said about an item: one rating and one review each, the
 -- latest. Only current members' — an expelled member's are left out when the

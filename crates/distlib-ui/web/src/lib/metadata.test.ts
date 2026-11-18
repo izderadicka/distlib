@@ -16,7 +16,7 @@ const MLOCI: ItemRecord = {
   description: null,
   files: {},
   last_modified: 1790521054348270,
-  added_by: [],
+  added_by: "a".repeat(64),
   custodians: [],
   availability: { held: false, providers: 1, online: [] },
   ratings: { average: null, count: 0, mine: null },

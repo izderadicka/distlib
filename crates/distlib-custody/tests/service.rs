@@ -2,10 +2,7 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{ContentHash, FileRecord, Item, ItemId, MemberId, NodeAddr};
@@ -67,7 +64,7 @@ fn an_item(creator: MemberId) -> StoredItem {
         },
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
-        creators: BTreeSet::from([creator]),
+        creator,
         last_modified: 1,
     }
 }

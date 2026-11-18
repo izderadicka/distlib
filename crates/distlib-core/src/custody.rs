@@ -47,8 +47,8 @@ impl WeightRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustodyItem {
     pub item: ItemId,
-    /// Usually one; two members adding the same files at once both count.
-    pub creators: Vec<MemberId>,
+    /// Who wrote its file list first (P5-66).
+    pub creator: MemberId,
     /// All of its files.
     pub size_bytes: u64,
 }
@@ -95,8 +95,8 @@ impl CustodyGroup {
 
     /// The custodians of `item`, highest score first.
     ///
-    /// `replicas − 1` of them while a creator is a member, since its own copy
-    /// is the first replica; `replicas` once none is. Fewer when fewer members
+    /// `replicas − 1` of them while its creator is a member, since its own
+    /// copy is the first replica; `replicas` once it is not. Fewer when fewer members
     /// have a weight.
     pub fn custodians(&self, item: &CustodyItem) -> Vec<MemberId> {
         let slots = self.slots(item);
@@ -113,16 +113,13 @@ impl CustodyGroup {
         ranked.into_iter().map(|ranked| ranked.member).collect()
     }
 
-    /// Who must keep a copy of `item`: its custodians, and its creators while
-    /// they are members. Only their copies make up for a custodian letting go.
+    /// Who must keep a copy of `item`: its custodians, and its creator while
+    /// it is a member. Only their copies make up for a custodian letting go.
     pub fn obliged_holders(&self, item: &CustodyItem) -> Vec<MemberId> {
         let mut obliged = self.custodians(item);
-        obliged.extend(
-            item.creators
-                .iter()
-                .copied()
-                .filter(|creator| self.is_member(*creator)),
-        );
+        if self.is_member(item.creator) {
+            obliged.push(item.creator);
+        }
         obliged
     }
 
@@ -137,7 +134,7 @@ impl CustodyGroup {
         let Some(weight) = self.weight_of(me) else {
             return false;
         };
-        if slots == 0 || item.creators.contains(&me) {
+        if slots == 0 || item.creator == me {
             return false;
         }
         let mine = Ranked::new(&self.key, item.item, me, weight);
@@ -201,10 +198,9 @@ impl CustodyGroup {
             .map_or(0, |index| self.members[index].1)
     }
 
-    /// How many custodians `item` has: one fewer while a creator is a member.
+    /// How many custodians `item` has: one fewer while its creator is a member.
     fn slots(&self, item: &CustodyItem) -> usize {
-        let created_here = item.creators.iter().any(|creator| self.is_member(*creator));
-        usize::from(self.replicas).saturating_sub(usize::from(created_here))
+        usize::from(self.replicas).saturating_sub(usize::from(self.is_member(item.creator)))
     }
 
     fn is_member(&self, member: MemberId) -> bool {
@@ -213,7 +209,7 @@ impl CustodyGroup {
             .is_ok()
     }
 
-    /// The members ranked for `item`: everyone with a weight but its creators.
+    /// The members ranked for `item`: everyone with a weight but its creator.
     fn candidates<'a>(
         &'a self,
         item: &'a CustodyItem,
@@ -221,7 +217,7 @@ impl CustodyGroup {
         self.weighted
             .iter()
             .copied()
-            .filter(|(member, _)| !item.creators.contains(member))
+            .filter(|(member, _)| *member != item.creator)
     }
 
     fn weight_of(&self, member: MemberId) -> Option<f64> {

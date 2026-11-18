@@ -34,7 +34,8 @@ const MLOCI: ItemRecord = {
   series: { index: 1.0, name: "Mloci" },
   title: "Válka s mloky",
   year: 1936,
-  added_by: [],
+  // Not a member: the adder row shows only where a test sets one.
+  added_by: "d".repeat(64),
   custodians: [],
   availability: { held: false, providers: 1, online: [] },
   ratings: { average: null, count: 0, mine: null },
@@ -170,7 +171,7 @@ describe("the item page", () => {
 
   it("shows who keeps it for the group, and whether each is online", async () => {
     const CAROL = "c".repeat(64);
-    answer = { ...MLOCI, added_by: [ME], custodians: [OTHER, CAROL], availability: { ...MLOCI.availability, online: [OTHER] } };
+    answer = { ...MLOCI, added_by: ME, custodians: [OTHER, CAROL], availability: { ...MLOCI.availability, online: [OTHER] } };
     open();
 
     await screen.findByText("bob");
@@ -183,7 +184,7 @@ describe("the item page", () => {
   });
 
   it("says when no member but its adder keeps it", async () => {
-    answer = { ...MLOCI, added_by: [OTHER] };
+    answer = { ...MLOCI, added_by: OTHER };
     open();
 
     await screen.findByText("bob");
@@ -193,15 +194,15 @@ describe("the item page", () => {
 
   it("leaves out an adder who is no longer a member", async () => {
     const GONE = "e".repeat(64);
-    answer = { ...MLOCI, added_by: [GONE, OTHER], custodians: [] };
+    answer = { ...MLOCI, added_by: GONE, custodians: [OTHER] };
     open();
 
     await screen.findByText("bob");
-    expect(rows("Kept for the group")).toEqual([["bob", "its adder", "offline"]]);
+    expect(rows("Kept for the group")).toEqual([["bob", "custodian", "offline"]]);
   });
 
   it("says when who keeps it is not worked out yet", async () => {
-    answer = { ...MLOCI, added_by: [OTHER], custodians: null };
+    answer = { ...MLOCI, added_by: OTHER, custodians: null };
     open();
 
     await screen.findByText("Who keeps it is not worked out yet.");

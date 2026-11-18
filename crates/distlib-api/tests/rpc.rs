@@ -22,7 +22,7 @@ use distlib_api::{
 };
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipNode, UpgradeRequired};
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, GroupSettings, Item, ItemId, MemberId,
+    Bookmark, BookmarkId, Comment, ContentHash, FileRecord, GroupSettings, Item, ItemId, MemberId,
     NOTE_MAX_BYTES, NodeAddr, ProbeFailure, Rating, Review, Ticket, Wish, WishFields, WishId,
     WishStatus,
 };
@@ -57,6 +57,21 @@ const PLEDGE: u64 = 1_000_000_000;
 
 /// The settings the harness founds with: the defaults, with [`PLEDGE`] as the
 /// minimum pledge.
+/// An item of one made-up file told apart by `n`, with nothing else said:
+/// its own file list, so it is an item (P5-66).
+fn listed_item(n: u8) -> Item {
+    let file = FileRecord {
+        format: "epub".to_owned(),
+        size: 1,
+        filename: format!("{n}.epub"),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    Item::of_files(BTreeMap::from([(ContentHash::from_bytes([n; 32]), file)])).expect("one file")
+}
+
 fn settings() -> GroupSettings {
     GroupSettings {
         min_pledge_bytes: PLEDGE,
@@ -1701,7 +1716,7 @@ async fn library_item_reads_the_stored_record() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
-            creators: Default::default(),
+            creator: MemberId::from(SecretKey::generate().public()),
         })
         .await
         .unwrap();
@@ -1738,7 +1753,7 @@ async fn library_item_summarises_ratings_and_lists_reviews() {
             ]),
             reviews: BTreeMap::from([(other, review)]),
             last_modified: 1,
-            creators: Default::default(),
+            creator: MemberId::from(SecretKey::generate().public()),
         })
         .await
         .unwrap();
@@ -1762,11 +1777,11 @@ async fn library_item_summarises_ratings_and_lists_reviews() {
 async fn community_rate_and_review_write_and_clear_this_members_entries() {
     let harness = Harness::start().await;
     let me = harness.node.id();
-    let id = ItemId::from_bytes([7; 32]);
+    let id = listed_item(7).id;
     harness.catalogue.ready().await;
     let dune = Item {
         title: Some("Dune".to_owned()),
-        ..Item::new(id)
+        ..listed_item(7)
     };
     harness.catalogue.write(&dune).await.unwrap();
 
@@ -1807,11 +1822,11 @@ async fn community_rate_and_review_write_and_clear_this_members_entries() {
 async fn community_bookmark_leaves_edits_and_deletes_this_members_bookmarks() {
     let harness = Harness::start().await;
     let me = harness.node.id();
-    let item = ItemId::from_bytes([7; 32]);
+    let item = listed_item(7).id;
     harness.catalogue.ready().await;
     let dune = Item {
         title: Some("Dune".to_owned()),
-        ..Item::new(item)
+        ..listed_item(7)
     };
     harness.catalogue.write(&dune).await.unwrap();
 
@@ -1865,11 +1880,11 @@ async fn community_bookmark_leaves_edits_and_deletes_this_members_bookmarks() {
 #[tokio::test]
 async fn community_bookmark_refuses_what_is_not_this_members_to_write() {
     let harness = Harness::start().await;
-    let item = ItemId::from_bytes([7; 32]);
+    let item = listed_item(7).id;
     harness.catalogue.ready().await;
     let dune = Item {
         title: Some("Dune".to_owned()),
-        ..Item::new(item)
+        ..listed_item(7)
     };
     harness.catalogue.write(&dune).await.unwrap();
     let nobodys = BookmarkId::from_bytes([3; 16]);
@@ -1921,7 +1936,7 @@ async fn bookmarks_are_listed_on_the_item_and_found_across_the_group() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
-            creators: Default::default(),
+            creator: MemberId::from(SecretKey::generate().public()),
         })
         .await
         .unwrap();
@@ -1986,11 +2001,11 @@ async fn bookmarks_are_listed_on_the_item_and_found_across_the_group() {
 async fn community_wishes_are_created_commented_on_and_fulfilled() {
     let harness = Harness::start().await;
     let me = harness.node.id();
-    let item = ItemId::from_bytes([7; 32]);
+    let item = listed_item(7).id;
     harness.catalogue.ready().await;
     let hordubal = Item {
         title: Some("Hordubal".to_owned()),
-        ..Item::new(item)
+        ..listed_item(7)
     };
     harness.catalogue.write(&hordubal).await.unwrap();
 
@@ -2098,7 +2113,7 @@ async fn community_wish_list_resolves_filters_and_orders_wishes() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
-            creators: Default::default(),
+            creator: MemberId::from(SecretKey::generate().public()),
         })
         .await
         .unwrap();
@@ -2182,11 +2197,11 @@ async fn community_wish_list_resolves_filters_and_orders_wishes() {
 #[tokio::test]
 async fn community_rate_refuses_a_bad_rating_and_an_unknown_item() {
     let harness = Harness::start().await;
-    let id = ItemId::from_bytes([7; 32]);
+    let id = listed_item(7).id;
     harness.catalogue.ready().await;
     let dune = Item {
         title: Some("Dune".to_owned()),
-        ..Item::new(id)
+        ..listed_item(7)
     };
     harness.catalogue.write(&dune).await.unwrap();
 
@@ -2243,7 +2258,7 @@ async fn library_search_ranks_and_reads_hits_back() {
             ratings: BTreeMap::new(),
             reviews: BTreeMap::new(),
             last_modified: 1,
-            creators: Default::default(),
+            creator: MemberId::from(SecretKey::generate().public()),
         })
         .await
         .unwrap();
@@ -2288,7 +2303,7 @@ async fn a_long_library_reads_in_pages_with_nothing_twice_and_nothing_missed() {
                 ratings: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 last_modified: 1,
-                creators: Default::default(),
+                creator: MemberId::from(SecretKey::generate().public()),
             })
             .await
             .unwrap();

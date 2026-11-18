@@ -35,7 +35,7 @@ fn items(count: u32, creators: &[MemberId]) -> Vec<CustodyItem> {
     (0..count)
         .map(|n| CustodyItem {
             item: item(n),
-            creators: vec![creators[n as usize % creators.len()]],
+            creator: creators[n as usize % creators.len()],
             size_bytes: 0,
         })
         .collect()
@@ -126,7 +126,7 @@ proptest! {
         let members: Vec<MemberId> = pledges.iter().map(|(member, _)| *member).collect();
         let weighted = pledges.iter().filter(|(_, pledge)| RULE.weight(*pledge) > 0).count();
         for item in items(50, &members) {
-            let creator = item.creators[0];
+            let creator = item.creator;
             let old = group(&pledges).custodians(&item);
             prop_assert!(!old.contains(&creator));
 
@@ -170,7 +170,7 @@ proptest! {
             prop_assert_eq!(second, two_more.custodians(&item).get(custodians.len() + 1).copied());
             if let Some(first) = first {
                 prop_assert!(!custodians.contains(&first));
-                prop_assert!(!item.creators.contains(&first));
+                prop_assert_ne!(item.creator, first);
             }
         }
     }
@@ -289,13 +289,13 @@ fn the_load_factor_is_each_items_size_per_slot_over_the_total_weight() {
     // Its creator is a member, so two slots: 2 × 100.
     let by_a_member = CustodyItem {
         item: item(1),
-        creators: vec![c],
+        creator: c,
         size_bytes: 100,
     };
     // Its creator is not, so three: 3 × 40.
     let by_an_outsider = CustodyItem {
         item: item(2),
-        creators: vec![outsider],
+        creator: outsider,
         size_bytes: 40,
     };
     let demand = u128::from(group.demand_bytes(&by_a_member) + group.demand_bytes(&by_an_outsider));
@@ -315,7 +315,7 @@ fn the_obliged_holders_are_the_custodians_and_a_creator_still_a_member() {
     let group = CustodyGroup::new(REPLICAS, RULE, [(a, 500), (b, 500), (c, 500), (d, 500)]);
     let by = |creator| CustodyItem {
         item: item(1),
-        creators: vec![creator],
+        creator,
         size_bytes: 0,
     };
 

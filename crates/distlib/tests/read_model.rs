@@ -15,11 +15,7 @@
 #![cfg(feature = "slow-tests")]
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use distlib::Runtime;
 use distlib_core::{
@@ -31,7 +27,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{api, bound, config, group_settings, init_logging, profile, until_released};
+use common::{
+    api, bound, config, group_settings, init_logging, listed_item, profile, until_released,
+};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// then for the projection behind that to catch up.
@@ -437,12 +435,12 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
     // order they were written, and a pass takes everything reported so far, so
     // the pass that projects the marker has every one of the item's entries
     // behind it — and its event is published only after its index commit.
-    let marker = ItemId::from_bytes([0xff; 32]);
+    let marker = listed_item(0xff).id;
     runtime
         .catalogue()
         .write(&Item {
             title: Some("a marker".to_owned()),
-            ..Item::new(marker)
+            ..listed_item(0xff)
         })
         .await
         .unwrap();
@@ -617,15 +615,15 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     assert_eq!(record["title"], json!("Dune"));
     assert_eq!(record["authors"], json!(["Frank Herbert", "Brian Herbert"]));
     assert_eq!(record["files"].as_object().unwrap().len(), 1);
-    assert_eq!(record["added_by"], json!([id]));
+    assert_eq!(record["added_by"], json!(id));
 
     runtime.shutdown().await;
 }
 
-/// Two members who each wrote the same file list both added the item: the
-/// read model keeps every author of a valid list, not only the latest (5b-1a).
+/// Two members who each wrote the item's file list: the first to write it
+/// created the item, on every node (P5-66).
 #[tokio::test(flavor = "multi_thread")]
-async fn both_members_who_wrote_the_file_list_added_the_item() {
+async fn the_member_who_wrote_the_file_list_first_created_the_item() {
     let dir = TempDir::new().unwrap();
     let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
     alice.catalogue().ready().await;
@@ -633,23 +631,70 @@ async fn both_members_who_wrote_the_file_list_added_the_item() {
 
     let item = an_item(4, "Dune");
     alice.catalogue().write(&item).await.unwrap();
+    until_projected(&bob, item.id, "Dune").await;
+    // Bob's list, then a title after it: once the title is on alice, so is
+    // the list.
     bob.catalogue().write(&item).await.unwrap();
+    let retitled = Item {
+        title: Some("Dune, again".to_owned()),
+        ..Item::new(item.id)
+    };
+    bob.catalogue().write(&retitled).await.unwrap();
 
-    let both = BTreeSet::from([alice.node().id(), bob.node().id()]);
     for node in [&alice, &bob] {
-        tokio::time::timeout(SOON, async {
-            loop {
-                let stored = node.store().item(item.id).await.unwrap();
-                if stored.is_some_and(|stored| stored.creators == both) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("each node records both members as the item's creators");
+        let stored = until_projected(node, item.id, "Dune, again").await;
+        assert_eq!(stored.creator, alice.node().id(), "the first list's author");
     }
 
     bob.shutdown().await;
     alice.shutdown().await;
+}
+
+/// An item's fields without its file list are not an item yet: nothing is
+/// projected, so nothing is held or kept for it, until the list is here
+/// (#185, P5-66).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_is_projected_only_once_its_file_list_is_here() {
+    let dir = TempDir::new().unwrap();
+    let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
+    alice.catalogue().ready().await;
+
+    let item = an_item(5, "Dune");
+    let fields = Item {
+        files: BTreeMap::new(),
+        ..item.clone()
+    };
+    alice.catalogue().write(&fields).await.unwrap();
+    // Projected in the order written: once this one is, the fields were read.
+    alice.catalogue().write(&an_item(6, "Emma")).await.unwrap();
+    until_projected(&alice, item_id(6), "Emma").await;
+    assert_eq!(alice.store().item(item.id).await.unwrap(), None);
+    assert_eq!(alice.catalogue().item(item.id).await.unwrap(), None);
+
+    alice.catalogue().write(&item).await.unwrap();
+    let stored = until_projected(&alice, item.id, "Dune").await;
+    assert_eq!(stored.item, item);
+
+    bob.shutdown().await;
+    alice.shutdown().await;
+}
+
+/// Waits until `node`'s read model holds `item` titled `title`.
+async fn until_projected(node: &Runtime, item: ItemId, title: &str) -> StoredItem {
+    let mut last = None;
+    let projected = tokio::time::timeout(SOON, async {
+        loop {
+            last = node.store().item(item).await.unwrap();
+            if let Some(stored) = &last
+                && stored.item.title.as_deref() == Some(title)
+            {
+                return stored.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    projected.unwrap_or_else(|_| {
+        panic!("{item} titled {title:?} not projected within {SOON:?}; last seen: {last:#?}")
+    })
 }

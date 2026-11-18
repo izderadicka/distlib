@@ -135,7 +135,7 @@ async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
         let items: Vec<CustodyItem> = (1..=16_u8)
             .map(|seed| CustodyItem {
                 item: an_item(seed, u64::from(seed) * GB).id,
-                creators: vec![ids[creator_of(seed)]],
+                creator: ids[creator_of(seed)],
                 size_bytes: u64::from(seed) * GB,
             })
             .collect();

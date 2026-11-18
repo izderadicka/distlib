@@ -157,9 +157,9 @@
         </thead>
         <tbody>
           <!-- An adder who has left keeps nothing for the group. -->
-          {#each item.added_by.filter((member) => names.has(member)) as member (member)}
-            <tr><td>{memberName(member, names, me)}</td><td>its adder</td><td>{presence(member, online)}</td></tr>
-          {/each}
+          {#if names.has(item.added_by)}
+            <tr><td>{memberName(item.added_by, names, me)}</td><td>its adder</td><td>{presence(item.added_by, online)}</td></tr>
+          {/if}
           {#each item.custodians as member (member)}
             <tr><td>{memberName(member, names, me)}</td><td>custodian</td><td>{presence(member, online)}</td></tr>
           {/each}

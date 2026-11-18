@@ -679,11 +679,7 @@ impl Keeper {
                 fetch_until_stalled(&self.blobs, hash, providers.clone()).await?;
             }
         }
-        // Read again: the projection may have rechecked a newer item meanwhile
-        // (#200 finding 6), its file list arrived during the fetch.
-        if let Some(stored) = self.store.item(item_id).await? {
-            self.holdings.recheck(&stored.item).await?;
-        }
+        self.holdings.recheck(&stored.item).await?;
         Ok(())
     }
 

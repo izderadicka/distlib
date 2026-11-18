@@ -34,7 +34,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, config, following, group_settings, init_logging, profile, until_projected,
+    api, bound, config, following, group_settings, init_logging, listed_item, profile,
+    until_projected,
 };
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
@@ -813,13 +814,13 @@ async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
     let bookmark = |note: &str| Bookmark::new("p. 12".to_owned(), note.to_owned(), 1).unwrap();
     let bookmark_id = BookmarkId::from_bytes([1; 16]);
 
-    let id = ItemId::from_bytes([4; 32]);
+    let id = listed_item(4).id;
     group
         .alice
         .catalogue()
         .write(&Item {
             title: Some("The Dispossessed".to_owned()),
-            ..Item::new(id)
+            ..listed_item(4)
         })
         .await
         .unwrap();
@@ -979,13 +980,13 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
         ("bob", &bobs_api, json!(4)),
         ("carol", &carols_api, json!(5)),
     ];
-    let item = ItemId::from_bytes([5; 32]);
+    let item = listed_item(5).id;
     group
         .alice
         .catalogue()
         .write(&Item {
             title: Some("Hordubal".to_owned()),
-            ..Item::new(item)
+            ..listed_item(5)
         })
         .await
         .unwrap();
@@ -994,7 +995,7 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
         ("bob", &group.bob),
         ("carol", &group.carol),
     ] {
-        until_projected(runtime, item, 0, who).await;
+        until_projected(runtime, item, 1, who).await;
     }
 
     let rate = |rating: u8| Some(json!({ "item_id": item, "rating": rating }));
@@ -1061,13 +1062,13 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
     let bobs_api = api(&group.bob, &group.bob_key);
     let carols_api = api(&group.carol, &group.carol_key);
     let bob_id = MemberId::from(group.bob_key.public());
-    let item = ItemId::from_bytes([5; 32]);
+    let item = listed_item(5).id;
     group
         .alice
         .catalogue()
         .write(&Item {
             title: Some("Dune".to_owned()),
-            ..Item::new(item)
+            ..listed_item(5)
         })
         .await
         .unwrap();
@@ -1076,7 +1077,7 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
         ("bob", &group.bob),
         ("carol", &group.carol),
     ] {
-        until_projected(runtime, item, 0, who).await;
+        until_projected(runtime, item, 1, who).await;
     }
     let mut alice_hears = group.alice.events().subscribe();
 
@@ -1216,13 +1217,13 @@ async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
         )
         .await
         .unwrap();
-    let item = ItemId::from_bytes([4; 32]);
+    let item = listed_item(4).id;
     group
         .carol
         .catalogue()
         .write(&Item {
             title: Some("Hordubal".to_owned()),
-            ..Item::new(item)
+            ..listed_item(4)
         })
         .await
         .unwrap();

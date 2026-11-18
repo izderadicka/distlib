@@ -45,7 +45,7 @@ pub struct CoverageSources {
     pub custody: Custody,
     /// For `max_settle_secs`.
     pub membership: watch::Receiver<MembershipState>,
-    /// An item's creators and size.
+    /// An item's creator and size.
     pub store: Store,
     /// Who is online, and what they hold.
     pub availability: Availability,
@@ -246,7 +246,7 @@ mod tests {
     fn item(seed: u8, creator: MemberId) -> CustodyItem {
         CustodyItem {
             item: ItemId::from_bytes([seed; 32]),
-            creators: vec![creator],
+            creator,
             size_bytes: 10,
         }
     }

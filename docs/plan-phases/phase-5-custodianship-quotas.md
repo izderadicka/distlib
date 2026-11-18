@@ -884,9 +884,11 @@ fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward
   #200's `one_more_content_record_makes_a_whole_item_not_held` and
   `one_stray_content_record_lets_a_custodian_go_without_copies_elsewhere`, reversed, the latter
   without its reindex.
-  *Done (P5-66), as one file list per item instead (Ivan, on #212):* an item is the files it was
-  added with, in one `item/{id}/files` key; a list that does not fingerprint to the id is left
-  out, and no roles. Both tests reversed, against a stray list.
+  *Done (P5-66), as one file list per item instead (Ivan, on #212 and #213):* an item is the
+  files it was added with, in one `item/{id}/files` key written with it and never after; a list
+  that does not fingerprint to the id is left out, and no roles. An item is not one until its
+  list is here; its one creator is the first list's author. Both tests reversed, against a
+  stray list.
 - **5f-3 — a creator's copy is checked like a custodian's (#200 finding 3).** 5e-6 counts a
   creator's copy as an obliged one, but probes and coverage judge custodians only: a creator's
   corrupted copy is never probed, still counts as real, and an old custodian can let go on it.

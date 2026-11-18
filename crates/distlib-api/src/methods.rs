@@ -712,8 +712,8 @@ impl Api {
         record["lang"] = json!(stored.item.lang);
         record["description"] = json!(stored.item.description);
         record["files"] = json!(stored.item.files);
-        // Whoever wrote its file list, members or not any more.
-        record["added_by"] = json!(stored.creators);
+        // Whoever wrote its file list first, member or not any more.
+        record["added_by"] = json!(stored.creator);
         // Null until custody has been computed.
         record["custodians"] = json!(self.custody.custodians(&stored.custody_item()));
         record["last_modified"] = json!(stored.last_modified);
@@ -1016,10 +1016,10 @@ impl Api {
     /// catalogue entry for it (2b-2; §6.1's "v1 — exact" dedup).
     ///
     /// The files are the item for good: `item_id` is their fingerprint (§5.2,
-    /// D4). An item already at that id keeps its metadata, so a worse guess at
-    /// a title cannot replace a better one, and gets a file list only if it
-    /// has none here. Two nodes adding the same files compute the same id, so
-    /// they converge on one item without coordinating.
+    /// D4). An item already at that id is left as it is, so a worse guess at
+    /// a title cannot replace a better one. Two nodes adding the same files
+    /// compute the same id, so they converge on one item without
+    /// coordinating.
     ///
     /// Every file imported is kept as this node's own, whether or not the
     /// item was new: whoever adds files means to share them.
@@ -1033,11 +1033,7 @@ impl Api {
         self.check_room_for(&item).await?;
         let id = item.id;
         let existing = self.catalogue.item(id).await.map_err(sync_error)?;
-        // A file list by this member only where the item has none.
-        let growth: u64 = if existing
-            .as_ref()
-            .is_some_and(|existing| !existing.files.is_empty())
-        {
+        let growth: u64 = if existing.is_some() {
             0
         } else {
             item.files
@@ -1060,7 +1056,11 @@ impl Api {
                 .map_err(net_error)?;
         }
         let mut answer = match existing {
-            Some(existing) => self.add_to_existing(item, &existing).await?,
+            Some(existing) => json!({
+                "item_id": id,
+                "created": false,
+                "title": existing.title,
+            }),
             None => self.write_new_item(item, params).await?,
         };
         answer["under_pledged"] = requirement.under_pledged();
@@ -1135,14 +1135,13 @@ impl Api {
     async fn item_from_files(&self, paths: &[PathBuf]) -> Result<(Item, Vec<ImportedFile>), Error> {
         // Keyed on the blob, so the same file named twice is not a collision.
         let mut named: BTreeMap<String, &PathBuf> = BTreeMap::new();
-        // A placeholder id until every file is hashed.
-        let mut item = Item::new(ItemId::from_bytes([0; 32]));
+        let mut files = BTreeMap::new();
         let mut imported = Vec::with_capacity(paths.len());
         for path in paths {
             let (file, record) = self.hash_file(path).await?;
             let hash = file.hash;
             imported.push(file);
-            if !item.files.contains_key(&hash)
+            if !files.contains_key(&hash)
                 && let Some(first) = named.get(&record.filename)
             {
                 return Err(Error::invalid_params(format!(
@@ -1154,10 +1153,9 @@ impl Api {
                 )));
             }
             named.insert(record.filename.clone(), path);
-            item.files.insert(hash, record);
+            files.insert(hash, record);
         }
-        item.id = item
-            .fingerprint()
+        let item = Item::of_files(files)
             .expect("`files` is non-empty: the params ask for at least one file");
         Ok((item, imported))
     }
@@ -1218,34 +1216,6 @@ impl Api {
         Ok(true)
     }
 
-    /// Writes `item`'s file list if `existing`, at the same id, has none here,
-    /// and leaves its metadata alone. Usually it has one: only an earlier
-    /// write interrupted partway, or a list still arriving, leaves it without.
-    async fn add_to_existing(&self, item: Item, existing: &Item) -> Result<Value, Error> {
-        let id = item.id;
-        let files = if existing.files.is_empty() {
-            item.files
-        } else {
-            BTreeMap::new()
-        };
-        let contributed: Vec<ContentHash> = files.keys().copied().collect();
-        if !files.is_empty() {
-            self.catalogue
-                .write(&Item {
-                    files,
-                    ..Item::new(id)
-                })
-                .await
-                .map_err(sync_error)?;
-        }
-        Ok(json!({
-            "item_id": id,
-            "created": false,
-            "title": existing.title,
-            "contributed_files": contributed,
-        }))
-    }
-
     /// Writes `item` as a new item, with every field `params` gives.
     async fn write_new_item(&self, mut item: Item, params: Add) -> Result<Value, Error> {
         item.kind = Some(params.kind);
@@ -1261,7 +1231,6 @@ impl Api {
             "item_id": item.id,
             "created": true,
             "title": item.title,
-            "contributed_files": Vec::<ContentHash>::new(),
         }))
     }
 

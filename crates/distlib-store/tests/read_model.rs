@@ -137,6 +137,11 @@ fn member() -> impl Strategy<Value = MemberId> {
     (1u8..5).prop_map(|seed| MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public()))
 }
 
+/// Whoever created a fixed item; who does not matter to the test.
+fn a_creator() -> MemberId {
+    MemberId::from(iroh::SecretKey::from_bytes(&[9; 32]).public())
+}
+
 fn rating() -> impl Strategy<Value = Rating> {
     (1u8..=5).prop_map(|value| Rating::try_from(value).expect("one to five is a rating"))
 }
@@ -151,15 +156,15 @@ fn stored() -> impl Strategy<Value = StoredItem> {
         proptest::collection::btree_map(member(), rating(), 0..3),
         proptest::collection::btree_map(member(), review(), 0..3),
         any::<u64>(),
-        proptest::collection::btree_set(member(), 0..3),
+        member(),
     )
         .prop_map(
-            |(item, ratings, reviews, last_modified, creators)| StoredItem {
+            |(item, ratings, reviews, last_modified, creator)| StoredItem {
                 item,
                 ratings,
                 reviews,
                 last_modified: last_modified >> 1,
-                creators,
+                creator,
             },
         )
 }
@@ -281,10 +286,10 @@ proptest! {
         })?;
     }
 
-    /// What each member added is the size of the files of each item whose
-    /// file list it wrote.
+    /// What each member added is the size of the files of each item it
+    /// created.
     #[test]
-    fn added_bytes_are_the_files_of_each_item_a_member_wrote(
+    fn added_bytes_are_the_files_of_each_item_a_member_created(
         items in distinct_items(0..5),
     ) {
         runtime().block_on(async {
@@ -296,9 +301,8 @@ proptest! {
                 }
                 let size: u64 = stored.item.files.values().map(|file| file.size).sum();
                 // An item with no files adds nothing, not a zero.
-                let creators = stored.creators.iter().filter(|_| !stored.item.files.is_empty());
-                for creator in creators {
-                    *expected.entry(*creator).or_default() += size;
+                if !stored.item.files.is_empty() {
+                    *expected.entry(stored.creator).or_default() += size;
                 }
                 store.upsert_item(stored).await.expect("the item is written");
             }
@@ -458,7 +462,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
             Review::try_from("Spice".to_owned()).expect("a review"),
         )]),
         last_modified: 100,
-        creators: Default::default(),
+        creator: a_creator(),
     };
     store
         .upsert_item(whole)
@@ -476,7 +480,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 200,
-        creators: Default::default(),
+        creator: a_creator(),
     };
     store
         .upsert_item(partial.clone())
@@ -559,7 +563,7 @@ async fn bookmarks_are_found_by_text_member_and_item() {
                 ratings: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 last_modified: 1,
-                creators: Default::default(),
+                creator: a_creator(),
             })
             .await
             .expect("written");
@@ -681,7 +685,7 @@ async fn a_store_reopens_onto_what_it_already_held() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
-        creators: Default::default(),
+        creator: a_creator(),
     };
 
     let first = Store::open(Some(dir.path().to_path_buf()))
@@ -729,7 +733,7 @@ async fn a_store_of_another_version_is_started_afresh() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
-        creators: Default::default(),
+        creator: a_creator(),
     };
     store.upsert_item(stored.clone()).await.expect("written");
     assert_eq!(store.item(id).await.expect("read"), Some(stored));
@@ -753,7 +757,6 @@ async fn a_store_of_another_version_is_started_afresh() {
         [
             "blob_last_used",
             "bookmarks",
-            "creators",
             "item_files",
             "items",
             "last_used",
@@ -789,7 +792,7 @@ fn with_file(id: ItemId, blob: ContentHash) -> StoredItem {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 1,
-        creators: Default::default(),
+        creator: a_creator(),
     }
 }
 
@@ -888,7 +891,7 @@ async fn an_items_file_is_told_apart_from_a_stranger() {
             ratings: Default::default(),
             reviews: Default::default(),
             last_modified: 0,
-            creators: Default::default(),
+            creator: a_creator(),
         })
         .await
         .expect("the item is written");

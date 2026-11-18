@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 123d5614f07cd6f71cf0693c80ca8d8c520075497b163bf852944f9a50044a3a # shrinks to pledges = [(MemberId(PublicKey(3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29)), 0), (MemberId(PublicKey(8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c)), 0), (MemberId(PublicKey(8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394)), 0), (MemberId(PublicKey(ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1)), 0), (MemberId(PublicKey(ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c)), 0), (MemberId(PublicKey(6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1)), 0), (MemberId(PublicKey(8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17)), 10)]

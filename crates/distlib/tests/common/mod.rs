@@ -14,6 +14,7 @@ pub mod process;
 
 use std::{
     borrow::Borrow,
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     path::Path,
@@ -25,10 +26,28 @@ use distlib::Runtime;
 use distlib_api::Api;
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState};
 use distlib_core::{
-    Config, CoreMember, DataDir, GroupSettings, ItemId, MemberId, NetConfig, NodeAddr,
+    Config, ContentHash, CoreMember, DataDir, FileRecord, GroupSettings, Item, ItemId, MemberId,
+    NetConfig, NodeAddr,
 };
 use iroh::SecretKey;
 use serde_json::json;
+
+/// An item of one made-up file told apart by `n`, with nothing else said:
+/// its own file list, so it is an item (P5-66).
+pub fn listed_item(n: u32) -> Item {
+    let mut hash = [0; 32];
+    hash[..4].copy_from_slice(&n.to_le_bytes());
+    let file = FileRecord {
+        format: "epub".to_owned(),
+        size: 1,
+        filename: format!("{n}.epub"),
+        seq: None,
+        disc: None,
+        title: None,
+        duration: None,
+    };
+    Item::of_files(BTreeMap::from([(ContentHash::from_bytes(hash), file)])).expect("one file")
+}
 
 /// Waits until a stopped runtime has let go of every database in `data_dir`.
 ///

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_core::{ContentHash, DataDir, Item, ItemId, ItemKind, MemberId};
+use distlib_core::{DataDir, Item, ItemId, MemberId};
 use iroh::SecretKey;
 use serde_json::json;
 use tempfile::TempDir;
@@ -192,14 +192,13 @@ async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
 }
 
 /// §6.1's add-time assist, on one node: a fingerprint that already names an
-/// item leaves that item's metadata alone, and writes its file list only if
-/// it has none.
+/// item writes nothing, so its metadata stays as it was (P5-66).
 ///
-/// The item is seeded with its metadata and no file list, standing in for a
-/// write interrupted between the two in [`distlib_sync::Catalogue::write`].
-/// Adding its files again then contributes nothing: the list is there.
+/// Fields written at the id without a file list, as a write interrupted
+/// partway in [`distlib_sync::Catalogue::write`] leaves them, are no item:
+/// the first add writes the whole item.
 #[tokio::test]
-async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_writes_a_missing_list() {
+async fn adding_an_item_again_writes_nothing_and_fields_without_a_list_are_no_item() {
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -218,56 +217,50 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_writes
     let hash_b = runtime.catalogue().add_file(&file_b).await.unwrap().hash;
     let item_id = ItemId::from_content_hashes(&[*hash_a.as_bytes(), *hash_b.as_bytes()]);
 
-    // Somebody already created this item, and its file list never made it in.
     runtime
         .catalogue()
         .write(&Item {
-            kind: Some(ItemKind::Audiobook),
-            title: Some("Dune".to_owned()),
+            title: Some("an interrupted add's title".to_owned()),
             ..Item::new(item_id)
         })
         .await
         .unwrap();
 
-    let add = || async {
-        api(&runtime, &key)
-            .call(
+    let add = |title: &'static str| {
+        let api = api(&runtime, &key);
+        let files = json!([&file_a, &file_b]);
+        async move {
+            api.call(
                 "library.add",
-                Some(json!({
-                    "kind": "audiobook",
-                    "files": [&file_a, &file_b],
-                    "title": "a worse guess at the title",
-                })),
+                Some(json!({ "kind": "audiobook", "files": files, "title": title })),
             )
             .await
             .unwrap()
+        }
     };
-    let answer = add().await;
-
-    assert_eq!(answer["item_id"], json!(item_id));
-    assert_eq!(answer["created"], json!(false), "the id already existed");
+    let first = add("Dune").await;
+    assert_eq!(first["item_id"], json!(item_id));
     assert_eq!(
-        answer["title"],
+        first["created"],
+        json!(true),
+        "fields without a list are no item"
+    );
+    let written = runtime.catalogue().item(item_id).await.unwrap().unwrap();
+    assert_eq!(written.title.as_deref(), Some("Dune"));
+    assert_eq!(written.files.len(), 2);
+
+    let again = add("a worse guess at the title").await;
+    assert_eq!(again["created"], json!(false), "the id already existed");
+    assert_eq!(
+        again["title"],
         json!("Dune"),
         "the existing title is reported back untouched"
     );
-    let mut contributed: Vec<ContentHash> =
-        serde_json::from_value(answer["contributed_files"].clone()).unwrap();
-    contributed.sort();
-    let mut both = vec![hash_a, hash_b];
-    both.sort();
-    assert_eq!(contributed, both, "the whole list");
-
-    let item = runtime.catalogue().item(item_id).await.unwrap().unwrap();
     assert_eq!(
-        item.title,
-        Some("Dune".to_owned()),
-        "not overwritten by the second, worse-informed caller"
+        runtime.catalogue().item(item_id).await.unwrap().unwrap(),
+        written,
+        "nothing written"
     );
-    assert_eq!(item.files.len(), 2, "its file list is here now");
-
-    let again = add().await;
-    assert_eq!(again["contributed_files"], json!([]), "the list is there");
 
     runtime.shutdown().await;
 }

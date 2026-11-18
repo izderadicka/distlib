@@ -425,8 +425,7 @@ async fn a_stray_file_list_changes_nothing_a_custodian_keeps() {
         let stored = node.runtime.store().item(item).await.unwrap().unwrap();
         assert_eq!(stored.item.files.keys().collect::<Vec<_>>(), [&file]);
         assert_eq!(
-            stored.creators,
-            [founder.id].into(),
+            stored.creator, founder.id,
             "the stray's writer added nothing"
         );
         assert!(node.runtime.catalogue().holdings().holds(item));
@@ -568,7 +567,7 @@ fn custodian_and_other(founder: &Node, second: Node, third: Node, item: ItemId) 
     );
     let custodians = group.custodians(&CustodyItem {
         item,
-        creators: vec![founder.id],
+        creator: founder.id,
         size_bytes: 0,
     });
     if custodians == [second.id] {
@@ -629,7 +628,7 @@ async fn until_each_ranks_the_other(
         let probe = (0..=u8::MAX)
             .map(|seed| CustodyItem {
                 item: ItemId::from_bytes([seed; 32]),
-                creators: vec![founder.id],
+                creator: founder.id,
                 size_bytes: 0,
             })
             .find(|item| group.custodians(item) == [other.id])
@@ -1409,7 +1408,7 @@ fn a_title_ranked(
         .find(|(_, item)| {
             let item = CustodyItem {
                 item: *item,
-                creators: vec![founder],
+                creator: founder,
                 size_bytes: 0,
             };
             ranked
@@ -1581,7 +1580,7 @@ async fn the_next_member_after_the_custodians_copies_an_item_left_with_one_copy(
     let (item, file) = add_a_book(node(&nodes, 0), dir.path(), "Dune", BOOK).await;
     let ranked = CustodyItem {
         item,
-        creators: vec![core[0]],
+        creator: core[0],
         size_bytes: 0,
     };
     let group = CustodyGroup::new(
@@ -1742,7 +1741,7 @@ async fn an_emergency_copy_stays_past_the_limit_until_the_custodian_holds_the_it
     let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
     let ranked = CustodyItem {
         item,
-        creators: vec![founder.id],
+        creator: founder.id,
         size_bytes: 0,
     };
     let (custodian, copier) = if group.custodians(&ranked) == [second.id] {
