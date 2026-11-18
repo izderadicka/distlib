@@ -800,12 +800,7 @@ fn print_item_description(item_id: ItemId, answer: &Value, names: &MemberNames) 
     if let Some(description) = answer["description"].as_str() {
         println!("description {description}");
     }
-    if let Some(added_by) = answer["added_by"]
-        .as_array()
-        .filter(|list| !list.is_empty())
-    {
-        println!("added by    {}", names.join(added_by));
-    }
+    println!("added by    {}", names.named(&answer["added_by"]));
     if let Some(custodians) = answer["custodians"]
         .as_array()
         .filter(|list| !list.is_empty())
@@ -1154,13 +1149,7 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
     if answer["created"].as_bool().unwrap_or(false) {
         println!("added       {item_id}  {title}");
     } else {
-        let contributed = answer["contributed_files"].as_array().map_or(0, Vec::len);
         println!("exists      {item_id}  {title}");
-        if contributed == 0 {
-            println!("            nothing here that it did not already have");
-        } else {
-            println!("            contributed {contributed} file(s) it was missing");
-        }
     }
     print_under_pledged(&answer["under_pledged"]);
     Ok(())

@@ -233,17 +233,16 @@ impl GroupId {
     }
 }
 
-/// Identifies one catalogue item by the set of content files it was born with.
+/// Identifies one catalogue item by the set of files it was added with.
 ///
-/// Computed once at creation and then frozen: adding a missing chapter or a
-/// second format later must not change the id, because ratings, reviews,
-/// bookmarks and custodianship all key off it.
+/// Nothing is added to an item later (P5-66), so the id never changes:
+/// ratings, reviews, bookmarks and custodianship all key off it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ItemId(#[serde(with = "hex32")] [u8; 32]);
 
 impl ItemId {
-    /// Fingerprints the set of `role: content` blob hashes an item is made of.
+    /// Fingerprints the set of blob hashes an item's files are.
     ///
     /// ```text
     /// BLAKE3( "distlib.item.v1" || n || sorted[ h_i ] )
@@ -259,9 +258,6 @@ impl ItemId {
     /// variable-length elements would carry its own tag, which is what
     /// prevents cross-version collisions — the length prefix never was.
     /// Recorded as P0-7 in `docs/plan-deltas.md`.
-    ///
-    /// Cover art and subtitles are excluded by the caller — only content files
-    /// take part, so adding a cover does not create a different item.
     ///
     /// Callers pass a set: the catalogue keys files by blob hash, so duplicates
     /// cannot occur. Duplicates are hashed as given rather than silently

@@ -2,9 +2,7 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use distlib_core::{
-    Absorbed, ContentHash, Field, FileRecord, FileRole, Item, ItemId, ItemKind, Key, Series,
-};
+use distlib_core::{Absorbed, ContentHash, Field, FileRecord, Item, ItemId, ItemKind, Key, Series};
 
 fn hash(byte: u8) -> ContentHash {
     ContentHash::from_bytes([byte; 32])
@@ -23,16 +21,13 @@ fn an_item() -> Item {
     item.year = Some(1969);
     item.lang = Some("en".to_owned());
     item.description = Some("Winter, and an envoy.".to_owned());
-    item.files
-        .insert(hash(1), a_file(FileRole::Content, "01.mp3"));
-    item.files
-        .insert(hash(2), a_file(FileRole::Content, "02.mp3"));
+    item.files.insert(hash(1), a_file("01.mp3"));
+    item.files.insert(hash(2), a_file("02.mp3"));
     item
 }
 
-fn a_file(role: FileRole, filename: &str) -> FileRecord {
+fn a_file(filename: &str) -> FileRecord {
     FileRecord {
-        role,
         format: "mp3".to_owned(),
         size: 4_200_000,
         filename: filename.to_owned(),
@@ -156,10 +151,7 @@ fn keys_say_what_they_mean() {
             item,
             field: Field::Description,
         },
-        Key::File {
-            item,
-            blob: hash(8),
-        },
+        Key::Files { item },
     ] {
         let encoded = key.encode();
         assert_eq!(Key::parse(encoded.as_bytes()), Some(key), "{encoded}");
@@ -176,34 +168,37 @@ fn keys_say_what_they_mean() {
     );
 }
 
-/// **Only content files make the id**, which is the rule §5.2 says people get
-/// wrong: adding a cover must not produce a different item.
+/// **An item is the files it was added with** (P5-66): a file list that does
+/// not fingerprint to the id, one file more or one fewer, is somebody's
+/// stray, and leaves the item's files as they were.
 #[test]
-fn a_cover_does_not_change_what_the_item_is() {
-    let mut item = an_item();
-    let before = item.fingerprint().unwrap();
+fn a_file_list_that_is_not_the_items_own_is_left_out() {
+    let item = an_item();
+    let key = Key::Files { item: item.id }.encode();
+    let mut read = Item::new(item.id);
+    for (key, value) in item.entries() {
+        read.absorb(key.as_bytes(), &value);
+    }
 
-    item.files
-        .insert(hash(3), a_file(FileRole::Cover, "cover.jpg"));
-    item.files
-        .insert(hash(4), a_file(FileRole::Subtitle, "en.srt"));
-    assert_eq!(item.fingerprint(), Some(before));
-
-    // And a second chapter of content does, because that is a different work
-    // in the only sense the fingerprint knows.
-    item.files
-        .insert(hash(5), a_file(FileRole::Content, "03.mp3"));
-    assert_ne!(item.fingerprint(), Some(before));
+    let mut one_more = item.files.clone();
+    one_more.insert(hash(3), a_file("03.mp3"));
+    let mut one_fewer = item.files.clone();
+    one_fewer.remove(&hash(2));
+    for stray in [one_more, one_fewer] {
+        assert_eq!(
+            read.absorb(key.as_bytes(), &serde_json::to_vec(&stray).unwrap()),
+            Absorbed::WrongFingerprint
+        );
+        assert_eq!(read, item);
+    }
 }
 
-/// An item with no content files has no fingerprint, rather than the same one
-/// every empty item would share.
+/// An item with no files has no fingerprint, rather than the same one every
+/// empty item would share.
 #[test]
 fn an_item_with_nothing_in_it_has_no_fingerprint() {
-    let mut item = Item::new(ItemId::from_bytes([6u8; 32]));
+    let item = Item::new(ItemId::from_bytes([6u8; 32]));
     assert_eq!(item.fingerprint(), None);
-    item.files.insert(hash(1), a_file(FileRole::Cover, "c.jpg"));
-    assert_eq!(item.fingerprint(), None, "a cover alone is not an item");
 }
 
 /// Every field an item can hold is a field it writes.

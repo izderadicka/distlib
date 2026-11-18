@@ -5,8 +5,8 @@
 //! holdings are read from.
 //!
 //! **A set this node keeps, not a question asked per row.** Whether an item is
-//! held changes only when its content files do — a download lands, a member
-//! adds a file this node lacks — and each of those passes through something
+//! held changes only when its files do — a download lands, its file list
+//! arrives — and each of those passes through something
 //! that can say so: the projection, which reads every item the document
 //! changes, and `library.download`, which knows when a fetch is done. Asking
 //! the blob store on every read instead would be one lookup per file per row
@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use distlib_core::{FileRole, Item, ItemId, KeepReason};
+use distlib_core::{Item, ItemId, KeepReason};
 use futures_lite::stream::StreamExt as _;
 use iroh_blobs::{Hash, api::Store as BlobStore, api::proto::BlobStatus};
 use tokio::{sync::watch, time::Instant};
@@ -37,8 +37,7 @@ mod statement;
 pub use ask_order::ask_order;
 pub use heartbeat::{Availability, Sources, topic_for};
 
-/// The items every one of whose content files is complete in this node's
-/// store.
+/// The items every one of whose files is complete in this node's store.
 ///
 /// Cheap to clone; every clone is the same set.
 #[derive(Debug, Clone)]
@@ -65,11 +64,8 @@ impl Holdings {
 
     /// Works out again whether `item` is held, and records the answer.
     ///
-    /// Held means **every `role: content` file is complete here and kept for
-    /// the item** — covers and other roles do not count, as they do not count
-    /// towards an item's identity. **Every one the item was born with**: its
-    /// content files must fingerprint to its id, so an item whose records are
-    /// still arriving is not held, however complete the ones here are (#185).
+    /// Held means **every one of its files is complete here and kept for
+    /// the item**.
     ///
     /// **Kept, not only here**: a file whose tags are released, an evicted
     /// item's, stays complete until the next collection deletes it, and is
@@ -78,17 +74,14 @@ impl Holdings {
     pub async fn recheck(&self, item: &Item) -> Result<bool> {
         // Collected first: an iterator of closures held across the await
         // below would make this future not `Send`.
-        let content: Vec<Hash> = item
+        let files: Vec<Hash> = item
             .files
-            .iter()
-            .filter(|(_, record)| record.role == FileRole::Content)
-            .map(|(hash, _)| Hash::from_bytes(*hash.as_bytes()))
+            .keys()
+            .map(|hash| Hash::from_bytes(*hash.as_bytes()))
             .collect();
-        let mut held = item.fingerprint() == Some(item.id) && {
-            let kept = self.kept_for(item.id).await?;
-            content.iter().all(|hash| kept.contains(hash))
-        };
-        for hash in content.into_iter().take_while(|_| held) {
+        let kept = self.kept_for(item.id).await?;
+        let mut held = files.iter().all(|hash| kept.contains(hash));
+        for hash in files.into_iter().take_while(|_| held) {
             let status = self
                 .blobs
                 .blobs()
@@ -189,7 +182,7 @@ mod tests {
         let content = store.add_bytes(b"dune".to_vec()).await.unwrap().hash;
         let hash = ContentHash::from_bytes(*content.as_bytes());
         let mut item = Item::new(ItemId::from_content_hashes(&[*hash.as_bytes()]));
-        item.files.insert(hash, content_record("dune.epub"));
+        item.files.insert(hash, file_record("dune.epub"));
 
         assert!(
             !holdings.recheck(&item).await.unwrap(),
@@ -215,38 +208,8 @@ mod tests {
         assert!(!changes.has_changed().unwrap(), "forgotten again: none");
     }
 
-    /// #185 finding 1: an item of two files, only one of whose records has
-    /// arrived, is not held, though that file is complete and kept; it is
-    /// once the second record lands and its file is kept.
-    #[tokio::test]
-    async fn an_item_whose_records_are_still_arriving_is_not_held() {
-        let store = MemStore::new();
-        let holdings = Holdings::new((*store).clone());
-        let mut hashes = Vec::new();
-        for bytes in [b"part one".to_vec(), b"part two".to_vec()] {
-            let added = store.add_bytes(bytes).await.unwrap().hash;
-            hashes.push(ContentHash::from_bytes(*added.as_bytes()));
-        }
-        let born = hashes
-            .iter()
-            .map(|hash| *hash.as_bytes())
-            .collect::<Vec<_>>();
-        let mut item = Item::new(ItemId::from_content_hashes(&born));
-        for hash in &hashes {
-            let tag = KeepReason::Cache.tag(item.id, *hash);
-            let blob = Hash::from_bytes(*hash.as_bytes());
-            store.tags().set(tag, blob).await.unwrap();
-        }
-
-        item.files.insert(hashes[0], content_record("one.mp3"));
-        assert!(!holdings.recheck(&item).await.unwrap(), "one record of two");
-        item.files.insert(hashes[1], content_record("two.mp3"));
-        assert!(holdings.recheck(&item).await.unwrap(), "both");
-    }
-
-    fn content_record(filename: &str) -> FileRecord {
+    fn file_record(filename: &str) -> FileRecord {
         FileRecord {
-            role: FileRole::Content,
             format: "epub".to_owned(),
             size: 4,
             filename: filename.to_owned(),

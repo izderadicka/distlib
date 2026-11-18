@@ -1,7 +1,7 @@
 //! The SQLite database itself: opening it, and the rows it holds.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -57,24 +57,19 @@ pub struct StoredItem {
     pub ratings: BTreeMap<MemberId, Rating>,
     /// Each current member's review.
     pub reviews: BTreeMap<MemberId, Review>,
-    /// Who wrote each of the item's file keys, members or not.
-    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
+    /// Who wrote the item's file list first, member or not.
+    pub creator: MemberId,
     /// The newest entry timestamp this item was projected from — §5.2's
     /// `last_modified`, in microseconds since the epoch.
     pub last_modified: u64,
 }
 
 impl StoredItem {
-    /// Who added the item: whoever wrote any of its file keys.
-    pub fn creators(&self) -> BTreeSet<MemberId> {
-        creators_of(&self.file_authors)
-    }
-
-    /// The item as custody sees it: its creators, and all of its files' size.
+    /// The item as custody sees it: its creator, and all of its files' size.
     pub fn custody_item(&self) -> CustodyItem {
         CustodyItem {
             item: self.item.id,
-            creators: self.creators().into_iter().collect(),
+            creator: self.creator,
             size_bytes: self
                 .item
                 .files
@@ -82,10 +77,6 @@ impl StoredItem {
                 .fold(0, |total, file| total.saturating_add(file.size)),
         }
     }
-}
-
-fn creators_of(file_authors: &BTreeMap<ContentHash, BTreeSet<MemberId>>) -> BTreeSet<MemberId> {
-    file_authors.values().flatten().copied().collect()
 }
 
 /// One row of `bookmarks`: a member's bookmark on an item.
@@ -451,45 +442,38 @@ impl Store {
     /// give it, without reading the rest of each item.
     pub async fn custody_items(&self) -> Result<Vec<CustodyItem>> {
         self.read(|conn| {
-            let mut file_authors = file_authors_of(conn, None)?;
             // `TOTAL` rather than `SUM`, which fails on an overflow: one absurd
             // size written by one member must not stop every node's custody.
             let mut statement = conn.prepare(
-                "SELECT items.id, TOTAL(item_files.size) FROM items \
+                "SELECT items.id, items.creator, TOTAL(item_files.size) FROM items \
                  LEFT JOIN item_files ON item_files.item = items.id \
                  GROUP BY items.id ORDER BY items.id",
             )?;
-            let mut rows = statement.query([])?;
-            let mut items = Vec::new();
-            while let Some(row) = rows.next()? {
-                let item: ItemId = identifier(row, 0, "id")?;
-                let creators = file_authors
-                    .remove(&item)
-                    .map(|authors| creators_of(&authors).into_iter().collect())
-                    .unwrap_or_default();
-                items.push(CustodyItem {
-                    item,
-                    creators,
-                    // Saturating, as the sum in `custody_item` is.
-                    size_bytes: row.get::<_, f64>(1)? as u64,
-                });
-            }
+            let items = statement
+                .query_map([], |row| {
+                    Ok(CustodyItem {
+                        item: identifier(row, 0, "id")?,
+                        creator: identifier(row, 1, "creator")?,
+                        // Saturating, as the sum in `custody_item` is.
+                        size_bytes: row.get::<_, f64>(2)? as u64,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
             Ok(items)
         })
         .await
     }
 
-    /// The content each member added (phase 5's D8): the sizes of the
-    /// content files whose file key it wrote, per file key, so a file in two
-    /// items counts twice. Members that added nothing are left out.
+    /// The content each member added (phase 5's D8): the sizes of the files
+    /// of each item it created, so a file in two items counts twice. Members
+    /// that added nothing are left out.
     pub async fn added_bytes(&self) -> Result<BTreeMap<MemberId, u64>> {
         self.read(|conn| {
             // `TOTAL`, as in `custody_items`: one absurd size must not fail it.
             let mut statement = conn.prepare(
-                "SELECT file_authors.member, TOTAL(item_files.size) FROM file_authors \
-                 JOIN item_files ON item_files.item = file_authors.item \
-                 AND item_files.blob = file_authors.blob \
-                 WHERE item_files.role = 'content' GROUP BY file_authors.member",
+                "SELECT items.creator, TOTAL(item_files.size) FROM items \
+                 JOIN item_files ON item_files.item = items.id \
+                 GROUP BY items.creator",
             )?;
             let added = statement
                 .query_map([], |row| {
@@ -501,11 +485,11 @@ impl Store {
         .await
     }
 
-    /// Whether `blob` is a content file of any item.
-    pub async fn is_content_file(&self, blob: ContentHash) -> Result<bool> {
+    /// Whether `blob` is a file of any item.
+    pub async fn is_item_file(&self, blob: ContentHash) -> Result<bool> {
         self.read(move |conn| {
             conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM item_files WHERE blob = ?1 AND role = 'content')",
+                "SELECT EXISTS (SELECT 1 FROM item_files WHERE blob = ?1)",
                 params![blob.to_string()],
                 |row| row.get(0),
             )
@@ -656,11 +640,11 @@ impl Store {
 /// positional agreement: a column added to one and not the other reads the
 /// wrong value out of the right row, and nothing would catch it.
 const ITEM_COLUMNS: &str = "id, kind, title, authors, genres, series, series_index, \
-                            year, lang, description, last_modified";
+                            year, lang, description, last_modified, creator";
 
 /// The `item_files` columns, in the order [`files_of`] reads them.
 const FILE_COLUMNS: &[&str] = &[
-    "item", "blob", "role", "format", "size", "filename", "seq", "disc", "title", "duration",
+    "item", "blob", "format", "size", "filename", "seq", "disc", "title", "duration",
 ];
 
 /// A table whose rows belong to one key, in its first column: an item's
@@ -678,10 +662,6 @@ struct OwnedRows {
 const FILES: OwnedRows = OwnedRows {
     table: "item_files",
     columns: FILE_COLUMNS,
-};
-const FILE_AUTHORS: OwnedRows = OwnedRows {
-    table: "file_authors",
-    columns: &["item", "blob", "member"],
 };
 const RATINGS: OwnedRows = OwnedRows {
     table: "ratings",
@@ -779,14 +759,14 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
     )?;
     tx.execute(
         "INSERT INTO items (id, kind, title, authors, genres, series, series_index, \
-                            year, lang, description, last_modified) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+                            year, lang, description, last_modified, creator) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
          ON CONFLICT(id) DO UPDATE SET \
              kind = excluded.kind, title = excluded.title, authors = excluded.authors, \
              genres = excluded.genres, series = excluded.series, \
              series_index = excluded.series_index, year = excluded.year, \
              lang = excluded.lang, description = excluded.description, \
-             last_modified = excluded.last_modified",
+             last_modified = excluded.last_modified, creator = excluded.creator",
         params![
             id,
             item.kind.as_ref().map(word).transpose()?,
@@ -799,6 +779,7 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             item.lang,
             item.description,
             stored.last_modified,
+            stored.creator.to_string(),
         ],
     )?;
 
@@ -806,7 +787,6 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
         insert.execute(params![
             id,
             blob.to_string(),
-            word(&file.role)?,
             file.format,
             file.size,
             file.filename,
@@ -815,13 +795,6 @@ fn upsert_item(tx: &Transaction<'_>, stored: &StoredItem) -> rusqlite::Result<Up
             file.title,
             file.duration,
         ])
-    })?;
-    let authorship = stored
-        .file_authors
-        .iter()
-        .flat_map(|(blob, authors)| authors.iter().map(move |author| (blob, author)));
-    FILE_AUTHORS.replace(tx, &id, authorship, |insert, (blob, author)| {
-        insert.execute(params![id, blob.to_string(), author.to_string()])
     })?;
     RATINGS.replace(tx, &id, &stored.ratings, |insert, (member, rating)| {
         insert.execute(params![id, member.to_string(), rating.get()])
@@ -852,14 +825,13 @@ fn files_of(
     let mut grouped: BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>> = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let record = FileRecord {
-            role: from_word(row, 2, "role")?,
-            format: row.get(3)?,
-            size: row.get(4)?,
-            filename: row.get(5)?,
-            seq: row.get(6)?,
-            disc: row.get(7)?,
-            title: row.get(8)?,
-            duration: row.get(9)?,
+            format: row.get(2)?,
+            size: row.get(3)?,
+            filename: row.get(4)?,
+            seq: row.get(5)?,
+            disc: row.get(6)?,
+            title: row.get(7)?,
+            duration: row.get(8)?,
         };
         grouped
             .entry(identifier(row, 0, "item")?)
@@ -874,7 +846,6 @@ fn files_of(
 /// per table, and handed to each item as it is read.
 struct ItemDetails {
     files: BTreeMap<ItemId, BTreeMap<ContentHash, FileRecord>>,
-    file_authors: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>,
     ratings: BTreeMap<ItemId, BTreeMap<MemberId, Rating>>,
     reviews: BTreeMap<ItemId, BTreeMap<MemberId, Review>>,
 }
@@ -883,7 +854,6 @@ impl ItemDetails {
     fn read(conn: &Connection, only: Option<ItemId>) -> rusqlite::Result<Self> {
         Ok(Self {
             files: files_of(conn, only)?,
-            file_authors: file_authors_of(conn, only)?,
             ratings: member_values_by_item(conn, "ratings", "rating", only, |row| {
                 Rating::try_from(row.get::<_, u8>(2)?).map_err(unreadable(2, "rating"))
             })?,
@@ -897,31 +867,9 @@ impl ItemDetails {
     fn attach_to(&mut self, stored: &mut StoredItem) {
         let id = stored.item.id;
         stored.item.files = self.files.remove(&id).unwrap_or_default();
-        stored.file_authors = self.file_authors.remove(&id).unwrap_or_default();
         stored.ratings = self.ratings.remove(&id).unwrap_or_default();
         stored.reviews = self.reviews.remove(&id).unwrap_or_default();
     }
-}
-
-/// Every file key's authors, or just one item's, grouped by item, then blob.
-fn file_authors_of(
-    conn: &Connection,
-    only: Option<ItemId>,
-) -> rusqlite::Result<BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>>> {
-    let (sql, params) = select_item_rows("item, blob, member FROM file_authors", only);
-    let mut statement = conn.prepare(&sql)?;
-    let mut rows = statement.query(rusqlite::params_from_iter(params))?;
-
-    let mut grouped: BTreeMap<ItemId, BTreeMap<ContentHash, BTreeSet<MemberId>>> = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        grouped
-            .entry(identifier(row, 0, "item")?)
-            .or_default()
-            .entry(identifier(row, 1, "blob")?)
-            .or_default()
-            .insert(identifier(row, 2, "member")?);
-    }
-    Ok(grouped)
 }
 
 /// The `column` of every row of `table` — or of just one item's rows —
@@ -994,7 +942,7 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<StoredItem> {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: row.get(10)?,
-        file_authors: BTreeMap::new(),
+        creator: identifier(row, 11, "creator")?,
     })
 }
 

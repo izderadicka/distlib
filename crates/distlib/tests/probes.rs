@@ -262,7 +262,7 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
     );
     let custodians = group.custodians(&CustodyItem {
         item: book,
-        creators: vec![founder.id],
+        creator: founder.id,
         size_bytes: 0,
     });
     let (custodian, other) = if custodians == [second.id] {

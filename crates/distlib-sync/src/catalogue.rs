@@ -114,10 +114,11 @@ pub struct ReadItem {
     pub ratings: BTreeMap<MemberId, Rating>,
     /// Every member's review, counted the same way.
     pub reviews: BTreeMap<MemberId, Review>,
-    /// Who wrote each of the item's file keys: every author, not only the
-    /// latest, since iroh-docs keeps one entry per key and author. Whoever
-    /// wrote one added the item (phase 5's D1 and D8).
-    pub file_authors: BTreeMap<ContentHash, BTreeSet<MemberId>>,
+    /// Who wrote the item's file list first (P5-66): of the lists that
+    /// fingerprint to the id, the one with the earliest timestamp, then the
+    /// lowest author. It added the item (phase 5's D1 and D8). `None` until a
+    /// list is here, and until then this is not an item yet.
+    pub creator: Option<MemberId>,
     /// The newest timestamp among the item's own entries, in microseconds
     /// since the epoch — iroh-docs' own clock for the record. A rating or a
     /// review is not a change to the item, so neither moves it.
@@ -128,6 +129,38 @@ pub struct ReadItem {
     /// The item is still worth projecting: what is here is true, and §5.2's
     /// catalogue is grow-only, so the rest only adds. This says to come back.
     pub waiting_for_content: bool,
+}
+
+/// What [`Catalogue::read_files`] found besides the files themselves.
+#[derive(Debug, Default)]
+struct ReadFiles {
+    creator: Option<MemberId>,
+    waiting_for_content: bool,
+    /// When the list taken was written.
+    last_modified: u64,
+}
+
+/// Folds `entry` into `item`, logging what this build cannot use.
+fn absorb(item: &mut Item, entry: &Entry, value: &[u8]) -> Absorbed {
+    let absorbed = item.absorb(entry.key(), value);
+    let key = String::from_utf8_lossy(entry.key());
+    match absorbed {
+        Absorbed::Took | Absorbed::Unknown => {}
+        // Both worth saying out loud and neither worth failing for: the first
+        // means somebody wrote something this build cannot read, the second
+        // means the prefix query answered with a key about another item, which
+        // would be a bug in either the query or the key encoding.
+        Absorbed::Unreadable => {
+            tracing::warn!(%key, "a catalogue entry holds a value this build cannot read")
+        }
+        Absorbed::NotThisItem => {
+            tracing::warn!(%key, id = %item.id, "a prefix search for one item answered with another")
+        }
+        Absorbed::WrongFingerprint => {
+            tracing::warn!(%key, author = %entry.author(), "a file list that is not the item's own; leaving it out")
+        }
+    }
+    absorbed
 }
 
 /// An item's bookmarks as this node holds them, for a reader that projects
@@ -514,13 +547,16 @@ impl Catalogue {
 
     /// Reads one item back out of the entries that make it up.
     ///
-    /// `None` when this node holds no entry for it at all. Otherwise the item
-    /// as far as this node knows it: **an item is its entries**, so one that
-    /// is still arriving reads as a partial item rather than as an error, and
-    /// a field whose content has not landed yet is left out the same way. A
+    /// `None` until this node holds the item's file list: an item is its
+    /// files (P5-66). Otherwise the item as far as this node knows it: a field
+    /// still arriving, or whose content has not landed yet, is left out. A
     /// caller that needs to know the difference watches for it to fill in.
     pub async fn item(&self, id: ItemId) -> Result<Option<Item>> {
-        Ok(self.read_item(id).await?.map(|read| read.item))
+        Ok(self
+            .read_item(id)
+            .await?
+            .filter(|read| read.creator.is_some())
+            .map(|read| read.item))
     }
 
     /// [`Self::item`], with what a read model needs beside it.
@@ -556,6 +592,10 @@ impl Catalogue {
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
             found = true;
+            // Read per author below: the latest list may be somebody's stray.
+            if matches!(Key::parse(entry.key()), Some(Key::Files { .. })) {
+                continue;
+            }
             last_modified = last_modified.max(entry.timestamp());
             let Some(value) = self.content(&entry).await? else {
                 waiting_for_content = true;
@@ -565,27 +605,12 @@ impl Catalogue {
                 );
                 continue;
             };
-            match item.absorb(entry.key(), &value) {
-                Absorbed::Took | Absorbed::Unknown => {}
-                // Both worth saying out loud and neither worth failing for:
-                // the first means somebody wrote something this build cannot
-                // read, the second means the prefix query answered with a key
-                // about another item, which would be a bug in either the
-                // query or the key encoding.
-                Absorbed::Unreadable => tracing::warn!(
-                    key = %String::from_utf8_lossy(entry.key()),
-                    "a catalogue entry holds a value this build cannot read"
-                ),
-                Absorbed::NotThisItem => tracing::warn!(
-                    key = %String::from_utf8_lossy(entry.key()),
-                    %id,
-                    "a prefix search for one item answered with another"
-                ),
-            }
+            absorb(&mut item, &entry, &value);
         }
         if !found {
             return Ok(None);
         }
+        let files = self.read_files(&mut item).await?;
 
         let ratings = self
             .read_community_entries(CommunityKey::ratings_of(id), Rating::decode)
@@ -593,50 +618,63 @@ impl Catalogue {
         let reviews = self
             .read_community_entries(CommunityKey::reviews_of(id), Review::decode)
             .await?;
-        let file_authors = self.read_file_authors(id).await?;
         Ok(Some(ReadItem {
             item,
-            file_authors,
+            creator: files.creator,
             waiting_for_content: waiting_for_content
+                || files.waiting_for_content
                 || ratings.waiting_for_content
                 || reviews.waiting_for_content,
             ratings: values_by_member(ratings.entries),
             reviews: values_by_member(reviews.entries),
-            last_modified,
+            last_modified: last_modified.max(files.last_modified),
         }))
     }
 
-    /// Who wrote each of `id`'s file keys.
-    async fn read_file_authors(
-        &self,
-        id: ItemId,
-    ) -> Result<BTreeMap<ContentHash, BTreeSet<MemberId>>> {
+    /// Reads every author's file list of `item` and takes the first written
+    /// of those that are the item's own: any two of them list the same files,
+    /// and (timestamp, author) picks the same one on every node.
+    async fn read_files(&self, item: &mut Item) -> Result<ReadFiles> {
         let doc = self.document()?;
+        let key = Key::Files { item: item.id }.encode();
         let entries = doc
-            .get_many(Query::all().key_prefix(Key::prefix_of(id)))
+            .get_many(Query::all().key_exact(&key))
             .await
             .map_err(SyncError::docs("read from"))?;
         tokio::pin!(entries);
 
-        let mut authors: BTreeMap<ContentHash, BTreeSet<MemberId>> = BTreeMap::new();
+        let mut read = ReadFiles::default();
+        let mut first: Option<(u64, MemberId, Item)> = None;
         while let Some(entry) = entries.next().await {
             let entry = entry.map_err(SyncError::docs("read from"))?;
-            let Some(Key::File { blob, .. }) = Key::parse(entry.key()) else {
+            let Some(value) = self.content(&entry).await? else {
+                read.waiting_for_content = true;
+                tracing::debug!(%key, "the content of a file list has not arrived yet; leaving it out");
                 continue;
             };
-            match PublicKey::from_bytes(entry.author().as_bytes()) {
-                Ok(author) => {
-                    authors
-                        .entry(blob)
-                        .or_default()
-                        .insert(MemberId::from(author));
-                }
-                Err(_) => {
-                    tracing::warn!(author = %entry.author(), "a file key's author is not a member id")
-                }
+            let Ok(author) = PublicKey::from_bytes(entry.author().as_bytes()) else {
+                tracing::warn!(author = %entry.author(), "a file list's author is not a member id");
+                continue;
+            };
+            let author = MemberId::from(author);
+            let mut listed = Item::new(item.id);
+            if absorb(&mut listed, &entry, &value) != Absorbed::Took {
+                continue;
+            }
+            let written = (entry.timestamp(), author);
+            if first
+                .as_ref()
+                .is_none_or(|(at, by, _)| written < (*at, *by))
+            {
+                first = Some((written.0, written.1, listed));
             }
         }
-        Ok(authors)
+        if let Some((at, by, listed)) = first {
+            item.files = listed.files;
+            read.creator = Some(by);
+            read.last_modified = at;
+        }
+        Ok(read)
     }
 
     /// Rates `item` as this node's member, replacing its earlier rating.

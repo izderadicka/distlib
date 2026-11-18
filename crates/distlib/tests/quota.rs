@@ -127,7 +127,7 @@ async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it()
     runtime.shutdown().await;
 }
 
-/// An add that writes no new file key adds nothing to the requirement, so it
+/// An add that writes no file list adds nothing to the requirement, so it
 /// is neither refused nor counted twice.
 #[tokio::test]
 async fn adding_the_same_files_again_requires_nothing_more() {

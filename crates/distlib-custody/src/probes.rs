@@ -11,7 +11,7 @@ use std::{
 };
 
 use distlib_consensus::MembershipState;
-use distlib_core::{ContentHash, FileRole, ItemId, MemberId, ProbeFailure};
+use distlib_core::{ContentHash, ItemId, MemberId, ProbeFailure};
 use distlib_net::{Blobs, NetError, blobs::Probed};
 use distlib_store::{Store, StoreError};
 use distlib_sync::{Availability, Catalogue, Holdings, RecordedFailure, SyncError};
@@ -295,8 +295,7 @@ async fn latest_evidence(
 /// One probe in this many re-checks a suspect (D11).
 const SUSPECT_ONE_IN: u64 = 4;
 
-/// What one probe asks `custodian` for: `chunk` of `blob`, a content file of
-/// `item`.
+/// What one probe asks `custodian` for: `chunk` of `blob`, a file of `item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     custodian: MemberId,
@@ -402,7 +401,7 @@ fn suspect(
     Ok(pick(low)?.map(Suspect::LowCoverage))
 }
 
-/// A random chunk of a random content file of a random item this node holds,
+/// A random chunk of a random file of a random item this node holds,
 /// of one of its other custodians that announces it: `only`, if given.
 async fn random_target(
     sources: &ProbeSources,
@@ -434,14 +433,8 @@ async fn random_target(
         .into_iter()
         .filter(|custodian| may_probe(*custodian, *me, &announcers, only))
         .collect();
-    let contents: Vec<ContentHash> = stored
-        .item
-        .files
-        .iter()
-        .filter(|(_, file)| file.role == FileRole::Content)
-        .map(|(blob, _)| *blob)
-        .collect();
-    let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&contents)?) else {
+    let files: Vec<ContentHash> = stored.item.files.keys().copied().collect();
+    let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&files)?) else {
         return Ok(None);
     };
     // This node's own copy says how many chunks there are, not the catalogue.

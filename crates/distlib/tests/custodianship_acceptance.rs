@@ -166,7 +166,7 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     let ids: Vec<MemberId> = nodes.iter().map(|node| node.id).collect();
     let ranked = CustodyItem {
         item: book,
-        creators: vec![ids[0]],
+        creator: ids[0],
         size_bytes: 0,
     };
     let group = custody_group(&ids);

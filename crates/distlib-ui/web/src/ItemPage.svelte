@@ -131,13 +131,12 @@
     <h2>Files <span class="count">{Object.keys(item.files).length}</span></h2>
     <table>
       <thead>
-        <tr><th>Name</th><th>Role</th><th>Format</th><th class="number">Size</th></tr>
+        <tr><th>Name</th><th>Format</th><th class="number">Size</th></tr>
       </thead>
       <tbody>
         {#each inOrder(item.files) as [hash, file] (hash)}
           <tr>
             <td>{file.filename}</td>
-            <td>{file.role}</td>
             <td>{file.format}</td>
             <td class="number">{bytes(file.size)}</td>
           </tr>
@@ -158,9 +157,9 @@
         </thead>
         <tbody>
           <!-- An adder who has left keeps nothing for the group. -->
-          {#each item.added_by.filter((member) => names.has(member)) as member (member)}
-            <tr><td>{memberName(member, names, me)}</td><td>its adder</td><td>{presence(member, online)}</td></tr>
-          {/each}
+          {#if names.has(item.added_by)}
+            <tr><td>{memberName(item.added_by, names, me)}</td><td>its adder</td><td>{presence(item.added_by, online)}</td></tr>
+          {/if}
           {#each item.custodians as member (member)}
             <tr><td>{memberName(member, names, me)}</td><td>custodian</td><td>{presence(member, online)}</td></tr>
           {/each}

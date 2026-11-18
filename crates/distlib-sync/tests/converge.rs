@@ -18,9 +18,9 @@ use std::{
 
 use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState, SignedEvent, Timestamp};
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, FileRole, Item, ItemId,
-    ItemKind, MemberId, NodeAddr, ProbeFailure, Rating, Review, SignedAddress, Wish, WishFields,
-    WishId, WishStatus, community::CLEARED,
+    Bookmark, BookmarkId, Comment, CommunityKey, ContentHash, FileRecord, Item, ItemId, ItemKind,
+    MemberId, NodeAddr, ProbeFailure, Rating, Review, SignedAddress, Wish, WishFields, WishId,
+    WishStatus, community::CLEARED,
 };
 use distlib_net::Transport;
 use distlib_sync::{Catalogue, CatalogueStorage, catalogue_key};
@@ -666,7 +666,7 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
         .unwrap();
 
     let chapters = [[11u8; 32], [12u8; 32]];
-    // The id is the fingerprint of the content files, which is what makes two
+    // The id is the fingerprint of the files, which is what makes two
     // members adding the same files converge on one item (§5.2, P0-7).
     let mut item = Item::new(ItemId::from_content_hashes(&chapters));
     item.kind = Some(ItemKind::Audiobook);
@@ -677,7 +677,6 @@ async fn an_item_written_on_one_node_reads_back_whole_on_the_other() {
         item.files.insert(
             ContentHash::from_bytes(*chapter),
             FileRecord {
-                role: FileRole::Content,
                 format: "mp3".to_owned(),
                 size: 4_200_000,
                 filename: format!("{:02}.mp3", index + 1),
@@ -1189,7 +1188,7 @@ async fn changes_are_reported_as_items_rather_than_as_entries() {
         .await
         .unwrap();
 
-    let id = ItemId::from_bytes([11; 32]);
+    let id = ItemId::from_content_hashes(&[[12; 32]]);
     let item = Item {
         kind: Some(ItemKind::Ebook),
         title: Some("Dune".to_owned()),
@@ -1198,7 +1197,6 @@ async fn changes_are_reported_as_items_rather_than_as_entries() {
         files: [(
             ContentHash::from_bytes([12; 32]),
             FileRecord {
-                role: FileRole::Content,
                 format: "epub".to_owned(),
                 size: 42,
                 filename: "dune.epub".to_owned(),
@@ -1212,10 +1210,10 @@ async fn changes_are_reported_as_items_rather_than_as_entries() {
         .collect(),
         ..Item::new(id)
     };
-    // Six entries, one item.
+    // Five entries, one item.
     alice.catalogue.write(&item).await.unwrap();
 
-    // Whether the six arrive in one batch or several is the engine's business
+    // Whether the five arrive in one batch or several is the engine's business
     // and not something to assert; that every batch names this item and only
     // this item is the claim.
     let mut seen = std::collections::BTreeSet::new();

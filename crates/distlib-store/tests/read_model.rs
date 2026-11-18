@@ -25,8 +25,8 @@ use std::{
 };
 
 use distlib_core::{
-    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, FileRole, Item, ItemId,
-    ItemKind, MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
+    Bookmark, BookmarkId, Comment, ContentHash, CustodyItem, FileRecord, Item, ItemId, ItemKind,
+    MemberId, Rating, Review, Series, Wish, WishFields, WishId, WishStatus,
 };
 use distlib_store::{BookmarkFilter, Store, StoredBookmark, StoredItem, StoredMember, StoredWish};
 use proptest::prelude::*;
@@ -70,19 +70,8 @@ fn kind() -> impl Strategy<Value = ItemKind> {
     ]
 }
 
-fn role() -> impl Strategy<Value = FileRole> {
-    prop_oneof![
-        Just(FileRole::Content),
-        Just(FileRole::Cover),
-        Just(FileRole::Subtitle),
-        Just(FileRole::Metadata),
-        Just(FileRole::Other),
-    ]
-}
-
 fn file_record() -> impl Strategy<Value = FileRecord> {
     (
-        role(),
         text(),
         any::<u64>(),
         text(),
@@ -92,8 +81,7 @@ fn file_record() -> impl Strategy<Value = FileRecord> {
         any::<Option<u64>>(),
     )
         .prop_map(
-            |(role, format, size, filename, seq, disc, title, duration)| FileRecord {
-                role,
+            |(format, size, filename, seq, disc, title, duration)| FileRecord {
                 format,
                 // SQLite's only integer is signed, so a size past `i64::MAX` is
                 // refused rather than wrapped. Nothing that size exists; the
@@ -149,6 +137,11 @@ fn member() -> impl Strategy<Value = MemberId> {
     (1u8..5).prop_map(|seed| MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public()))
 }
 
+/// Whoever created a fixed item; who does not matter to the test.
+fn a_creator() -> MemberId {
+    MemberId::from(iroh::SecretKey::from_bytes(&[9; 32]).public())
+}
+
 fn rating() -> impl Strategy<Value = Rating> {
     (1u8..=5).prop_map(|value| Rating::try_from(value).expect("one to five is a rating"))
 }
@@ -163,19 +156,15 @@ fn stored() -> impl Strategy<Value = StoredItem> {
         proptest::collection::btree_map(member(), rating(), 0..3),
         proptest::collection::btree_map(member(), review(), 0..3),
         any::<u64>(),
-        proptest::collection::btree_map(
-            content_hash(),
-            proptest::collection::btree_set(member(), 1..3),
-            0..3,
-        ),
+        member(),
     )
         .prop_map(
-            |(item, ratings, reviews, last_modified, file_authors)| StoredItem {
+            |(item, ratings, reviews, last_modified, creator)| StoredItem {
                 item,
                 ratings,
                 reviews,
                 last_modified: last_modified >> 1,
-                file_authors,
+                creator,
             },
         )
 }
@@ -297,30 +286,24 @@ proptest! {
         })?;
     }
 
-    /// What each member added is the size of each content file whose key it
-    /// wrote.
+    /// What each member added is the size of the files of each item it
+    /// created.
     #[test]
-    fn added_bytes_are_the_content_files_each_member_wrote(
+    fn added_bytes_are_the_files_of_each_item_a_member_created(
         items in distinct_items(0..5),
-        authors in proptest::collection::vec(member(), 1..3),
     ) {
         runtime().block_on(async {
             let store = empty().await;
             let mut expected: BTreeMap<MemberId, u64> = BTreeMap::new();
             for mut stored in items {
-                stored.file_authors = stored
-                    .item
-                    .files
-                    .iter_mut()
-                    .zip(authors.iter().cycle())
-                    .map(|((hash, file), author)| {
-                        file.size >>= 20;
-                        if file.role == FileRole::Content {
-                            *expected.entry(*author).or_default() += file.size;
-                        }
-                        (*hash, [*author].into())
-                    })
-                    .collect();
+                for file in stored.item.files.values_mut() {
+                    file.size >>= 20;
+                }
+                let size: u64 = stored.item.files.values().map(|file| file.size).sum();
+                // An item with no files adds nothing, not a zero.
+                if !stored.item.files.is_empty() {
+                    *expected.entry(stored.creator).or_default() += size;
+                }
                 store.upsert_item(stored).await.expect("the item is written");
             }
             prop_assert_eq!(store.added_bytes().await.expect("read"), expected);
@@ -462,7 +445,6 @@ async fn an_item_whose_content_went_away_loses_the_field() {
             files: BTreeMap::from([(
                 blob,
                 FileRecord {
-                    role: FileRole::Content,
                     format: "epub".to_owned(),
                     size: 1024,
                     filename: "dune.epub".to_owned(),
@@ -480,7 +462,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
             Review::try_from("Spice".to_owned()).expect("a review"),
         )]),
         last_modified: 100,
-        file_authors: Default::default(),
+        creator: a_creator(),
     };
     store
         .upsert_item(whole)
@@ -498,7 +480,7 @@ async fn an_item_whose_content_went_away_loses_the_field() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 200,
-        file_authors: Default::default(),
+        creator: a_creator(),
     };
     store
         .upsert_item(partial.clone())
@@ -581,7 +563,7 @@ async fn bookmarks_are_found_by_text_member_and_item() {
                 ratings: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 last_modified: 1,
-                file_authors: Default::default(),
+                creator: a_creator(),
             })
             .await
             .expect("written");
@@ -703,7 +685,7 @@ async fn a_store_reopens_onto_what_it_already_held() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
-        file_authors: Default::default(),
+        creator: a_creator(),
     };
 
     let first = Store::open(Some(dir.path().to_path_buf()))
@@ -751,7 +733,7 @@ async fn a_store_of_another_version_is_started_afresh() {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 42,
-        file_authors: Default::default(),
+        creator: a_creator(),
     };
     store.upsert_item(stored.clone()).await.expect("written");
     assert_eq!(store.item(id).await.expect("read"), Some(stored));
@@ -775,7 +757,6 @@ async fn a_store_of_another_version_is_started_afresh() {
         [
             "blob_last_used",
             "bookmarks",
-            "file_authors",
             "item_files",
             "items",
             "last_used",
@@ -792,10 +773,9 @@ async fn a_store_of_another_version_is_started_afresh() {
     assert_eq!(left, 1, "only the row written since, not the one left over");
 }
 
-/// An item with one content file, `blob`, as the projection would write it.
+/// An item with one file, `blob`, as the projection would write it.
 fn with_file(id: ItemId, blob: ContentHash) -> StoredItem {
     let file = FileRecord {
-        role: FileRole::Content,
         format: "epub".to_owned(),
         size: 10,
         filename: "book.epub".to_owned(),
@@ -812,7 +792,7 @@ fn with_file(id: ItemId, blob: ContentHash) -> StoredItem {
         ratings: BTreeMap::new(),
         reviews: BTreeMap::new(),
         last_modified: 1,
-        file_authors: Default::default(),
+        creator: a_creator(),
     }
 }
 
@@ -886,40 +866,36 @@ async fn a_blob_served_before_its_item_is_projected_counts_once_it_is() {
     );
 }
 
-/// Only an item's content files are content: its cover is not, nor a blob
-/// no item names.
+/// An item's file is told apart from a blob no item names.
 #[tokio::test]
-async fn a_content_file_is_told_apart_from_a_cover_and_from_a_stranger() {
+async fn an_items_file_is_told_apart_from_a_stranger() {
     let store = empty().await;
-    let [content, cover, stranger] = [1, 2, 3].map(|seed| ContentHash::from_bytes([seed; 32]));
-    let file = |role, filename: &str| FileRecord {
-        role,
-        format: "epub".to_owned(),
-        size: 1024,
-        filename: filename.to_owned(),
-        seq: None,
-        disc: None,
-        title: None,
-        duration: None,
-    };
+    let [file, stranger] = [1, 2].map(|seed| ContentHash::from_bytes([seed; 32]));
     store
         .upsert_item(StoredItem {
             item: Item {
-                files: BTreeMap::from([
-                    (content, file(FileRole::Content, "dune.epub")),
-                    (cover, file(FileRole::Cover, "cover.jpg")),
-                ]),
+                files: BTreeMap::from([(
+                    file,
+                    FileRecord {
+                        format: "epub".to_owned(),
+                        size: 1024,
+                        filename: "dune.epub".to_owned(),
+                        seq: None,
+                        disc: None,
+                        title: None,
+                        duration: None,
+                    },
+                )]),
                 ..Item::new(ItemId::from_bytes([7; 32]))
             },
             ratings: Default::default(),
             reviews: Default::default(),
             last_modified: 0,
-            file_authors: Default::default(),
+            creator: a_creator(),
         })
         .await
         .expect("the item is written");
 
-    assert!(store.is_content_file(content).await.expect("read"));
-    assert!(!store.is_content_file(cover).await.expect("read"));
-    assert!(!store.is_content_file(stranger).await.expect("read"));
+    assert!(store.is_item_file(file).await.expect("read"));
+    assert!(!store.is_item_file(stranger).await.expect("read"));
 }

@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, num::NonZeroU8, time::Duration};
 use distlib::Runtime;
 use distlib_api::Api;
 use distlib_core::{
-    ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, FileRole, GroupSettings, Item,
-    ItemId, MemberId,
+    ContentHash, CustodyGroup, CustodyItem, DataDir, FileRecord, GroupSettings, Item, ItemId,
+    MemberId,
 };
 use iroh::SecretKey;
 use serde_json::{Value, json};
@@ -32,7 +32,6 @@ fn an_item(seed: u8, size_bytes: u64) -> Item {
         files: BTreeMap::from([(
             ContentHash::from_bytes([seed; 32]),
             FileRecord {
-                role: FileRole::Content,
                 format: "epub".to_owned(),
                 size: size_bytes,
                 filename: format!("{seed}.epub"),
@@ -42,7 +41,7 @@ fn an_item(seed: u8, size_bytes: u64) -> Item {
                 duration: None,
             },
         )]),
-        ..Item::new(ItemId::from_bytes([seed; 32]))
+        ..Item::new(ItemId::from_content_hashes(&[[seed; 32]]))
     }
 }
 
@@ -136,7 +135,7 @@ async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
         let items: Vec<CustodyItem> = (1..=16_u8)
             .map(|seed| CustodyItem {
                 item: an_item(seed, u64::from(seed) * GB).id,
-                creators: vec![ids[creator_of(seed)]],
+                creator: ids[creator_of(seed)],
                 size_bytes: u64::from(seed) * GB,
             })
             .collect();

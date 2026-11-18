@@ -32,7 +32,7 @@ impl<'a> Seen<'a> {
         }
     }
 
-    /// Whether this node holds every content file of `item`.
+    /// Whether this node holds every file of `item`.
     pub(crate) fn held(&self, item: &ItemId) -> bool {
         self.holdings.holds(*item)
     }

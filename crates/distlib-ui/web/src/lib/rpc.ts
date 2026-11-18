@@ -212,7 +212,6 @@ export type Hit = ItemSummary & Availability;
 
 /** One file of an item. What nobody said is left out, rather than `null`. */
 export interface FileRecord {
-  role: "content" | "cover" | "subtitle" | "metadata" | "other";
   format: string;
   size: number;
   filename: string;
@@ -266,9 +265,9 @@ export interface ItemRecord extends ItemSummary {
   files: Record<string, FileRecord>;
   /** Microseconds since the epoch. */
   last_modified: number;
-  /** Whoever wrote one of its files, members or not any more. */
-  added_by: string[];
-  /** Who keeps it for the group besides its adders; `null` until custody is computed. */
+  /** Whoever wrote its file list first, member or not any more. */
+  added_by: string;
+  /** Who keeps it for the group besides its adder; `null` until custody is computed. */
   custodians: string[] | null;
   availability: ItemAvailability;
   ratings: Ratings;
@@ -354,7 +353,6 @@ interface Methods {
       item_id: string;
       created: boolean;
       title: string | null;
-      contributed_files: string[];
       /** This node's pledge and what its adds now require, when the pledge falls short (D8). */
       under_pledged: UnderPledged | null;
     };

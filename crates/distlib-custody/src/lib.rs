@@ -44,7 +44,7 @@ use view::CustodyView;
 #[derive(Debug)]
 pub struct CustodySources {
     pub membership: watch::Receiver<MembershipState>,
-    /// The items, with their creators and sizes.
+    /// The items, with their creator and size.
     pub store: Store,
     /// Where items added or changed are announced.
     pub events: broadcast::Receiver<Event>,

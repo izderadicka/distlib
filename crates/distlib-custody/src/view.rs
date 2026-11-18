@@ -160,7 +160,7 @@ mod tests {
     fn item(seed: u8, creator: MemberId, size_bytes: u64) -> CustodyItem {
         CustodyItem {
             item: ItemId::from_bytes([seed; 32]),
-            creators: vec![creator],
+            creator,
             size_bytes,
         }
     }

@@ -13,30 +13,22 @@
 use std::{path::Path, time::Duration};
 
 use distlib::Runtime;
-use distlib_core::{DataDir, Event, Item, ItemId, MemberId};
+use distlib_core::{DataDir, Event, Item, MemberId};
 use iroh::SecretKey;
 use tempfile::TempDir;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
 mod common;
-use common::{bound, config, group_settings, profile};
+use common::{bound, config, group_settings, listed_item, profile};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// for the projection behind that to catch up.
 const SOON: Duration = Duration::from_secs(60);
 
-/// An item id for each `n`, and more of them than a byte of seed gives.
-fn id(n: u16) -> ItemId {
-    let mut bytes = [0; 32];
-    bytes[..2].copy_from_slice(&n.to_le_bytes());
-    bytes[31] = 1;
-    ItemId::from_bytes(bytes)
-}
-
 fn titled(n: u16, title: &str) -> Item {
     Item {
         title: Some(title.to_owned()),
-        ..Item::new(id(n))
+        ..listed_item(n.into())
     }
 }
 
@@ -50,14 +42,14 @@ fn titled(n: u16, title: &str) -> Item {
 /// happen once the projection is reading the change stream.
 async fn live(runtime: &Runtime) {
     let mut events = runtime.events().subscribe();
-    let sentinel = id(u16::MAX);
+    let sentinel = listed_item(u16::MAX.into()).id;
     let heard = tokio::time::timeout(SOON, async {
         for attempt in 0_u32.. {
             runtime
                 .catalogue()
                 .write(&Item {
                     title: Some(format!("sentinel {attempt}")),
-                    ..Item::new(sentinel)
+                    ..listed_item(u16::MAX.into())
                 })
                 .await
                 .unwrap();
@@ -230,19 +222,18 @@ async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
             .await
             .unwrap();
     }
-    // Written last, with the greatest id there is. A batch is projected — and
-    // its events published — in id order, so whether the writes above land in
-    // one batch or many, hearing about this one means every one of theirs has
-    // gone out. "The last item written" is not that: ids sort by byte, not by
-    // the order they were written in.
-    let barrier = ItemId::from_bytes([0xff; 32]);
-    node.catalogue()
-        .write(&Item {
-            title: Some("barrier".to_owned()),
-            ..Item::new(barrier)
-        })
-        .await
+    // Written last, with an id greater than all of theirs. A batch is
+    // projected — and its events published — in id order, so whether the
+    // writes above land in one batch or many, hearing about this one means
+    // every one of theirs has gone out. "The last item written" is not that:
+    // ids sort by byte, not by the order they were written in.
+    let greatest = (0..count).map(|n| listed_item(n.into()).id).max().unwrap();
+    let barrier = (u32::from(count)..)
+        .map(listed_item)
+        .find(|item| item.id > greatest)
         .unwrap();
+    node.catalogue().write(&barrier).await.unwrap();
+    let barrier = barrier.id;
     tokio::time::timeout(SOON, async {
         loop {
             match awake.recv().await {
@@ -280,7 +271,8 @@ async fn a_reindex_is_not_news() {
     let dir = TempDir::new().unwrap();
     let node = a_node(dir.path()).await;
     let mut before = node.events().subscribe();
-    let dune = titled(1, "Dune");
+    // Its list alone: one entry, so one event, and none still to come.
+    let dune = listed_item(1);
     node.catalogue().write(&dune).await.unwrap();
     until(&node, &mut before, "the write is projected", |event| {
         *event == Event::ItemAdded { item_id: dune.id }

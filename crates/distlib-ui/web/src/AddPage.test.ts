@@ -50,7 +50,6 @@ describe("the add page", () => {
       item_id: ITEM,
       created: true,
       title: "Válka s mloky",
-      contributed_files: [],
       under_pledged: null,
     });
   });
@@ -145,7 +144,6 @@ describe("the add page", () => {
       item_id: ITEM,
       created: false,
       title: "R.U.R.",
-      contributed_files: [],
       under_pledged: null,
     });
     open();
@@ -166,7 +164,6 @@ describe("the add page", () => {
       item_id: ITEM,
       created: true,
       title: "Válka s mloky",
-      contributed_files: [],
       under_pledged: short,
     });
     open();
@@ -186,7 +183,6 @@ describe("the add page", () => {
       item_id: ITEM,
       created: false,
       title: "R.U.R.",
-      contributed_files: [],
       under_pledged: { pledge_bytes: 100_000_000_000, required_pledge_bytes: 120_000_000_000, refused_above_bytes: 200_000_000_000 },
     });
     open();

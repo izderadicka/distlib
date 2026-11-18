@@ -20,10 +20,10 @@ use std::{
 use data_encoding::HEXLOWER;
 use distlib_core::{
     ApiConfig, AvailabilityConfig, Bookmark, BookmarkId, Comment, CommunityKey, Config,
-    ConsensusConfig, ContentHash, CoreMember, FileRecord, FileRole, GroupId, GroupSettings,
-    Heartbeat, Holdings, Item, ItemId, ItemKind, KeepReason, LibraryConfig, MemberId, NetConfig,
-    NodeAddr, ProbeFailure, Rating, RelayMode, Review, Series, SignedAddress, SignedHeartbeat,
-    StorageConfig, Ticket, TransferConfig, Wish, WishFields, WishId, WishStatus,
+    ConsensusConfig, ContentHash, CoreMember, FileRecord, GroupId, GroupSettings, Heartbeat,
+    Holdings, Item, ItemId, ItemKind, KeepReason, LibraryConfig, MemberId, NetConfig, NodeAddr,
+    ProbeFailure, Rating, RelayMode, Review, Series, SignedAddress, SignedHeartbeat, StorageConfig,
+    Ticket, TransferConfig, Wish, WishFields, WishId, WishStatus,
     availability::{decode_base, encode_base},
 };
 use figment::Jail;
@@ -81,9 +81,17 @@ const MEMBER_2_HEX: &str = "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df6
 /// [`addr`]: the relay url as a string, then a set of one IPv4 socket.
 const ADDR: &str = "011668747470733a2f2f72656c61792e6578616d706c652f01000a000001d122";
 
+/// The item whose one file is [`BLOB`]: its id is that file's fingerprint.
+const ITEM_OF_BLOB_HEX: &str = "d866f4c1518054ccfe1563e611350b9af8bd708c3206ae2afcc1fa8d3f268d0b";
+
 #[test]
-fn every_item_field_and_file_has_a_fixed_key_and_json_value() {
-    let mut item = Item::new(ITEM);
+fn every_item_field_and_its_file_list_have_a_fixed_key_and_json_value() {
+    let mut item = Item::new(ItemId::from_content_hashes(&[*BLOB.as_bytes()]));
+    assert_eq!(
+        item.id.to_string(),
+        ITEM_OF_BLOB_HEX,
+        "the fingerprint changed"
+    );
     item.kind = Some(ItemKind::Audiobook);
     item.title = Some("Dune".into());
     item.authors = Some(vec!["Frank Herbert".into()]);
@@ -98,7 +106,6 @@ fn every_item_field_and_file_has_a_fixed_key_and_json_value() {
     item.files.insert(
         BLOB,
         FileRecord {
-            role: FileRole::Content,
             format: "mp3".into(),
             size: 1000,
             filename: "01.mp3".into(),
@@ -118,11 +125,18 @@ fn every_item_field_and_file_has_a_fixed_key_and_json_value() {
         ("lang", r#""en""#),
         ("description", r#""Spice.""#),
         (
-            &format!("file/{BLOB_HEX}"),
-            r#"{"role":"content","format":"mp3","size":1000,"filename":"01.mp3","seq":1,"disc":2,"title":"One","duration":60}"#,
+            "files",
+            &format!(
+                r#"{{"{BLOB_HEX}":{{"format":"mp3","size":1000,"filename":"01.mp3","seq":1,"disc":2,"title":"One","duration":60}}}}"#
+            ),
         ),
     ]
-    .map(|(field, value)| (format!("item/{ITEM_HEX}/{field}"), value.to_owned()));
+    .map(|(field, value)| {
+        (
+            format!("item/{ITEM_OF_BLOB_HEX}/{field}"),
+            value.to_owned(),
+        )
+    });
 
     let entries: Vec<_> = item
         .entries()
@@ -131,7 +145,7 @@ fn every_item_field_and_file_has_a_fixed_key_and_json_value() {
         .collect();
     assert_eq!(entries, golden);
 
-    let mut read_back = Item::new(ITEM);
+    let mut read_back = Item::new(item.id);
     for (key, value) in &golden {
         read_back.absorb(key.as_bytes(), value.as_bytes());
     }
@@ -139,7 +153,7 @@ fn every_item_field_and_file_has_a_fixed_key_and_json_value() {
 }
 
 #[test]
-fn every_item_kind_and_file_role_has_a_fixed_name() {
+fn every_item_kind_has_a_fixed_name() {
     for (kind, name) in [
         (ItemKind::Ebook, r#""ebook""#),
         (ItemKind::Audiobook, r#""audiobook""#),
@@ -148,16 +162,6 @@ fn every_item_kind_and_file_role_has_a_fixed_name() {
     ] {
         assert_eq!(serde_json::to_string(&kind).unwrap(), name);
         assert_eq!(serde_json::from_str::<ItemKind>(name).unwrap(), kind);
-    }
-    for (role, name) in [
-        (FileRole::Content, r#""content""#),
-        (FileRole::Cover, r#""cover""#),
-        (FileRole::Subtitle, r#""subtitle""#),
-        (FileRole::Metadata, r#""metadata""#),
-        (FileRole::Other, r#""other""#),
-    ] {
-        assert_eq!(serde_json::to_string(&role).unwrap(), name);
-        assert_eq!(serde_json::from_str::<FileRole>(name).unwrap(), role);
     }
 }
 

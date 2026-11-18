@@ -29,7 +29,7 @@
 /// Kept in SQLite's `PRAGMA user_version` and in the index directory's
 /// `VERSION` file, because each half can be opened, and so has to be judged,
 /// on its own.
-pub const READ_MODEL_VERSION: u32 = 8;
+pub const READ_MODEL_VERSION: u32 = 9;
 
 /// Run on every connection, before anything else.
 ///
@@ -60,13 +60,15 @@ CREATE TABLE IF NOT EXISTS items (
     year          INTEGER,
     lang          TEXT,
     description   TEXT,
-    last_modified INTEGER NOT NULL
+    last_modified INTEGER NOT NULL,
+    -- Who wrote its file list first (P5-66), member now or not. Their copy is
+    -- their own (phase 5's D1), and its files count towards their pledge (D8).
+    creator       TEXT    NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS item_files (
     item     TEXT    NOT NULL REFERENCES items(id) ON DELETE CASCADE,
     blob     TEXT    NOT NULL,
-    role     TEXT    NOT NULL,
     format   TEXT    NOT NULL,
     size     INTEGER NOT NULL,
     filename TEXT    NOT NULL,
@@ -81,16 +83,6 @@ CREATE TABLE IF NOT EXISTS item_files (
 -- leads with the item. Asked when a blob arrives or goes, to decide whether
 -- its items are now held here (phase 4).
 CREATE INDEX IF NOT EXISTS item_files_by_blob ON item_files (blob);
-
--- Who wrote each of an item's file keys: every author of each, whoever is a
--- member now. Whoever wrote one added the item, so its copy is their own
--- (phase 5's D1), and what they added counts towards their pledge (D8).
-CREATE TABLE IF NOT EXISTS file_authors (
-    item   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    blob   TEXT NOT NULL,
-    member TEXT NOT NULL,
-    PRIMARY KEY (item, blob, member)
-) STRICT;
 
 -- What members said about an item: one rating and one review each, the
 -- latest. Only current members' — an expelled member's are left out when the

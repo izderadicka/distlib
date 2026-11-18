@@ -351,11 +351,13 @@ impl ReadModelWriter {
             } else {
                 self.items_waiting_for_content.remove(&id);
             }
+            // Not an item until its file list is here (P5-66).
+            let Some(creator) = read.creator else {
+                continue;
+            };
 
-            // Every pass over an item, since any change to its files can change
-            // whether it is held — including another member adding one this
-            // node lacks. Before the write below, so a row in the read model is
-            // never newer than the holdings behind it.
+            // Before the write below, so a row in the read model is never
+            // newer than the holdings behind it.
             if let Err(error) = self.catalogue.holdings().recheck(&read.item).await {
                 tracing::warn!(%id, %error, "could not work out whether this node holds an item");
             }
@@ -376,7 +378,7 @@ impl ReadModelWriter {
                     item: read.item,
                     ratings: read.ratings,
                     reviews: read.reviews,
-                    file_authors: read.file_authors,
+                    creator,
                     last_modified: read.last_modified,
                 })
                 .await

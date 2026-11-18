@@ -14,11 +14,11 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 #![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_core::{DataDir, FileRecord, FileRole, Item, ItemId, ItemKind, MemberId};
+use distlib_core::{DataDir, Item, ItemId, MemberId};
 use iroh::SecretKey;
 use serde_json::json;
 use tempfile::TempDir;
@@ -192,22 +192,13 @@ async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
 }
 
 /// §6.1's add-time assist, on one node: a fingerprint that already names an
-/// item leaves that item's metadata alone and only contributes the files it
-/// did not already have.
+/// item writes nothing, so its metadata stays as it was (P5-66).
 ///
-/// The pre-existing item is seeded with only one of its two files under an
-/// id computed from *both* — standing in for a write that was interrupted
-/// partway through [`distlib_sync::Catalogue::write`]'s per-key loop, which
-/// is the case this guard actually has to repair: an id that already exists
-/// can still be missing some of the file entries its own fingerprint implies.
-///
-/// **Mutation check:** deleting the `!existing.files.contains_key(hash)`
-/// filter and writing every field of a fresh `Item` regardless of `existing`
-/// turns this red on the `title` assertion — the worse guess would overwrite
-/// "Dune" — which is exactly the regression the guard exists to prevent.
+/// Fields written at the id without a file list, as a write interrupted
+/// partway in [`distlib_sync::Catalogue::write`] leaves them, are no item:
+/// the first add writes the whole item.
 #[tokio::test]
-async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contributes_missing_files()
- {
+async fn adding_an_item_again_writes_nothing_and_fields_without_a_list_are_no_item() {
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -222,66 +213,54 @@ async fn adding_an_item_that_already_exists_leaves_its_metadata_alone_and_contri
     std::fs::write(&file_a, b"chapter one").unwrap();
     let file_b = dir.path().join("chapter-2.mp3");
     std::fs::write(&file_b, b"chapter two").unwrap();
-
-    let a = runtime.catalogue().add_file(&file_a).await.unwrap();
-    let (hash_a, size_a) = (a.hash, a.size);
+    let hash_a = runtime.catalogue().add_file(&file_a).await.unwrap().hash;
     let hash_b = runtime.catalogue().add_file(&file_b).await.unwrap().hash;
     let item_id = ItemId::from_content_hashes(&[*hash_a.as_bytes(), *hash_b.as_bytes()]);
 
-    // Somebody already created this item, and only chapter one's file entry
-    // ever made it in.
     runtime
         .catalogue()
         .write(&Item {
-            kind: Some(ItemKind::Audiobook),
-            title: Some("Dune".to_owned()),
-            files: BTreeMap::from([(
-                hash_a,
-                FileRecord {
-                    role: FileRole::Content,
-                    format: "mp3".to_owned(),
-                    size: size_a,
-                    filename: "chapter-1.mp3".to_owned(),
-                    seq: None,
-                    disc: None,
-                    title: None,
-                    duration: None,
-                },
-            )]),
+            title: Some("an interrupted add's title".to_owned()),
             ..Item::new(item_id)
         })
         .await
         .unwrap();
 
-    let answer = api(&runtime, &key)
-        .call(
-            "library.add",
-            Some(json!({
-                "kind": "audiobook",
-                "files": [&file_a, &file_b],
-                "title": "a worse guess at the title",
-            })),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(answer["item_id"], json!(item_id));
-    assert_eq!(answer["created"], json!(false), "the id already existed");
+    let add = |title: &'static str| {
+        let api = api(&runtime, &key);
+        let files = json!([&file_a, &file_b]);
+        async move {
+            api.call(
+                "library.add",
+                Some(json!({ "kind": "audiobook", "files": files, "title": title })),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let first = add("Dune").await;
+    assert_eq!(first["item_id"], json!(item_id));
     assert_eq!(
-        answer["title"],
+        first["created"],
+        json!(true),
+        "fields without a list are no item"
+    );
+    let written = runtime.catalogue().item(item_id).await.unwrap().unwrap();
+    assert_eq!(written.title.as_deref(), Some("Dune"));
+    assert_eq!(written.files.len(), 2);
+
+    let again = add("a worse guess at the title").await;
+    assert_eq!(again["created"], json!(false), "the id already existed");
+    assert_eq!(
+        again["title"],
         json!("Dune"),
         "the existing title is reported back untouched"
     );
-    let contributed = answer["contributed_files"].as_array().unwrap();
-    assert_eq!(contributed, &[json!(hash_b)], "only the missing file");
-
-    let item = runtime.catalogue().item(item_id).await.unwrap().unwrap();
     assert_eq!(
-        item.title,
-        Some("Dune".to_owned()),
-        "not overwritten by the second, worse-informed caller"
+        runtime.catalogue().item(item_id).await.unwrap().unwrap(),
+        written,
+        "nothing written"
     );
-    assert_eq!(item.files.len(), 2, "chapter two is here now too");
 
     runtime.shutdown().await;
 }
