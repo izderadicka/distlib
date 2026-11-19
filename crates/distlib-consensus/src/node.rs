@@ -26,6 +26,7 @@ use openraft::{
 };
 use redb::Database;
 use tokio::{sync::watch, task::JoinHandle};
+use tracing::Instrument as _;
 
 use crate::{
     error::ConsensusError,
@@ -397,7 +398,9 @@ fn start_first_role(role: &Role) {
         }
         start(
             &role.follow,
-            tokio::spawn(follower::follow(role.following(), role.listens.clone())),
+            tokio::spawn(
+                follower::follow(role.following(), role.listens.clone()).in_current_span(),
+            ),
         );
         return;
     };
@@ -409,9 +412,12 @@ fn start_first_role(role: &Role) {
         // Joined rather than spawned beside it, so the one-shot ask lives and
         // dies with the task that is already tracked here. `enact` never
         // returns, so the join's only effect is to hold both under one handle.
-        tokio::spawn(async move {
-            tokio::join!(enacting, asking);
-        }),
+        tokio::spawn(
+            async move {
+                tokio::join!(enacting, asking);
+            }
+            .in_current_span(),
+        ),
     );
 }
 
@@ -496,7 +502,7 @@ fn spawn_join_topic(
             said,
         },
     );
-    (tokio::spawn(joining), own_address)
+    (tokio::spawn(joining.in_current_span()), own_address)
 }
 
 /// A task this node runs only while it has a particular role.
@@ -771,7 +777,7 @@ impl MembershipNode {
 
         let (allowlist_updates, enforced) =
             enforce_membership(&role, allowlist, addresses, hooks.clone());
-        let evictions = tokio::spawn(hooks.evict_expelled());
+        let evictions = tokio::spawn(hooks.evict_expelled().in_current_span());
 
         start_first_role(&role);
         Ok(Self {
@@ -796,7 +802,7 @@ impl MembershipNode {
             follow: Arc::clone(&role.follow),
             core_group: Arc::clone(&role.core_group),
             // Last of the role's fields: it hands the role over.
-            role: tokio::spawn(serve_role(role)),
+            role: tokio::spawn(serve_role(role).in_current_span()),
             expelled,
             upgrade_required,
             hints,
@@ -1478,9 +1484,15 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
                 break;
             }
         }
-        tokio::select! {
-            changed = memberships.changed() => { if changed.is_err() { return false; } }
-            changed = applied.changed() => { if changed.is_err() { return false; } }
+        let changed = tokio::select! {
+            changed = memberships.changed() => changed,
+            changed = applied.changed() => changed,
+        };
+        if changed.is_err() {
+            tracing::error!(
+                "the log stopped reporting membership; this node's role is no longer followed"
+            );
+            return false;
         }
     }
     tracing::info!("the log says this node no longer votes; standing down");
@@ -1523,7 +1535,7 @@ async fn stand_down(role: &Role, seated_at: u64) -> bool {
     let listens = role.listens.clone();
     start(
         &role.follow,
-        tokio::spawn(follower::follow(role.following(), listens)),
+        tokio::spawn(follower::follow(role.following(), listens).in_current_span()),
     );
     tracing::info!("this node is now a follower");
     true
@@ -1679,7 +1691,10 @@ async fn take_the_seat(role: &Role) -> Option<u64> {
     };
 
     seat.take(raft.clone());
-    start(core_group, tokio::spawn(role.voting(raft)));
+    start(
+        core_group,
+        tokio::spawn(role.voting(raft).in_current_span()),
+    );
     tracing::info!("this node is now a voter");
     Some(seated_at)
 }
@@ -1792,14 +1807,17 @@ fn enforce_membership(
     // Starts from what the log holds: until the router serves, nobody can
     // connect to be refused.
     let (enforced_tx, enforced) = watch::channel(role.state_machine.membership());
-    let task = tokio::spawn(follow_membership(
-        role.state_machine.clone(),
-        role.catch_up.clone(),
-        writer,
-        addresses,
-        hooks,
-        enforced_tx,
-    ));
+    let task = tokio::spawn(
+        follow_membership(
+            role.state_machine.clone(),
+            role.catch_up.clone(),
+            writer,
+            addresses,
+            hooks,
+            enforced_tx,
+        )
+        .in_current_span(),
+    );
     (task, enforced)
 }
 
@@ -1882,10 +1900,14 @@ async fn follow_membership(
             enforced.send_replace(membership);
         }
 
-        tokio::select! {
-            changed = memberships.changed() => { if changed.is_err() { return; } }
-            changed = raft_memberships.changed() => { if changed.is_err() { return; } }
-            changed = catch_up_views.changed() => { if changed.is_err() { return; } }
+        let changed = tokio::select! {
+            changed = memberships.changed() => changed,
+            changed = raft_memberships.changed() => changed,
+            changed = catch_up_views.changed() => changed,
+        };
+        if changed.is_err() {
+            tracing::error!("the log stopped reporting membership; the allowlist stays as it is");
+            return;
         }
     }
 }

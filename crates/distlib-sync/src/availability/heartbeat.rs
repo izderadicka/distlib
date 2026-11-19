@@ -153,7 +153,7 @@ impl Availability {
         let (published, online) = watch::channel(BTreeSet::new());
         let holders = Arc::new(Mutex::new(Holders::default()));
         let said = Arc::new(Mutex::new(None));
-        let span = tracing::debug_span!(parent: None, "availability", %me);
+        let span = tracing::debug_span!(parent: None, "availability", me = %me.fmt_short());
         let task = tokio::spawn(
             join_when_founded(Joining {
                 transport: transport.clone(),
@@ -553,12 +553,10 @@ async fn listen(listening: Listening, neighbours: &watch::Sender<usize>) {
                     match heard {
                         Ok(Some(fetch)) => {
                             reap(&mut fetches);
-                            fetches.spawn(learn(
-                                endpoint.clone(),
-                                holders.clone(),
-                                events.clone(),
-                                fetch,
-                            ));
+                            fetches.spawn(
+                                learn(endpoint.clone(), holders.clone(), events.clone(), fetch)
+                                    .in_current_span(),
+                            );
                         }
                         Ok(None) => {}
                         Err(error) => tracing::warn!(

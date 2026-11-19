@@ -354,7 +354,7 @@ impl Catalogue {
         // in one test process otherwise share (C25's diagnosis). Debug, so the
         // default filter never builds it; a root, so it does not inherit
         // whichever node's span happened to be current when this was called.
-        let span = tracing::debug_span!(parent: None, "catalogue", %me);
+        let span = tracing::debug_span!(parent: None, "catalogue", me = %me.fmt_short());
         let task = tokio::spawn(
             open_when_founded(Opening {
                 docs: docs.clone(),
@@ -1063,6 +1063,11 @@ impl Catalogue {
     /// This node's author id, which is its member id.
     pub fn author(&self) -> AuthorId {
         self.inner.author
+    }
+
+    /// This node's member id.
+    pub fn me(&self) -> MemberId {
+        self.inner.me
     }
 
     /// Stops the subsystem's own task. The engines stop with the router.

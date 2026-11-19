@@ -47,6 +47,7 @@ use tokio::{
     sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
+use tracing::Instrument as _;
 
 /// A node and the transport it is served on.
 ///
@@ -431,6 +432,9 @@ async fn start_consensus(
         data_dir.root(),
         core_group(config),
     )
+    // Names the node on every line consensus logs: a test runs several nodes
+    // in one process.
+    .instrument(tracing::debug_span!(parent: None, "consensus", me = %me.fmt_short()))
     .await
     .context("could not start consensus")?;
     Ok((transport, Arc::new(node)))
@@ -564,6 +568,9 @@ fn set_once_the_group_is_known(
 /// Starts following `me`'s custody, and keeping it in the blob store within
 /// the storage limit.
 fn start_keeping(me: MemberId, inputs: &CustodyInputs<'_>) -> Keeping {
+    // Names the node on every line custody's tasks log, which they inherit
+    // from here: a test runs several nodes in one process.
+    let _custody = tracing::debug_span!(parent: None, "custody", me = %me.fmt_short()).entered();
     let storage = Storage::new(
         inputs.config.storage.limit_bytes,
         StorageSources {

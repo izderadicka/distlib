@@ -18,6 +18,7 @@ use tokio::{
     task::{JoinError, JoinHandle},
     time::Instant,
 };
+use tracing::Instrument as _;
 
 use crate::Custody;
 
@@ -77,7 +78,7 @@ impl Coverage {
     /// Starts working out coverage every `every`.
     pub fn start(sources: CoverageSources, every: Duration) -> Self {
         let inner = Arc::new(Inner::default());
-        let task = tokio::spawn(run(sources, every, Arc::downgrade(&inner)));
+        let task = tokio::spawn(run(sources, every, Arc::downgrade(&inner)).in_current_span());
         *lock(&inner.task) = Some(task);
         Self { inner }
     }
