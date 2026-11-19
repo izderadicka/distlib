@@ -135,17 +135,13 @@ pub(crate) async fn enact(
         //
         // In particular, the surviving leader must finish a transition whose
         // previous leader retired. The old-majority regression exercises it.
-        tokio::select! {
-            changed = published.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-            changed = server.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
+        let changed = tokio::select! {
+            changed = published.changed() => changed,
+            changed = server.changed() => changed,
+        };
+        if changed.is_err() {
+            tracing::error!("the log or raft is gone; the core group is no longer put into effect");
+            return;
         }
     }
 }

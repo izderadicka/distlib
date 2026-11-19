@@ -29,6 +29,7 @@ use tokio::{
     task::JoinHandle,
     time::Instant,
 };
+use tracing::Instrument as _;
 
 pub use coverage::{COVERAGE_EVERY, Coverage, CoverageSources, MemberCoverage};
 pub use pins::{PinCounts, PinManager, PinSources};
@@ -96,7 +97,7 @@ impl Custody {
             view: view_tx,
             changes: changes.clone(),
         };
-        let task = tokio::spawn(service::run(me, sources, published));
+        let task = tokio::spawn(service::run(me, sources, published).in_current_span());
         Self {
             inner: Arc::new(Inner {
                 view,

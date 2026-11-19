@@ -103,6 +103,7 @@ impl Holdings {
         };
         drop(set);
         if changed {
+            tracing::debug!(item = %item.id, held, "holdings changed");
             self.changed.send_replace(Instant::now());
         }
         Ok(held)

@@ -431,6 +431,7 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
 /// turns this red — `NetError::Fetch`, from a download offered no providers.
 #[tokio::test]
 async fn downloading_something_this_node_already_has_asks_nobody() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let item = add_an_ebook(
         &api(&runtime, &key),
@@ -468,6 +469,7 @@ async fn downloading_something_this_node_already_has_asks_nobody() {
 /// made when it is first needed.
 #[tokio::test]
 async fn a_download_without_a_destination_goes_to_the_nodes_own_directory() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let item = add_an_ebook(
         &api(&runtime, &key),
@@ -500,6 +502,7 @@ async fn a_download_without_a_destination_goes_to_the_nodes_own_directory() {
 /// instruction; overwriting it would be a guess.
 #[tokio::test]
 async fn downloading_over_a_file_that_is_already_there_is_refused() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let item = add_an_ebook(
         &api(&runtime, &key),
@@ -597,6 +600,7 @@ async fn two_chapters(runtime: &Runtime, key: &SecretKey, dir: &Path) -> (ItemId
 /// and it needs no network to make fail on cue.
 #[tokio::test]
 async fn downloading_again_takes_only_what_is_missing() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let (item, second) = two_chapters(&runtime, &key, dir.path()).await;
     let dest = dest(dir.path(), "me");
@@ -647,6 +651,7 @@ async fn downloading_again_takes_only_what_is_missing() {
 /// prints. See `Api::download`.
 #[tokio::test]
 async fn downloading_one_file_of_an_item_takes_only_that_file() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let (item, wanted) = two_chapters(&runtime, &key, dir.path()).await;
 
@@ -689,6 +694,7 @@ async fn downloading_one_file_of_an_item_takes_only_that_file() {
 /// fetched, so a mistyped path is not paid for with a transfer first.
 #[tokio::test]
 async fn downloading_into_something_that_is_not_a_directory_is_refused() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let item = add_an_ebook(
         &api(&runtime, &key),
@@ -720,6 +726,7 @@ async fn downloading_into_something_that_is_not_a_directory_is_refused() {
 /// a member who has since left can.
 #[tokio::test]
 async fn a_download_nobody_can_serve_fails_and_says_so() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let hash = ContentHash::from_bytes([0xdd; 32]);
     let item = ItemId::from_content_hashes(&[*hash.as_bytes()]);
@@ -806,6 +813,7 @@ async fn a_solo_node() -> (TempDir, Runtime, SecretKey) {
 /// the first, and the answer reports two files at one location.
 #[tokio::test]
 async fn downloading_an_item_whose_files_share_a_name_is_refused() {
+    init_logging();
     let (dir, runtime, key) = a_solo_node().await;
     let discs = dir.path().join("discs");
     std::fs::create_dir_all(discs.join("disc1")).unwrap();

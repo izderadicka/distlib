@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, download, found, until_projected};
+use common::{api, config, download, found, init_logging, until_projected};
 
 const SOON: Duration = Duration::from_secs(30);
 
@@ -91,6 +91,7 @@ async fn until_required(api: &Api, required: u64) {
 /// one below the minimum.
 #[tokio::test]
 async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (runtime, api) = founded_alone(dir.path(), 100).await;
     assert_eq!(listed(&api).await, (json!(100), json!(10)));
@@ -131,6 +132,7 @@ async fn what_a_member_added_is_warned_then_refused_until_its_pledge_covers_it()
 /// is neither refused nor counted twice.
 #[tokio::test]
 async fn adding_the_same_files_again_requires_nothing_more() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (runtime, api) = founded_alone(dir.path(), 100).await;
 
@@ -152,6 +154,7 @@ async fn adding_the_same_files_again_requires_nothing_more() {
 /// through.
 #[tokio::test]
 async fn a_member_below_the_minimum_pledge_browses_but_takes_no_content() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let keys = [SecretKey::generate(), SecretKey::generate()];
     let ids = keys.each_ref().map(|key| MemberId::from(key.public()));

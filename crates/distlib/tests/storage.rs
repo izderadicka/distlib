@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{PLEDGE, api, collecting, config, found, group_settings};
+use common::{PLEDGE, api, collecting, config, found, group_settings, init_logging};
 
 /// A group of one, founded, with its catalogue open and `limit` bytes of
 /// storage.
@@ -57,6 +57,7 @@ async fn storage(api: &Api) -> Value {
 /// refused, and one that adds nothing new goes through even over it.
 #[tokio::test]
 async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (runtime, api) = founded_alone(dir.path(), 1_000).await;
 
@@ -104,6 +105,7 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
 /// A pledge has to leave room under the limit for own items and the cache.
 #[tokio::test]
 async fn a_pledge_not_below_the_storage_limit_is_refused() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let limit = 2 * PLEDGE;
     let (runtime, api) = founded_alone(dir.path(), limit).await;
@@ -127,6 +129,7 @@ async fn a_pledge_not_below_the_storage_limit_is_refused() {
 /// When the last collection pass began is in the status, once one has.
 #[tokio::test]
 async fn the_last_collection_pass_is_reported() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let (runtime, api) = founded_alone_with(

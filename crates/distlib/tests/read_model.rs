@@ -137,7 +137,6 @@ async fn agree_on_search(node: &Runtime, against: &Runtime, query: &str, what: &
 /// Alice and bob, founded as one group, with bob's data directory named so the
 /// test can start a second node on it.
 async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
-    init_logging();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
@@ -173,6 +172,7 @@ async fn a_founded_pair(dir: &Path) -> (Runtime, Runtime, SecretKey, Config) {
 /// restart could have got for free by having been there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restarted_node_holds_what_a_node_that_never_restarted_holds() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
 
@@ -242,6 +242,7 @@ async fn a_restarted_node_holds_what_a_node_that_never_restarted_holds() {
 /// `db/` is documented as the one directory under the root that can be deleted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_model_that_was_lost_is_rebuilt_from_the_document() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
 
@@ -291,6 +292,7 @@ const REPAIRED: Duration = Duration::from_secs(20);
 /// only from the catalogue's thirty-second timer.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_item_whose_content_the_sweep_fetched_is_projected_whole() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
     let item = an_item(6, "Dune");
@@ -346,6 +348,7 @@ async fn an_item_whose_content_the_sweep_fetched_is_projected_whole() {
 /// while a cold start of both together still failed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, bob_key, config) = a_founded_pair(dir.path()).await;
 
@@ -405,6 +408,7 @@ async fn a_search_index_that_was_lost_is_rebuilt_from_the_document() {
 /// be complete while its later entries' events are still on their way.
 #[tokio::test(flavor = "multi_thread")]
 async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -500,6 +504,7 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
 /// to nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn admin_reindex_does_not_hang_before_a_group_exists() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let runtime = Runtime::start(
@@ -534,6 +539,7 @@ async fn admin_reindex_does_not_hang_before_a_group_exists() {
 /// real dispatch a caller uses — not `Store`/`SearchIndex` called directly.
 #[tokio::test(flavor = "multi_thread")]
 async fn library_search_and_item_read_what_the_catalogue_wrote() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -624,6 +630,7 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
 /// created the item, on every node (P5-66).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_member_who_wrote_the_file_list_first_created_the_item() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
     alice.catalogue().ready().await;
@@ -655,6 +662,7 @@ async fn the_member_who_wrote_the_file_list_first_created_the_item() {
 /// (#185, P5-66).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_item_is_projected_only_once_its_file_list_is_here() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, bob, _, _) = a_founded_pair(dir.path()).await;
     alice.catalogue().ready().await;

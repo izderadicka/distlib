@@ -28,6 +28,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, sleep_until},
 };
+use tracing::Instrument as _;
 
 use crate::{
     Custody, CustodyChange,
@@ -231,7 +232,8 @@ impl Emergency {
                     self.alone.copying(item);
                     let keeper = self.keeper.clone();
                     copies.spawn(
-                        async move { (item, keeper.keep(item, KeepReason::Emergency).await) },
+                        async move { (item, keeper.keep(item, KeepReason::Emergency).await) }
+                            .in_current_span(),
                     );
                 }
                 Ok(false) => {}

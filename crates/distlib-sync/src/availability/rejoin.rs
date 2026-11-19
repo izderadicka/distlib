@@ -24,6 +24,7 @@ use tokio::{
     sync::watch::{self, error::RecvError},
     task::JoinSet,
 };
+use tracing::Instrument as _;
 
 /// The first wait before joining again, and what any news resets it to.
 const FIRST_WAIT: Duration = Duration::from_secs(1);
@@ -120,6 +121,7 @@ async fn connect(
                     })
                     .ok()
             }
+            .in_current_span()
         })
         .collect();
     let mut connected = Vec::new();

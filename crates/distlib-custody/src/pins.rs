@@ -25,6 +25,7 @@ use tokio::{
     task::{self, JoinHandle, JoinSet},
     time::{Instant, sleep_until},
 };
+use tracing::Instrument as _;
 
 use crate::{
     Custody, CustodyChange,
@@ -146,9 +147,13 @@ impl PinManager {
         let (changes, emergency_changes) = (custody.changes(), custody.changes());
         Self {
             tasks: Mutex::new(vec![
-                tokio::spawn(pins.run(changes, events)),
-                tokio::spawn(emergency.run(emergency_events, emergency_changes)),
-                tokio::spawn(following_failed_copies),
+                tokio::spawn(pins.run(changes, events).in_current_span()),
+                tokio::spawn(
+                    emergency
+                        .run(emergency_events, emergency_changes)
+                        .in_current_span(),
+                ),
+                tokio::spawn(following_failed_copies.in_current_span()),
             ]),
             counts,
         }
@@ -379,7 +384,10 @@ impl Pins {
         for item in self.fewest_copies_first(free) {
             let keeper = self.keeper.clone();
             let task = fetches
-                .spawn(async move { (item, keeper.keep(item, KeepReason::Custody).await) })
+                .spawn(
+                    async move { (item, keeper.keep(item, KeepReason::Custody).await) }
+                        .in_current_span(),
+                )
                 .id();
             self.pins.insert(
                 item,
@@ -650,6 +658,7 @@ impl Keeper {
             .await
             .expect("the fetch slots are never closed");
         let Some(stored) = self.store.item(item_id).await? else {
+            tracing::debug!(item = %item_id, ?reason, "not in the read model; nothing kept");
             return Ok(());
         };
         let files: Vec<(ContentHash, u64)> = stored
@@ -674,12 +683,15 @@ impl Keeper {
             tracing::warn!(item = %item_id, ?reason, short_by, "kept over the storage limit, with the whole cache evicted");
         }
         let providers = self.providers(item_id);
-        for (hash, _) in files {
-            if !self.blobs.has(hash).await? {
-                fetch_until_stalled(&self.blobs, hash, providers.clone()).await?;
+        let mut fetched = 0;
+        for (hash, _) in &files {
+            if !self.blobs.has(*hash).await? {
+                fetch_until_stalled(&self.blobs, *hash, providers.clone()).await?;
+                fetched += 1;
             }
         }
-        self.holdings.recheck(&stored.item).await?;
+        let held = self.holdings.recheck(&stored.item).await?;
+        tracing::debug!(item = %item_id, ?reason, files = files.len(), fetched, held, "files fetched");
         Ok(())
     }
 

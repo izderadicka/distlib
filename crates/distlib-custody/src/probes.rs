@@ -20,6 +20,7 @@ use tokio::{
     sync::{Mutex as AsyncMutex, watch},
     task::JoinHandle,
 };
+use tracing::Instrument as _;
 
 use crate::{
     Coverage, Custody,
@@ -100,7 +101,7 @@ impl Probes {
             counts: Mutex::default(),
             task: Mutex::default(),
         });
-        let task = tokio::spawn(run(Arc::downgrade(&inner)));
+        let task = tokio::spawn(run(Arc::downgrade(&inner)).in_current_span());
         *lock(&inner.task) = Some(task);
         Self { inner }
     }

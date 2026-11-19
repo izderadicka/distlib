@@ -128,6 +128,6 @@ jobs:
       # have been (C25); QUIC's packet-level noise is cut.
       - run: cargo nextest run --workspace --all-features --no-fail-fast --profile ci
         env:
-          RUST_LOG: info,distlib=debug,distlib_consensus=debug,distlib_net=debug,distlib_sync=debug,iroh_gossip=debug,noq_proto=warn
+          RUST_LOG: info,distlib=debug,distlib_api=debug,distlib_consensus=debug,distlib_custody=debug,distlib_net=debug,distlib_store=debug,distlib_sync=debug,iroh_gossip=debug,noq_proto=warn
       # nextest does not run doctests, so they need their own pass.
       - run: cargo test --workspace --all-features --doc

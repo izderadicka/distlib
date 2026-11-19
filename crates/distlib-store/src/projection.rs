@@ -71,6 +71,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
 };
+use tracing::Instrument as _;
 
 use crate::{
     error::{Result, StoreError},
@@ -150,9 +151,16 @@ impl Projection {
     ) -> Self {
         let (reindex_tx, reindex_rx) = mpsc::channel(REINDEX_QUEUE);
         let (replays_tx, replays) = watch::channel(0);
-        let task = tokio::spawn(run(
-            catalogue, store, index, membership, events, reindex_rx, replays_tx,
-        ));
+        // Names the node on every line the projection logs, as the catalogue's
+        // span does: a test runs several nodes in one process.
+        let span =
+            tracing::debug_span!(parent: None, "projection", me = %catalogue.me().fmt_short());
+        let task = tokio::spawn(
+            run(
+                catalogue, store, index, membership, events, reindex_rx, replays_tx,
+            )
+            .instrument(span),
+        );
         Self {
             task,
             reindex: ReindexHandle(reindex_tx),
@@ -256,7 +264,7 @@ async fn run(
                     mut changed_wishes,
                     content_arrived,
                 }) = batch else {
-                    tracing::debug!("the catalogue stopped reporting changes; the read model is now cold");
+                    tracing::error!("the catalogue stopped reporting changes; the read model stays as it is");
                     return;
                 };
                 if content_arrived {
@@ -353,6 +361,7 @@ impl ReadModelWriter {
             }
             // Not an item until its file list is here (P5-66).
             let Some(creator) = read.creator else {
+                tracing::debug!(%id, waiting_for_content = read.waiting_for_content, "no file list here yet; not projected");
                 continue;
             };
 
@@ -383,8 +392,13 @@ impl ReadModelWriter {
                 })
                 .await
             {
-                Ok(Upserted::Created) => written.push(Event::ItemAdded { item_id: id }),
-                Ok(Upserted::Updated) => written.push(Event::ItemChanged { item_id: id }),
+                Ok(upserted) => {
+                    tracing::debug!(%id, ?upserted, "projected");
+                    written.push(match upserted {
+                        Upserted::Created => Event::ItemAdded { item_id: id },
+                        Upserted::Updated => Event::ItemChanged { item_id: id },
+                    });
+                }
                 Err(error) => {
                     tracing::warn!(%id, %error, "could not write a catalogue item to the read model");
                 }

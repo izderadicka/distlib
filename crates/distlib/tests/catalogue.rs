@@ -55,7 +55,6 @@ const AMPLY: Duration = Duration::from_secs(10);
 
 /// Two runtimes, founded as one group, sharing one catalogue.
 async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
-    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
@@ -175,7 +174,6 @@ async fn a_group_with_two_followers() -> Group {
 /// [`a_group_with_two_followers`], every node beating every `interval`
 /// seconds.
 async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
-    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let alice_id = MemberId::from(alice_key.public());
@@ -268,6 +266,7 @@ async fn a_group_with_two_followers_beating(interval: NonZeroU32) -> Group {
 
 #[tokio::test]
 async fn an_item_written_on_one_node_is_read_on_the_other() {
+    init_logging();
     let (_dir, alice, bob) = a_founded_pair().await;
 
     // Bob learns the group from the log, and only then has a catalogue: its
@@ -301,6 +300,7 @@ async fn an_item_written_on_one_node_is_read_on_the_other() {
 /// it had one.
 #[tokio::test]
 async fn each_of_a_pair_shows_the_other_as_its_neighbour_until_it_stops() {
+    init_logging();
     let (_dir, alice, bob) = a_founded_pair().await;
     let alice_id = MemberId::from(alice.endpoint().id());
     let bob_id = MemberId::from(bob.endpoint().id());
@@ -333,6 +333,7 @@ async fn each_of_a_pair_shows_the_other_as_its_neighbour_until_it_stops() {
 /// its last beat would otherwise be believed for three minutes.
 #[tokio::test]
 async fn a_node_stopped_cleanly_is_offline_at_once() {
+    init_logging();
     let (_dir, alice, bob) = a_founded_pair().await;
     let bob_id = MemberId::from(bob.endpoint().id());
     let mut online = alice.availability().online();
@@ -358,6 +359,7 @@ async fn a_node_stopped_cleanly_is_offline_at_once() {
 /// handles negotiates it and then refuses every stream (P1-11).
 #[tokio::test]
 async fn a_node_serves_exactly_the_protocols_its_endpoint_advertises() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let runtime = Runtime::start(
@@ -405,6 +407,7 @@ async fn a_node_serves_exactly_the_protocols_its_endpoint_advertises() {
 /// to anything else dialing a bare id on this endpoint.
 #[tokio::test]
 async fn what_one_follower_writes_the_other_follower_reads() {
+    init_logging();
     let group = a_group_with_two_followers().await;
 
     group
@@ -444,6 +447,7 @@ async fn what_one_follower_writes_the_other_follower_reads() {
 /// does not offer.
 #[tokio::test]
 async fn a_follower_learns_where_another_follower_is() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
 
@@ -499,6 +503,7 @@ async fn a_follower_learns_where_another_follower_is() {
 /// arrives and this fails on the timeout.
 #[tokio::test]
 async fn a_settled_group_stops_talking_about_addresses() {
+    init_logging();
     // Beating every second, so the quiet a settled group must manage holds
     // with heartbeats in it, not merely between them.
     let group = a_group_with_two_followers_beating(NonZeroU32::MIN).await;
@@ -579,6 +584,7 @@ const NO_ROUNDS: Duration = Duration::from_secs(45);
 /// an offer costs, since iroh-docs dials every peer it is handed.
 #[tokio::test]
 async fn a_settled_group_stops_syncing() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let everyone = [&group.alice, &group.bob, &group.carol];
     let rounds = || {
@@ -626,6 +632,7 @@ async fn a_settled_group_stops_syncing() {
 /// "never" rather than "slowly".
 #[tokio::test]
 async fn two_followers_keep_converging_once_the_core_node_is_gone() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
     let carol_id = MemberId::from(group.carol.endpoint().id());
@@ -716,6 +723,7 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
 /// test* before she is expelled, and the same path is then asked for a second.
 #[tokio::test]
 async fn an_expelled_member_stops_receiving_entries() {
+    init_logging();
     let group = a_group_with_two_followers().await;
 
     group
@@ -806,6 +814,7 @@ async fn an_expelled_member_stops_receiving_entries() {
 /// nothing.
 #[tokio::test]
 async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
     let carol_id = group.carol_id;
@@ -971,6 +980,7 @@ async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
 /// clearing it.
 #[tokio::test]
 async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let alices_api = api(&group.alice, &group.alice_key);
     let bobs_api = api(&group.bob, &group.bob_key);
@@ -1057,6 +1067,7 @@ async fn two_members_rating_an_item_at_once_both_show_on_every_node() {
 /// it. Alice is told `bookmark.changed`, and bob's deleting one reaches her.
 #[tokio::test]
 async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let alices_api = api(&group.alice, &group.alice_key);
     let bobs_api = api(&group.bob, &group.bob_key);
@@ -1185,6 +1196,7 @@ async fn call_until(
 /// that item, and is told `wish.changed`.
 #[tokio::test]
 async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let alices_api = api(&group.alice, &group.alice_key);
     let bobs_api = api(&group.bob, &group.bob_key);
@@ -1279,6 +1291,7 @@ async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
 /// made make no wish. A reindex afterwards changes nothing.
 #[tokio::test]
 async fn a_wish_reaches_the_read_model_without_an_expelled_members_comment() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let alice_id = MemberId::from(group.alice.endpoint().id());
     let bob_id = MemberId::from(group.bob.endpoint().id());
@@ -1520,6 +1533,7 @@ async fn stored_when(
 /// first removes the accident, so what is left is the mechanism.
 #[tokio::test]
 async fn a_late_joiner_still_learns_where_the_others_are() {
+    init_logging();
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
     let alice_id = MemberId::from(group.alice.endpoint().id());

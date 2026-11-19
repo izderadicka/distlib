@@ -35,6 +35,7 @@ use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tracing::Instrument as _;
 
 use crate::{
     availability::Seen,
@@ -110,8 +111,14 @@ pub struct Api {
 }
 
 impl Api {
-    /// Dispatches one call.
+    /// Dispatches one call, in a span naming this node and the method.
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
+        let span =
+            tracing::debug_span!(parent: None, "api", me = %self.node.id().fmt_short(), method);
+        self.dispatch(method, params).instrument(span).await
+    }
+
+    async fn dispatch(&self, method: &str, params: Option<Value>) -> Result<Value, Error> {
         match method {
             "node.status" => self.status().await,
             "group.members" => self.members().await,
@@ -1373,20 +1380,22 @@ impl Api {
         // A clone, because the task outlives this call; every field is a
         // handle onto something shared.
         let api = self.clone();
-        tokio::spawn(async move {
-            match api.fetch_all(item_id, targets, &providers, &mut task).await {
-                Ok(files) => {
-                    api.recheck_holdings(item_id).await;
-                    task.finish(files);
+        tokio::spawn(
+            async move {
+                match api.fetch_all(item_id, targets, &providers, &mut task).await {
+                    Ok(files) => {
+                        api.recheck_holdings(item_id).await;
+                        task.finish(files);
+                    }
+                    Err(error) => task.fail(error.message),
                 }
-                Err(error) => task.fail(error.message),
             }
-        });
+            .in_current_span(),
+        );
     }
 
     /// Rechecks whether this node holds `item_id`. A download is the one way
-    /// content arrives that the document never hears of. The item is read
-    /// again, since a file may have been added to it during the download.
+    /// content arrives that the document never hears of.
     async fn recheck_holdings(&self, item_id: ItemId) {
         let rechecked = async {
             let Some(item) = self.catalogue.item(item_id).await? else {

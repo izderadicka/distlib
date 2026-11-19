@@ -24,7 +24,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{PLEDGE, api, config, found, group_settings, until_projected};
+use common::{PLEDGE, api, config, found, group_settings, init_logging, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -41,6 +41,7 @@ const SOON: Duration = Duration::from_secs(30);
 /// which one the document ends up agreeing happened "first".
 #[tokio::test]
 async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
@@ -136,6 +137,7 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
 /// own tags are set (5b-3b-2: held means complete and kept).
 #[tokio::test]
 async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
@@ -199,6 +201,7 @@ async fn adding_files_the_catalogue_already_has_makes_the_item_held() {
 /// the first add writes the whole item.
 #[tokio::test]
 async fn adding_an_item_again_writes_nothing_and_fields_without_a_list_are_no_item() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -270,6 +273,7 @@ async fn adding_an_item_again_writes_nothing_and_fields_without_a_list_are_no_it
 /// catalogue is asked anything, so it needs no group to be founded first.
 #[tokio::test]
 async fn adding_with_no_files_is_refused() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -300,6 +304,7 @@ async fn adding_with_no_files_is_refused() {
 #[tokio::test]
 async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fingerprint_in_step()
 {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -368,6 +373,7 @@ async fn adding_two_paths_with_identical_bytes_keeps_the_id_and_the_items_own_fi
 /// state that used to be reachable and now is not.
 #[tokio::test]
 async fn adding_two_different_files_under_one_name_is_refused() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -422,6 +428,7 @@ async fn adding_two_different_files_under_one_name_is_refused() {
 /// fields of one item at once without either erasing the other.
 #[tokio::test]
 async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let alice_key = SecretKey::generate();
     let bob_key = SecretKey::generate();
@@ -536,6 +543,7 @@ async fn title_on(api: &Api, item_id: ItemId) -> Option<String> {
 /// but metadata, with no files and an id nothing fingerprints to.
 #[tokio::test]
 async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let id = MemberId::from(key.public());
@@ -567,6 +575,7 @@ async fn editing_an_item_nobody_added_is_refused_and_writes_nothing() {
 /// configuration says, and clears what a previous run left behind.
 #[tokio::test]
 async fn uploads_follow_the_configuration_and_start_empty() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let data = DataDir::new(dir.path().to_path_buf());
     let leftover = data.root().join("uploads").join("0".repeat(32));
