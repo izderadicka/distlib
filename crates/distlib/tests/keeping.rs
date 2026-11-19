@@ -18,8 +18,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    PLEDGE, api, bound, collecting, config, download, following, found, group_settings, pledge,
-    profile, until_a_pass_collects, until_projected,
+    PLEDGE, api, bound, collecting, config, download, following, found, group_settings,
+    init_logging, pledge, profile, until_a_pass_collects, until_projected,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile, project
@@ -88,6 +88,7 @@ async fn alice_and_bob_collecting(dir: &Path) -> (Runtime, SecretKey, Runtime, S
 /// loses bob's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_collection_pass_keeps_what_was_added_downloaded_and_synced() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let (alice, alice_key, bob, bob_key) = alice_and_bob_collecting(dir.path()).await;
 
@@ -153,6 +154,7 @@ async fn a_collection_pass_keeps_what_was_added_downloaded_and_synced() {
 /// unwritten add's tag.
 #[tokio::test(flavor = "multi_thread")]
 async fn starting_the_api_lets_go_of_an_add_that_stopped_before_it_was_written() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let key = SecretKey::generate();
     let alice = Runtime::start(

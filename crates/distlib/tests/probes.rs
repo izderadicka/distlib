@@ -130,7 +130,6 @@ async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> 
 /// The founder, its book's custodian, and a member with no weight, founded
 /// with `settings` and `pledges`.
 async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) -> [Node; 3] {
-    init_logging();
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
@@ -189,6 +188,7 @@ async fn a_book_kept(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let ([founder, second, third], book, blob) =
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
@@ -248,6 +248,7 @@ const EMERGENCY_AFTER_SECS: u32 = 10;
 /// last real one: after the delay, the other member keeps an emergency copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let settings = GroupSettings {
         emergency_after_secs: EMERGENCY_AFTER_SECS,
@@ -315,6 +316,7 @@ const CHUNK: u64 = 500;
 /// fails it too, and records its own failure at it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let ([founder, second, third], book, blob) =
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
@@ -356,6 +358,7 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
 /// nothing clears the two written here.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let probes_off = GroupSettings {
         probes: false,
@@ -410,6 +413,7 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
 /// with no failures, or without a reason, is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let probes_off = GroupSettings {
         probes: false,
@@ -502,6 +506,7 @@ async fn a_node_without_its_catalogue_lists_no_suspects() {
 /// again once they are back, which clears it.
 #[tokio::test(flavor = "multi_thread")]
 async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let hourly = GroupSettings {
         probe_every_secs: NonZeroU32::new(3600).unwrap(),
@@ -570,6 +575,7 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_custodian_is_skipped_not_failed() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let ([founder, second, third], _book, _blob) =
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
@@ -595,6 +601,7 @@ async fn an_unreachable_custodian_is_skipped_not_failed() {
 /// it for a book it does not claim, which is coverage's business (D10).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_that_does_not_announce_the_item_is_not_probed() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let [founder, second, third] = three_nodes(dir.path(), &settings(), PLEDGES).await;
     second.runtime.pins().shutdown();
@@ -611,6 +618,7 @@ async fn a_custodian_that_does_not_announce_the_item_is_not_probed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_founded_without_probes_makes_none() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let probes_off = GroupSettings {
         probes: false,
@@ -640,6 +648,7 @@ async fn a_group_founded_without_probes_makes_none() {
 /// sent content, so its probes would all fail.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_below_the_minimum_pledge_makes_no_probes() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let minimum = GroupSettings {
         min_pledge_bytes: 100 * GB,

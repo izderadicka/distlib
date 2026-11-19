@@ -97,7 +97,6 @@ impl Node {
 /// Three nodes beating every second, so coverage is worked out every second;
 /// founded with `pledges`, the founder first.
 async fn three_nodes(dir: &Path, pledges: [u64; 3]) -> [Node; 3] {
-    init_logging();
     let keys: Vec<SecretKey> = pledges.iter().map(|_| SecretKey::generate()).collect();
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
@@ -138,6 +137,7 @@ async fn add_a_book(node: &Node, dir: &Path, title: &str) -> ItemId {
 /// of two. The third member is custodian of nothing, and counts nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_holding_its_items_shows_full_coverage() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let [founder, second, third] = three_nodes(dir.path(), [100 * GB, 100 * GB, 0]).await;
     add_a_book(&founder, dir.path(), "Dune").await;
@@ -158,6 +158,7 @@ async fn a_custodian_holding_its_items_shows_full_coverage() {
 /// does not announce.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodian_that_never_fetches_falls_behind_once_its_assignment_is_old() {
+    init_logging();
     let dir = TempDir::new().unwrap();
     let [founder, second, third] = three_nodes(dir.path(), [100 * GB; 3]).await;
     second.runtime.pins().shutdown();

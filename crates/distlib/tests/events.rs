@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
 mod common;
-use common::{bound, config, group_settings, listed_item, profile};
+use common::{bound, config, group_settings, init_logging, listed_item, profile};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// for the projection behind that to catch up.
@@ -140,6 +140,7 @@ async fn until(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_item_written_on_one_node_is_news_on_the_other() {
+    init_logging();
     // 3a-2's acceptance: a page open on bob hears about what alice adds, and
     // then about what she changes — as two different things.
     let dir = TempDir::new().unwrap();
@@ -204,6 +205,7 @@ async fn an_item_written_on_one_node_is_news_on_the_other() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
+    init_logging();
     // D1's claim, asserted rather than argued: the projection publishes and
     // moves on, whoever is not keeping up. More items than the bus holds, and
     // a watcher that reads none of them — the read model must still reach the
@@ -262,6 +264,7 @@ async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reindex_is_not_news() {
+    init_logging();
     // A replay runs on every start and on every `admin.reindex`, and rebuilds
     // the read model from a document it already held. Publishing that would
     // put every watcher into `resync` at startup for nothing. The reindex is
