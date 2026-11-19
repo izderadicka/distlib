@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (P5-66).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -861,7 +861,7 @@ The end-of-phase mutation pass follows 5f.
   authority stays with the signed log. **Acceptance:** the review's reproduction, restarting C on
   the same address: C catches up under leader D (`core_turnover.rs`).
 
-### 5f — the review in #200, and the availability topic's rejoin (5 PRs)
+### 5f — the review in #200, the availability topic's rejoin, and the flakes
 
 #200 holds a review after #185: six findings in custody, five with a test that passes by asserting
 today's behaviour. Each was checked against `ed88649` and holds. #200 is not merged, since its
@@ -869,7 +869,8 @@ tests would pin the defects on master: each fix below takes its test from #200, 
 fails before the fix and passes after; #200 is closed once 5f-1 lands. Findings 4, 3 and 2 can
 lose an item or count a lost copy as real, so v1 fixes them, most dangerous first; finding 1 is
 fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. 5f-6, found on
-#207's CI, goes first: it makes custody tests flake. The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f.
+#207's CI, goes first: it makes custody tests flake. 5f-7, the flakes, goes after 5f-2 and before
+5f-3 (Ivan). The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f.
 
 - **5f-1 — the plan.** This section, its C-items and P5-64.
 - **5f-2 — an item is its born files (#200 finding 4).** One `role: content` record more than the
@@ -924,6 +925,20 @@ fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward
   address is learned or the membership changes (`availability::rejoin`). **Acceptance:** two
   members whose log names no address strand each other at their first dials; once one learns the
   other's address, both hear each other's beats (`a_node_with_no_neighbour_joins_again_once_it_learns_an_address`).
+- **5f-7 — flakes made diagnosable, then fixed (P5-67).** CI flakes on about every other PR, and a
+  failed multi-node test's log cannot be read: custody, pins, the projection, API calls and
+  consensus do not say which node logged a line, half the tests log nothing, and a wait that times
+  out says what it wanted, not what it saw. Four PRs:
+  - **5f-7a — every line names its node.** A root span `me=` on the projection's, custody's,
+    consensus's and each API call's tasks, as the catalogue and availability have; debug lines
+    for what holdings, a keep and the projection decide; CI logs those crates at debug; every
+    test turns logging on.
+  - **5f-7b — a wait says what it last saw.** One `until` helper the tests' waits share, whose
+    timeout prints the last value it read.
+  - **5f-7c — a node reads its own new item at once.** A node that has just added an item
+    sometimes reads it back without its files or title (`keeping`, `pins` and `download` on
+    macOS CI).
+  - **5f-7d — the tests that fail again on a rerun**, each fixed, or kept with its reason recorded.
 
 ---
 
