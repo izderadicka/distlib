@@ -15,6 +15,7 @@ pub mod process;
 use std::{
     borrow::Borrow,
     collections::BTreeMap,
+    fmt::Debug,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     path::Path,
@@ -24,13 +25,14 @@ use std::{
 
 use distlib::Runtime;
 use distlib_api::Api;
-use distlib_consensus::{MemberProfile, MembershipEvent, MembershipState};
+use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
     Config, ContentHash, CoreMember, DataDir, FileRecord, GroupSettings, Item, ItemId, MemberId,
     NetConfig, NodeAddr,
 };
 use iroh::SecretKey;
 use serde_json::json;
+use tokio::sync::{broadcast, watch};
 
 /// An item of one made-up file told apart by `n`, with nothing else said:
 /// its own file list, so it is an item (P5-66).
@@ -60,18 +62,24 @@ pub async fn until_released(data_dir: &DataDir) {
         data_dir.blobs_dir().join("blobs.db"),
         data_dir.docs_dir().join("docs.redb"),
     ];
-    tokio::time::timeout(Duration::from_secs(30), async {
-        for database in &databases {
-            while matches!(
-                redb::Database::create(database),
-                Err(redb::DatabaseError::DatabaseAlreadyOpen)
-            ) {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    })
-    .await
-    .expect("the stopped runtime to let go of its databases");
+    let still_open = || async {
+        databases
+            .iter()
+            .find(|database| {
+                matches!(
+                    redb::Database::create(database),
+                    Err(redb::DatabaseError::DatabaseAlreadyOpen)
+                )
+            })
+            .cloned()
+    };
+    until_within(
+        Duration::from_secs(30),
+        "the stopped runtime lets go of its databases",
+        still_open,
+        Option::is_none,
+    )
+    .await;
 }
 
 /// Logs to this test's output, filtered by `RUST_LOG`.
@@ -166,30 +174,20 @@ pub fn bound(runtime: &Runtime) -> NodeAddr {
     }
 }
 
-/// How long a test waits for a node to project an item it was sent.
-const PROJECTED_WITHIN: Duration = SOON;
-
-/// Waits until this node's read model holds `item` with all `files` of its
-/// files — which is what `library.download` reads, so a download asked for
-/// any sooner is asking about an item this node genuinely does not have yet.
-///
-/// **The file count, not merely the item.** An item's row appears as soon as
-/// any one of its entries has been projected, and its per-file rows are
-/// separate entries that arrive on their own schedule. Waiting only for the
-/// row is waiting for the title.
+/// Waits until this node's read model holds `item` with its `files` files —
+/// which is what `library.download` reads, so a download asked for any sooner
+/// is asking about an item this node genuinely does not have yet.
 pub async fn until_projected(runtime: &Runtime, item: ItemId, files: usize, who: &str) {
-    tokio::time::timeout(PROJECTED_WITHIN, async {
-        loop {
-            if let Some(stored) = runtime.store().item(item).await.unwrap()
-                && stored.item.files.len() == files
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{who} never projected the item with its {files} file(s)"));
+    until(
+        &format!("{who} projects the item with its {files} file(s)"),
+        || async { runtime.store().item(item).await.unwrap() },
+        |stored| {
+            stored
+                .as_ref()
+                .is_some_and(|stored| stored.item.files.len() == files)
+        },
+    )
+    .await;
 }
 
 /// An `Api` wired to `runtime`'s own pieces: what `distlib::commands::run`
@@ -219,7 +217,103 @@ pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
 
 /// Long enough for in-process nodes to elect, replicate, reconcile, project,
 /// fetch and collect.
-const SOON: Duration = Duration::from_secs(60);
+pub const SOON: Duration = Duration::from_secs(60);
+
+/// How long a wait sleeps between two reads.
+const READ_AGAIN_AFTER: Duration = Duration::from_millis(50);
+
+/// Reads `read` until `done` holds of what it returns, and returns that.
+///
+/// Past [`SOON`] it panics with `what` it waited for and the last value it
+/// read, so a failure says how far things got.
+pub async fn until<T: Debug, F: Future<Output = T>>(
+    what: &str,
+    read: impl FnMut() -> F,
+    done: impl Fn(&T) -> bool,
+) -> T {
+    until_within(SOON, what, read, done).await
+}
+
+/// [`until`], giving up after `within`.
+pub async fn until_within<T: Debug, F: Future<Output = T>>(
+    within: Duration,
+    what: &str,
+    mut read: impl FnMut() -> F,
+    done: impl Fn(&T) -> bool,
+) -> T {
+    let mut last = None;
+    let reached = tokio::time::timeout(within, async {
+        loop {
+            let value = read().await;
+            if done(&value) {
+                return value;
+            }
+            last = Some(value);
+            tokio::time::sleep(READ_AGAIN_AFTER).await;
+        }
+    })
+    .await;
+    reached.unwrap_or_else(|_| panic!("{what} within {within:?}; last read: {last:?}"))
+}
+
+/// Reads `events` until one is `wanted`, and returns it; one missed to a lag
+/// is passed over.
+///
+/// Past [`SOON`] it panics with `what` it waited for and the last event it
+/// heard.
+pub async fn until_heard<T: Debug + Clone>(
+    what: &str,
+    events: &mut broadcast::Receiver<T>,
+    wanted: impl Fn(&T) -> bool,
+) -> T {
+    let mut last = None;
+    let heard = tokio::time::timeout(SOON, async {
+        loop {
+            match events.recv().await {
+                Ok(event) if wanted(&event) => return event,
+                Ok(event) => last = Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => panic!("{what}: the bus closed"),
+            }
+        }
+    })
+    .await;
+    heard.unwrap_or_else(|_| panic!("{what} within {SOON:?}; last heard: {last:?}"))
+}
+
+/// Waits until `done` holds of what `watched` holds, and returns a copy.
+///
+/// Past [`SOON`] it panics with `what` it waited for and what `watched` held
+/// then.
+pub async fn until_watched<T: Debug + Clone>(
+    what: &str,
+    watched: &mut watch::Receiver<T>,
+    done: impl FnMut(&T) -> bool,
+) -> T {
+    until_watched_within(SOON, what, watched, done).await
+}
+
+/// [`until_watched`], giving up after `within`.
+pub async fn until_watched_within<T: Debug + Clone>(
+    within: Duration,
+    what: &str,
+    watched: &mut watch::Receiver<T>,
+    done: impl FnMut(&T) -> bool,
+) -> T {
+    let reached = tokio::time::timeout(within, watched.wait_for(done))
+        .await
+        .map(|reached| {
+            reached
+                .expect("the watched value outlives the wait")
+                .clone()
+        });
+    reached.unwrap_or_else(|_| {
+        panic!(
+            "{what} within {within:?}; last held: {:?}",
+            *watch::Receiver::borrow(watched)
+        )
+    })
+}
 
 /// A configuration that collects every second.
 pub fn collecting(mut config: Config) -> Config {
@@ -233,13 +327,12 @@ pub async fn until_a_pass_collects(runtime: &Runtime, dir: &Path, marker: &str) 
     let path = dir.join(marker);
     std::fs::write(&path, marker).unwrap();
     let hash = runtime.catalogue().add_file(&path).await.unwrap().hash;
-    tokio::time::timeout(SOON, async {
-        while runtime.blobs().has(hash).await.unwrap() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{marker} was never collected"));
+    until(
+        &format!("{marker} is collected"),
+        || async { runtime.blobs().has(hash).await.unwrap() },
+        |here| !here,
+    )
+    .await;
 }
 
 /// Downloads all of `item` through `api`, waiting until the task finishes.
@@ -252,18 +345,16 @@ pub async fn download(api: &Api, item: ItemId, dest: &Path) {
         .await
         .unwrap();
     let task = json!({ "task_id": started["task_id"] });
-    tokio::time::timeout(SOON, async {
-        loop {
-            let state = api.call("library.task", Some(task.clone())).await.unwrap();
-            match state["state"].as_str() {
-                Some("running") => tokio::time::sleep(Duration::from_millis(50)).await,
-                Some("finished") => return,
-                _ => panic!("the download did not finish: {state}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let ended = until(
+        "the download ends",
+        || async { api.call("library.task", Some(task.clone())).await.unwrap() },
+        |state| state["state"] != "running",
+    )
+    .await;
+    assert_eq!(
+        ended["state"], "finished",
+        "the download did not finish: {ended}"
+    );
 }
 
 /// Founds the group of `runtimes`, the first key founding, then each member
@@ -294,18 +385,24 @@ pub async fn found<R: Borrow<Runtime>>(
     for (key, pledge_bytes) in pledges.iter().filter(|(_, bytes)| *bytes > 0) {
         pledge(founder, key, *pledge_bytes).await;
     }
-    let pledged = |state: &MembershipState| {
-        pledges.iter().all(|(key, pledge_bytes)| {
-            state
-                .member(&MemberId::from(key.public()))
-                .is_some_and(|record| record.pledge_bytes == *pledge_bytes)
-        })
-    };
+    let wanted: Vec<Option<u64>> = pledges.iter().map(|(_, bytes)| Some(*bytes)).collect();
     for runtime in runtimes {
-        tokio::time::timeout(SOON, runtime.borrow().node().subscribe().wait_for(pledged))
-            .await
-            .expect("every node learns every founder's pledge")
-            .unwrap();
+        let pledged = || async {
+            let membership = runtime.borrow().node().membership();
+            pledges
+                .iter()
+                .map(|(key, _)| {
+                    let member = membership.member(&MemberId::from(key.public()));
+                    member.map(|record| record.pledge_bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        until(
+            "every node learns every founder's pledge",
+            pledged,
+            |seen| *seen == wanted,
+        )
+        .await;
     }
 }
 
@@ -330,19 +427,15 @@ async fn until_custody_counts_pledges<R: Borrow<Runtime>>(
     pledges: &[(&SecretKey, u64)],
 ) {
     for (runtime, (_, pledge_bytes)) in runtimes.iter().zip(pledges) {
-        let counted = || {
-            runtime
-                .borrow()
-                .custody()
-                .status()
-                .map(|status| status.pledge_bytes)
+        let counted = || async {
+            let status = runtime.borrow().custody().status();
+            status.map(|status| status.pledge_bytes)
         };
-        tokio::time::timeout(SOON, async {
-            while counted() != Some(*pledge_bytes) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("custody counts the node's pledge once it has settled");
+        until(
+            "custody counts the node's pledge once it has settled",
+            counted,
+            |counted| *counted == Some(*pledge_bytes),
+        )
+        .await;
     }
 }

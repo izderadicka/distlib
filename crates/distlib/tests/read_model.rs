@@ -28,12 +28,9 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, config, group_settings, init_logging, listed_item, profile, until_released,
+    api, bound, config, group_settings, init_logging, listed_item, profile, until, until_heard,
+    until_released, until_within,
 };
-
-/// Long enough for two in-process nodes to elect, replicate and reconcile, and
-/// then for the projection behind that to catch up.
-const SOON: Duration = Duration::from_secs(60);
 
 /// One item, with enough of §5.2 filled in that a dropped column shows up.
 ///
@@ -86,26 +83,16 @@ fn item_id(seed: u8) -> ItemId {
 ///
 /// The count is asserted too, so two empty stores are not "agreement".
 async fn agree_on(node: &Runtime, against: &Runtime, items: usize, what: &str) {
-    let mut here: Vec<StoredItem> = Vec::new();
-    let mut there: Vec<StoredItem> = Vec::new();
-    let caught_up = tokio::time::timeout(SOON, async {
-        loop {
-            here = node.store().items().await.unwrap();
-            there = against.store().items().await.unwrap();
-            if here.len() == items && here == there {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    let both = || async {
+        let here = node.store().items().await.unwrap();
+        (here, against.store().items().await.unwrap())
+    };
+    until(
+        &format!("{what}: the two read models agree on {items} items"),
+        both,
+        |(here, there)| here.len() == items && here == there,
+    )
     .await;
-
-    assert!(
-        caught_up.is_ok(),
-        "{what}: the two read models never agreed on {items} items within {SOON:?}\n  the restarted node has {}: {here:#?}\n  the other has {}: {there:#?}",
-        here.len(),
-        there.len(),
-    );
 }
 
 /// Waits until both nodes' search indexes rank `query` the same way.
@@ -114,24 +101,16 @@ async fn agree_on(node: &Runtime, against: &Runtime, items: usize, what: &str) {
 /// reason — a node's own projection is behind its own writes, so reading the
 /// side being compared against just once would snapshot a half-built index.
 async fn agree_on_search(node: &Runtime, against: &Runtime, query: &str, what: &str) {
-    let mut here = Vec::new();
-    let mut there = Vec::new();
-    let caught_up = tokio::time::timeout(SOON, async {
-        loop {
-            here = node.search().search(query, 10).await.unwrap();
-            there = against.search().search(query, 10).await.unwrap();
-            if !here.is_empty() && here == there {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    let both = || async {
+        let here = node.search().search(query, 10).await.unwrap();
+        (here, against.search().search(query, 10).await.unwrap())
+    };
+    until(
+        &format!("{what}: the two search indexes agree on {query:?}"),
+        both,
+        |(here, there)| !here.is_empty() && here == there,
+    )
     .await;
-
-    assert!(
-        caught_up.is_ok(),
-        "{what}: the two search indexes never agreed on {query:?} within {SOON:?}\n  here: {here:#?}\n  there: {there:#?}",
-    );
 }
 
 /// Alice and bob, founded as one group, with bob's data directory named so the
@@ -316,22 +295,13 @@ async fn an_item_whose_content_the_sweep_fetched_is_projected_whole() {
         "bob must come back without the content, or the sweep has nothing to repair"
     );
 
-    let projected = tokio::time::timeout(REPAIRED, async {
-        loop {
-            if let Some(stored) = bob.store().item(item.id).await.unwrap()
-                && stored.item == item
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    until_within(
+        REPAIRED,
+        "the repaired item is projected whole",
+        || async { bob.store().item(item.id).await.unwrap() },
+        |stored| stored.as_ref().is_some_and(|stored| stored.item == item),
+    )
     .await;
-    assert!(
-        projected.is_ok(),
-        "the repaired item was not projected whole within {REPAIRED:?}: {:#?}",
-        bob.store().item(item.id).await.unwrap()
-    );
 
     bob.shutdown().await;
     alice.shutdown().await;
@@ -448,11 +418,12 @@ async fn reindex_repairs_a_search_index_that_has_drifted_from_the_document() {
         })
         .await
         .unwrap();
-    tokio::time::timeout(SOON, async {
-        while events.recv().await.unwrap() != (Event::ItemAdded { item_id: marker }) {}
-    })
-    .await
-    .expect("the marker is projected, and the item before it");
+    until_heard(
+        "the marker is projected, and the item before it",
+        &mut events,
+        |event| *event == (Event::ItemAdded { item_id: marker }),
+    )
+    .await;
     assert_eq!(
         runtime.search().search("Dune", 10).await.unwrap(),
         vec![item_id],
@@ -583,25 +554,21 @@ async fn library_search_and_item_read_what_the_catalogue_wrote() {
     // follows are waited for by name — the index, under the term the search
     // below actually uses, and the record's own fields out of SQLite, which
     // is a different store catching up on its own schedule.
-    tokio::time::timeout(SOON, async {
-        loop {
-            let indexed = runtime.search().search("Herbert", 10).await.unwrap() == vec![item_id];
-            let projected = runtime
-                .store()
-                .item(item_id)
-                .await
-                .unwrap()
-                .is_some_and(|stored| {
+    let found_and_stored = || async {
+        let found = runtime.search().search("Herbert", 10).await.unwrap();
+        (found, runtime.store().item(item_id).await.unwrap())
+    };
+    until(
+        "the item becomes searchable by author, with its record fully projected",
+        found_and_stored,
+        |(found, stored)| {
+            *found == vec![item_id]
+                && stored.as_ref().is_some_and(|stored| {
                     stored.item.authors.is_some() && stored.item.files.len() == 1
-                });
-            if indexed && projected {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the item becomes searchable by author, with its record fully projected");
+                })
+        },
+    )
+    .await;
 
     let api = api(&runtime, &key);
 
@@ -689,20 +656,15 @@ async fn an_item_is_projected_only_once_its_file_list_is_here() {
 
 /// Waits until `node`'s read model holds `item` titled `title`.
 async fn until_projected(node: &Runtime, item: ItemId, title: &str) -> StoredItem {
-    let mut last = None;
-    let projected = tokio::time::timeout(SOON, async {
-        loop {
-            last = node.store().item(item).await.unwrap();
-            if let Some(stored) = &last
-                && stored.item.title.as_deref() == Some(title)
-            {
-                return stored.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    projected.unwrap_or_else(|_| {
-        panic!("{item} titled {title:?} not projected within {SOON:?}; last seen: {last:#?}")
-    })
+    until(
+        &format!("{item} titled {title:?} is projected"),
+        || async { node.store().item(item).await.unwrap() },
+        |stored| {
+            stored
+                .as_ref()
+                .is_some_and(|stored| stored.item.title.as_deref() == Some(title))
+        },
+    )
+    .await
+    .expect("projected")
 }

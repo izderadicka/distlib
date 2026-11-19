@@ -39,7 +39,7 @@ use tempfile::TempDir;
 mod common;
 use common::{
     api, bound, collecting, config, download, following, found_and_settled, init_logging, pledge,
-    until_a_pass_collects, until_projected, until_released,
+    until, until_a_pass_collects, until_projected, until_released, until_watched,
 };
 
 const SOON: Duration = Duration::from_secs(60);
@@ -134,18 +134,20 @@ impl Node {
 
     /// Waits until it keeps `file` of `item` for `reason`, or no longer does.
     async fn until_keeps(&self, keeps: bool, reason: KeepReason, item: ItemId, file: ContentHash) {
-        tokio::time::timeout(SOON, async {
-            while self.keeps(reason, item, file).await != keeps {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never came to keep the book for {reason:?} = {keeps} within {SOON:?}",
+        let tagged_and_here = || async {
+            let blobs = self.runtime.blobs();
+            let tagged = blobs.kept(reason).await.unwrap().contains(&(item, file));
+            (tagged, blobs.has(file).await.unwrap())
+        };
+        until(
+            &format!(
+                "{} keeps the book for {reason:?} = {keeps}",
                 self.id.fmt_short()
-            )
-        });
+            ),
+            tagged_and_here,
+            |(tagged, here)| (*tagged && *here) == keeps,
+        )
+        .await;
     }
 
     /// Whether a `custody/` tag for `file` of `item` is set, bytes or not.
@@ -161,87 +163,66 @@ impl Node {
 
     /// Waits until a `custody/` tag for `file` of `item` is set, or is not.
     async fn until_tagged_for_custody(&self, tagged: bool, item: ItemId, file: ContentHash) {
-        tokio::time::timeout(SOON, async {
-            while self.tagged_for_custody(item, file).await != tagged {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{}'s custody tag never came to be {tagged} within {SOON:?}",
-                self.id.fmt_short()
-            )
-        });
+        until(
+            &format!("{}'s custody tag is {tagged}", self.id.fmt_short()),
+            || self.tagged_for_custody(item, file),
+            |is| *is == tagged,
+        )
+        .await;
     }
 
     /// Waits until its custody counts its pledge as `pledge_bytes`.
     async fn until_custody_counts(&self, pledge_bytes: u64) {
-        tokio::time::timeout(SOON, async {
-            while self
-                .runtime
-                .custody()
-                .status()
-                .map(|status| status.pledge_bytes)
-                != Some(pledge_bytes)
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("custody counts the node's pledge once it has settled");
+        until(
+            "custody counts the node's pledge once it has settled",
+            || async {
+                self.runtime
+                    .custody()
+                    .status()
+                    .map(|status| status.pledge_bytes)
+            },
+            |counted| *counted == Some(pledge_bytes),
+        )
+        .await;
     }
 
     /// Waits until it sees `holder` online and holding `item`.
     async fn until_it_sees(&self, holder: MemberId, item: ItemId) {
         let availability = self.runtime.availability();
-        tokio::time::timeout(SOON, async {
-            while !(availability.online().borrow().contains(&holder)
-                && availability.holders(&item).contains(&holder))
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never saw {} holding the book within {SOON:?}",
+        let online_and_holding = || async {
+            let online = availability.online().borrow().contains(&holder);
+            (online, availability.holders(&item).contains(&holder))
+        };
+        until(
+            &format!(
+                "{} sees {} online and holding the book",
                 self.id.fmt_short(),
                 holder.fmt_short()
-            )
-        });
+            ),
+            online_and_holding,
+            |(online, holding)| *online && *holding,
+        )
+        .await;
     }
 
     /// Waits until `node.status` says `count` of its pins are in `state`.
     async fn until_pins(&self, state: &str, count: u64) {
-        tokio::time::timeout(SOON, async {
-            while self.call("node.status", json!({})).await["pins"][state] != json!(count) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never had {count} pins {state} within {SOON:?}",
-                self.id.fmt_short()
-            )
-        });
+        until(
+            &format!("{} has {count} pins {state}", self.id.fmt_short()),
+            || async { self.call("node.status", json!({})).await["pins"].clone() },
+            |pins| pins[state] == json!(count),
+        )
+        .await;
     }
 
     /// Waits until it says it is custodian of `items` items.
     async fn until_custodian_of(&self, items: u64) {
-        tokio::time::timeout(SOON, async {
-            while self.call("node.status", json!({})).await["custody"]["items"] != json!(items) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never became custodian of {items} items within {SOON:?}",
-                self.id.fmt_short()
-            )
-        });
+        until(
+            &format!("{} is custodian of {items} items", self.id.fmt_short()),
+            || async { self.call("node.status", json!({})).await["custody"].clone() },
+            |custody| custody["items"] == json!(items),
+        )
+        .await;
     }
 }
 
@@ -381,14 +362,13 @@ async fn a_custodian_fetches_unasked_and_lets_go_only_with_copies_elsewhere() {
         .await;
     assert!(custodian.keeps(KeepReason::Cache, item, file).await);
     // Stamped once the tags have moved, so waited for.
-    tokio::time::timeout(SOON, async {
-        let store = custodian.runtime.store();
-        while store.last_used().await.unwrap().get(&item) < Some(&before_the_release) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("arriving in the cache is a use of it");
+    let store = custodian.runtime.store();
+    until(
+        "arriving in the cache is a use of it",
+        || async { store.last_used().await.unwrap().get(&item).copied() },
+        |used| *used >= Some(before_the_release),
+    )
+    .await;
     until_a_pass_collects(&custodian.runtime, dir.path(), "after-the-release").await;
     assert!(
         custodian.runtime.blobs().has(file).await.unwrap(),
@@ -518,22 +498,12 @@ async fn write_a_stray_list(writer: &Node, item: ItemId, readers: &[&Node]) {
         .await
         .unwrap();
     for reader in readers {
-        tokio::time::timeout(SOON, async {
-            while reader
-                .runtime
-                .catalogue()
-                .get(&key)
-                .await
-                .ok()
-                .flatten()
-                .as_deref()
-                != Some(stray.as_slice())
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("the stray list reaches every reader");
+        until(
+            "the stray list reaches every reader",
+            || async { reader.runtime.catalogue().get(&key).await.ok().flatten() },
+            |read| read.as_deref() == Some(stray.as_slice()),
+        )
+        .await;
     }
 
     // Written after the list is everywhere, so its projection reads the list.
@@ -543,17 +513,16 @@ async fn write_a_stray_list(writer: &Node, item: ItemId, readers: &[&Node]) {
     };
     writer.runtime.catalogue().write(&marker).await.unwrap();
     for reader in readers {
-        tokio::time::timeout(SOON, async {
-            loop {
-                let stored = reader.runtime.store().item(item).await.unwrap();
-                if stored.is_some_and(|stored| stored.item.title == marker.title) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("every reader projects the item after the stray list");
+        until(
+            "every reader projects the item after the stray list",
+            || async { reader.runtime.store().item(item).await.unwrap() },
+            |stored| {
+                stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.item.title == marker.title)
+            },
+        )
+        .await;
     }
 }
 
@@ -633,19 +602,12 @@ async fn until_each_ranks_the_other(
             })
             .find(|item| group.custodians(item) == [other.id])
             .expect("some item is the other follower's");
-        tokio::time::timeout(SOON, async {
-            while follower.runtime.custody().custodians(&probe) != Some(vec![other.id]) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never ranked {} within {SOON:?}",
-                follower.id.fmt_short(),
-                other.id.fmt_short()
-            )
-        });
+        until(
+            &format!("{} ranks {}", follower.id.fmt_short(), other.id.fmt_short()),
+            || async { follower.runtime.custody().custodians(&probe) },
+            |custodians| *custodians == Some(vec![other.id]),
+        )
+        .await;
     }
 }
 
@@ -712,17 +674,12 @@ async fn raise_the_protocol_past(founder: &Node, follower: &Node) {
             .await
             .unwrap();
     }
-    tokio::time::timeout(
-        SOON,
-        follower
-            .runtime
-            .node()
-            .subscribe_upgrade_required()
-            .wait_for(Option::is_some),
+    until_watched(
+        &format!("{} stops for an upgrade", follower.id.fmt_short()),
+        &mut follower.runtime.node().subscribe_upgrade_required(),
+        Option::is_some,
     )
-    .await
-    .unwrap_or_else(|_| panic!("{} never stopped for an upgrade", follower.id.fmt_short()))
-    .unwrap();
+    .await;
 }
 
 /// **A node that waits for an upgrade keeps its emergency copies** (5d-8,
@@ -874,18 +831,12 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
         .record_probe_failure(other.id, &failure)
         .await
         .unwrap();
-    tokio::time::timeout(SOON, async {
-        while custodian
-            .runtime
-            .availability()
-            .real_holders(&item)
-            .contains(&other.id)
-        {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("the custodian takes the failure in");
+    until(
+        "the custodian takes the failure in",
+        || async { custodian.runtime.availability().real_holders(&item) },
+        |real| !real.contains(&other.id),
+    )
+    .await;
 
     custodian
         .call("group.pledge_set", json!({ "bytes": 0 }))
@@ -1423,19 +1374,16 @@ fn a_title_ranked(
 async fn rechecked_while_its_bytes_are_here(node: &Node, item: ItemId, file: ContentHash) {
     node.call("community.rate", json!({ "item_id": item, "rating": 3 }))
         .await;
-    tokio::time::timeout(SOON, async {
-        let store = node.runtime.store();
-        while !store
-            .item(item)
-            .await
-            .unwrap()
-            .is_some_and(|stored| stored.ratings.contains_key(&node.id))
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the rating was projected");
+    until(
+        "the rating is projected",
+        || async { node.runtime.store().item(item).await.unwrap() },
+        |stored| {
+            stored
+                .as_ref()
+                .is_some_and(|stored| stored.ratings.contains_key(&node.id))
+        },
+    )
+    .await;
     assert!(node.runtime.blobs().has(file).await.unwrap());
     assert!(
         !node.runtime.catalogue().holdings().holds(item),

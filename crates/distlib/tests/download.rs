@@ -39,7 +39,7 @@ use tokio::sync::broadcast;
 mod common;
 use common::{
     PLEDGE, api, bound, config, following, found, group_settings, init_logging, pledge, profile,
-    until_projected, until_released,
+    until, until_projected, until_released,
 };
 
 /// Long enough for in-process nodes to elect, replicate, reconcile and
@@ -83,21 +83,24 @@ async fn download(api: &Api, params: Value) -> Result<Value, String> {
         .await
         .map_err(|error| error.to_string())?;
     let task = json!({ "task_id": started["task_id"] });
-    tokio::time::timeout(SOON, async {
-        loop {
-            let state = api
-                .call("library.task", Some(task.clone()))
-                .await
-                .map_err(|error| error.to_string())?;
-            match state["state"].as_str() {
-                Some("running") => tokio::time::sleep(Duration::from_millis(50)).await,
-                Some("finished") => return Ok(state),
-                _ => return Err(state["error"].to_string()),
-            }
-        }
-    })
-    .await
-    .expect("a download ends, one way or the other")
+    let state = until(
+        "a download ends, one way or the other",
+        || async {
+            let state = api.call("library.task", Some(task.clone())).await;
+            state.map_err(|error| error.to_string())
+        },
+        |state| {
+            state
+                .as_ref()
+                .map_or(true, |state| state["state"] != "running")
+        },
+    )
+    .await?;
+    if state["state"] == "finished" {
+        Ok(state)
+    } else {
+        Err(state["error"].to_string())
+    }
 }
 
 /// Everything `watching` hears about the download `task` describes: up to
@@ -163,13 +166,12 @@ async fn add_an_ebook(api: &Api, path: &Path, bytes: &[u8], title: &str) -> Item
 /// Waits until `runtime` holds `item` in full (4b-2): the projection works it
 /// out on its own schedule, after the write or the replay that prompts it.
 async fn until_held(runtime: &Runtime, item: ItemId, who: &str) {
-    tokio::time::timeout(SOON, async {
-        while !runtime.catalogue().holdings().holds(item) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{who} never came to hold the item"));
+    until(
+        &format!("{who} comes to hold the item"),
+        || async { runtime.catalogue().holdings().holds(item) },
+        |held| *held,
+    )
+    .await;
 }
 
 /// A directory to download into, made fresh so an assertion about what is in
@@ -369,40 +371,34 @@ async fn a_node_that_downloads_a_file_serves_it_after_a_restart() {
     // Held is kept in memory only; the replay every start runs works it out
     // again from the store.
     until_held(&bob, item, "the restarted bob").await;
-    tokio::time::timeout(SOON, async {
-        loop {
-            if carol.node().known_addresses().address_of(bob_id).is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("carol must find out where the restarted bob is");
+    until(
+        "carol finds out where the restarted bob is",
+        || async { carol.node().known_addresses().address_of(bob_id) },
+        Option::is_some,
+    )
+    .await;
 
     // And now the only other copy in the group goes away.
     alice.shutdown().await;
 
     let carols_dest = dest(dir.path(), "carol");
-    let downloaded = tokio::time::timeout(SOON, async {
-        loop {
-            // Retried rather than asserted first time: carol may reach for
-            // bob before her endpoint has finished learning how, and a fetch
-            // that finds nobody fails rather than waiting. What is being
-            // pinned is that it comes through, not how soon.
-            match download(
-                &api(&carol, &carol_key),
+    // Retried rather than asserted first time: carol may reach for bob before
+    // her endpoint has finished learning how, and a fetch that finds nobody
+    // fails rather than waiting. What is being pinned is that it comes
+    // through, not how soon.
+    let carols_api = api(&carol, &carol_key);
+    let downloaded = until(
+        "carol gets the file from the node that downloaded it, with the adder gone",
+        || {
+            download(
+                &carols_api,
                 json!({ "item_id": item, "dest": &carols_dest }),
             )
-            .await
-            {
-                Ok(answer) => return answer,
-                Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
-            }
-        }
-    })
+        },
+        Result::is_ok,
+    )
     .await
-    .expect("carol must get the file from the node that downloaded it, with the adder gone");
+    .expect("downloaded");
 
     assert_eq!(
         downloaded["files"].as_array().unwrap()[0]["from"],

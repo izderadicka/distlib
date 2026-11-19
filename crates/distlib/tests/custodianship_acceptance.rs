@@ -13,7 +13,6 @@
 #![allow(clippy::too_many_lines)] // a test is a scenario, read top to bottom
 
 use std::{
-    future::Future,
     num::{NonZeroU8, NonZeroU32},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -28,9 +27,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found_and_settled, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until, until_projected};
 
-const SOON: Duration = Duration::from_secs(60);
 const PLEDGE: u64 = 100_000_000_000;
 /// The size of the book: well over what the blob store keeps inline.
 const BOOK: usize = 1_000_000;
@@ -89,17 +87,6 @@ impl Node {
             .join("data")
             .join(format!("{blob}.data"))
     }
-}
-
-/// Waits until `ready` answers true, or fails saying `what` did not happen.
-async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> F) {
-    tokio::time::timeout(SOON, async {
-        while !ready().await {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{what} within {SOON:?}"));
 }
 
 /// Five nodes, all pledging [`PLEDGE`], founded with [`settings`]; the
@@ -188,9 +175,11 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     ]
     .map(|index| nodes[index].take().unwrap());
     for holder in [&lost, &custodian] {
-        until("both custodians keep the book", || {
-            holder.keeps(KeepReason::Custody, book, blob)
-        })
+        until(
+            "both custodians keep the book",
+            || holder.keeps(KeepReason::Custody, book, blob),
+            |kept| *kept,
+        )
         .await;
     }
 
@@ -199,9 +188,11 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     // their failures fail it too, and it is red on every node.
     std::fs::write(lost.bytes_of(blob), b"").unwrap();
     for node in [&founder, &lost, &custodian, &next, &last] {
-        until("the custodian is red on every node", || {
-            node.says_red(lost.id)
-        })
+        until(
+            "the custodian is red on every node",
+            || node.says_red(lost.id),
+            |red| *red,
+        )
         .await;
     }
 
@@ -222,9 +213,11 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
             .call("group.approve", json!({ "proposal": proposed["proposal"] }))
             .await;
     }
-    until("the expulsion is applied", || async {
-        !founder.runtime.node().membership().is_member(&lost.id)
-    })
+    until(
+        "the expulsion is applied",
+        || async { founder.runtime.node().membership().is_member(&lost.id) },
+        |member| !member,
+    )
     .await;
     lost.runtime.shutdown().await;
     let members: Vec<MemberId> = ids.iter().copied().filter(|id| *id != lost.id).collect();
@@ -234,9 +227,11 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
         [custodian.id, next.id],
         "the next-ranked member takes the expelled custodian's place"
     );
-    until("the next-ranked member keeps the book", || {
-        next.keeps(KeepReason::Custody, book, blob)
-    })
+    until(
+        "the next-ranked member keeps the book",
+        || next.keeps(KeepReason::Custody, book, blob),
+        |kept| *kept,
+    )
     .await;
 
     // All but the founder's copy stopped: after the delay, the one member
@@ -244,9 +239,11 @@ async fn three_copies_are_kept_through_a_lost_copy_an_expulsion_and_stopped_hold
     custodian.runtime.shutdown().await;
     let alone_from = Instant::now();
     next.runtime.shutdown().await;
-    until("the member left keeps an emergency copy", || {
-        last.keeps(KeepReason::Emergency, book, blob)
-    })
+    until(
+        "the member left keeps an emergency copy",
+        || last.keeps(KeepReason::Emergency, book, blob),
+        |kept| *kept,
+    )
     .await;
     assert!(
         alone_from.elapsed() >= EMERGENCY_AFTER,

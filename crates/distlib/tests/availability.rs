@@ -16,10 +16,10 @@ use tempfile::TempDir;
 use tokio::time::Instant;
 
 mod common;
-use common::{PLEDGE, api, config, found, group_settings, init_logging, until_projected};
-
-/// Long enough for two in-process nodes to elect, replicate and reconcile.
-const SOON: Duration = Duration::from_secs(30);
+use common::{
+    PLEDGE, api, config, found, group_settings, init_logging, until, until_heard, until_projected,
+    until_watched,
+};
 
 /// How long a beat every second is believed for: three of them.
 const TTL: Duration = Duration::from_secs(3);
@@ -67,20 +67,16 @@ async fn add_an_ebook(api: &Api, dir: &Path, files: &[(&str, &[u8])]) -> ItemId 
 /// `item_id`'s hit in `library.list`, once it is one that `wanted` accepts.
 async fn hit_on(api: &Api, item_id: ItemId, wanted: impl Fn(&Value) -> bool) -> Value {
     let id = json!(item_id);
-    tokio::time::timeout(SOON, async {
-        loop {
-            let page = api.call("library.list", Some(json!({}))).await.unwrap();
-            let hit = page["results"]
-                .as_array()
-                .and_then(|hits| hits.iter().find(|hit| hit["item_id"] == id));
-            if let Some(hit) = hit.filter(|hit| wanted(hit)) {
-                return hit.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    let hit = || async {
+        let page = api.call("library.list", Some(json!({}))).await.unwrap();
+        let hits = page["results"].as_array().cloned().unwrap_or_default();
+        hits.into_iter().find(|hit| hit["item_id"] == id)
+    };
+    until("the hit looks as wanted", hit, |hit| {
+        hit.as_ref().is_some_and(&wanted)
     })
     .await
-    .expect("the hit never looked as wanted")
+    .expect("a hit")
 }
 
 /// **§9's first half: stop the provider, and `providers` drops within the
@@ -158,10 +154,12 @@ async fn a_download_does_not_wait_on_an_offline_member() {
 
     carol.shutdown().await;
     let mut online = alice.availability().online();
-    tokio::time::timeout(SOON, online.wait_for(|online| online.iter().eq([&bob_id])))
-        .await
-        .expect("alice sees bob online, and carol gone")
-        .unwrap();
+    until_watched(
+        "alice sees bob online, and carol gone",
+        &mut online,
+        |online| online.iter().eq([&bob_id]),
+    )
+    .await;
     hit_on(&alice_api, item_id, |hit| hit["providers"] == 1).await;
     until_projected(&alice, item_id, chapters.len(), "alice").await;
 
@@ -177,18 +175,18 @@ async fn a_download_does_not_wait_on_an_offline_member() {
         .await
         .unwrap();
     let task: TaskId = serde_json::from_value(started["task_id"].clone()).unwrap();
-    let ended = tokio::time::timeout(SOON, async {
-        loop {
-            match watching.recv().await.unwrap() {
-                Event::DownloadFinished { task_id, .. } if task_id == task => return true,
-                Event::DownloadFailed { task_id, .. } if task_id == task => return false,
-                _ => {}
-            }
-        }
+    let ended = until_heard("the download ends", &mut watching, |event| {
+        matches!(
+            event,
+            Event::DownloadFinished { task_id, .. } | Event::DownloadFailed { task_id, .. }
+                if *task_id == task
+        )
     })
-    .await
-    .expect("the download ends");
-    assert!(ended, "the download finished");
+    .await;
+    assert!(
+        matches!(ended, Event::DownloadFinished { .. }),
+        "the download finished: {ended:?}"
+    );
     assert!(
         asked.elapsed() < Duration::from_secs(1),
         "took {:?}: a dial to carol was waited out",

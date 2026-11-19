@@ -34,8 +34,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    api, bound, config, following, group_settings, init_logging, listed_item, profile,
-    until_projected,
+    api, bound, config, following, group_settings, init_logging, listed_item, profile, until,
+    until_heard, until_projected, until_watched, until_watched_within,
 };
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
@@ -97,30 +97,17 @@ async fn a_founded_pair() -> (TempDir, Runtime, Runtime) {
 /// an entry whose content has not landed means the document arrived and the
 /// blob behind it did not.
 async fn read(catalogue: &distlib_sync::Catalogue, key: &str) -> Vec<u8> {
-    let bound = SOON;
-    let last = std::sync::Arc::new(std::sync::Mutex::new("nothing was read"));
-    let seen = std::sync::Arc::clone(&last);
-    tokio::time::timeout(bound, async move {
-        loop {
-            let outcome = match catalogue.get(key).await {
-                Ok(Some(value)) => return value.to_vec(),
-                Ok(None) => "no entry for that key has reached this node",
-                Err(distlib_sync::SyncError::MissingContent { .. }) => {
-                    "the entry is here, its content has not arrived"
-                }
-                Err(error) => panic!("reading the catalogue failed: {error}"),
-            };
-            *seen.lock().expect("not poisoned") = outcome;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "`{key}` never arrived within {bound:?}; last seen: {}",
-            last.lock().expect("not poisoned")
-        )
-    })
+    let read = until(
+        &format!("`{key}` arrives"),
+        || catalogue.get(key),
+        |read| match read {
+            Ok(Some(_)) => true,
+            Ok(None) | Err(distlib_sync::SyncError::MissingContent { .. }) => false,
+            Err(error) => panic!("reading the catalogue failed: {error}"),
+        },
+    )
+    .await;
+    read.ok().flatten().expect("arrived").to_vec()
 }
 
 /// Whether a key ever shows up, given a window to do it in.
@@ -306,24 +293,24 @@ async fn each_of_a_pair_shows_the_other_as_its_neighbour_until_it_stops() {
     let bob_id = MemberId::from(bob.endpoint().id());
 
     for (who, runtime, other) in [("alice", &alice, bob_id), ("bob", &bob, alice_id)] {
-        let mut sync = runtime.catalogue().sync_status();
-        tokio::time::timeout(
-            SOON,
-            sync.wait_for(|state| state.neighbours.iter().eq([&other])),
+        until_watched(
+            &format!("{who} shows the other as a neighbour"),
+            &mut runtime.catalogue().sync_status(),
+            |state| state.neighbours.iter().eq([&other]),
         )
-        .await
-        .unwrap_or_else(|_| panic!("{who} never showed the other as a neighbour"))
-        .unwrap();
+        .await;
     }
 
     // A graceful stop, as Ctrl-C makes, rather than a crash: the case iroh-gossip
     // left a minute stale until the runtime closed its connections first (P4-2).
     let mut sync = bob.catalogue().sync_status();
     alice.shutdown().await;
-    tokio::time::timeout(SOON, sync.wait_for(|state| state.neighbours.is_empty()))
-        .await
-        .expect("bob still shows alice as a neighbour after she stopped")
-        .unwrap();
+    until_watched(
+        "bob stops showing alice as a neighbour after she stopped",
+        &mut sync,
+        |state| state.neighbours.is_empty(),
+    )
+    .await;
 
     bob.shutdown().await;
 }
@@ -337,16 +324,19 @@ async fn a_node_stopped_cleanly_is_offline_at_once() {
     let (_dir, alice, bob) = a_founded_pair().await;
     let bob_id = MemberId::from(bob.endpoint().id());
     let mut online = alice.availability().online();
-    tokio::time::timeout(SOON, online.wait_for(|online| online.contains(&bob_id)))
-        .await
-        .expect("alice never saw bob online")
-        .unwrap();
+    until_watched("alice sees bob online", &mut online, |online| {
+        online.contains(&bob_id)
+    })
+    .await;
 
     bob.shutdown().await;
-    tokio::time::timeout(AMPLY, online.wait_for(BTreeSet::is_empty))
-        .await
-        .expect("alice still counts bob online after he stopped")
-        .unwrap();
+    until_watched_within(
+        AMPLY,
+        "alice stops counting bob online after he stopped",
+        &mut online,
+        BTreeSet::is_empty,
+    )
+    .await;
 
     alice.shutdown().await;
 }
@@ -451,16 +441,13 @@ async fn a_follower_learns_where_another_follower_is() {
     let group = a_group_with_two_followers().await;
     let bob_id = MemberId::from(group.bob.endpoint().id());
 
-    let found = tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(addr) = group.carol.node().known_addresses().address_of(bob_id) {
-                return addr;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    let found = until(
+        "carol learns where bob is, though nothing in the log says",
+        || async { group.carol.node().known_addresses().address_of(bob_id) },
+        Option::is_some,
+    )
     .await
-    .expect("carol must learn where bob is, though nothing in the log says");
+    .expect("learned");
 
     // Compared against what bob's endpoint says about *itself*, not against
     // its bound sockets: a node announces what iroh has discovered it to be
@@ -519,29 +506,31 @@ async fn a_settled_group_stops_talking_about_addresses() {
             .map(|(_, runtime)| *runtime.node().known_addresses().learned().borrow())
             .collect::<Vec<u64>>()
     };
-    let everyone_knows_everyone = || {
-        everyone.iter().all(|(_, runtime)| {
-            everyone
-                .iter()
-                .filter(|(_, other)| other.endpoint().id() != runtime.endpoint().id())
-                .all(|(_, other)| {
-                    runtime
-                        .node()
-                        .known_addresses()
-                        .address_of(MemberId::from(other.endpoint().id()))
-                        .is_some()
-                })
-        })
+    // How many of the others each member does not know the address of.
+    let addresses_unknown = || async {
+        everyone
+            .iter()
+            .map(|(who, runtime)| {
+                let unknown = everyone
+                    .iter()
+                    .filter(|(_, other)| other.endpoint().id() != runtime.endpoint().id())
+                    .filter(|(_, other)| {
+                        let other = MemberId::from(other.endpoint().id());
+                        runtime.node().known_addresses().address_of(other).is_none()
+                    })
+                    .count();
+                (*who, unknown)
+            })
+            .collect::<Vec<_>>()
     };
 
     // Converged first: silence before that would be the wrong kind.
-    tokio::time::timeout(SOON, async {
-        while !everyone_knows_everyone() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("every member must learn where the others are");
+    until(
+        "every member learns where the others are",
+        addresses_unknown,
+        |unknown| unknown.iter().all(|(_, unknown)| *unknown == 0),
+    )
+    .await;
 
     let settled = tokio::time::timeout(SOON, async {
         loop {
@@ -644,13 +633,12 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         ("carol", &group.carol, bob_id),
         ("bob", &group.bob, carol_id),
     ] {
-        tokio::time::timeout(SOON, async {
-            while runtime.node().known_addresses().address_of(other).is_none() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{who} never learned where the other follower is"));
+        until(
+            &format!("{who} learns where the other follower is"),
+            || async { runtime.node().known_addresses().address_of(other) },
+            Option::is_some,
+        )
+        .await;
     }
 
     // **4a-3's acceptance: they are each other's neighbours before alice goes.**
@@ -665,14 +653,13 @@ async fn two_followers_keep_converging_once_the_core_node_is_gone() {
         ("carol", &group.carol, bob_id),
         ("bob", &group.bob, carol_id),
     ] {
-        let mut sync = runtime.catalogue().sync_status();
-        tokio::time::timeout(
+        until_watched_within(
             AMPLY,
-            sync.wait_for(|state| state.neighbours.contains(&other)),
+            &format!("{who} becomes the other follower's neighbour"),
+            &mut runtime.catalogue().sync_status(),
+            |state| state.neighbours.contains(&other),
         )
-        .await
-        .unwrap_or_else(|_| panic!("{who} never became the other follower's neighbour"))
-        .unwrap();
+        .await;
     }
 
     // Something crosses first, so a failure after the shutdown is about the
@@ -742,13 +729,13 @@ async fn an_expelled_member_stops_receiving_entries() {
     let mut watches = Vec::new();
     for (who, runtime) in [("alice", &group.alice), ("bob", &group.bob)] {
         let mut sync = runtime.catalogue().sync_status();
-        tokio::time::timeout(
+        until_watched_within(
             AMPLY,
-            sync.wait_for(|state| state.neighbours.contains(&group.carol_id)),
+            &format!("{who} becomes carol's neighbour"),
+            &mut sync,
+            |state| state.neighbours.contains(&group.carol_id),
         )
-        .await
-        .unwrap_or_else(|_| panic!("{who} never became carol's neighbour"))
-        .unwrap();
+        .await;
         watches.push((who, sync));
     }
 
@@ -773,13 +760,12 @@ async fn an_expelled_member_stops_receiving_entries() {
     // relays whatever bob sends. Carol dropping out of their neighbours is the
     // connection actually closing.
     for (who, mut sync) in watches {
-        tokio::time::timeout(
-            SOON,
-            sync.wait_for(|state| !state.neighbours.contains(&group.carol_id)),
+        until_watched(
+            &format!("the expulsion reaches {who}"),
+            &mut sync,
+            |state| !state.neighbours.contains(&group.carol_id),
         )
-        .await
-        .unwrap_or_else(|_| panic!("the expulsion must reach {who}"))
-        .unwrap();
+        .await;
     }
 
     group
@@ -876,20 +862,12 @@ async fn an_expelled_members_ratings_reviews_and_bookmarks_stop_counting() {
             (carol_id, review("Too short"))
         ])
     );
-    tokio::time::timeout(SOON, async {
-        while !group
-            .alice
-            .catalogue()
-            .ratings(nothing)
-            .await
-            .unwrap()
-            .contains_key(&carol_id)
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("carol's rating of an item nobody wrote reaches alice");
+    until(
+        "carol's rating of an item nobody wrote reaches alice",
+        || async { group.alice.catalogue().ratings(nothing).await.unwrap() },
+        |ratings| ratings.contains_key(&carol_id),
+    )
+    .await;
     assert_eq!(
         store.item(nothing).await.unwrap(),
         None,
@@ -1137,11 +1115,12 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
         )
         .await
         .expect_err("a bookmark is deleted only by its member");
-    tokio::time::timeout(SOON, async {
-        while alice_hears.recv().await.unwrap() != (Event::BookmarkChanged { item_id: item }) {}
-    })
-    .await
-    .expect("alice is told the item's bookmarks changed");
+    until_heard(
+        "alice is told the item's bookmarks changed",
+        &mut alice_hears,
+        |event| *event == (Event::BookmarkChanged { item_id: item }),
+    )
+    .await;
 
     bobs_api
         .call(
@@ -1178,17 +1157,12 @@ async fn call_until(
     who: &str,
     ready: impl Fn(&Value) -> bool,
 ) -> Value {
-    tokio::time::timeout(SOON, async {
-        loop {
-            let answer = api.call(method, Some(params.clone())).await.unwrap();
-            if ready(&answer) {
-                return answer;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    until(
+        &format!("{who}'s {method} gives the answer waited for"),
+        || async { api.call(method, Some(params.clone())).await.unwrap() },
+        ready,
+    )
     .await
-    .unwrap_or_else(|_| panic!("{who}'s {method} never gave the answer waited for"))
 }
 
 /// **4c-4's acceptance:** alice wishes for a book, bob comments, and carol
@@ -1273,11 +1247,12 @@ async fn a_wish_commented_on_and_fulfilled_reaches_its_creator_fulfilled() {
         json!([{ "member": bob_id, "comment": "I have it on paper" }])
     );
     let wish_id: WishId = serde_json::from_value(wish).unwrap();
-    tokio::time::timeout(SOON, async {
-        while alice_hears.recv().await.unwrap() != (Event::WishChanged { wish_id }) {}
-    })
-    .await
-    .expect("alice is told the wish changed");
+    until_heard(
+        "alice is told the wish changed",
+        &mut alice_hears,
+        |event| *event == (Event::WishChanged { wish_id }),
+    )
+    .await;
 
     group.carol.shutdown().await;
     group.bob.shutdown().await;
@@ -1388,20 +1363,15 @@ async fn a_wish_reaches_the_read_model_without_an_expelled_members_comment() {
         |stored| stored.entries.len() == 1 && stored.comments.len() == 1,
     )
     .await;
-    tokio::time::timeout(SOON, async {
-        while !group
-            .alice
-            .catalogue()
-            .wish_comments(wish_nobody_made)
-            .await
-            .unwrap()
-            .contains_key(&carol_id)
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("carol's comment on a wish nobody made reaches alice");
+    until(
+        "carol's comment on a wish nobody made reaches alice",
+        || async {
+            let comments = group.alice.catalogue().wish_comments(wish_nobody_made);
+            comments.await.unwrap()
+        },
+        |comments| comments.contains_key(&carol_id),
+    )
+    .await;
 
     group
         .alice
@@ -1465,34 +1435,22 @@ async fn wish_when(
     what: &str,
     ready: impl Fn(&StoredWish) -> bool,
 ) -> StoredWish {
-    tokio::time::timeout(SOON, async {
-        loop {
-            let stored = store.wish(wish).await.unwrap();
-            if ready(&stored) {
-                return stored;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    until(
+        &format!("the read model holds the wish with {what}"),
+        || async { store.wish(wish).await.unwrap() },
+        ready,
+    )
     .await
-    .unwrap_or_else(|_| panic!("the read model never held the wish with {what} within {SOON:?}"))
 }
 
 /// Waits for `store` to hold `count` bookmarks on `item`, and returns them.
 async fn bookmarks_when(store: &Store, item: ItemId, count: usize) -> Vec<StoredBookmark> {
-    tokio::time::timeout(SOON, async {
-        loop {
-            let bookmarks = store.bookmarks_of(item).await.unwrap();
-            if bookmarks.len() == count {
-                return bookmarks;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    until(
+        &format!("the read model holds {count} bookmarks on {item}"),
+        || async { store.bookmarks_of(item).await.unwrap() },
+        |bookmarks| bookmarks.len() == count,
+    )
     .await
-    .unwrap_or_else(|_| {
-        panic!("the read model never held {count} bookmarks on {item} within {SOON:?}")
-    })
 }
 
 /// Waits for `store` to hold item `id` as `ready` says it should, and
@@ -1503,18 +1461,13 @@ async fn stored_when(
     what: &str,
     ready: impl Fn(&StoredItem) -> bool,
 ) -> StoredItem {
-    tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(stored) = store.item(id).await.unwrap()
-                && ready(&stored)
-            {
-                return stored;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    until(
+        &format!("the read model holds {what}"),
+        || async { store.item(id).await.unwrap() },
+        |stored| stored.as_ref().is_some_and(&ready),
+    )
     .await
-    .unwrap_or_else(|_| panic!("the read model never held {what} within {SOON:?}"))
+    .expect("held")
 }
 
 /// **A member that joins long after everyone else still learns where they are.**
@@ -1564,16 +1517,13 @@ async fn a_late_joiner_still_learns_where_the_others_are() {
     .await
     .unwrap();
 
-    let found = tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(addr) = latecomer.node().known_addresses().address_of(bob_id) {
-                return addr;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    let found = until(
+        "a member joining late must still learn where the others are",
+        || async { latecomer.node().known_addresses().address_of(bob_id) },
+        Option::is_some,
+    )
     .await
-    .expect("a member joining late must still learn where the others are");
+    .expect("learned");
     assert_eq!(found, NodeAddr::from(&group.bob.endpoint().addr()));
 
     latecomer.shutdown().await;
@@ -1648,16 +1598,13 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
         .await
         .unwrap();
 
-    let where_bob_is = tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(addr) = alice.node().known_addresses().address_of(bob_id) {
-                return addr;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    let where_bob_is = until(
+        "alice must hear bob announce; the rest of this test rests on it",
+        || async { alice.node().known_addresses().address_of(bob_id) },
+        Option::is_some,
+    )
     .await
-    .expect("alice must hear bob announce; the rest of this test rests on it");
+    .expect("learned");
 
     // And now the only node that could say it again is gone.
     bob.shutdown().await;
@@ -1670,16 +1617,13 @@ async fn a_late_joiner_resolves_a_member_it_never_heard_announce() {
     .await
     .unwrap();
 
-    let found = tokio::time::timeout(SOON, async {
-        loop {
-            if let Some(addr) = carol.node().known_addresses().address_of(bob_id) {
-                return addr;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+    let found = until(
+        "carol must resolve bob by asking the core group, having heard nothing",
+        || async { carol.node().known_addresses().address_of(bob_id) },
+        Option::is_some,
+    )
     .await
-    .expect("carol must resolve bob by asking the core group, having heard nothing");
+    .expect("learned");
 
     assert_eq!(
         found, where_bob_is,
