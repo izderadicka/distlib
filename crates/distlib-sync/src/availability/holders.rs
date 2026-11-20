@@ -25,6 +25,17 @@ pub(super) struct Holders {
     failed_copies: HashSet<(MemberId, ItemId)>,
 }
 
+/// Who holds the one live copy of an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SoleHolder {
+    /// One online member holds a real copy.
+    Online(MemberId),
+    /// No online member does, and one away does: the item is still down to
+    /// one copy, which can be copied once its holder is back (#200's
+    /// finding 1).
+    Away,
+}
+
 /// What taking in one statement did.
 #[derive(Debug, PartialEq)]
 pub(super) struct Heard {
@@ -205,17 +216,21 @@ impl Holders {
     }
 
     /// Every item exactly one member of `online` holds a real copy of, with
-    /// that member.
-    pub(super) fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
+    /// that member; and every item only members away hold a real copy of.
+    pub(super) fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, SoleHolder)> {
         self.index
             .0
             .iter()
             .filter_map(|(item, members)| {
-                let mut online_holders = members.iter().filter(|member| {
-                    online.contains(member) && !self.failed_copies.contains(&(**member, *item))
-                });
+                let mut real = members
+                    .iter()
+                    .filter(|member| !self.failed_copies.contains(&(**member, *item)))
+                    .peekable();
+                let any_real = real.peek().is_some();
+                let mut online_holders = real.filter(|member| online.contains(member));
                 match (online_holders.next(), online_holders.next()) {
-                    (Some(holder), None) => Some((*item, *holder)),
+                    (Some(holder), None) => Some((*item, SoleHolder::Online(*holder))),
+                    (None, _) if any_real => Some((*item, SoleHolder::Away)),
                     _ => None,
                 }
             })
@@ -399,11 +414,31 @@ mod tests {
 
         let mut sole = holders.sole_holders(&online);
         sole.sort_unstable();
-        assert_eq!(sole, [(item(1), bob)], "2 has two online, 3 too");
         assert_eq!(
-            holders.sole_holders(&BTreeSet::from([dave])),
-            [(item(3), dave)]
+            sole,
+            [(item(1), SoleHolder::Online(bob))],
+            "2 has two online, 3 too"
         );
+    }
+
+    /// #200's finding 1, reversed (5f-5): an item whose only holders are away
+    /// is listed as such, so whoever times how long it has had one copy keeps
+    /// its time rather than seeing it gone.
+    #[test]
+    fn an_item_whose_last_holders_are_away_is_listed_as_away() {
+        let (bob, carol, dave) = (member(), member(), member());
+        let mut holders = Holders::default();
+        holders.heard(bob, &stated(None, 2, &[1, 2], &[]));
+        holders.heard(carol, &stated(None, 1, &[2], &[]));
+        holders.heard(dave, &stated(None, 1, &[3], &[]));
+        holders.set_failed_copies(HashSet::from([(dave, item(3))]));
+
+        let mut sole = holders.sole_holders(&BTreeSet::from([dave]));
+        sole.sort_unstable();
+        let mut expected = [(item(1), SoleHolder::Away), (item(2), SoleHolder::Away)];
+        expected.sort_unstable();
+        assert_eq!(sole, expected, "3's only copy is not a real one");
+        assert_eq!(holders.holders(&item(1)), [bob], "still known to hold it");
     }
 
     /// A copy a probe found missing is still held, by what its member says,
@@ -422,7 +457,10 @@ mod tests {
         assert_eq!(holders.real_holders(&item(2)), [bob]);
         let mut sole = holders.sole_holders(&online);
         sole.sort_unstable();
-        let mut expected = [(item(1), bob), (item(2), bob)];
+        let mut expected = [
+            (item(1), SoleHolder::Online(bob)),
+            (item(2), SoleHolder::Online(bob)),
+        ];
         expected.sort_unstable();
         assert_eq!(sole, expected);
 

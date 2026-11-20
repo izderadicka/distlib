@@ -41,7 +41,7 @@ use tracing::Instrument as _;
 
 use super::{
     Holdings,
-    holders::{Heard, Holders},
+    holders::{Heard, Holders, SoleHolder},
     online::{MAX_INTERVAL, Online},
     rejoin::rejoin_while_alone,
     statement::Statement,
@@ -209,8 +209,8 @@ impl Availability {
     }
 
     /// Every item exactly one member of `online` is known to hold a real copy
-    /// of, with that member.
-    pub fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, MemberId)> {
+    /// of, with that member; and every item only members away do.
+    pub fn sole_holders(&self, online: &BTreeSet<MemberId>) -> Vec<(ItemId, SoleHolder)> {
         lock(&self.inner.holders).sole_holders(online)
     }
 
