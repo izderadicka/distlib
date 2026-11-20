@@ -17,7 +17,6 @@
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
 use std::{
-    future::Future,
     num::{NonZeroU8, NonZeroU32},
     path::{Path, PathBuf},
     time::Duration,
@@ -35,9 +34,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found_and_settled, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until, until_projected};
 
-const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
 /// The size of a book: well over what the blob store keeps inline, so its
 /// bytes are a file of their own.
@@ -116,17 +114,6 @@ impl Node {
     }
 }
 
-/// Waits until `ready` answers true, or fails saying `what` did not happen.
-async fn until<F: Future<Output = bool>>(what: &str, mut ready: impl FnMut() -> F) {
-    tokio::time::timeout(SOON, async {
-        while !ready().await {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{what} within {SOON:?}"));
-}
-
 /// The founder, its book's custodian, and a member with no weight, founded
 /// with `settings` and `pledges`.
 async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) -> [Node; 3] {
@@ -179,9 +166,11 @@ async fn a_book_kept(
 ) -> ([Node; 3], ItemId, ContentHash) {
     let [founder, second, third] = three_nodes(dir, settings, pledges).await;
     let (book, blob) = add_a_book(&founder, &second, dir).await;
-    until("the custodian holds the book", || async {
-        second.runtime.catalogue().holdings().holds(book)
-    })
+    until(
+        "the custodian holds the book",
+        || async { second.runtime.catalogue().holdings().holds(book) },
+        |held| *held,
+    )
     .await;
     ([founder, second, third], book, blob)
 }
@@ -194,9 +183,11 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
 
     // Passes, and nothing is written.
-    until("the founder's probes pass", || async {
-        founder.probed().passed >= 2
-    })
+    until(
+        "the founder's probes pass",
+        || async { founder.probed() },
+        |probed| probed.passed >= 2,
+    )
     .await;
     assert_eq!(founder.probed().failed, 0);
     assert!(founder.failures().await.is_empty());
@@ -206,30 +197,38 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
     let book_bytes = std::fs::read(&bytes).unwrap();
     std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
     for node in [&founder, &second, &third] {
-        until("the failure reaches every node", || async {
-            node.failures().await.iter().any(|recorded| {
-                (recorded.custodian, recorded.prober, recorded.failure.item)
-                    == (second.id, founder.id, book)
-            })
-        })
+        until(
+            "the failure reaches every node",
+            || node.failures(),
+            |failures| {
+                failures.iter().any(|recorded| {
+                    (recorded.custodian, recorded.prober, recorded.failure.item)
+                        == (second.id, founder.id, book)
+                })
+            },
+        )
         .await;
     }
     // Every chunk is wrong, so the next probe fails too, and is counted.
-    until("the failures are counted in a row", || async {
-        founder
-            .failures()
-            .await
-            .iter()
-            .any(|recorded| recorded.failure.in_a_row >= 2)
-    })
+    until(
+        "the failures are counted in a row",
+        || founder.failures(),
+        |failures| {
+            failures
+                .iter()
+                .any(|recorded| recorded.failure.in_a_row >= 2)
+        },
+    )
     .await;
 
     // Back, and the founder's next pass clears it everywhere.
     std::fs::write(&bytes, &book_bytes).unwrap();
     for node in [&founder, &second, &third] {
-        until("the clearing reaches every node", || async {
-            node.failures().await.is_empty()
-        })
+        until(
+            "the clearing reaches every node",
+            || node.failures(),
+            Vec::is_empty,
+        )
         .await;
     }
 
@@ -271,9 +270,11 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
     } else {
         (&third, &second)
     };
-    until("the custodian holds the book", || async {
-        custodian.runtime.catalogue().holdings().holds(book)
-    })
+    until(
+        "the custodian holds the book",
+        || async { custodian.runtime.catalogue().holdings().holds(book) },
+        |held| *held,
+    )
     .await;
     let emergency_copy = || async {
         let blobs = other.runtime.blobs();
@@ -292,7 +293,12 @@ async fn a_failed_copy_that_was_the_last_real_one_gets_an_emergency_copy() {
     let bytes = custodian.bytes_of(blob);
     let book_bytes = std::fs::read(&bytes).unwrap();
     std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
-    until("the other member keeps an emergency copy", emergency_copy).await;
+    until(
+        "the other member keeps an emergency copy",
+        emergency_copy,
+        |kept| *kept,
+    )
+    .await;
     assert!(
         founder
             .failures()
@@ -340,12 +346,16 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
         .await
         .unwrap();
 
-    until("the founder fails the custodian at that chunk", || async {
-        founder.failures().await.iter().any(|recorded| {
-            (recorded.custodian, recorded.prober, recorded.failure.chunk)
-                == (second.id, founder.id, CHUNK)
-        })
-    })
+    until(
+        "the founder fails the custodian at that chunk",
+        || founder.failures(),
+        |failures| {
+            failures.iter().any(|recorded| {
+                (recorded.custodian, recorded.prober, recorded.failure.chunk)
+                    == (second.id, founder.id, CHUNK)
+            })
+        },
+    )
     .await;
 
     for node in [founder, second, third] {
@@ -381,9 +391,11 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
         .await
         .unwrap();
     for node in &nodes {
-        until("the founder's failure reaches every node", || async {
-            node.failed_by(second.id).await == 1
-        })
+        until(
+            "the founder's failure reaches every node",
+            || node.failed_by(second.id),
+            |failed| *failed == 1,
+        )
         .await;
         assert!(!node.says_red(second.id).await, "one prober is not enough");
     }
@@ -395,9 +407,11 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
         .await
         .unwrap();
     for node in &nodes {
-        until("the second member is red on every node", || async {
-            node.says_red(second.id).await
-        })
+        until(
+            "the second member is red on every node",
+            || node.says_red(second.id),
+            |red| *red,
+        )
         .await;
         assert!(!node.says_red(founder.id).await);
     }
@@ -434,9 +448,11 @@ async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
             .await
             .unwrap();
     }
-    until("both failures reach the founder", || async {
-        founder.failed_by(second.id).await == 2
-    })
+    until(
+        "both failures reach the founder",
+        || founder.failed_by(second.id),
+        |failed| *failed == 2,
+    )
     .await;
 
     for refused in [
@@ -513,9 +529,11 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
         ..settings()
     };
     let ([founder, second, third], book, blob) = a_book_kept(dir.path(), &hourly, PLEDGES).await;
-    until("the founder sees the custodian hold the book", || async {
-        founder.check(second.id).await == json!("passed")
-    })
+    until(
+        "the founder sees the custodian hold the book",
+        || founder.check(second.id),
+        |outcome| *outcome == json!("passed"),
+    )
     .await;
 
     let bytes = second.bytes_of(blob);
@@ -547,9 +565,11 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
         .record_probe_failure(second.id, &failure)
         .await
         .unwrap();
-    until("the third member's failure reaches the founder", || async {
-        founder.failed_by(second.id).await == 1
-    })
+    until(
+        "the third member's failure reaches the founder",
+        || founder.failed_by(second.id),
+        |failed| *failed == 1,
+    )
     .await;
     assert_eq!(founder.check(second.id).await, json!("failed"));
     assert!(
@@ -579,15 +599,19 @@ async fn an_unreachable_custodian_is_skipped_not_failed() {
     let dir = TempDir::new().unwrap();
     let ([founder, second, third], _book, _blob) =
         a_book_kept(dir.path(), &settings(), PLEDGES).await;
-    until("the founder's probes pass", || async {
-        founder.probed().passed >= 1
-    })
+    until(
+        "the founder's probes pass",
+        || async { founder.probed() },
+        |probed| probed.passed >= 1,
+    )
     .await;
 
     second.runtime.shutdown().await;
-    until("the founder skips the stopped custodian", || async {
-        founder.probed().skipped >= 1
-    })
+    until(
+        "the founder skips the stopped custodian",
+        || async { founder.probed() },
+        |probed| probed.skipped >= 1,
+    )
     .await;
     assert_eq!(founder.probed().failed, 0);
     assert!(founder.failures().await.is_empty());

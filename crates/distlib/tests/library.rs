@@ -24,7 +24,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{PLEDGE, api, config, found, group_settings, init_logging, until_projected};
+use common::{PLEDGE, api, config, found, group_settings, init_logging, until, until_projected};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile.
 const SOON: Duration = Duration::from_secs(30);
@@ -108,25 +108,19 @@ async fn adding_the_same_files_twice_from_different_nodes_converges_on_one_item(
     // Whichever of the two writes the document resolves as "later" per key,
     // both nodes end up with one item holding one file — never a second item,
     // and never a file entry lost to the other's write.
-    tokio::time::timeout(SOON, async {
-        loop {
-            let seen_by_alice = alice.catalogue().item(item_id).await.unwrap();
-            let seen_by_bob = bob.catalogue().item(item_id).await.unwrap();
-            if let (Some(a), Some(b)) = (&seen_by_alice, &seen_by_bob)
-                && a.files.len() == 1
-                && b.files.len() == 1
-            {
-                assert_eq!(a.title, Some("Dune".to_owned()));
-                assert_eq!(b.title, Some("Dune".to_owned()));
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect(
+    let seen = || async {
+        let seen_by_alice = alice.catalogue().item(item_id).await.unwrap();
+        (seen_by_alice, bob.catalogue().item(item_id).await.unwrap())
+    };
+    let (by_alice, by_bob) = until(
         "both nodes converge on one item with one file, with no coordination between the two calls",
-    );
+        seen,
+        |seen| matches!(seen, (Some(a), Some(b)) if a.files.len() == 1 && b.files.len() == 1),
+    )
+    .await;
+    for seen in [by_alice, by_bob] {
+        assert_eq!(seen.expect("seen").title, Some("Dune".to_owned()));
+    }
 
     alice.shutdown().await;
     bob.shutdown().await;
@@ -475,13 +469,12 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
         .await
         .unwrap();
     let item_id: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
-    tokio::time::timeout(SOON, async {
-        while title_on(&bob_api, item_id).await.as_deref() != Some("Dune") {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("bob reads the item alice added");
+    until(
+        "bob reads the item alice added",
+        || title_on(&bob_api, item_id),
+        |title| title.as_deref() == Some("Dune"),
+    )
+    .await;
 
     let mut watching_bob = bob.events().subscribe();
     alice_api
@@ -508,13 +501,12 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
     // Waited for, not read once: a node's own read model is behind its own
     // writes too (see `read_model.rs`), and macOS CI caught alice's still
     // reading "Dune" after bob's had moved on.
-    tokio::time::timeout(SOON, async {
-        while title_on(&alice_api, item_id).await.as_deref() != Some("Dune Messiah") {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("alice reads her own edit");
+    until(
+        "alice reads her own edit",
+        || title_on(&alice_api, item_id),
+        |title| title.as_deref() == Some("Dune Messiah"),
+    )
+    .await;
 
     let on_bob = bob_api
         .call("library.item", Some(json!({ "item_id": item_id })))

@@ -19,9 +19,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found_and_settled, init_logging, until_released};
+use common::{api, config, found_and_settled, init_logging, until, until_released};
 
-const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
 const SETTLE: Duration = Duration::from_secs(5);
 
@@ -80,30 +79,27 @@ async fn until_all_say(
     expected: &[Vec<MemberId>],
     when: &str,
 ) {
-    let mut last = Vec::new();
-    let agreed = tokio::time::timeout(SOON, async {
-        loop {
-            last.clear();
-            let mut all_agree = true;
-            for (member, api) in apis {
-                let (custodians, count) = said_by(api, items).await;
-                let mine = expected.iter().filter(|list| list.contains(member)).count();
-                all_agree &= custodians
-                    == expected.iter().map(|list| json!(list)).collect::<Vec<_>>()
-                    && count == json!(mine);
-                last.push((custodians, count));
-            }
-            if all_agree {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+    let custodians: Vec<Value> = expected.iter().map(|list| json!(list)).collect();
+    let wanted: Vec<(Vec<Value>, Value)> = apis
+        .iter()
+        .map(|(member, _)| {
+            let mine = expected.iter().filter(|list| list.contains(member)).count();
+            (custodians.clone(), json!(mine))
+        })
+        .collect();
+    let said = || async {
+        let mut said = Vec::new();
+        for (_, api) in apis {
+            said.push(said_by(api, items).await);
         }
-    })
+        said
+    };
+    until(
+        &format!("{when}: every node says {expected:?}"),
+        said,
+        |said| *said == wanted,
+    )
     .await;
-    assert!(
-        agreed.is_ok(),
-        "{when}: the nodes never agreed within {SOON:?}\n  expected {expected:#?}\n  said {last:#?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -202,21 +198,12 @@ async fn five_nodes_agree_on_custodians_and_follow_a_settled_pledge_change() {
 
 /// Waits until `api`'s node says it is custodian of `items` items.
 async fn until_custodian_of(api: &Api, items: u64, when: &str) {
-    let mut last = Value::Null;
-    let reached = tokio::time::timeout(SOON, async {
-        loop {
-            last = api.call("node.status", None).await.unwrap()["custody"].clone();
-            if last["items"] == json!(items) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    until(
+        &format!("{when}: custody reaches {items} items"),
+        || async { api.call("node.status", None).await.unwrap()["custody"].clone() },
+        |custody| custody["items"] == json!(items),
+    )
     .await;
-    assert!(
-        reached.is_ok(),
-        "{when}: custody never reached {items} items within {SOON:?}: {last}"
-    );
 }
 
 /// A replay rewrites the read model without announcing an item, so custody

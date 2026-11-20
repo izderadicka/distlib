@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{PLEDGE, api, collecting, config, found, group_settings, init_logging};
+use common::{PLEDGE, api, collecting, config, found, group_settings, init_logging, until_within};
 
 /// A group of one, founded, with its catalogue open and `limit` bytes of
 /// storage.
@@ -139,13 +139,13 @@ async fn the_last_collection_pass_is_reported() {
     )
     .await;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while storage(&api).await["last_collection_at"].is_null() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("a pass every second began");
+    until_within(
+        Duration::from_secs(10),
+        "a pass every second begins",
+        || storage(&api),
+        |storage| !storage["last_collection_at"].is_null(),
+    )
+    .await;
 
     runtime.shutdown().await;
 }

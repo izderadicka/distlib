@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use distlib::Runtime;
 use distlib_api::Api;
@@ -14,9 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, download, found, init_logging, until_projected};
-
-const SOON: Duration = Duration::from_secs(30);
+use common::{api, config, download, found, init_logging, until, until_projected};
 
 /// The settings these tests found with: `replicas` 3, a minimum pledge of 10
 /// bytes.
@@ -76,13 +74,12 @@ async fn listed(api: &Api) -> (Value, Value) {
 /// Waits until the members list requires `required` of the founder: until
 /// what it added is in the read model.
 async fn until_required(api: &Api, required: u64) {
-    tokio::time::timeout(SOON, async {
-        while listed(api).await.1 != json!(required) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("never required {required} bytes"));
+    until(
+        &format!("the founder is required {required} bytes"),
+        || listed(api),
+        |listed| listed.1 == json!(required),
+    )
+    .await;
 }
 
 /// 5b-5's acceptance, in bytes: a pledge of 100 and 60 added is warned,
@@ -186,13 +183,12 @@ async fn a_member_below_the_minimum_pledge_browses_but_takes_no_content() {
     assert!(blobs.fetch(file, vec![ids[0]]).await.is_err());
 
     pledge(&member, 10).await.unwrap();
-    tokio::time::timeout(SOON, async {
-        while !runtimes[0].node().membership().pledges_the_minimum(&ids[1]) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the founder learns of the pledge");
+    until(
+        "the founder learns of the pledge",
+        || async { runtimes[0].node().membership().pledges_the_minimum(&ids[1]) },
+        |pledges| *pledges,
+    )
+    .await;
     blobs.fetch(file, vec![ids[0]]).await.unwrap();
     let dest = dir.path().join("downloads");
     std::fs::create_dir_all(&dest).unwrap();

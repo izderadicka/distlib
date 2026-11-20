@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
 mod common;
-use common::{bound, config, group_settings, init_logging, listed_item, profile};
+use common::{bound, config, group_settings, init_logging, listed_item, profile, until_heard};
 
 /// Long enough for two in-process nodes to elect, replicate and reconcile, and
 /// for the projection behind that to catch up.
@@ -236,23 +236,17 @@ async fn a_watcher_that_stops_reading_does_not_hold_the_projection_up() {
         .unwrap();
     node.catalogue().write(&barrier).await.unwrap();
     let barrier = barrier.id;
-    tokio::time::timeout(SOON, async {
-        loop {
-            match awake.recv().await {
-                Ok(Event::ItemAdded { item_id } | Event::ItemChanged { item_id })
-                    if item_id == barrier =>
-                {
-                    return;
-                }
-                // Reading, but a batch can still outrun it; the newest events
-                // are the ones kept, so the barrier's is not among the lost.
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => panic!("the bus closed"),
-            }
-        }
-    })
-    .await
-    .expect("the projection kept going past a watcher that was not reading");
+    // Reading, but a batch can still outrun it; the newest events are the
+    // ones kept, so the barrier's is not among the lost.
+    until_heard(
+        "the projection keeps going past a watcher that is not reading",
+        &mut awake,
+        |event| {
+            matches!(event, Event::ItemAdded { item_id } | Event::ItemChanged { item_id }
+                if *item_id == barrier)
+        },
+    )
+    .await;
 
     assert!(
         matches!(asleep.try_recv(), Err(TryRecvError::Lagged(_))),

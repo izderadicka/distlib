@@ -20,9 +20,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found_and_settled, init_logging, until_projected};
+use common::{api, config, found_and_settled, init_logging, until, until_projected};
 
-const SOON: Duration = Duration::from_secs(60);
 const GB: u64 = 1_000_000_000;
 /// The size of a book.
 const BOOK: usize = 1_000_000;
@@ -78,19 +77,16 @@ impl Node {
             expected,
             announced,
         });
-        tokio::time::timeout(SOON, async {
-            while self.coverage_of(member).await != wanted {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{} never saw {}'s coverage at {announced} of {expected}",
+        until(
+            &format!(
+                "{} sees {}'s coverage at {announced} of {expected}",
                 self.id.fmt_short(),
                 member.fmt_short()
-            )
-        });
+            ),
+            || self.coverage_of(member),
+            |coverage| *coverage == wanted,
+        )
+        .await;
     }
 }
 
