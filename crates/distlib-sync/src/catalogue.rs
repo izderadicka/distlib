@@ -44,7 +44,7 @@ use iroh_blobs::{
 use iroh_docs::{
     Author, AuthorId, Capability, Entry, NamespaceSecret,
     api::Doc,
-    engine::{DefaultAuthorStorage, Engine, ProtectCallbackHandler},
+    engine::{DefaultAuthorStorage, Engine},
     protocol::Docs,
     store::{Query, Store as DocumentStore},
 };
@@ -59,6 +59,7 @@ use crate::{
     availability::Holdings,
     changes::{self, Changes, Feed, News, Pump, SyncState},
     error::{Result, SyncError},
+    protection::{CatalogueProtection, WritesSinceTheLastPass},
 };
 
 /// Domain tag for deriving the catalogue's document key, so it cannot collide
@@ -238,9 +239,9 @@ pub struct CatalogueStorage {
     /// The directory for the documents; `None` keeps them in memory.
     pub documents: Option<PathBuf>,
     /// The other half of `blobs`' garbage collection callback, through which
-    /// the documents protect every blob they reference. `None` for a store
-    /// that never collects.
-    pub protect: Option<ProtectCallbackHandler>,
+    /// the documents protect every blob they reference, and this node's writes
+    /// theirs until the next pass. `None` for a store that never collects.
+    pub protect: Option<CatalogueProtection>,
     /// The provider events every blob this node serves goes through: see
     /// `distlib_net::blobs::serving_events`. `None` serves without any.
     pub serving_events: Option<EventSender>,
@@ -267,6 +268,9 @@ struct Inner {
     author: AuthorId,
     /// The same key as a member: who this node's community entries name.
     me: MemberId,
+    /// Where a write keeps its value until the next collection pass begins;
+    /// `None` when nothing collects.
+    writes_since_the_last_pass: Option<WritesSinceTheLastPass>,
     /// The document, once there is a group to derive it from.
     open: watch::Receiver<Option<Doc>>,
     /// What the document's one subscription reports, from when it opened.
@@ -328,6 +332,9 @@ impl Catalogue {
         // The engine drives it for the content it knows to ask for; the task
         // below drives the same one for the content it never asked for.
         let downloader = blobs.downloader(&transport.endpoint);
+        let (documents_protection, writes_since_the_last_pass) = protect
+            .map(|protect| (protect.documents, protect.writes))
+            .unzip();
         let engine = Engine::spawn(
             transport.endpoint.clone(),
             transport.gossip.clone(),
@@ -335,7 +342,7 @@ impl Catalogue {
             blobs.clone(),
             downloader.clone(),
             DefaultAuthorStorage::Mem,
-            protect,
+            documents_protection,
         )
         .await
         .map_err(SyncError::docs("started"))?;
@@ -376,6 +383,7 @@ impl Catalogue {
                 docs,
                 author: author_id,
                 me,
+                writes_since_the_last_pass,
                 open,
                 feed,
                 task: Mutex::new(Some(task)),
@@ -416,11 +424,32 @@ impl Catalogue {
     }
 
     /// Writes one entry, replacing whatever this node wrote there before.
+    ///
+    /// Its value is kept until the next collection pass begins: see
+    /// [`CatalogueProtection`].
     pub async fn put(&self, key: impl AsRef<[u8]>, value: impl Into<bytes::Bytes>) -> Result<()> {
         let doc = self.document()?;
-        doc.set_bytes(self.inner.author, key.as_ref().to_vec(), value.into())
+        let value = value.into();
+        let size = value.len() as u64;
+        let imported = self
+            .inner
+            .blobs
+            .store()
+            .add_bytes(value)
+            .temp_tag()
             .await
-            .map_err(SyncError::docs("written to"))?;
+            .map_err(SyncError::content("stored a value to write"))?;
+        doc.set_hash(
+            self.inner.author,
+            key.as_ref().to_vec(),
+            imported.hash(),
+            size,
+        )
+        .await
+        .map_err(SyncError::docs("written to"))?;
+        if let Some(writes) = &self.inner.writes_since_the_last_pass {
+            writes.hold(imported);
+        }
         Ok(())
     }
 
