@@ -258,7 +258,7 @@ impl Runtime {
         &self.keeping.coverage
     }
 
-    /// This node's probes of its co-custodians.
+    /// This node's probes of the others obliged to hold what it holds.
     pub fn probes(&self) -> &Probes {
         &self.keeping.probes
     }

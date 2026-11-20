@@ -1,6 +1,6 @@
 //! Probes (phase 5's D11 and D12): every `probe_every_secs`, a random chunk of
-//! an item this node holds is asked of one of its other custodians that
-//! announces it. One probe in four re-checks a suspect instead. A failure is
+//! an item this node holds is asked of one of the others obliged to hold it,
+//! custodians and creator (5f-3), that announces it. One probe in four re-checks a suspect instead. A failure is
 //! recorded in the catalogue; this node's next pass of that custodian clears
 //! it.
 
@@ -402,8 +402,8 @@ fn suspect(
     Ok(pick(low)?.map(Suspect::LowCoverage))
 }
 
-/// A random chunk of a random file of a random item this node holds,
-/// of one of its other custodians that announces it: `only`, if given.
+/// A random chunk of a random file of a random item this node holds, of one
+/// of the others obliged to hold it that announces it: `only`, if given.
 async fn random_target(
     sources: &ProbeSources,
     only: Option<MemberId>,
@@ -429,13 +429,13 @@ async fn random_target(
         return Ok(None);
     };
     let announcers = availability.holders(&item);
-    let custodians: Vec<MemberId> = group
-        .custodians(&stored.custody_item())
+    let obliged: Vec<MemberId> = group
+        .obliged_holders(&stored.custody_item())
         .into_iter()
-        .filter(|custodian| may_probe(*custodian, *me, &announcers, only))
+        .filter(|obliged| may_probe(*obliged, *me, &announcers, only))
         .collect();
     let files: Vec<ContentHash> = stored.item.files.keys().copied().collect();
-    let (Some(custodian), Some(blob)) = (pick(&custodians)?, pick(&files)?) else {
+    let (Some(custodian), Some(blob)) = (pick(&obliged)?, pick(&files)?) else {
         return Ok(None);
     };
     // This node's own copy says how many chunks there are, not the catalogue.

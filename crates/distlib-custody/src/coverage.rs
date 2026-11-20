@@ -1,6 +1,7 @@
 //! Coverage (phase 5's D10): of the items this node holds, the share each of
-//! their other custodians announces holding. This node's own view, from the
-//! heartbeats it hears; nothing is sent for it.
+//! the others obliged to hold them, custodians and creators (5f-3), announces
+//! holding. This node's own view, from the heartbeats it hears; nothing is
+//! sent for it.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -206,14 +207,14 @@ fn count(
         .collect();
     for (item, _) in held.iter().filter(|(_, since)| old_enough(*since)) {
         let announced_by = holders(&item.item);
-        for custodian in group
-            .custodians(item)
+        for obliged in group
+            .obliged_holders(item)
             .into_iter()
-            .filter(|custodian| judged.contains(custodian))
+            .filter(|obliged| judged.contains(obliged))
         {
-            let coverage = counted.entry(custodian).or_default();
+            let coverage = counted.entry(obliged).or_default();
             coverage.expected += 1;
-            if announced_by.contains(&custodian) {
+            if announced_by.contains(&obliged) {
                 coverage.announced += 1;
             }
         }
@@ -295,6 +296,24 @@ mod tests {
         );
         assert_eq!(counted, HashMap::from([(bob, covered(1, 0))]));
         assert!(!counted.contains_key(&carol));
+    }
+
+    /// #200's finding 3, reversed: a creator's copy is one of the item's
+    /// obliged copies, so a creator that announces nothing of what it added
+    /// is low, as a custodian would be.
+    #[test]
+    fn a_creator_that_announces_nothing_of_its_own_item_is_low() {
+        let (group, me, bob, carol) = group();
+        let start = Instant::now();
+        // Bob added both; this node and Carol are their custodians.
+        let held = [(item(1, bob), start), (item(2, bob), start)];
+        assert!(group.is_custodian(&held[0].0, me));
+        let judged = HashSet::from([bob, carol]);
+        // Carol announces both; Bob, their creator, neither.
+        let counted = count(&group, &held, &judged, |_| vec![carol], |_| true);
+        assert_eq!(counted[&carol], covered(2, 2));
+        assert_eq!(counted[&bob], covered(2, 0));
+        assert!(counted[&bob].is_low());
     }
 
     #[test]
