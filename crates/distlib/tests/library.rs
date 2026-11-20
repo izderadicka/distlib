@@ -469,10 +469,19 @@ async fn an_edited_title_reaches_the_other_node_and_is_announced_there() {
         .await
         .unwrap();
     let item_id: ItemId = serde_json::from_value(added["item_id"].clone()).unwrap();
+    // Its authors too, read after the edit below: each field is an entry of
+    // its own, and can arrive after the others.
     until(
-        "bob reads the item alice added",
-        || title_on(&bob_api, item_id),
-        |title| title.as_deref() == Some("Dune"),
+        "bob reads the item alice added, with its authors",
+        || async {
+            let item = bob_api.call("library.item", Some(json!({ "item_id": item_id })));
+            item.await.ok()
+        },
+        |item| {
+            item.as_ref().is_some_and(|item| {
+                item["title"] == "Dune" && item["authors"] == json!(["Frank Herbert"])
+            })
+        },
     )
     .await;
 
