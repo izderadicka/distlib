@@ -205,10 +205,12 @@ struct CommunityEntry<T> {
     written: u64,
 }
 
-/// One prober's recorded failure of one custodian (phase 5's D12).
+/// One prober's recorded failure of one custodian's copy of an item (phase
+/// 5's D12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordedFailure {
     pub custodian: MemberId,
+    pub item: ItemId,
     pub prober: MemberId,
     pub failure: ProbeFailure,
     /// When the prober wrote it, in microseconds since the epoch.
@@ -790,24 +792,28 @@ impl Catalogue {
         self.clear(key.encode()).await
     }
 
-    /// Records this node's member's latest failed probe of `custodian`
-    /// (phase 5's D12), replacing the one before.
+    /// Records this node's member's latest failed probe of `custodian`'s copy
+    /// of `item` (phase 5's D12), replacing the one before.
     pub async fn record_probe_failure(
         &self,
         custodian: MemberId,
+        item: ItemId,
         failure: &ProbeFailure,
     ) -> Result<()> {
         let key = CommunityKey::ProbeFailure {
             custodian,
+            item,
             prober: self.inner.me,
         };
         self.put(key.encode(), failure.encode()).await
     }
 
-    /// Clears this node's member's failures of `custodian`, if it has any.
-    pub async fn clear_probe_failure(&self, custodian: MemberId) -> Result<()> {
+    /// Clears this node's member's failures of `custodian`'s copy of `item`,
+    /// if it has any.
+    pub async fn clear_probe_failure(&self, custodian: MemberId, item: ItemId) -> Result<()> {
         let key = CommunityKey::ProbeFailure {
             custodian,
+            item,
             prober: self.inner.me,
         };
         self.clear(key.encode()).await
@@ -824,11 +830,17 @@ impl Catalogue {
             .into_iter()
             .filter_map(|entry| {
                 // The prefix holds no other kind of key.
-                let CommunityKey::ProbeFailure { custodian, prober } = entry.key else {
+                let CommunityKey::ProbeFailure {
+                    custodian,
+                    item,
+                    prober,
+                } = entry.key
+                else {
                     return None;
                 };
                 Some(RecordedFailure {
                     custodian,
+                    item,
                     prober,
                     failure: entry.value,
                     written: entry.written,

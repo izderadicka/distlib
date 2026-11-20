@@ -228,9 +228,10 @@ fn every_community_key_is_fixed() {
         (
             CommunityKey::ProbeFailure {
                 custodian,
+                item: ITEM,
                 prober: member,
             },
-            format!("probe/{MEMBER_2_HEX}/{MEMBER_1_HEX}"),
+            format!("probe/{MEMBER_2_HEX}/{ITEM_HEX}/{MEMBER_1_HEX}"),
         ),
     ] {
         assert_eq!(key.encode(), golden);
@@ -304,14 +305,13 @@ fn every_community_value_is_fixed_json() {
     );
     check(
         ProbeFailure {
-            item: ITEM,
             blob: BLOB,
             chunk: 9,
             in_a_row: 2,
         },
         ProbeFailure::encode,
         ProbeFailure::decode,
-        &format!(r#"{{"item":"{ITEM_HEX}","blob":"{BLOB_HEX}","chunk":9,"in_a_row":2}}"#),
+        &format!(r#"{{"blob":"{BLOB_HEX}","chunk":9,"in_a_row":2}}"#),
     );
 }
 

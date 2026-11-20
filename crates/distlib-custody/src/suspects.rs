@@ -4,7 +4,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
 
@@ -59,7 +59,7 @@ pub fn evidence_reason(
                     || "an unknown time".to_owned(),
                     |when| when.format("%Y-%m-%d %H:%M UTC").to_string(),
                 );
-            let item = recorded.failure.item.to_string();
+            let item = recorded.item.to_string();
             format!(
                 "by {} at {when}: item {} chunk {}, {} in a row",
                 recorded.prober.fmt_short(),
@@ -124,19 +124,31 @@ pub fn suspects(
     )
 }
 
-/// [`suspects`], with who is a member and the window given.
+/// [`suspects`], with who is a member and the window given. A prober's
+/// failures of several items of one member count once, by the latest.
 fn suspects_among(
     failures: Vec<RecordedFailure>,
     is_member: impl Fn(&MemberId) -> bool,
     window: Duration,
     now: SystemTime,
 ) -> Vec<Suspect> {
-    let mut by_member: BTreeMap<MemberId, Vec<RecordedFailure>> = BTreeMap::new();
+    let mut latest_by_pair: HashMap<(MemberId, MemberId), RecordedFailure> = HashMap::new();
     for recorded in failures.into_iter().filter(|recorded| {
         is_member(&recorded.custodian)
             && is_member(&recorded.prober)
             && left_in_window(recorded, window, now).is_some()
     }) {
+        latest_by_pair
+            .entry((recorded.custodian, recorded.prober))
+            .and_modify(|kept| {
+                if kept.written < recorded.written {
+                    *kept = recorded;
+                }
+            })
+            .or_insert(recorded);
+    }
+    let mut by_member: BTreeMap<MemberId, Vec<RecordedFailure>> = BTreeMap::new();
+    for recorded in latest_by_pair.into_values() {
         by_member
             .entry(recorded.custodian)
             .or_default()
@@ -182,9 +194,9 @@ mod tests {
             .unwrap();
         RecordedFailure {
             custodian,
+            item: ItemId::from_bytes([1; 32]),
             prober,
             failure: ProbeFailure {
-                item: ItemId::from_bytes([1; 32]),
                 blob: ContentHash::from_bytes([2; 32]),
                 chunk: 0,
                 in_a_row,
@@ -222,6 +234,21 @@ mod tests {
             "the latest first"
         );
         assert!(!found[1].is_red());
+    }
+
+    #[test]
+    fn one_probers_failures_of_two_items_count_once_by_the_latest() {
+        let now = SystemTime::now();
+        let (bob, carol) = (member(1), member(2));
+        let other_item = RecordedFailure {
+            item: ItemId::from_bytes([3; 32]),
+            ..failed(bob, carol, 4, 10, now)
+        };
+        let failures = vec![failed(bob, carol, 1, 20, now), other_item];
+        let found = suspects_among(failures, |_| true, WINDOW, now);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].failures, [other_item]);
+        assert!(!found[0].is_red(), "one prober is not enough");
     }
 
     #[test]

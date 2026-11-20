@@ -504,6 +504,7 @@ mod tests {
         let (probe_failures, mut changed) = watch::channel(());
         let key = CommunityKey::ProbeFailure {
             custodian: MemberId::from(SecretKey::generate().public()),
+            item: ItemId::from_bytes([3; 32]),
             prober: MemberId::from(SecretKey::generate().public()),
         };
         let mut batch = Batch::default();

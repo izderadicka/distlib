@@ -8,6 +8,7 @@
 //! 5c-3a's: failures from two probers turn a member red on every node, and
 //! one prober's alone does not; check now probes a member at once. 5c-3b's:
 //! an expulsion with evidence names the failures, within `MAX_REASON`.
+//! 5f-4's: a pass clears only the failure of the item that passed.
 //!
 //! The founder adds a book; the second member, the only other with a weight,
 //! is its custodian and keeps it, and the founder probes it every second.
@@ -141,13 +142,24 @@ async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) ->
 /// The founder adds a book, which it and the second member have projected:
 /// the book and its one file.
 async fn add_a_book(founder: &Node, second: &Node, dir: &Path) -> (ItemId, ContentHash) {
+    add_a_book_called("Dune", founder, second, dir).await
+}
+
+/// [`add_a_book`], the book called `title`.
+async fn add_a_book_called(
+    title: &str,
+    founder: &Node,
+    second: &Node,
+    dir: &Path,
+) -> (ItemId, ContentHash) {
     founder.runtime.catalogue().ready().await;
-    let file = dir.join("dune.epub");
-    std::fs::write(&file, "Dune\n".repeat(BOOK / 5)).unwrap();
+    let file = dir.join(format!("{title}.epub"));
+    let line = format!("{title}\n");
+    std::fs::write(&file, line.repeat(BOOK / line.len())).unwrap();
     let added = api(&founder.runtime, &founder.key)
         .call(
             "library.add",
-            Some(json!({ "kind": "ebook", "files": [&file], "title": "Dune" })),
+            Some(json!({ "kind": "ebook", "files": [&file], "title": title })),
         )
         .await
         .unwrap();
@@ -202,7 +214,7 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
             || node.failures(),
             |failures| {
                 failures.iter().any(|recorded| {
-                    (recorded.custodian, recorded.prober, recorded.failure.item)
+                    (recorded.custodian, recorded.prober, recorded.item)
                         == (second.id, founder.id, book)
                 })
             },
@@ -268,7 +280,7 @@ async fn a_creators_copy_is_probed_and_a_failure_stops_it_counting_as_real() {
         || second.failures(),
         |failures| {
             failures.iter().any(|recorded| {
-                (recorded.custodian, recorded.prober, recorded.failure.item)
+                (recorded.custodian, recorded.prober, recorded.item)
                     == (founder.id, second.id, book)
             })
         },
@@ -279,6 +291,88 @@ async fn a_creators_copy_is_probed_and_a_failure_stops_it_counting_as_real() {
         || async { second.runtime.availability().real_holders(&book) },
         |real| !real.contains(&founder.id),
     )
+    .await;
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
+/// #200's finding 2, reversed (5f-4): the custodian keeps two books and loses
+/// one. The founder's failure names the lost book; its passes of the other
+/// book leave that failure in place. Then the other book is lost as well: its
+/// failure is recorded beside the first, not over it (C61).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_another_book_leaves_the_failure_of_a_book_still_lost() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    // The third member is below the minimum, so the founder's are the only
+    // probes of the custodian.
+    let founder_alone_probes = GroupSettings {
+        min_pledge_bytes: 100 * GB,
+        ..settings()
+    };
+    let [founder, second, third] = three_nodes(dir.path(), &founder_alone_probes, PLEDGES).await;
+    let (lost, lost_blob) = add_a_book(&founder, &second, dir.path()).await;
+    let (other, other_blob) = add_a_book_called("Emma", &founder, &second, dir.path()).await;
+    until(
+        "the custodian holds both books",
+        || async {
+            let holdings = second.runtime.catalogue().holdings();
+            holdings.holds(lost) && holdings.holds(other)
+        },
+        |held| *held,
+    )
+    .await;
+    let failed_items = || async {
+        let mut items: Vec<ItemId> = founder
+            .failures()
+            .await
+            .iter()
+            .filter(|recorded| recorded.custodian == second.id)
+            .map(|recorded| recorded.item)
+            .collect();
+        items.sort_unstable();
+        items
+    };
+
+    let lose = |blob| {
+        let bytes = second.bytes_of(blob);
+        let wrong = vec![0; std::fs::read(&bytes).unwrap().len()];
+        std::fs::write(&bytes, wrong).unwrap();
+    };
+    lose(lost_blob);
+    until("the founder fails the lost book", failed_items, |items| {
+        *items == [lost]
+    })
+    .await;
+    let passed = founder.probed().passed;
+    until(
+        "the founder passes the other book three times",
+        || async { founder.probed().passed },
+        |now| *now >= passed + 3,
+    )
+    .await;
+    assert_eq!(
+        failed_items().await,
+        [lost],
+        "a pass of another book cleared it"
+    );
+    assert!(
+        !founder
+            .runtime
+            .availability()
+            .real_holders(&lost)
+            .contains(&second.id),
+        "the lost copy counts as real"
+    );
+
+    lose(other_blob);
+    let mut both = [lost, other];
+    both.sort_unstable();
+    until("the founder fails both books", failed_items, |items| {
+        *items == both
+    })
     .await;
 
     for node in [founder, second, third] {
@@ -382,7 +476,6 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
     book_bytes[start..start + 1024].fill(0);
     std::fs::write(&bytes, &book_bytes).unwrap();
     let failure = ProbeFailure {
-        item: book,
         blob,
         chunk: CHUNK,
         in_a_row: 1,
@@ -391,7 +484,7 @@ async fn a_failure_another_member_recorded_is_rechecked_at_its_chunk() {
     third
         .runtime
         .catalogue()
-        .record_probe_failure(second.id, &failure)
+        .record_probe_failure(second.id, book, &failure)
         .await
         .unwrap();
 
@@ -426,8 +519,8 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
     let nodes = three_nodes(dir.path(), &probes_off, PLEDGES).await;
     let [founder, second, third] = &nodes;
     founder.runtime.catalogue().ready().await;
+    let item = ItemId::from_bytes([1; 32]);
     let failure = ProbeFailure {
-        item: ItemId::from_bytes([1; 32]),
         blob: ContentHash::from_bytes([2; 32]),
         chunk: 0,
         in_a_row: 1,
@@ -436,7 +529,7 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
     founder
         .runtime
         .catalogue()
-        .record_probe_failure(second.id, &failure)
+        .record_probe_failure(second.id, item, &failure)
         .await
         .unwrap();
     for node in &nodes {
@@ -452,7 +545,7 @@ async fn two_probers_turn_a_member_red_on_every_node_and_one_does_not() {
     third
         .runtime
         .catalogue()
-        .record_probe_failure(second.id, &failure)
+        .record_probe_failure(second.id, item, &failure)
         .await
         .unwrap();
     for node in &nodes {
@@ -483,8 +576,8 @@ async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
         ..settings()
     };
     let [founder, second, third] = three_nodes(dir.path(), &probes_off, PLEDGES).await;
+    let item = ItemId::from_bytes([1; 32]);
     let failure = ProbeFailure {
-        item: ItemId::from_bytes([1; 32]),
         blob: ContentHash::from_bytes([2; 32]),
         chunk: 7,
         in_a_row: 2,
@@ -493,7 +586,7 @@ async fn an_expulsion_with_evidence_names_the_failures_within_the_limit() {
         let catalogue = prober.runtime.catalogue();
         catalogue.ready().await;
         catalogue
-            .record_probe_failure(second.id, &failure)
+            .record_probe_failure(second.id, item, &failure)
             .await
             .unwrap();
     }
@@ -602,7 +695,6 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
     one_chunk_wrong[start..start + 1024].fill(0);
     std::fs::write(&bytes, &one_chunk_wrong).unwrap();
     let failure = ProbeFailure {
-        item: book,
         blob,
         chunk: CHUNK,
         in_a_row: 1,
@@ -611,7 +703,7 @@ async fn check_now_probes_a_member_at_once_and_records_how_it_came_out() {
     third
         .runtime
         .catalogue()
-        .record_probe_failure(second.id, &failure)
+        .record_probe_failure(second.id, book, &failure)
         .await
         .unwrap();
     until(

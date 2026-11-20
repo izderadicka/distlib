@@ -73,7 +73,7 @@ fn failed_within(
         .iter()
         .filter_map(|recorded| {
             let left = left_in_window(recorded, window, now)?;
-            Some(((recorded.custodian, recorded.failure.item), left))
+            Some(((recorded.custodian, recorded.item), left))
         })
         .fold(
             (HashSet::new(), None),
@@ -99,9 +99,9 @@ mod tests {
     fn recorded(custodian: MemberId, item: ItemId, written: SystemTime) -> RecordedFailure {
         RecordedFailure {
             custodian,
+            item,
             prober: MemberId::from(SecretKey::generate().public()),
             failure: ProbeFailure {
-                item,
                 blob: ContentHash::from_bytes([1; 32]),
                 chunk: 0,
                 in_a_row: 1,
