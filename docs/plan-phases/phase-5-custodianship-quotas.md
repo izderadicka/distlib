@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -946,6 +946,14 @@ fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward
     temporary tag until the next pass begins (`CatalogueProtection`); a synced value lost the
     same way is fetched again by the content sweep, but a node's own write has no other copy.
   - **5f-7d — the tests that fail again on a rerun**, each fixed, or kept with its reason recorded.
+    *Done*, from CI since 2026-11-06, first attempts and master: `keeping` and `pins`'s
+    eviction and `add_a_book` were 5f-7c's race; `probes`' re-check was C58 (P5-62);
+    `pins`' let-go before #209, and `coverage`'s only on #212, which #213 replaced. Fixed here:
+    `two_bookmarks_…` read a title the read model did not have yet, waiting only for the file
+    list, which since P5-66 can arrive first, and `an_edited_title_…` read authors the same
+    way. Two process tests timed out together on a macOS runner whose in-process tests took
+    up to a minute: their bound is 60 s, as the in-process tests' is, and a failed process
+    test prints every node's log.
 
 ---
 

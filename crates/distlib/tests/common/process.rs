@@ -29,8 +29,10 @@ use distlib_core::GroupSettings;
 use tempfile::TempDir;
 
 /// Long enough for three processes to start, elect and replicate; short enough
-/// that a hang fails the suite rather than stalling it.
-pub const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// that a hang fails the suite rather than stalling it. The in-process tests'
+/// `SOON`: at 30 s two of these failed together on a macOS runner whose
+/// in-process tests were taking up to a minute (5f-7d).
+pub const CONVERGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a node gets to act on a stop signal before it is killed outright.
 ///
@@ -349,16 +351,16 @@ impl Friend {
 /// blamed on a different node, with the line that said so buried in a log
 /// nobody had reason to read.
 ///
-/// So this checks liveness before content, and prints *every* node's log when
-/// it does give up.
+/// So this checks liveness before content; every node's log is printed as it
+/// is dropped on the way out of the failed test (see [`Running`]'s `Drop`).
 pub fn wait_for_all(nodes: &mut [&mut Running], needle: &str) {
     let deadline = Instant::now() + CONVERGE_TIMEOUT;
     loop {
         for node in nodes.iter_mut() {
             if let Some(status) = node.exited() {
                 panic!(
-                    "a node exited ({status}) while the group waited for {needle:?}; its log was:\n{}",
-                    node.log_contents()
+                    "a node exited ({status}) while the group waited for {needle:?}; {} has its log",
+                    node.log.display()
                 );
             }
         }
@@ -368,13 +370,10 @@ pub fn wait_for_all(nodes: &mut [&mut Running], needle: &str) {
         {
             return;
         }
-        if Instant::now() >= deadline {
-            let logs: String = nodes
-                .iter()
-                .map(|node| format!("--- {}\n{}\n", node.log.display(), node.log_contents()))
-                .collect();
-            panic!("timed out waiting for {needle:?} on every node; logs were:\n{logs}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle:?} on every node"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -530,6 +529,10 @@ impl Drop for Running {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
+        // Every node's, whatever the test was waiting for when it failed.
+        if std::thread::panicking() {
+            eprintln!("--- {}\n{}", self.log.display(), self.log_contents());
+        }
     }
 }
 

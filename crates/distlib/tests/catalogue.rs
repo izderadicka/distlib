@@ -1061,12 +1061,13 @@ async fn two_bookmarks_by_one_member_both_survive_and_another_finds_one() {
         })
         .await
         .unwrap();
-    for (who, runtime) in [
-        ("alice", &group.alice),
-        ("bob", &group.bob),
-        ("carol", &group.carol),
-    ] {
-        until_projected(runtime, item, 1, who).await;
+    // The title, not only the file list: an item is projected once its list
+    // is here, and its title can arrive after it (P5-66).
+    for runtime in [&group.alice, &group.bob, &group.carol] {
+        stored_when(runtime.store(), item, "its title", |stored| {
+            stored.item.title.as_deref() == Some("Dune")
+        })
+        .await;
     }
     let mut alice_hears = group.alice.events().subscribe();
 
