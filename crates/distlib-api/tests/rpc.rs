@@ -952,8 +952,8 @@ async fn a_watcher_hears_a_probe_failure_recorded_and_cleared() {
     // #184: the Node page marks a custodian red, and back, without a reload.
     let harness = Harness::start().await;
     let custodian = MemberId::from(SecretKey::generate().public());
+    let item = ItemId::from_bytes([1; 32]);
     let failure = ProbeFailure {
-        item: ItemId::from_bytes([1; 32]),
         blob: ContentHash::from_bytes([2; 32]),
         chunk: 0,
         in_a_row: 1,
@@ -962,13 +962,13 @@ async fn a_watcher_hears_a_probe_failure_recorded_and_cleared() {
 
     harness
         .catalogue
-        .record_probe_failure(custodian, &failure)
+        .record_probe_failure(custodian, item, &failure)
         .await
         .unwrap();
     watcher.expect("probes.changed").await;
     harness
         .catalogue
-        .clear_probe_failure(custodian)
+        .clear_probe_failure(custodian, item)
         .await
         .unwrap();
     watcher.expect("probes.changed").await;

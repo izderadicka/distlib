@@ -314,14 +314,14 @@ impl Api {
             for recorded in &suspect.failures {
                 let title = self
                     .store
-                    .item(recorded.failure.item)
+                    .item(recorded.item)
                     .await
                     .map_err(query_error)?
                     .and_then(|stored| stored.item.title);
                 failures.push(json!({
                     "prober": recorded.prober,
                     "prober_name": name(&recorded.prober),
-                    "item": recorded.failure.item,
+                    "item": recorded.item,
                     "title": title,
                     "blob": recorded.failure.blob,
                     "chunk": recorded.failure.chunk,

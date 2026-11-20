@@ -59,7 +59,7 @@ pub fn evidence_reason(
                     || "an unknown time".to_owned(),
                     |when| when.format("%Y-%m-%d %H:%M UTC").to_string(),
                 );
-            let item = recorded.failure.item.to_string();
+            let item = recorded.item.to_string();
             format!(
                 "by {} at {when}: item {} chunk {}, {} in a row",
                 recorded.prober.fmt_short(),
@@ -182,9 +182,9 @@ mod tests {
             .unwrap();
         RecordedFailure {
             custodian,
+            item: ItemId::from_bytes([1; 32]),
             prober,
             failure: ProbeFailure {
-                item: ItemId::from_bytes([1; 32]),
                 blob: ContentHash::from_bytes([2; 32]),
                 chunk: 0,
                 in_a_row,

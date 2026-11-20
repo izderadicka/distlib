@@ -820,7 +820,6 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
     custodian.until_it_sees(other.id, item).await;
 
     let failure = ProbeFailure {
-        item,
         blob: file,
         chunk: 0,
         in_a_row: 1,
@@ -828,7 +827,7 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
     founder
         .runtime
         .catalogue()
-        .record_probe_failure(other.id, &failure)
+        .record_probe_failure(other.id, item, &failure)
         .await
         .unwrap();
     until(
@@ -855,7 +854,7 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
     founder
         .runtime
         .catalogue()
-        .clear_probe_failure(other.id)
+        .clear_probe_failure(other.id, item)
         .await
         .unwrap();
     custodian

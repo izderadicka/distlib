@@ -46,10 +46,11 @@ fn comment(member: MemberId) -> CommunityKey {
     CommunityKey::WishComment { wish: WISH, member }
 }
 
-/// A failure the member found probing `custodian`.
+/// A failure the member found probing `custodian`'s copy of the item.
 fn probe_failure(custodian: MemberId, member: MemberId) -> CommunityKey {
     CommunityKey::ProbeFailure {
         custodian,
+        item: ITEM,
         prober: member,
     }
 }
@@ -90,7 +91,7 @@ fn a_key_is_named_by_its_kind_the_item_and_the_member() {
     let carol = member();
     assert_eq!(
         probe_failure(carol, bob).encode(),
-        format!("probe/{carol}/{bob}")
+        format!("probe/{carol}/{ITEM}/{bob}")
     );
 }
 
@@ -144,8 +145,9 @@ fn anything_else_is_somebody_elses_key() {
         format!("item/{ITEM}/title"),
         format!("rating/{bob}/{ITEM}"),
         format!("probe/{bob}"),
-        format!("probe/{bob}/{bob}/{ITEM}"),
-        format!("probe/{ITEM}/{bob}"),
+        format!("probe/{bob}/{bob}"),
+        format!("probe/{bob}/{ITEM}"),
+        format!("probe/{bob}/{ITEM}/{bob}/extra"),
     ] {
         assert_eq!(CommunityKey::parse(key.as_bytes()), None, "{key}");
     }
@@ -503,7 +505,6 @@ fn a_wish_without_a_titled_entry_does_not_resolve() {
 #[test]
 fn a_probe_failure_reads_back_as_itself() {
     let failure = ProbeFailure {
-        item: ITEM,
         blob: ContentHash::from_bytes([0xef; 32]),
         chunk: 41,
         in_a_row: 2,

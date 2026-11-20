@@ -74,12 +74,16 @@ impl std::fmt::Debug for Probes {
     }
 }
 
+/// This node's own failures, by the custodian and the item of the copy that
+/// failed (C61): a failure of one item leaves another's in place.
+type OwnFailures = HashMap<(MemberId, ItemId), ProbeFailure>;
+
 struct Inner {
     sources: ProbeSources,
-    /// This node's own failures recorded, by custodian, read from the
-    /// catalogue at the first probe. Held through a probe, so a check and a
-    /// scheduled probe take turns.
-    mine: AsyncMutex<Option<HashMap<MemberId, ProbeFailure>>>,
+    /// This node's own failures recorded, read from the catalogue at the
+    /// first probe. Held through a probe, so a check and a scheduled probe
+    /// take turns.
+    mine: AsyncMutex<Option<OwnFailures>>,
     counts: Mutex<ProbeCounts>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -223,11 +227,7 @@ impl Inner {
     }
 
     /// Probes `target`, counts how it came out, and records it.
-    async fn make(
-        &self,
-        mine: &mut HashMap<MemberId, ProbeFailure>,
-        target: Target,
-    ) -> Result<Probed, ProbeError> {
+    async fn make(&self, mine: &mut OwnFailures, target: Target) -> Result<Probed, ProbeError> {
         let probed = self
             .sources
             .blobs
@@ -263,9 +263,9 @@ fn refusal(sources: &ProbeSources) -> Option<ProbeError> {
 
 /// This node's own failures, read from the catalogue the first time.
 async fn loaded<'a>(
-    mine: &'a mut Option<HashMap<MemberId, ProbeFailure>>,
+    mine: &'a mut Option<OwnFailures>,
     sources: &ProbeSources,
-) -> Result<&'a mut HashMap<MemberId, ProbeFailure>, SyncError> {
+) -> Result<&'a mut OwnFailures, SyncError> {
     Ok(match mine {
         Some(mine) => mine,
         None => mine.insert(my_failures(&sources.catalogue, sources.me).await?),
@@ -289,7 +289,7 @@ async fn latest_evidence(
             recorded.custodian == member && left_in_window(recorded, window, now).is_some()
         })
         .max_by_key(|recorded| recorded.written)
-        .map(|recorded| Target::recorded(member, &recorded.failure))
+        .map(|recorded| Target::recorded(member, recorded.item, &recorded.failure))
         .filter(|target| sources.availability.holders(&target.item).contains(&member)))
 }
 
@@ -306,11 +306,11 @@ struct Target {
 }
 
 impl Target {
-    /// The chunk a failure of `custodian` was recorded at.
-    fn recorded(custodian: MemberId, failure: &ProbeFailure) -> Self {
+    /// The chunk a failure of `custodian`'s copy of `item` was recorded at.
+    fn recorded(custodian: MemberId, item: ItemId, failure: &ProbeFailure) -> Self {
         Self {
             custodian,
-            item: failure.item,
+            item,
             blob: failure.blob,
             chunk: failure.chunk,
         }
@@ -324,7 +324,7 @@ impl Target {
 /// announces.
 async fn suspect_target(
     sources: &ProbeSources,
-    mine: &HashMap<MemberId, ProbeFailure>,
+    mine: &OwnFailures,
 ) -> Result<Option<Target>, ProbeError> {
     let ProbeSources {
         me,
@@ -336,7 +336,7 @@ async fn suspect_target(
     } = sources;
     let own: Vec<Target> = mine
         .iter()
-        .map(|(custodian, failure)| Target::recorded(*custodian, failure))
+        .map(|((custodian, item), failure)| Target::recorded(*custodian, *item, failure))
         .collect();
     let window = failure_window(&membership.borrow());
     let others = others_failures(
@@ -372,7 +372,7 @@ fn others_failures(
                 && recorded.custodian != me
                 && left_in_window(recorded, window, now).is_some()
         })
-        .map(|recorded| Target::recorded(recorded.custodian, &recorded.failure))
+        .map(|recorded| Target::recorded(recorded.custodian, recorded.item, &recorded.failure))
         .collect()
 }
 
@@ -464,10 +464,11 @@ fn may_probe(
 }
 
 /// Records how probing `target` came out: a failure written, counting those
-/// in a row, or this node's failure of that custodian cleared by a pass.
+/// in a row, or this node's failure of that custodian's copy of that item
+/// cleared by a pass (#200's finding 2: a pass of another item clears none).
 async fn record(
     catalogue: &Catalogue,
-    mine: &mut HashMap<MemberId, ProbeFailure>,
+    mine: &mut OwnFailures,
     target: Target,
     probed: Probed,
 ) -> Result<(), SyncError> {
@@ -479,21 +480,24 @@ async fn record(
     } = target;
     match probed {
         Probed::Passed => {
-            if mine.remove(&custodian).is_some() {
-                catalogue.clear_probe_failure(custodian).await?;
+            if mine.remove(&(custodian, item)).is_some() {
+                catalogue.clear_probe_failure(custodian, item).await?;
             }
         }
         Probed::Failed => {
-            let in_a_row = mine.get(&custodian).map_or(1, |before| before.in_a_row + 1);
+            let in_a_row = mine
+                .get(&(custodian, item))
+                .map_or(1, |before| before.in_a_row + 1);
             tracing::warn!(custodian = %custodian.fmt_short(), %item, %blob, chunk, in_a_row, "a custodian failed a probe");
             let failure = ProbeFailure {
-                item,
                 blob,
                 chunk,
                 in_a_row,
             };
-            catalogue.record_probe_failure(custodian, &failure).await?;
-            mine.insert(custodian, failure);
+            catalogue
+                .record_probe_failure(custodian, item, &failure)
+                .await?;
+            mine.insert((custodian, item), failure);
         }
         Probed::Unreachable => {
             tracing::debug!(custodian = %custodian.fmt_short(), "could not reach a custodian to probe; skipped");
@@ -502,17 +506,14 @@ async fn record(
     Ok(())
 }
 
-/// The failures `me` has recorded, by custodian.
-async fn my_failures(
-    catalogue: &Catalogue,
-    me: MemberId,
-) -> Result<HashMap<MemberId, ProbeFailure>, SyncError> {
+/// The failures `me` has recorded.
+async fn my_failures(catalogue: &Catalogue, me: MemberId) -> Result<OwnFailures, SyncError> {
     Ok(catalogue
         .probe_failures()
         .await?
         .into_iter()
         .filter(|recorded| recorded.prober == me)
-        .map(|recorded| (recorded.custodian, recorded.failure))
+        .map(|recorded| ((recorded.custodian, recorded.item), recorded.failure))
         .collect())
 }
 
@@ -611,9 +612,9 @@ mod tests {
         let window = Duration::from_secs(100);
         let recorded = |custodian, prober, chunk, age: u64| RecordedFailure {
             custodian,
+            item: ItemId::from_bytes([1; 32]),
             prober,
             failure: ProbeFailure {
-                item: ItemId::from_bytes([1; 32]),
                 blob: ContentHash::from_bytes([2; 32]),
                 chunk,
                 in_a_row: 1,

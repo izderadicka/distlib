@@ -23,7 +23,7 @@ use distlib_core::{
     WishStatus, community::CLEARED,
 };
 use distlib_net::Transport;
-use distlib_sync::{Catalogue, CatalogueStorage, catalogue_key};
+use distlib_sync::{Catalogue, CatalogueStorage, RecordedFailure, catalogue_key};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{RelayMode, presets},
@@ -335,19 +335,20 @@ async fn a_rating_forged_in_another_members_name_counts_on_no_node() {
 #[tokio::test]
 async fn a_probe_failure_reaches_every_node_until_its_prober_clears_it() {
     let ([alice, bob, carol], nodes, _logs) = three_founders().await;
+    let item = ItemId::from_bytes([9; 32]);
     let failure = ProbeFailure {
-        item: ItemId::from_bytes([9; 32]),
         blob: ContentHash::from_bytes([7; 32]),
         chunk: 3,
         in_a_row: 1,
     };
     nodes[0]
         .catalogue
-        .record_probe_failure(bob, &failure)
+        .record_probe_failure(bob, item, &failure)
         .await
         .unwrap();
     let forged = CommunityKey::ProbeFailure {
         custodian: carol,
+        item,
         prober: alice,
     };
     nodes[2]
@@ -362,7 +363,16 @@ async fn a_probe_failure_reaches_every_node_until_its_prober_clears_it() {
             let failures = catalogue.probe_failures().await.unwrap();
             failures
                 .iter()
-                .map(|recorded| (recorded.custodian, recorded.prober, recorded.failure))
+                .map(|recorded| {
+                    let RecordedFailure {
+                        custodian,
+                        item,
+                        prober,
+                        failure,
+                        ..
+                    } = *recorded;
+                    (custodian, item, prober, failure)
+                })
                 .collect::<Vec<_>>()
         }
     };
@@ -382,16 +392,21 @@ async fn a_probe_failure_reaches_every_node_until_its_prober_clears_it() {
         .await;
         assert_eq!(
             failures_on(node).await,
-            [(bob, alice, failure)],
+            [(bob, item, alice, failure)],
             "on {name}"
         );
     }
 
-    nodes[0].catalogue.clear_probe_failure(bob).await.unwrap();
+    nodes[0]
+        .catalogue
+        .clear_probe_failure(bob, item)
+        .await
+        .unwrap();
     // Cleared by a newer value, never deleted: a delete an older copy from a
     // peer would undo (C58).
     let alices = CommunityKey::ProbeFailure {
         custodian: bob,
+        item,
         prober: alice,
     };
     assert_eq!(

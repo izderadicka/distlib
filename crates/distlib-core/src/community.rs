@@ -67,10 +67,11 @@ pub enum CommunityKey {
     Wish { wish: WishId, member: MemberId },
     /// `wish_comment/{wish_id}/{member_id}`
     WishComment { wish: WishId, member: MemberId },
-    /// `probe/{custodian}/{prober}`: the prober's probes of the custodian
-    /// fail (phase 5's D12).
+    /// `probe/{custodian}/{item_id}/{prober}`: the prober's probes of the
+    /// custodian's copy of the item fail (phase 5's D12; one per item, C61).
     ProbeFailure {
         custodian: MemberId,
+        item: ItemId,
         prober: MemberId,
     },
 }
@@ -88,7 +89,11 @@ impl CommunityKey {
             } => format!("{BOOKMARK}/{item}/{member}/{bookmark}"),
             Self::Wish { wish, member } => format!("{WISH}/{wish}/{member}"),
             Self::WishComment { wish, member } => format!("{WISH_COMMENT}/{wish}/{member}"),
-            Self::ProbeFailure { custodian, prober } => format!("{PROBE}/{custodian}/{prober}"),
+            Self::ProbeFailure {
+                custodian,
+                item,
+                prober,
+            } => format!("{PROBE}/{custodian}/{item}/{prober}"),
         }
     }
 
@@ -128,6 +133,7 @@ impl CommunityKey {
             },
             PROBE => Self::ProbeFailure {
                 custodian: segment(parts)?,
+                item: segment(parts)?,
                 prober: segment(parts)?,
             },
             _ => return None,
@@ -273,11 +279,11 @@ random_id!(
     "wish id"
 );
 
-/// The latest of a prober's failed probes of one custodian, and how many have
-/// failed in a row (phase 5's D12). When it failed is the entry's own time.
+/// The latest of a prober's failed probes of one custodian's copy of an
+/// item, and how many have failed in a row (phase 5's D12). Which custodian
+/// and item is the key's; when it failed is the entry's own time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeFailure {
-    pub item: ItemId,
     pub blob: ContentHash,
     pub chunk: u64,
     pub in_a_row: u32,
