@@ -237,6 +237,55 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
     }
 }
 
+/// **A creator's copy is probed, and a failure of it stops it counting as
+/// real** (5f-3, #200's finding 3). The founder added the book and the second
+/// member is its one custodian, so the founder's copy is the other obliged
+/// one: the second member probes it, and once its bytes are not the book,
+/// fails it and no longer counts it among the book's real copies.
+///
+/// **Mutation check:** probing custodians only, as before, never probes the
+/// founder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_creators_copy_is_probed_and_a_failure_stops_it_counting_as_real() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let ([founder, second, third], book, blob) =
+        a_book_kept(dir.path(), &settings(), PLEDGES).await;
+
+    until(
+        "the custodian's probes of the creator pass",
+        || async { second.probed() },
+        |probed| probed.passed >= 1,
+    )
+    .await;
+    assert_eq!(second.probed().failed, 0);
+
+    let bytes = founder.bytes_of(blob);
+    let book_bytes = std::fs::read(&bytes).unwrap();
+    std::fs::write(&bytes, vec![0; book_bytes.len()]).unwrap();
+    until(
+        "the custodian fails the creator",
+        || second.failures(),
+        |failures| {
+            failures.iter().any(|recorded| {
+                (recorded.custodian, recorded.prober, recorded.failure.item)
+                    == (founder.id, second.id, book)
+            })
+        },
+    )
+    .await;
+    until(
+        "the creator's copy no longer counts as real",
+        || async { second.runtime.availability().real_holders(&book) },
+        |real| !real.contains(&founder.id),
+    )
+    .await;
+
+    for node in [founder, second, third] {
+        node.runtime.shutdown().await;
+    }
+}
+
 /// The delay before an emergency copy, in the test below: longer than the
 /// custodian takes to fetch the book, so the founder's copy alone before
 /// that is not what makes it.
