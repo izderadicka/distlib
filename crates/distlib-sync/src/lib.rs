@@ -10,6 +10,7 @@ pub mod availability;
 pub mod catalogue;
 pub mod changes;
 pub mod error;
+pub mod protection;
 
 pub use availability::{Availability, Holdings, Sources};
 pub use catalogue::{
@@ -18,4 +19,4 @@ pub use catalogue::{
 };
 pub use changes::{Batch, Changes, LastSync, SyncState};
 pub use error::{Result, SyncError};
-pub use iroh_docs::engine::ProtectCallbackHandler;
+pub use protection::CatalogueProtection;

@@ -34,7 +34,7 @@ use distlib_net::{
     AllowlistHooks, Blobs, BytePacer, Transport, allowlist, blobs::serving_events, build_endpoint,
 };
 use distlib_store::{Projection, SearchIndex, Store};
-use distlib_sync::{Availability, Catalogue, CatalogueStorage, ProtectCallbackHandler, Sources};
+use distlib_sync::{Availability, Catalogue, CatalogueProtection, CatalogueStorage, Sources};
 use iroh::{Endpoint, SecretKey, protocol::Router};
 use iroh_blobs::{
     provider::events::EventSender,
@@ -114,8 +114,8 @@ impl Runtime {
         // because iroh-docs cannot be built without one: an entry's value is a
         // blob. Both are handed the transport the node already has — one
         // endpoint, one gossip, whatever the process grows next.
-        let (protect, protected_by_documents) = ProtectCallbackHandler::new();
-        let (blobs, collections) = open_blobs(config, data_dir, protected_by_documents).await?;
+        let (protect, protected_by_catalogue) = CatalogueProtection::new();
+        let (blobs, collections) = open_blobs(config, data_dir, protected_by_catalogue).await?;
         // One store, two users of it, and the sharing is the point rather
         // than an economy: `library.download` fetching a media blob has to
         // land it in the very store `Catalogue::protocols`' `BlobsProtocol`
