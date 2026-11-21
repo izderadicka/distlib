@@ -5,13 +5,15 @@
 //! be, until the members obliged to keep the item hold enough copies (5e-6),
 //! and then moved to the cache (5e-7). Its fetch takes one of custody's
 //! `max_fetches` places, so many due at once arrive no faster than custody.
+//! An item whose last holder is away keeps how long it has been alone, and is
+//! due once the holder is back (5f-5).
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may
 //! both fetch, or neither until the next look.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -19,6 +21,7 @@ use std::{
 use distlib_consensus::UpgradeRequired;
 use distlib_core::{Event, ItemId, KeepReason, MemberId};
 use distlib_store::StoreError;
+use distlib_sync::availability::SoleHolder;
 use tokio::{
     sync::{
         Notify,
@@ -54,19 +57,25 @@ struct AloneItems(HashMap<ItemId, Alone>);
 
 impl AloneItems {
     /// Brings the items up to those alone `now`, and returns the ones due:
-    /// alone for `delay` since they last had more than one copy, and not
-    /// being copied. One being copied stays, alone or not.
+    /// alone for `delay` since they last had more than one copy, not being
+    /// copied, and with their holder online. One whose holder is `away`
+    /// keeps its time, and one being copied stays, alone or not (5f-5).
     fn update(
         &mut self,
-        alone_now: impl IntoIterator<Item = ItemId>,
+        alone_now: &HashSet<ItemId>,
+        away: impl IntoIterator<Item = ItemId>,
         now: Instant,
         delay: Duration,
     ) -> Vec<ItemId> {
         let mut previous = std::mem::take(&mut self.0);
         let mut alone: HashMap<ItemId, Alone> = alone_now
-            .into_iter()
-            .map(|item| (item, previous.remove(&item).unwrap_or(Alone::Since(now))))
+            .iter()
+            .map(|item| (*item, previous.remove(item).unwrap_or(Alone::Since(now))))
             .collect();
+        alone.extend(
+            away.into_iter()
+                .filter_map(|item| Some((item, previous.remove(&item)?))),
+        );
         alone.extend(
             previous
                 .into_iter()
@@ -80,7 +89,7 @@ impl AloneItems {
                 {
                     *alone = Alone::Due;
                 }
-                (*alone == Alone::Due).then_some(*item)
+                (*alone == Alone::Due && alone_now.contains(item)).then_some(*item)
             })
             .collect();
         self.0 = alone;
@@ -214,16 +223,26 @@ impl Emergency {
     async fn look(&mut self, copies: &mut JoinSet<(ItemId, Result<(), KeepError>)>) {
         self.move_unneeded_copies_to_cache().await;
         let online = self.keeper.availability.online().borrow().clone();
-        let holders: HashMap<ItemId, MemberId> = self
+        let mut holders: HashMap<ItemId, MemberId> = HashMap::new();
+        let mut away = Vec::new();
+        for (item, holder) in self
             .keeper
             .availability
             .sole_holders(&online)
             .into_iter()
             .filter(|(item, _)| !self.keeper.holdings.holds(*item))
-            .collect();
+        {
+            match holder {
+                SoleHolder::Online(holder) => {
+                    holders.insert(item, holder);
+                }
+                SoleHolder::Away => away.push(item),
+            }
+        }
+        let alone_now = holders.keys().copied().collect();
         let due = self
             .alone
-            .update(holders.keys().copied(), Instant::now(), self.delay());
+            .update(&alone_now, away, Instant::now(), self.delay());
         for item in due {
             let holder = holders[&item];
             match self.is_mine_to_copy(item, holder, &online).await {
@@ -319,41 +338,109 @@ mod tests {
     #[test]
     fn an_item_is_due_once_alone_for_the_delay() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
-        assert!(alone.update([item(1)], start, DELAY).is_empty());
+        assert!(
+            alone
+                .update(&HashSet::from([item(1)]), [], start, DELAY)
+                .is_empty()
+        );
         assert_eq!(alone.next_due(DELAY), Some(start + DELAY));
-        assert!(alone.update([item(1)], start + DELAY / 2, DELAY).is_empty());
-        assert_eq!(alone.update([item(1)], start + DELAY, DELAY), [item(1)]);
+        assert!(
+            alone
+                .update(&HashSet::from([item(1)]), [], start + DELAY / 2, DELAY)
+                .is_empty()
+        );
+        assert_eq!(
+            alone.update(&HashSet::from([item(1)]), [], start + DELAY, DELAY),
+            [item(1)]
+        );
         assert_eq!(alone.next_due(DELAY), None);
     }
 
     #[test]
     fn a_second_copy_starts_the_delay_over() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
-        alone.update([item(1)], start, DELAY);
-        alone.update([], start + DELAY / 2, DELAY);
-        assert!(alone.update([item(1)], start + DELAY, DELAY).is_empty());
+        alone.update(&HashSet::from([item(1)]), [], start, DELAY);
+        alone.update(&HashSet::from([]), [], start + DELAY / 2, DELAY);
+        assert!(
+            alone
+                .update(&HashSet::from([item(1)]), [], start + DELAY, DELAY)
+                .is_empty()
+        );
         assert_eq!(alone.next_due(DELAY), Some(start + DELAY * 2));
+    }
+
+    /// #200's finding 1, reversed (5f-5): at a look made while the last
+    /// holder is away the item keeps its time, and it is due at the first
+    /// look after the holder is back once the delay has passed.
+    #[test]
+    fn a_last_holder_away_at_a_look_keeps_the_items_time() {
+        let (mut alone, start) = (AloneItems::default(), Instant::now());
+        let one = HashSet::from([item(1)]);
+        assert!(alone.update(&one, [], start, DELAY).is_empty());
+        assert!(
+            alone
+                .update(&HashSet::new(), [item(1)], start + DELAY / 2, DELAY)
+                .is_empty()
+        );
+        assert_eq!(alone.update(&one, [], start + DELAY, DELAY), [item(1)]);
+
+        // Away when the delay passes: not due until it is back.
+        let mut alone = AloneItems::default();
+        alone.update(&one, [], start, DELAY);
+        assert!(
+            alone
+                .update(&HashSet::new(), [item(1)], start + DELAY * 2, DELAY)
+                .is_empty(),
+            "nobody online to copy it from"
+        );
+        assert_eq!(alone.next_due(DELAY), None, "no look until it is back");
+        assert_eq!(alone.update(&one, [], start + DELAY * 2, DELAY), [item(1)]);
+    }
+
+    #[test]
+    fn an_item_away_that_was_not_alone_is_not_timed() {
+        let (mut alone, start) = (AloneItems::default(), Instant::now());
+        alone.update(&HashSet::new(), [item(1)], start, DELAY);
+        assert_eq!(alone.next_due(DELAY), None);
+        assert!(
+            alone
+                .update(&HashSet::from([item(1)]), [], start + DELAY, DELAY)
+                .is_empty(),
+            "its time starts when it is seen alone"
+        );
     }
 
     #[test]
     fn an_item_being_copied_is_not_due_and_a_failed_copy_is() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
-        alone.update([item(1), item(2)], start, DELAY);
-        alone.update([item(1), item(2)], start + DELAY, DELAY);
+        alone.update(&HashSet::from([item(1), item(2)]), [], start, DELAY);
+        alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
         alone.copying(item(1));
-        assert_eq!(alone.update([item(2)], start + DELAY, DELAY), [item(2)]);
-        // Alone again while still being copied: not a second copy.
-        alone.update([item(1), item(2)], start + DELAY, DELAY);
         assert_eq!(
-            alone.update([item(1), item(2)], start + DELAY * 2, DELAY),
+            alone.update(&HashSet::from([item(2)]), [], start + DELAY, DELAY),
+            [item(2)]
+        );
+        // Alone again while still being copied: not a second copy.
+        alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
+        assert_eq!(
+            alone.update(
+                &HashSet::from([item(1), item(2)]),
+                [],
+                start + DELAY * 2,
+                DELAY
+            ),
             [item(2)]
         );
         alone.copied(item(1), false);
-        let mut due = alone.update([item(1), item(2)], start + DELAY, DELAY);
+        let mut due = alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
         due.sort_unstable();
         assert_eq!(due, [item(1), item(2)]);
         alone.copying(item(1));
         alone.copied(item(1), true);
-        assert!(alone.update([], start + DELAY, DELAY).is_empty());
+        assert!(
+            alone
+                .update(&HashSet::from([]), [], start + DELAY, DELAY)
+                .is_empty()
+        );
     }
 }

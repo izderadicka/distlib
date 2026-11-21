@@ -36,6 +36,7 @@ mod statement;
 
 pub use ask_order::ask_order;
 pub use heartbeat::{Availability, Sources, topic_for};
+pub use holders::SoleHolder;
 
 /// The items every one of whose files is complete in this node's store.
 ///
