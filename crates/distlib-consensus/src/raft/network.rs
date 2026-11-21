@@ -223,7 +223,7 @@ impl RaftProtocol {
 
     async fn answer(&self, raft: &Raft<TypeConfig>, request: Request) -> Response {
         match request {
-            Request::Retired => Response::Retired(self.seat.raft().is_none()),
+            Request::Retired => Response::Retired(self.seat.has_retired()),
             Request::ForgetMe => Response::Forgotten(false),
             Request::AppendEntries(rpc) => {
                 let response = raft.append_entries(rpc).await;
@@ -389,7 +389,7 @@ impl ProtocolHandler for RaftProtocol {
             );
             let may_query = self.may_query_retirement(peer);
             let response = match request {
-                Request::Retired if may_query => Response::Retired(self.seat.raft().is_none()),
+                Request::Retired if may_query => Response::Retired(self.seat.has_retired()),
                 Request::ForgetMe if may_query => {
                     Response::Forgotten(self.forget_retired(peer).await)
                 }
