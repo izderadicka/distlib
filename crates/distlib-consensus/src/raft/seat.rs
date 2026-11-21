@@ -32,7 +32,19 @@ use crate::raft::types::TypeConfig;
 /// for the same reason: the protocols are built before the answer is known and
 /// must see it change.
 #[derive(Clone, Default)]
-pub(crate) struct Seat(Arc<Mutex<Option<Raft<TypeConfig>>>>);
+pub(crate) struct Seat(Arc<Mutex<SeatState>>);
+
+/// Whether a node votes, and why not when it does not.
+#[derive(Default)]
+enum SeatState {
+    /// It does not vote: it never did, or it stood down once the log said so.
+    #[default]
+    Empty,
+    Taken(Raft<TypeConfig>),
+    /// It is shutting down. Not a retirement: whatever the log says of it,
+    /// this node has not applied it (#208).
+    Closed,
+}
 
 impl Seat {
     /// An empty seat: this node does not vote.
@@ -42,7 +54,7 @@ impl Seat {
 
     /// A seat already filled, for a node that starts up as a voter.
     pub(crate) fn holding(raft: Raft<TypeConfig>) -> Self {
-        Self(Arc::new(Mutex::new(Some(raft))))
+        Self(Arc::new(Mutex::new(SeatState::Taken(raft))))
     }
 
     /// The Raft, cloned out.
@@ -54,12 +66,21 @@ impl Seat {
     /// [`distlib_net::Connections`] documents itself against — or force an
     /// async mutex that would serialise every RPC this node answers.
     pub(crate) fn raft(&self) -> Option<Raft<TypeConfig>> {
-        self.lock().clone()
+        match &*self.lock() {
+            SeatState::Taken(raft) => Some(raft.clone()),
+            SeatState::Empty | SeatState::Closed => None,
+        }
     }
 
     /// Whether this node votes.
     pub(crate) fn is_taken(&self) -> bool {
-        self.lock().is_some()
+        matches!(*self.lock(), SeatState::Taken(_))
+    }
+
+    /// Whether this node has stood down as a voter, which a leader may take
+    /// as its retirement done: not while it shuts down (#208).
+    pub(crate) fn has_retired(&self) -> bool {
+        matches!(*self.lock(), SeatState::Empty)
     }
 
     /// Sits down: this node votes from now on.
@@ -67,7 +88,7 @@ impl Seat {
     /// Replaces whatever was there, which is the only sane meaning: a seat is
     /// emptied by [`Self::vacate`] before it is filled again.
     pub(crate) fn take(&self, raft: Raft<TypeConfig>) {
-        *self.lock() = Some(raft);
+        *self.lock() = SeatState::Taken(raft);
     }
 
     /// Stands up: this node stops voting, and hands back the Raft it was
@@ -79,7 +100,20 @@ impl Seat {
     /// seated would answer RPCs with an error for as long as the shutdown
     /// took, which reads to a peer as a broken voter rather than as no voter.
     pub(crate) fn vacate(&self) -> Option<Raft<TypeConfig>> {
-        self.lock().take()
+        self.replace(SeatState::Empty)
+    }
+
+    /// Closes the seat for a shutdown, handing back the Raft as
+    /// [`Self::vacate`] does; but the node does not count as retired.
+    pub(crate) fn close(&self) -> Option<Raft<TypeConfig>> {
+        self.replace(SeatState::Closed)
+    }
+
+    fn replace(&self, state: SeatState) -> Option<Raft<TypeConfig>> {
+        match std::mem::replace(&mut *self.lock(), state) {
+            SeatState::Taken(raft) => Some(raft),
+            SeatState::Empty | SeatState::Closed => None,
+        }
     }
 
     /// A poison-tolerant lock.
@@ -88,7 +122,7 @@ impl Seat {
     /// `Arc` and nothing else. A poisoned lock would mean an unrelated panic,
     /// and refusing to answer afterwards would turn that into a node that has
     /// silently stopped taking part in consensus.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Raft<TypeConfig>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SeatState> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

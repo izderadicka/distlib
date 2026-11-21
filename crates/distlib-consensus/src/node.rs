@@ -1316,8 +1316,9 @@ impl MembershipNode {
         // would let it finish more tidily.
         stop(&self.follow);
 
-        // Out of its seat, so that a second call has nothing to stop.
-        if let Some(raft) = self.seat.vacate()
+        // Out of its seat, so that a second call has nothing to stop; closed,
+        // not vacated, so a leader asking does not take this for retirement.
+        if let Some(raft) = self.seat.close()
             && let Err(error) = raft.shutdown().await
         {
             tracing::warn!(%error, "raft did not shut down cleanly");

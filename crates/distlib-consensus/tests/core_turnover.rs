@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::too_many_lines)]
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{MemberId, RawMemberId};
@@ -438,6 +438,101 @@ async fn a_voter_away_during_a_promotion_follows_the_promoted_leader() {
     .await;
 
     for peer in peers.iter().chain([&c, &d]) {
+        peer.shutdown().await;
+    }
+}
+
+/// Whether `target` answers `caller`'s retirement query with "retired", asked
+/// over the wire as the leader asks it.
+async fn says_retired(caller: &Peer, target: &Peer) -> bool {
+    let connection = caller
+        .node
+        .endpoint()
+        .connect(
+            target.addr.to_endpoint_addr(target.id).unwrap(),
+            distlib_net::alpn::RAFT,
+        )
+        .await
+        .unwrap();
+    let (mut send, mut receive) = connection.open_bi().await.unwrap();
+    // The golden encodings of Request::Retired and Response::Retired.
+    send.write_all(&[3]).await.unwrap();
+    send.finish().unwrap();
+    let answer = receive.read_to_end(16).await.unwrap();
+    assert!(answer == [3, 0] || answer == [3, 1], "{answer:?}");
+    answer[1] == 1
+}
+
+/// #208, reversed (5g-1): a voter shutting down has stopped consensus while
+/// its endpoint still answers. It has applied no removal, so it does not say
+/// it has retired.
+#[tokio::test]
+async fn a_voter_shutting_down_does_not_say_it_has_retired() {
+    let peers = a_founded_trio().await;
+    let (b, c) = (&peers[1], &peers[2]);
+    assert!(!says_retired(b, c).await);
+
+    c.node.stop_consensus().await;
+    assert!(!says_retired(b, c).await, "shutdown taken for retirement");
+
+    for peer in peers {
+        peer.shutdown().await;
+    }
+}
+
+/// #208, reversed (5g-1): C's removal commits while C is shutting down, so C
+/// never applies it. The survivors keep replicating to it, and once restarted
+/// it follows its removal and stands down, rather than staying seated as a
+/// voter of the old core.
+#[tokio::test]
+async fn a_voter_removed_while_shutting_down_stands_down_after_a_restart() {
+    let mut peers = a_founded_trio().await;
+    let c = peers.pop().unwrap();
+    let (a, b) = (&peers[0], &peers[1]);
+
+    c.node.stop_consensus().await;
+    let proposal = a
+        .node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(a.id, a.addr.clone()), (b.id, b.addr.clone())],
+            },
+            &a.secret,
+        )
+        .await
+        .unwrap();
+    b.node
+        .propose(MembershipEvent::Approved { proposal }, &b.secret)
+        .await
+        .unwrap();
+    let a_and_b = BTreeSet::from([RawMemberId::from(a.id), RawMemberId::from(b.id)]);
+    until_upto(PATIENTLY, "a and b vote alone", || {
+        uniform_voters(a).as_ref() == Some(&a_and_b)
+    })
+    .await;
+    assert!(c.node.membership().is_core(&c.id), "c applied nothing");
+    // The leader asks a retiring voter every 2 s whether it has retired;
+    // three times over, it has been told no and still replicates to c.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    for peer in [a, b] {
+        let raft = peer.node.raft().unwrap();
+        let knows_c = raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .nodes()
+            .any(|(id, _)| *id == RawMemberId::from(c.id));
+        assert!(knows_c, "c was forgotten before it applied its removal");
+    }
+
+    let c = c.restart_in_place(vec![a.id, b.id]).await;
+    until_upto(PATIENTLY, "c follows its removal and stands down", || {
+        !c.node.membership().is_core(&c.id) && c.node.raft().is_none()
+    })
+    .await;
+
+    c.shutdown().await;
+    for peer in peers {
         peer.shutdown().await;
     }
 }

@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -870,7 +870,7 @@ fails before the fix and passes after; #200 is closed once 5f-1 lands. Findings 
 lose an item or count a lost copy as real, so v1 fixes them, most dangerous first; finding 1 is
 fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward. 5f-6, found on
 #207's CI, goes first: it makes custody tests flake. 5f-7, the flakes, goes after 5f-2 and before
-5f-3 (Ivan). The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f.
+5f-3 (Ivan). The designs below are decided (Ivan). The end-of-phase mutation pass follows 5f, and 5g (P5-69).
 
 - **5f-1 — the plan.** This section, its C-items and P5-64.
 - **5f-2 — an item is its born files (#200 finding 4).** One `role: content` record more than the
@@ -963,6 +963,37 @@ fixed where it is cheap; finding 6 goes with 4, and finding 5 is carried forward
     way. Two process tests timed out together on a macOS runner whose in-process tests took
     up to a minute: their bound is 60 s, as the in-process tests' is, and a failed process
     test prints every node's log.
+
+### 5g — the reviews in #208, #210 and #211 (3 PRs)
+
+Three reviews filed on 2026-11-16, each with tests that pass by asserting the defect, on the
+branches `review/raft-nov15` and `review/raft-secondpass-nov16`. Each was checked against `ad0acdf`
+and holds. Each fix takes its test, reversed, as 5f did (Ivan: fix all three, before the
+end-of-phase mutation pass, which now follows 5g; P5-69).
+
+- **5g-1 — a voter shutting down does not say it has retired (#208).** Shutdown empties the Raft
+  seat while the endpoint still answers, and the retirement query reads an empty seat as retired:
+  a voter removed while it shuts down is forgotten by the leader before it applies its removal,
+  and comes back seated in the old core, which nobody replicates to. **Decided:** the seat is
+  empty, taken or closed; shutdown closes it, and only an empty one, stood down because the log
+  said so, answers retired. **Acceptance:** #208's two tests, reversed: the query says no during a
+  shutdown; a voter removed then is still replicated to, and after a restart stands down.
+  *Done:* `Seat`'s `SeatState`; `a_voter_shutting_down_does_not_say_it_has_retired` and
+  `a_voter_removed_while_shutting_down_stands_down_after_a_restart`.
+- **5g-2 — an old epoch's heartbeat is not taken for news (#210).** A beat is refused only when
+  its epoch is the one held and its seq is no newer; any other epoch is taken as a restart, so a
+  delayed beat of the epoch a restart replaced is taken again: it brings back holdings the member
+  no longer has, or its goodbye takes the restarted member offline. **Decided:** a receiver
+  remembers each member's last few epochs a restart replaced and refuses their beats. No wire
+  change. A delayed old beat that reaches a receiver which restarted since is still taken; the
+  member's next beat puts it right. **Acceptance:** #210's two tests, reversed.
+- **5g-3 — a node run by a newer build before does not vote (#211).** The announcer only ever
+  raises a member's `protocol_max`, so a node rolled back keeps the newer build's, and a raise the
+  rolled-back voter cannot speak passes the leader's check. **Decided:** no rollback past a
+  protocol this node has said it speaks: a node whose own record says more than its build stops as
+  "upgrade required" (5d-8), at a start and when the record changes, so it never votes. Local, so
+  not in the fold. **Acceptance:** #211's test, reversed: the rolled-back node does not vote, and
+  says why.
 
 ---
 
