@@ -63,12 +63,15 @@ struct Heard {
 
 impl Heard {
     /// Whether `beat` is newer than this one: a higher seq within the epoch,
-    /// or an epoch never seen before, which is a restart.
+    /// or another epoch, which is a restart — unless a restart replaced it
+    /// and the epoch that did is still believed. Epochs are not ordered, so
+    /// an old epoch first heard after the current one replaces it; the
+    /// current one is taken back once that stale beat runs out.
     fn is_superseded_by(&self, beat: &Heartbeat) -> bool {
         if beat.epoch == self.epoch {
             beat.seq > self.seq
         } else {
-            !self.replaced_epochs.contains(&beat.epoch)
+            self.until.is_none() || !self.replaced_epochs.contains(&beat.epoch)
         }
     }
 
@@ -105,9 +108,9 @@ impl Online {
     /// Refused: one from this node, one from somebody `is_member` does not
     /// admit — a relaying neighbour may not have applied an expulsion yet,
     /// and the connection-level allowlist checks only that neighbour — and
-    /// one no newer than what is held: an epoch never seen is a restart and
-    /// always news, within an epoch only a higher `seq` is, and one of the
-    /// epochs a restart replaced never is.
+    /// one no newer than what is held: within an epoch only a higher `seq`
+    /// is news, and another epoch is a restart unless a restart replaced it
+    /// and the member is still online.
     pub(super) fn heard(
         &mut self,
         beat: &Heartbeat,
@@ -288,6 +291,24 @@ mod tests {
         assert!(!online.heard(&beat(&bob, 10, 2, 1), start, anyone));
         assert!(!online.heard(&beat(&bob, 20, 2, 1), start, anyone));
         assert!(online.heard(&beat(&bob, 30, 2, 1), start, anyone));
+    }
+
+    /// A receiver that restarted hears the current epoch first, then a beat
+    /// of the old one, which it cannot tell from a restart: the current
+    /// epoch is taken back once that stale beat runs out.
+    #[test]
+    fn an_old_epoch_heard_after_the_current_one_gives_way_when_it_runs_out() {
+        let bob = SecretKey::generate();
+        let mut online = table();
+        let start = Instant::now();
+
+        online.heard(&beat(&bob, 20, 1, 1), start, anyone);
+        assert!(online.heard(&beat(&bob, 10, 5, 1), start, anyone));
+        assert!(!online.heard(&beat(&bob, 20, 2, 1), start + SECOND, anyone));
+        online.expire(start + 3 * SECOND);
+        assert!(online.heard(&beat(&bob, 20, 3, 1), start + 3 * SECOND, anyone));
+        assert_eq!(online.online(), BTreeSet::from([id(&bob)]));
+        assert!(!online.heard(&beat(&bob, 10, 6, 1), start + 3 * SECOND, anyone));
     }
 
     /// Only the last few are remembered: the oldest is forgotten.
