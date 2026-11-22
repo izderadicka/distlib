@@ -758,6 +758,11 @@ fn take_in(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // test code: a panic on a broken invariant is the point
+
+    use distlib_consensus::{MemberProfile, MembershipEvent, SignedEvent, Timestamp};
+    use distlib_core::NodeAddr;
+
     use super::*;
     use crate::availability::online::ttl;
 
@@ -911,5 +916,125 @@ mod tests {
             Some(Event::AvailabilityChanged { member_id: bob }),
             "what bob holds is known now"
         );
+    }
+
+    /// A node that hears one member's beats, as the service would.
+    struct Receiver {
+        member_key: SecretKey,
+        membership: MembershipState,
+        online: Online,
+        holders: Holders,
+        directory: Directory,
+        events: broadcast::Sender<Event>,
+    }
+
+    impl Receiver {
+        /// A group of the member and this node.
+        fn new() -> Self {
+            let member_key = SecretKey::generate();
+            let me = SecretKey::generate();
+            let founders = [&member_key, &me]
+                .into_iter()
+                .map(|key| {
+                    let profile = MemberProfile {
+                        member_id: MemberId::from(key.public()),
+                        display_name: "founder".into(),
+                    };
+                    (profile, NodeAddr::default())
+                })
+                .collect();
+            let founded =
+                MembershipEvent::found(founders, Default::default(), Timestamp::from_millis(1))
+                    .unwrap();
+            let signed =
+                SignedEvent::sign(&member_key, founded, Timestamp::from_millis(1), 0).unwrap();
+            let mut membership = MembershipState::default();
+            membership.apply(1, &signed).unwrap();
+            Self {
+                member_key,
+                membership,
+                online: Online::new(MemberId::from(me.public())),
+                holders: Holders::default(),
+                directory: Directory::default(),
+                events: broadcast::channel(16).0,
+            }
+        }
+
+        fn member(&self) -> MemberId {
+            MemberId::from(self.member_key.public())
+        }
+
+        /// The member's beat, holding `item` if given.
+        fn beat(&self, epoch: u64, seq: u64, item: Option<ItemId>, leaving: bool) -> Vec<u8> {
+            let added: Vec<_> = item.into_iter().collect();
+            let beat = Heartbeat {
+                address: SignedAddress::sign(&self.member_key, NodeAddr::default(), 1).unwrap(),
+                epoch,
+                seq,
+                interval_secs: 60,
+                leaving,
+                holdings: distlib_core::Holdings {
+                    count: added.len() as u64,
+                    added,
+                    ..Default::default()
+                },
+            };
+            let group = self.membership.group_id().unwrap();
+            SignedHeartbeat::sign(&self.member_key, &group, beat)
+                .unwrap()
+                .encode()
+                .unwrap()
+        }
+
+        fn hear(&mut self, encoded: &[u8]) {
+            let hearing = Hearing {
+                online: &mut self.online,
+                holders: &mut self.holders,
+                directory: &self.directory,
+                group: &self.membership.group_id().unwrap(),
+                membership: &self.membership,
+                events: &self.events,
+            };
+            hear(hearing, encoded).unwrap();
+        }
+
+        fn member_is_online(&self) -> bool {
+            self.online.online().contains(&self.member())
+        }
+    }
+
+    /// #210: a beat sent before a restart, arriving after it, does not bring
+    /// back what the restarted member no longer holds.
+    #[test]
+    fn a_delayed_beat_of_a_replaced_epoch_brings_back_no_holdings() {
+        let mut receiver = Receiver::new();
+        let item = ItemId::from_bytes([7; 32]);
+        let first = receiver.beat(10, 1, Some(item), false);
+        let delayed = receiver.beat(10, 2, Some(item), false);
+        let restarted_empty = receiver.beat(20, 1, None, false);
+
+        receiver.hear(&first);
+        assert_eq!(receiver.holders.real_holders(&item), [receiver.member()]);
+        receiver.hear(&restarted_empty);
+        assert!(receiver.holders.real_holders(&item).is_empty());
+        receiver.hear(&delayed);
+        assert!(receiver.member_is_online());
+        assert!(receiver.holders.real_holders(&item).is_empty());
+    }
+
+    /// #210: a goodbye sent before a restart, arriving after it, does not take
+    /// the restarted member offline.
+    #[test]
+    fn a_delayed_goodbye_of_a_replaced_epoch_keeps_the_member_online() {
+        let mut receiver = Receiver::new();
+        let first = receiver.beat(10, 1, None, false);
+        let goodbye = receiver.beat(10, 2, None, true);
+        let restarted = receiver.beat(20, 1, None, false);
+
+        receiver.hear(&first);
+        receiver.hear(&restarted);
+        assert!(receiver.member_is_online());
+        receiver.hear(&goodbye);
+        assert!(receiver.member_is_online());
     }
 }

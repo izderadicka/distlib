@@ -6,7 +6,7 @@
 //! is asked of the membership as it is at that moment, never copied here.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     time::Duration,
 };
 
@@ -20,6 +20,10 @@ use tokio::time::Instant;
 /// receives more beats the larger the group grows. Fine for the thousands §2
 /// aims at; a group far larger would need presence reworked (C32).
 pub(super) const MAX_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
+/// How many of a member's epochs that restarts replaced are remembered, so a
+/// beat of one, delayed across the restart, is refused (#210).
+const REPLACED_EPOCHS_KEPT: usize = 4;
 
 /// How long a beat may ask to be believed for, whatever it says: a sender
 /// cannot drop out between two packets, and the longest is three of the
@@ -44,7 +48,7 @@ pub(super) struct Online {
 }
 
 /// The newest beat accepted from one member.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Heard {
     epoch: u64,
     seq: u64,
@@ -52,6 +56,37 @@ struct Heard {
     /// left, or its beats stopped. Kept rather than forgotten, so a late beat
     /// older than whatever took it offline cannot bring it back.
     until: Option<Instant>,
+    /// The epochs restarts replaced, oldest first, at most
+    /// [`REPLACED_EPOCHS_KEPT`].
+    replaced_epochs: VecDeque<u64>,
+}
+
+impl Heard {
+    /// Whether `beat` is newer than this one: a higher seq within the epoch,
+    /// or another epoch, which is a restart — unless a restart replaced it
+    /// and the epoch that did is still believed. Epochs are not ordered, so
+    /// an old epoch first heard after the current one replaces it; the
+    /// current one is taken back once that stale beat runs out.
+    fn is_superseded_by(&self, beat: &Heartbeat) -> bool {
+        if beat.epoch == self.epoch {
+            beat.seq > self.seq
+        } else {
+            self.until.is_none() || !self.replaced_epochs.contains(&beat.epoch)
+        }
+    }
+
+    /// Takes in `beat`, newer than this one.
+    fn replace_with(&mut self, beat: &Heartbeat, until: Option<Instant>) {
+        if beat.epoch != self.epoch {
+            if self.replaced_epochs.len() == REPLACED_EPOCHS_KEPT {
+                self.replaced_epochs.pop_front();
+            }
+            self.replaced_epochs.push_back(self.epoch);
+        }
+        self.epoch = beat.epoch;
+        self.seq = beat.seq;
+        self.until = until;
+    }
 }
 
 impl Online {
@@ -73,8 +108,9 @@ impl Online {
     /// Refused: one from this node, one from somebody `is_member` does not
     /// admit — a relaying neighbour may not have applied an expulsion yet,
     /// and the connection-level allowlist checks only that neighbour — and
-    /// one no newer than what is held: a new `epoch` is a restart and always
-    /// news, within an epoch only a higher `seq` is.
+    /// one no newer than what is held: within an epoch only a higher `seq`
+    /// is news, and another epoch is a restart unless a restart replaced it
+    /// and the member is still online.
     pub(super) fn heard(
         &mut self,
         beat: &Heartbeat,
@@ -85,22 +121,22 @@ impl Online {
         if member == self.me || !is_member(&member) {
             return false;
         }
-        if self
-            .heard
-            .get(&member)
-            .is_some_and(|held| held.epoch == beat.epoch && beat.seq <= held.seq)
-        {
-            return false;
-        }
         let until = (!beat.leaving).then(|| now + ttl(beat.interval_secs));
-        self.heard.insert(
-            member,
-            Heard {
-                epoch: beat.epoch,
-                seq: beat.seq,
-                until,
-            },
-        );
+        match self.heard.get_mut(&member) {
+            Some(held) if !held.is_superseded_by(beat) => return false,
+            Some(held) => held.replace_with(beat, until),
+            None => {
+                self.heard.insert(
+                    member,
+                    Heard {
+                        epoch: beat.epoch,
+                        seq: beat.seq,
+                        until,
+                        replaced_epochs: VecDeque::new(),
+                    },
+                );
+            }
+        }
         true
     }
 
@@ -239,6 +275,59 @@ mod tests {
 
         online.heard(&beat(&bob, 1, 5, 1), start, anyone);
         assert!(online.heard(&beat(&bob, 2, 1, 1), start, anyone));
+    }
+
+    /// Gossip does not keep order, so a beat sent before a restart can arrive
+    /// after it (#210).
+    #[test]
+    fn a_beat_of_an_epoch_a_restart_replaced_is_not_news() {
+        let bob = SecretKey::generate();
+        let mut online = table();
+        let start = Instant::now();
+
+        online.heard(&beat(&bob, 10, 1, 1), start, anyone);
+        online.heard(&beat(&bob, 20, 1, 1), start, anyone);
+        online.heard(&beat(&bob, 30, 1, 1), start, anyone);
+        assert!(!online.heard(&beat(&bob, 10, 2, 1), start, anyone));
+        assert!(!online.heard(&beat(&bob, 20, 2, 1), start, anyone));
+        assert!(online.heard(&beat(&bob, 30, 2, 1), start, anyone));
+    }
+
+    /// A receiver that restarted hears the current epoch first, then a beat
+    /// of the old one, which it cannot tell from a restart: the current
+    /// epoch is taken back once that stale beat runs out.
+    #[test]
+    fn an_old_epoch_heard_after_the_current_one_gives_way_when_it_runs_out() {
+        let bob = SecretKey::generate();
+        let mut online = table();
+        let start = Instant::now();
+
+        online.heard(&beat(&bob, 20, 1, 1), start, anyone);
+        assert!(online.heard(&beat(&bob, 10, 5, 1), start, anyone));
+        assert!(!online.heard(&beat(&bob, 20, 2, 1), start + SECOND, anyone));
+        online.expire(start + 3 * SECOND);
+        assert!(online.heard(&beat(&bob, 20, 3, 1), start + 3 * SECOND, anyone));
+        assert_eq!(online.online(), BTreeSet::from([id(&bob)]));
+        assert!(!online.heard(&beat(&bob, 10, 6, 1), start + 3 * SECOND, anyone));
+    }
+
+    /// Only the last few are remembered: the oldest is forgotten.
+    #[test]
+    fn the_last_four_replaced_epochs_are_remembered() {
+        let bob = SecretKey::generate();
+        let mut online = table();
+        let start = Instant::now();
+
+        for epoch in 1..=6 {
+            online.heard(&beat(&bob, epoch, 1, 1), start, anyone);
+        }
+        assert!(online.heard(&beat(&bob, 1, 2, 1), start, anyone));
+        for epoch in 3..=6 {
+            assert!(
+                !online.heard(&beat(&bob, epoch, 2, 1), start, anyone),
+                "{epoch}"
+            );
+        }
     }
 
     #[test]
