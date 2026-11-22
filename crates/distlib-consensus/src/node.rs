@@ -329,8 +329,10 @@ fn starts_as_core(
     me: MemberId,
     core: &[(MemberId, NodeAddr)],
 ) -> bool {
-    // A node its group has passed cannot apply what the group decides (#183).
-    if follower::behind_the_group(state_machine).is_some() {
+    // A node its group has passed cannot apply what the group decides (#183),
+    // and one that said it speaks more than its build could vote a raise in
+    // that it cannot follow (#211).
+    if follower::needs_an_upgrade(state_machine, me).is_some() {
         return false;
     }
     if state_machine.promotion().is_some() {
@@ -355,9 +357,10 @@ fn starts_as_core(
 /// moment, not once a fetch has come back.
 fn upgrade_required_from_storage(
     state_machine: &StateMachineStore,
+    me: MemberId,
 ) -> watch::Sender<Option<UpgradeRequired>> {
     let (upgrade_required, _) = watch::channel(None);
-    if let Some(why) = follower::behind_the_group(state_machine) {
+    if let Some(why) = follower::needs_an_upgrade(state_machine, me) {
         follower::stop_until_upgraded(&upgrade_required, why);
     }
     upgrade_required
@@ -716,7 +719,7 @@ impl MembershipNode {
         let (addresses, memberlog) =
             install_address_book_and_client(&endpoint, &connections, &directory, &core)?;
 
-        let upgrade_required = upgrade_required_from_storage(&state_machine);
+        let upgrade_required = upgrade_required_from_storage(&state_machine, id);
         let is_core = starts_as_core(&state_machine, id, &core);
 
         // The gossip listener sends on this and the follow loop waits on it.

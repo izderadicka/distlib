@@ -506,8 +506,8 @@ impl Pins {
     /// behind, and when versions disagree, more copies are kept (5d-8). The
     /// item waits in `Releasing` for the upgraded build to decide.
     async fn release_if_safe(&mut self, item: ItemId) {
-        let behind_the_group = self.upgrade_required.borrow().is_some();
-        if behind_the_group
+        let waits_for_an_upgrade = self.upgrade_required.borrow().is_some();
+        if waits_for_an_upgrade
             || (self.keeper.holdings.holds(item) && !self.enough_copies_elsewhere(item).await)
         {
             self.pins.insert(item, Pin::Releasing);

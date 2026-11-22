@@ -101,6 +101,8 @@
     Upgrade required:
     {#if upgradeRequired.reason === "protocol"}
       the group speaks protocol {upgradeRequired.group}, which this node's build does not.
+    {:else if upgradeRequired.reason === "spoke_newer"}
+      this node said it speaks protocol {upgradeRequired.protocol}, which its build does not: a newer build ran it before.
     {:else}
       the core nodes send log entries this node's build cannot read.
     {/if}

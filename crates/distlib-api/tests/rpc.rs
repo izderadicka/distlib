@@ -2589,6 +2589,10 @@ fn upgrade_required_reads_as_a_reason_and_where_the_node_stopped() {
         serde_json::to_value(UpgradeRequired::Undecodable { at: 7 }).unwrap(),
         json!({ "reason": "undecodable", "at": 7 })
     );
+    assert_eq!(
+        serde_json::to_value(UpgradeRequired::SpokeNewer { protocol: 2, at: 7 }).unwrap(),
+        json!({ "reason": "spoke_newer", "protocol": 2, "at": 7 })
+    );
 }
 
 /// 5d-7: status says the group's protocol, this build's, and which core

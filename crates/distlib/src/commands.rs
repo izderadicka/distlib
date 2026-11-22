@@ -1966,9 +1966,16 @@ fn protocol_lines(protocol: &Value) -> Option<String> {
 /// Why this node stopped following the log, once it has (5d-8).
 fn upgrade_required_warning(upgrade_required: &Value) -> Option<String> {
     let at = upgrade_required["at"].as_u64()?;
-    let why = match upgrade_required["group"].as_u64() {
-        Some(group) => format!("the group speaks protocol {group}, which this build does not"),
-        None => "the core nodes send log entries this build cannot read".to_owned(),
+    let why = match upgrade_required["reason"].as_str() {
+        Some("protocol") => format!(
+            "the group speaks protocol {}, which this build does not",
+            upgrade_required["group"]
+        ),
+        Some("spoke_newer") => format!(
+            "this node said it speaks protocol {}, which this build does not: a newer build ran it before",
+            upgrade_required["protocol"]
+        ),
+        _ => "the core nodes send log entries this build cannot read".to_owned(),
     };
     Some(format!(
         "UPGRADE REQUIRED: {why}.\n            \
@@ -2190,6 +2197,13 @@ mod tests {
         let warning = upgrade_required_warning(&json!({ "reason": "undecodable", "at": 7 }))
             .expect("an unreadable log warns");
         assert!(warning.contains("cannot read"), "{warning}");
+        let warning =
+            upgrade_required_warning(&json!({ "reason": "spoke_newer", "protocol": 2, "at": 7 }))
+                .expect("a rolled-back node warns");
+        assert!(
+            warning.contains("this node said it speaks protocol 2"),
+            "{warning}"
+        );
         assert_eq!(upgrade_required_warning(&Value::Null), None, "following");
     }
 
