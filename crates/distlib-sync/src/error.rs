@@ -79,13 +79,6 @@ pub enum SyncError {
         source: std::io::Error,
     },
 
-    /// The operating system would not provide randomness, which this run's
-    /// heartbeat epoch is drawn from.
-    /// As a message, the way `CoreError::Random` has it: `getrandom`'s error
-    /// is a standard error only with a feature nothing else here needs.
-    #[error("could not draw a heartbeat epoch: {message}")]
-    Random { message: String },
-
     /// A member's base list, named by its heartbeat, could not be fetched
     /// from it. The next beat that names it tries again.
     #[error("could not fetch the list of what member {member} holds")]
