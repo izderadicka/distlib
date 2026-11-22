@@ -155,8 +155,7 @@ impl Runtime {
             },
             Duration::from_secs(u64::from(config.availability.beat_interval_secs.get())),
             tasks.events().clone(),
-        )
-        .context("could not start the heartbeat")?;
+        );
 
         // What fills the read model: after the catalogue, and before the
         // router so it watches before any peer sends changes — it replays the

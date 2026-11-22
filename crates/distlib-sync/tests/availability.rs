@@ -114,8 +114,7 @@ impl Node {
             },
             interval,
             events.clone(),
-        )
-        .unwrap();
+        );
         let (serving, mut served_events) = EventSender::channel(
             16,
             EventMask {

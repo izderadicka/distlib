@@ -115,7 +115,6 @@ fn availability(
         Duration::from_secs(60),
         tasks.events().clone(),
     )
-    .unwrap()
 }
 
 /// The coverage `Api` reports, from `custody`, and the probes `group.check`

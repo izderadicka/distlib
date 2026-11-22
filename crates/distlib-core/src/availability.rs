@@ -62,8 +62,8 @@ pub struct Heartbeat {
     /// Where the member is, signed on its own (C5). Its signer is the
     /// heartbeat's signer, which is how a receiver knows who sent this.
     pub address: SignedAddress,
-    /// Random per start, so a restart is told apart from a replay: a new
-    /// epoch is an appearance.
+    /// When the run started, in microseconds since the Unix epoch: a higher
+    /// epoch is a restart, a lower one a beat delayed across it (#210).
     pub epoch: u64,
     /// One more on every beat, within an epoch.
     ///

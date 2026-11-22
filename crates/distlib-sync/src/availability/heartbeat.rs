@@ -12,7 +12,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -138,17 +138,13 @@ impl Availability {
         sources: Sources,
         interval: Duration,
         events: broadcast::Sender<Event>,
-    ) -> Result<Self> {
+    ) -> Self {
         let Sources {
             membership,
             own_address,
             holdings,
         } = sources;
-        // Which run of this node a beat is from: a restart is told apart from
-        // a replay by this, not by a clock.
-        let epoch = getrandom::u64().map_err(|error| SyncError::Random {
-            message: error.to_string(),
-        })?;
+        let epoch = epoch_now();
         let me = MemberId::from(secret.public());
         let (published, online) = watch::channel(BTreeSet::new());
         let holders = Arc::new(Mutex::new(Holders::default()));
@@ -170,7 +166,7 @@ impl Availability {
             })
             .instrument(span),
         );
-        Ok(Self {
+        Self {
             inner: Arc::new(Inner {
                 secret: secret.clone(),
                 online,
@@ -179,7 +175,7 @@ impl Availability {
                 said,
                 task: Mutex::new(Some(task)),
             }),
-        })
+        }
     }
 
     /// The other members online now, by their heartbeats.
@@ -265,6 +261,19 @@ impl Availability {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
+}
+
+/// Which run of this node a beat is from: when it started, in microseconds
+/// since the Unix epoch, so a later run's epoch is higher and a beat delayed
+/// across a restart is told from the run that replaced it (#210). A clock
+/// before 1970 gives 0, the lowest, which receivers take once the run before
+/// has run out.
+fn epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+        })
 }
 
 /// What the task needs; see [`Availability::start`].
@@ -825,6 +834,18 @@ mod tests {
                 "{jittered:?}"
             );
         }
+    }
+
+    /// Epochs are ordered by when the run started (#210).
+    #[test]
+    fn the_epoch_is_the_start_time_in_microseconds() {
+        let micros_now = || {
+            let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            u64::try_from(since.as_micros()).unwrap()
+        };
+        let before = micros_now();
+        let epoch = epoch_now();
+        assert!((before..=micros_now()).contains(&epoch), "{epoch}");
     }
 
     /// The topic is a wire fact: pinned, like the catalogue key.

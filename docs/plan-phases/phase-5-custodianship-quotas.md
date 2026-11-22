@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (P5-70).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (P5-71).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -987,12 +987,18 @@ end-of-phase mutation pass, which now follows 5g; P5-69).
   remembers each member's last few epochs a restart replaced and refuses their beats. No wire
   change. A delayed old beat that reaches a receiver which restarted since is still taken; the
   member's next beat puts it right. **Acceptance:** #210's two tests, reversed.
-  **Amended in review (Codex on #222, P5-70):** epochs are not ordered, so an old epoch heard after the
-  current one replaces it, and refusing the current one for good would keep a live member out
-  until a restart. A replaced epoch is refused only while the epoch that replaced it is still
-  believed: the current one is taken back once the stale beat runs out, within one TTL.
-  *Done:* `Online` keeps each member's last four replaced epochs;
-  `an_old_epoch_heard_after_the_current_one_gives_way_when_it_runs_out`;
+  **Amended in review (Codex on #222, P5-70):** epochs are not ordered, so an old epoch heard
+  after the current one replaces it, and refusing the current one for good would keep a live
+  member out until a restart. A replaced epoch is refused only while the epoch that replaced it
+  is still believed. **Amended again (Ivan, P5-71):** that left a stale beat's holdings shown for
+  up to a TTL, and not being live yet, the wire's meaning may change: the epoch is the run's start
+  time in microseconds, so epochs are ordered. A higher epoch is a restart, a lower one is refused
+  while the held one is believed, and taken once it has run out (a clock that went back across a
+  restart). The list of replaced epochs goes.
+  *Done:* `epoch_now`, `Heard::is_superseded_by`;
+  `a_lower_epoch_is_not_news_while_the_higher_one_is_believed`,
+  `a_lower_epoch_is_taken_once_the_higher_one_has_run_out`,
+  `the_epoch_is_the_start_time_in_microseconds`;
   `a_delayed_beat_of_a_replaced_epoch_brings_back_no_holdings`,
   `a_delayed_goodbye_of_a_replaced_epoch_keeps_the_member_online`.
 - **5g-3 — a node run by a newer build before does not vote (#211).** The announcer only ever
