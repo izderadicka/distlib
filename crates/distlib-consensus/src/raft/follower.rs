@@ -59,6 +59,10 @@ use crate::{
 pub enum UpgradeRequired {
     /// The group raised its protocol to `group`, past what this build speaks.
     Protocol { group: u32, at: u64 },
+    /// This node said it speaks up to `protocol`, past what this build does:
+    /// it was run by a newer build before. Counted on as speaking it, it
+    /// could vote a raise in that it cannot follow (#211).
+    SpokeNewer { protocol: u32, at: u64 },
     /// Every core node that answered sent a page this build cannot read.
     Undecodable { at: u64 },
 }
@@ -183,7 +187,7 @@ pub async fn follow(following: Following, mut hints: Hints) {
         // Straight after every fetch, whatever it brought: a raise that is the
         // newest entry stops it now rather than a quiet poll later, and a
         // restart behind a raise stops at its first pass.
-        if let Some(why) = behind_the_group(&state_machine) {
+        if let Some(why) = needs_an_upgrade(&state_machine, me) {
             stop_until_upgraded(&upgrade_required, why);
             return;
         }
@@ -256,14 +260,21 @@ pub async fn follow(following: Following, mut hints: Hints) {
     }
 }
 
-/// Why this node has to be upgraded, if its group has raised its protocol
-/// past this build's: read from what is stored, so a restart knows at once.
-pub(crate) fn behind_the_group(state_machine: &StateMachineStore) -> Option<UpgradeRequired> {
-    let group = state_machine.membership().protocol();
-    (group > PROTOCOL_MAX).then(|| UpgradeRequired::Protocol {
-        group,
-        at: state_machine.position(),
-    })
+/// Why this node, `me`, has to be upgraded, if its group has raised its
+/// protocol past this build's or its own record says it speaks more: read
+/// from what is stored, so a restart knows at once.
+pub(crate) fn needs_an_upgrade(
+    state_machine: &StateMachineStore,
+    me: MemberId,
+) -> Option<UpgradeRequired> {
+    let membership = state_machine.membership();
+    let at = state_machine.position();
+    let group = membership.protocol();
+    if group > PROTOCOL_MAX {
+        return Some(UpgradeRequired::Protocol { group, at });
+    }
+    let protocol = membership.member(&me)?.protocol_max;
+    (protocol > PROTOCOL_MAX).then_some(UpgradeRequired::SpokeNewer { protocol, at })
 }
 
 /// Says this node stops reading the log until it is upgraded, and why.
@@ -276,7 +287,7 @@ pub(crate) fn stop_until_upgraded(
 ) {
     tracing::error!(
         ?why,
-        "upgrade required: the group speaks a protocol this build does not; this node stops following the log until it is upgraded"
+        "upgrade required: the group, or this node's own record, speaks a protocol this build does not; this node stops following the log until it is upgraded"
     );
     upgrade_required.send_replace(Some(why));
 }

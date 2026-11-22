@@ -92,7 +92,10 @@ export interface Protocol {
 }
 
 /** Why a node stopped following the log, and the last index it applied. */
-export type UpgradeRequired = { reason: "protocol"; group: number; at: number } | { reason: "undecodable"; at: number };
+export type UpgradeRequired =
+  | { reason: "protocol"; group: number; at: number }
+  | { reason: "spoke_newer"; protocol: number; at: number }
+  | { reason: "undecodable"; at: number };
 
 /** A group's settings, fixed when it was founded. */
 export interface GroupSettings {

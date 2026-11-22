@@ -14,7 +14,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use distlib_consensus::{
     ConsensusError, FIRST_PROTOCOL, Failure, MemberProfile, MemberlogClient, MembershipEvent,
-    MembershipState, ProposeError, SignedEvent, Timestamp, UpgradeRequired,
+    MembershipState, PROTOCOL_MAX, ProposeError, SignedEvent, Timestamp, UpgradeRequired,
     announce_protocol_support, node::NodeError,
 };
 use distlib_core::{GroupSettings, MemberId, NodeAddr, RawMemberId};
@@ -2962,6 +2962,10 @@ fn log_length(core: &Peer) -> Option<u64> {
 /// 5d-7: each member's node says in the log which protocols its build speaks
 /// (a follower's through forwarding), once, and then the group can be raised.
 /// Saying it again, as after a restart, or saying less writes nothing.
+///
+/// Both run this build and say 2, past it, so each is "a newer build ran it
+/// before": the follower stops at its own record (#211). Watched on the
+/// founder, whose seat it took before saying so.
 #[tokio::test]
 async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be_raised() {
     let (founder, follower) = a_founder_and_a_follower().await;
@@ -2969,19 +2973,30 @@ async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be
         move |m: &MembershipState| m.member(&member).is_some_and(|r| r.protocol_max == 2)
     };
 
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
     tokio::select! {
         () = announce_protocol_support(&founder.node, &founder.secret, 2) => unreachable!(),
         () = announce_protocol_support(&follower.node, &follower.secret, 2) => unreachable!(),
         () = async {
-            // On both, so neither is still behind on what the other said.
-            for peer in [&founder, &follower] {
-                wait_for(peer, "both to say they speak 2", |m| {
-                    speaks_2(founder.id)(m) && speaks_2(follower.id)(m)
-                })
-                .await;
-            }
+            wait_for(&founder, "both to say they speak 2", |m| {
+                speaks_2(founder.id)(m) && speaks_2(follower.id)(m)
+            })
+            .await;
+            // It stops only once it has applied its own record, so it is not
+            // behind on what it said.
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                upgrade_required.wait_for(Option::is_some),
+            )
+            .await
+            .expect("the follower to stop")
+            .unwrap();
         } => {}
     }
+    assert!(matches!(
+        follower.node.upgrade_required(),
+        Some(UpgradeRequired::SpokeNewer { protocol: 2, .. })
+    ));
     let said = log_length(&founder);
     tokio::select! {
         () = announce_protocol_support(&founder.node, &founder.secret, 2) => unreachable!(),
@@ -2996,10 +3011,7 @@ async fn each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be
         .propose(MembershipEvent::ProtocolRaised { to: 2 }, &founder.secret)
         .await
         .unwrap();
-    wait_for(&follower, "the raise to reach the follower", |m| {
-        m.protocol() == 2
-    })
-    .await;
+    wait_for(&founder, "the raise to apply", |m| m.protocol() == 2).await;
 }
 
 /// 5d-8: a running follower stops as soon as it applies a raise that is the
@@ -3244,6 +3256,68 @@ async fn a_voter_whose_group_has_passed_its_build_takes_no_seat_on_restart() {
         founder.node.upgrade_required(),
         Some(UpgradeRequired::Protocol { group: 2, .. })
     ));
+    founder.shutdown().await;
+}
+
+/// #211: a voter that a newer build ran before still says it speaks that
+/// build's protocol, and the leader would count it in on a raise it cannot
+/// follow. Run by this build again, it takes no seat, and says why.
+#[tokio::test]
+async fn a_voter_a_newer_build_ran_before_takes_no_seat_on_restart() {
+    let founder = Peer::start(SecretKey::generate(), vec![]).await;
+    founder
+        .node
+        .init_group(
+            vec![(founder.profile("founder"), founder.addr.clone())],
+            Default::default(),
+            &founder.secret,
+        )
+        .await
+        .unwrap();
+    wait_for(&founder, "the founding event to apply", |m| {
+        m.group_id().is_some()
+    })
+    .await;
+    let newer = PROTOCOL_MAX + 1;
+    // What the newer build's announcer said.
+    tokio::select! {
+        () = announce_protocol_support(&founder.node, &founder.secret, newer) => unreachable!(),
+        () = wait_for(&founder, "the newer build's support", |m| m.speaks(&founder.id, newer)) => {}
+    }
+
+    let founder = founder.restart(vec![]).await;
+
+    assert!(matches!(
+        founder.node.upgrade_required(),
+        Some(UpgradeRequired::SpokeNewer { protocol, .. }) if protocol == newer
+    ));
+    // Long enough for the role task to have taken a seat, had it meant to.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(founder.node.raft().is_none(), "no seat, so no vote");
+    founder.shutdown().await;
+}
+
+/// #211: a follower whose own record comes to say more than its build
+/// speaks stops following, as at a raise.
+#[tokio::test]
+async fn a_follower_whose_record_says_a_newer_protocol_stops() {
+    let (founder, follower) = a_founder_and_a_follower().await;
+    let newer = PROTOCOL_MAX + 1;
+    let mut upgrade_required = follower.node.subscribe_upgrade_required();
+    tokio::select! {
+        () = announce_protocol_support(&follower.node, &follower.secret, newer) => unreachable!(),
+        stopped = tokio::time::timeout(
+            Duration::from_secs(10),
+            upgrade_required.wait_for(Option::is_some),
+        ) => {
+            stopped.expect("the follower to stop").unwrap();
+        }
+    }
+    assert!(matches!(
+        follower.node.upgrade_required(),
+        Some(UpgradeRequired::SpokeNewer { protocol, .. }) if protocol == newer
+    ));
+    follower.shutdown().await;
     founder.shutdown().await;
 }
 

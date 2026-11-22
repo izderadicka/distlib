@@ -133,6 +133,15 @@ describe("the shell", () => {
     expect(screen.getByRole("alert")).toBe(banner);
   });
 
+  it("says when a node a newer build ran before stopped", async () => {
+    upgradeRequiredIn({ reason: "spoke_newer", protocol: 2, at: 7 });
+    open();
+
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toMatch(/this node said it speaks protocol 2, which its build does not/);
+    expect(banner.textContent).toMatch(/at index 7/);
+  });
+
   it("shows the banner when the node says it stopped", async () => {
     upgradeRequiredIn(null, { reason: "undecodable", at: 9 });
     const { watcher } = open();
