@@ -67,14 +67,12 @@ impl CustodyView {
     /// One item added or changed since the pass. Answers whether this node
     /// keeps it.
     pub(crate) fn update(&mut self, item: &CustodyItem) -> bool {
-        // A rating or a review changes nothing about who keeps it.
+        // A rating or a review changes nothing about who keeps it. Under the
+        // view's one group, the same size is the same demand.
         let since = self
             .items
             .get(&item.item)
-            .filter(|old| {
-                old.size_bytes == item.size_bytes
-                    && old.demand_bytes == self.group.demand_bytes(item)
-            })
+            .filter(|old| old.size_bytes == item.size_bytes)
             .map_or_else(Instant::now, |old| old.since);
         let is_mine = self.group.is_custodian(item, self.me);
         self.insert(item, is_mine, since);

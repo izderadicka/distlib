@@ -135,7 +135,7 @@ impl Storage {
         let replicas = usize::from(sources.membership.borrow().settings().replicas.get());
         let plan = kept.evictions(item, kept.uncounted_bytes(files), limit.get(), |item| {
             eviction_order(
-                copies_elsewhere(&sources.availability, sources.me, item, &online),
+                copies_elsewhere(&sources.availability, item, &online),
                 replicas,
                 last_used.get(&item).copied(),
             )
@@ -164,17 +164,17 @@ impl Storage {
     }
 }
 
-/// How many members in `online`, other than `me`, hold a real copy of `item`.
+/// How many members in `online` hold a real copy of `item`: never this
+/// node, which is neither.
 pub(crate) fn copies_elsewhere(
     availability: &Availability,
-    me: MemberId,
     item: ItemId,
     online: &BTreeSet<MemberId>,
 ) -> usize {
     availability
         .real_holders(&item)
         .iter()
-        .filter(|member| **member != me && online.contains(member))
+        .filter(|member| online.contains(member))
         .count()
 }
 

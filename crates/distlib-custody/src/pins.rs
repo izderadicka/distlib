@@ -413,7 +413,7 @@ impl Pins {
         // Cloned rather than borrowed: the holders' lock is taken per item.
         let online = self.keeper.availability.online().borrow().clone();
         next_to_fetch(&self.pins, count, |item| {
-            copies_elsewhere(&self.keeper.availability, self.keeper.me, item, &online)
+            copies_elsewhere(&self.keeper.availability, item, &online)
         })
     }
 
@@ -721,23 +721,21 @@ impl Keeper {
         }))
     }
 
-    /// Whether `replicas` online members of `obliged`, other than this node,
-    /// hold a real copy of `item`. Not while anyone online has not said what
-    /// they hold.
+    /// Whether `replicas` online members of `obliged` hold a real copy of
+    /// `item`. Not while anyone online has not said what they hold. Online
+    /// and holding are about the other members: this node is never either.
     fn enough_obliged_copies(&self, item: ItemId, obliged: &[MemberId]) -> bool {
         let online = self.availability.online().borrow().clone();
         if online
             .iter()
-            .any(|member| *member != self.me && !self.availability.knows_holdings_of(member))
+            .any(|member| !self.availability.knows_holdings_of(member))
         {
             return false;
         }
         let real_holders = self.availability.real_holders(&item);
         let obliged_copies = obliged
             .iter()
-            .filter(|member| {
-                **member != self.me && online.contains(member) && real_holders.contains(member)
-            })
+            .filter(|member| online.contains(member) && real_holders.contains(member))
             .count();
         obliged_copies >= usize::from(self.membership.borrow().settings().replicas.get())
     }

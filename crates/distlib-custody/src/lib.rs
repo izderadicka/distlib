@@ -179,3 +179,59 @@ impl Custody {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use distlib_core::WeightRule;
+
+    use super::*;
+
+    fn member(seed: u8) -> MemberId {
+        MemberId::from(iroh::SecretKey::from_bytes(&[seed; 32]).public())
+    }
+
+    fn custody_with(view: Option<CustodyView>) -> Custody {
+        Custody {
+            inner: Arc::new(Inner {
+                view: watch::channel(view).1,
+                changes: broadcast::channel(1).0,
+                task: Mutex::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn this_node_keeps_only_its_own_items_once_custody_is_computed() {
+        let (me, other) = (member(1), member(2));
+        let rule = WeightRule {
+            cap_bytes: 1_000,
+            step_bytes: 1,
+            min_bytes: 0,
+        };
+        // Two members: each is custodian of what the other added.
+        let group = CustodyGroup::new(3, rule, [(me, 500), (other, 500)]);
+        let item = |seed, creator| CustodyItem {
+            item: ItemId::from_bytes([seed; 32]),
+            creator,
+            size_bytes: 10,
+        };
+        let view = CustodyView::compute(group, me, &[item(1, other), item(2, me)]);
+        let (others, mine) = (ItemId::from_bytes([1; 32]), ItemId::from_bytes([2; 32]));
+        assert!(
+            view.is_mine(others) && !view.is_mine(mine),
+            "the group as assumed"
+        );
+
+        let custody = custody_with(Some(view));
+        assert!(custody.keeps(others));
+        assert!(!custody.keeps(mine));
+        assert!(
+            !custody.keeps(ItemId::from_bytes([3; 32])),
+            "not an item it knows"
+        );
+        assert!(
+            !custody_with(None).keeps(others),
+            "not before custody is computed"
+        );
+    }
+}

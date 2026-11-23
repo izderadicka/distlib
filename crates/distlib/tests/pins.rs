@@ -850,6 +850,7 @@ async fn a_custodian_does_not_let_go_while_the_copy_elsewhere_failed_a_probe() {
         custodian.keeps(KeepReason::Custody, item, file).await,
         "let go of the book while the founder's was the only real copy elsewhere"
     );
+    custodian.until_pins("releasing", 1).await;
 
     founder
         .runtime
