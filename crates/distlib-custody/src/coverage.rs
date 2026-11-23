@@ -337,4 +337,20 @@ mod tests {
         let judged = to_judge([bob, carol], |member| *member == bob);
         assert_eq!(judged, HashSet::from([bob]));
     }
+
+    #[test]
+    fn the_low_are_exactly_the_members_whose_coverage_is_low() {
+        let (bob, carol) = (member(2), member(3));
+        let coverage = Coverage {
+            inner: Arc::new(Inner {
+                counted: Mutex::new(HashMap::from([
+                    (bob, covered(2, 1)),
+                    (carol, covered(2, 2)),
+                ])),
+                task: Mutex::default(),
+            }),
+        };
+
+        assert_eq!(coverage.low(), [bob]);
+    }
 }

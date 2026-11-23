@@ -279,18 +279,27 @@ async fn latest_evidence(
     member: MemberId,
 ) -> Result<Option<Target>, SyncError> {
     let window = failure_window(&sources.membership.borrow());
-    let now = SystemTime::now();
-    Ok(sources
-        .catalogue
-        .probe_failures()
-        .await?
+    let failures = sources.catalogue.probe_failures().await?;
+    Ok(
+        latest_failure_of(&failures, member, window, SystemTime::now())
+            .map(|recorded| Target::recorded(member, recorded.item, &recorded.failure))
+            .filter(|target| sources.availability.holders(&target.item).contains(&member)),
+    )
+}
+
+/// `member`'s latest failure, by anyone, within `window` of `now`.
+fn latest_failure_of(
+    failures: &[RecordedFailure],
+    member: MemberId,
+    window: Duration,
+    now: SystemTime,
+) -> Option<&RecordedFailure> {
+    failures
         .iter()
         .filter(|recorded| {
             recorded.custodian == member && left_in_window(recorded, window, now).is_some()
         })
         .max_by_key(|recorded| recorded.written)
-        .map(|recorded| Target::recorded(member, recorded.item, &recorded.failure))
-        .filter(|target| sources.availability.holders(&target.item).contains(&member)))
 }
 
 /// One probe in this many re-checks a suspect (D11).
@@ -508,13 +517,16 @@ async fn record(
 
 /// The failures `me` has recorded.
 async fn my_failures(catalogue: &Catalogue, me: MemberId) -> Result<OwnFailures, SyncError> {
-    Ok(catalogue
-        .probe_failures()
-        .await?
+    Ok(own_failures(catalogue.probe_failures().await?, me))
+}
+
+/// Of `failures`, those `me` recorded.
+fn own_failures(failures: Vec<RecordedFailure>, me: MemberId) -> OwnFailures {
+    failures
         .into_iter()
         .filter(|recorded| recorded.prober == me)
         .map(|recorded| ((recorded.custodian, recorded.item), recorded.failure))
-        .collect())
+        .collect()
 }
 
 /// One of `choices` at random, or `None` if there are none.
@@ -605,12 +617,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn anothers_failure_counts_within_the_window_and_not_of_me() {
-        let (me, bob, carol) = (member(1), member(2), member(3));
-        let now = SystemTime::now();
-        let window = Duration::from_secs(100);
-        let recorded = |custodian, prober, chunk, age: u64| RecordedFailure {
+    const WINDOW: Duration = Duration::from_secs(100);
+
+    /// `custodian`'s failure at `chunk`, recorded by `prober` `age` seconds
+    /// before `now`.
+    fn recorded(
+        custodian: MemberId,
+        prober: MemberId,
+        chunk: u64,
+        age: u64,
+        now: SystemTime,
+    ) -> RecordedFailure {
+        RecordedFailure {
             custodian,
             item: ItemId::from_bytes([1; 32]),
             prober,
@@ -626,7 +644,49 @@ mod tests {
                     .as_micros(),
             )
             .unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_latest_evidence_is_the_members_newest_failure_within_the_window() {
+        let (me, bob, carol) = (member(1), member(2), member(3));
+        let now = SystemTime::now();
+        let failures = [
+            recorded(bob, me, 1, 30, now),
+            recorded(bob, carol, 2, 20, now),
+            recorded(carol, me, 3, 10, now),
+            recorded(bob, me, 4, 200, now),
+        ];
+        let latest = |failures: &[RecordedFailure]| {
+            latest_failure_of(failures, bob, WINDOW, now).map(|recorded| recorded.failure.chunk)
         };
+        assert_eq!(latest(&failures), Some(2), "not carol's, though newer");
+        assert_eq!(latest(&failures[3..]), None, "not out of the window");
+    }
+
+    #[test]
+    fn own_failures_are_those_this_node_recorded() {
+        let (me, bob, carol) = (member(1), member(2), member(3));
+        let now = SystemTime::now();
+        let failures = vec![
+            recorded(bob, me, 1, 10, now),
+            recorded(carol, bob, 2, 10, now),
+        ];
+
+        let own = own_failures(failures, me);
+        let chunks: Vec<_> = own
+            .iter()
+            .map(|((custodian, _), failure)| (*custodian, failure.chunk))
+            .collect();
+        assert_eq!(chunks, [(bob, 1)]);
+    }
+
+    #[test]
+    fn anothers_failure_counts_within_the_window_and_not_of_me() {
+        let (me, bob, carol) = (member(1), member(2), member(3));
+        let now = SystemTime::now();
+        let window = WINDOW;
+        let recorded = |custodian, prober, chunk, age| recorded(custodian, prober, chunk, age, now);
         let failures = [
             recorded(bob, carol, 1, 10),
             recorded(bob, me, 2, 10),

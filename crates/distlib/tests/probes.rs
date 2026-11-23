@@ -35,7 +35,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 mod common;
-use common::{api, config, found_and_settled, init_logging, until, until_projected};
+use common::{
+    api, config, found_and_settled, init_logging, until, until_projected, until_released,
+};
 
 const GB: u64 = 1_000_000_000;
 /// The size of a book: well over what the blob store keeps inline, so its
@@ -64,6 +66,26 @@ struct Node {
 }
 
 impl Node {
+    async fn start(key: SecretKey, core: &[MemberId], dir: DataDir) -> Self {
+        let mut config = config(core);
+        config.availability.beat_interval_secs = NonZeroU32::MIN;
+        let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
+        Self {
+            runtime,
+            id: key.public().into(),
+            key,
+            dir,
+        }
+    }
+
+    /// Stops it, and waits until it could start again.
+    async fn stop(self) -> (SecretKey, DataDir) {
+        self.runtime.shutdown().await;
+        drop(self.runtime);
+        until_released(&self.dir).await;
+        (self.key, self.dir)
+    }
+
     async fn failures(&self) -> Vec<RecordedFailure> {
         self.runtime.catalogue().probe_failures().await.unwrap()
     }
@@ -122,16 +144,8 @@ async fn three_nodes(dir: &Path, settings: &GroupSettings, pledges: [u64; 3]) ->
     let ids: Vec<MemberId> = keys.iter().map(|key| key.public().into()).collect();
     let mut nodes = Vec::new();
     for (index, key) in keys.into_iter().enumerate() {
-        let mut config = config(&ids);
-        config.availability.beat_interval_secs = NonZeroU32::MIN;
         let dir = DataDir::new(dir.join(index.to_string()));
-        let runtime = Runtime::start(&key, &config, &dir).await.unwrap();
-        nodes.push(Node {
-            runtime,
-            id: key.public().into(),
-            key,
-            dir,
-        });
+        nodes.push(Node::start(key, &ids, dir).await);
     }
     let runtimes: Vec<&Runtime> = nodes.iter().map(|node| &node.runtime).collect();
     let pledges: Vec<(&SecretKey, u64)> = nodes.iter().map(|node| &node.key).zip(pledges).collect();
@@ -232,9 +246,15 @@ async fn a_custodian_fails_once_its_bytes_are_not_the_book_until_its_next_pass()
         },
     )
     .await;
+    assert!(founder.probed().failed >= 2);
 
-    // Back, and the founder's next pass clears it everywhere.
+    // Back while the founder is away: once started again, it remembers its
+    // failure, and its next pass clears it everywhere.
+    let core = [founder.id, second.id, third.id];
+    let (key, founders_dir) = founder.stop().await;
     std::fs::write(&bytes, &book_bytes).unwrap();
+    let founder = Node::start(key, &core, founders_dir).await;
+    founder.runtime.catalogue().ready().await;
     for node in [&founder, &second, &third] {
         until(
             "the clearing reaches every node",
