@@ -6,8 +6,9 @@
 
 use std::{collections::BTreeSet, time::Duration};
 
-use distlib_consensus::{MemberProfile, MembershipEvent};
+use distlib_consensus::{Fetched, MemberProfile, MemberlogClient, MembershipEvent};
 use distlib_core::{MemberId, RawMemberId};
+use distlib_net::{AddressBook, Directory};
 use iroh::SecretKey;
 
 mod common;
@@ -167,6 +168,50 @@ async fn core_turnover(restart: bool) {
     .await;
 
     for peer in peers.iter().chain([&d, c]) {
+        peer.shutdown().await;
+    }
+}
+
+/// A retired voter serves the committed log it retains, and past its end
+/// points the caller at the core that replaced it.
+#[tokio::test]
+async fn a_retired_voter_serves_what_it_applied_and_redirects_past_it() {
+    let peers = a_founded_trio().await;
+    let (a, b, c) = (&peers[0], &peers[1], &peers[2]);
+    a.node
+        .propose(
+            MembershipEvent::CoreGroupChanged {
+                core: vec![(a.id, a.addr.clone()), (b.id, b.addr.clone())],
+            },
+            &a.secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(b, "c's demotion pending").await;
+    b.node
+        .propose(MembershipEvent::Approved { proposal }, &b.secret)
+        .await
+        .unwrap();
+    until_upto(PATIENTLY, "c retires", || c.node.raft().is_none()).await;
+
+    let client = MemberlogClient::new(
+        a.node.endpoint().clone(),
+        a.node.connections().clone(),
+        AddressBook::default(),
+        Directory::default(),
+    );
+    let Fetched::Entries { up_to, events, .. } = client.fetch(c.id, &c.addr, 0).await.unwrap()
+    else {
+        panic!("a retired voter serves the log it applied");
+    };
+    assert!(!events.is_empty());
+    let Fetched::Redirect(source) = client.fetch(c.id, &c.addr, up_to).await.unwrap() else {
+        panic!("past what it applied, a retired voter redirects");
+    };
+    let core: BTreeSet<MemberId> = source.core.iter().map(|(id, _)| *id).collect();
+    assert_eq!(core, BTreeSet::from([a.id, b.id]));
+
+    for peer in &peers {
         peer.shutdown().await;
     }
 }

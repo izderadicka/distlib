@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (P5-73).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -1016,6 +1016,62 @@ end-of-phase mutation pass, which now follows 5g; P5-69).
   `a_follower_whose_record_says_a_newer_protocol_stops`; 5d-7's
   `each_node_says_which_protocols_it_speaks_once_and_then_the_group_can_be_raised` now watches the
   raise on the founder, as its follower, saying 2 on this build, stops.
+
+### 5h — the end-of-phase mutation pass (5 PRs)
+
+`cargo mutants` on the phase's diff (`5790746..a9e3632`), in two stages and without
+`mutate.py --every-block` (P5-73): all 1479 mutants on the fast lane (612 caught, 363 unviable,
+4 timeouts, 312 missed), then the 316 not caught on the whole suite (227 caught, 2 of them by
+a hang). **87 survive.** Run with debug info off and the mold linker (31 s a build rather than
+92 s), three jobs at a time: more load makes cluster tests flaky, which kills mutants falsely.
+
+**Accepted (30), with why:**
+
+- *Stopping and printing* (9): `StorageUpkeep::stop`; `Drop` and `shutdown` of `Custody`,
+  `Coverage` and `Probes`; `Debug` of `Probes` and of `Storage`'s inner state. They abort tasks
+  or format; no test outlives them.
+- *Equivalent* (12): `custody_of`'s `PARALLEL_FROM` (3) picks a sequential or parallel ranking
+  of the same result; `Ranked::eq` (2) is never called, `Ord` decides; `UNHEARD_AFTER` (2) and
+  `BYTES_PER_FETCH` (2) set only when the log is read and how big a page is; `shuffled`'s
+  `last + 1` to `last * 1` is still a random order; `Emergency::run`'s first look earlier still
+  waits the emergency delay; `suspects_among`'s `<` to `<=` decides only between two failures
+  written at the same moment.
+- *Log or unread signal only* (7): `publish_counts`' error log (4) and its change flag, which
+  nothing waits on; `KeepError::is_unavailable`, a warn or an error; `Keeper::keep`'s fetched
+  count, a debug line.
+- *A re-check that narrows a race* (2): `RaftProtocol::accept`'s `Retired` and `ForgetMe`
+  guards set to `true`. Each connection is checked before its next request too, and
+  `forget_retired` has its own guards.
+
+**The other 57 get tests**, one PR per group:
+
+- **5h-1 — consensus access checks (7).** `may_query_retirement`, `forget_retired`'s joint
+  configuration, `applied_voter`, the `ForgetMe` guard; what a seatless node serves from the
+  memberlog. **Fixed on the way:** a learner's `ForgetMe` was answered and then the connection
+  closed under the answer ("not a voter"), so an expelled node exited only on its retry, through
+  the allowlist's refusal. The answer is now let arrive before the connection ends.
+  *Done:* `Restored` (a node restored from given entries) in `network.rs`'s tests;
+  `a_current_member_cannot_request_learner_cleanup_and_an_expelled_one_can` (now over the wire),
+  `a_learner_is_not_forgotten_while_the_applied_configuration_is_joint`,
+  `a_voter_whose_removal_is_not_yet_applied_still_speaks_raft`,
+  `a_founding_peer_may_reach_a_node_not_yet_initialised`,
+  `a_retired_voter_serves_what_it_applied_and_redirects_past_it`. A dead fallback in `accept`
+  goes: with no Raft nothing past retirement is answered, whatever `applied_voter` says.
+- **5h-2 — custody (13).** `enough_obliged_copies`, `copies_elsewhere`, `Emergency::copied`,
+  `fetch_panicked`, `fetched`'s retry, `my_failures`, `latest_evidence`, `CustodyView::update`'s
+  since, `Coverage::low`, `Custody::keeps`, the `releasing` pin count and the failed probe count
+  in the status.
+- **5h-3 — consensus boundaries (17).** `promotion()`'s boundary, `events_after`'s byte budget,
+  catch-up (`heard_from_leader` and the `AppendEntries` check that calls it, `set`'s change flag,
+  `read_ahead`, `core_of`), the follow loop (`follow`, `fetch_log_from_core_nodes`, a redirect
+  or no-group answer beside a refusal, `Answers::progress`), `retire_learners`,
+  `retired_and_expelled`, `propose_and_retry`'s stale guard.
+- **5h-4 — net (5).** `evict_once`, `is_remote_rejection` and its two arms, `serving_events`'
+  closed connection.
+- **5h-5 — small unit tests (15).** API: `describe_core` moving a member (3), `named` with an
+  empty name, `check_room_for`'s boundary; core: `GroupSettings::check`'s boundaries (2),
+  `all_probe_failures`' key, `check_format`'s not-found guard; store: `replay`'s count; sync:
+  `WritesSinceTheLastPass::release`; CLI: 4 printing checks.
 
 ---
 
