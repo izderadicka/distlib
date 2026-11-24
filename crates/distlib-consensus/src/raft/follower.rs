@@ -473,7 +473,7 @@ async fn fetch_log_from_core_nodes(
             }
 
             Ok(Fetched::Redirect(source)) => {
-                answers.otherwise += 1;
+                answers.answered();
                 let redirected = Sources {
                     core: source.core,
                     leader: source.leader,
@@ -485,18 +485,17 @@ async fn fetch_log_from_core_nodes(
             // Reachable, but with nothing to give: a core node that has not
             // itself received the founding entry yet. Somebody else may have.
             Ok(Fetched::NoGroup) => {
-                answers.otherwise += 1;
+                answers.answered();
                 tracing::debug!(from = %member, "asked a node that has no group yet");
             }
 
             Err(error) if error.why == Failure::Undecodable => {
-                answers.otherwise += 1;
-                answers.undecodable += 1;
+                answers.undecodable();
                 tracing::warn!(%error, from = %member, "a core node sent what this build cannot read");
             }
 
             Err(error) if error.why == Failure::Refused => {
-                answers.refusals += 1;
+                answers.refused();
                 tracing::debug!(%error, from = %member, "a core node will not talk to this node");
             }
 
@@ -526,6 +525,21 @@ struct Answers {
 }
 
 impl Answers {
+    /// A readable answer other than a refusal.
+    fn answered(&mut self) {
+        self.otherwise += 1;
+    }
+
+    /// An answer this build could not read.
+    fn undecodable(&mut self) {
+        self.otherwise += 1;
+        self.undecodable += 1;
+    }
+
+    fn refused(&mut self) {
+        self.refusals += 1;
+    }
+
     fn progress(&self) -> Progress {
         // Unreachable nodes get no vote: a core node that is down says nothing
         // about who belongs, so one that is down while the others refuse must
@@ -639,25 +653,43 @@ mod tests {
         chatter.abort();
     }
 
+    /// Answers of each kind, counted as the fetch loop counts them.
+    fn answers(refusals: usize, answered: usize, undecodable: usize) -> Answers {
+        let mut answers = Answers::default();
+        (0..refusals).for_each(|_| answers.refused());
+        (0..answered).for_each(|_| answers.answered());
+        (0..undecodable).for_each(|_| answers.undecodable());
+        answers
+    }
+
     #[test]
     fn a_follower_stops_only_when_every_answer_was_unreadable() {
-        let answers = |refusals, otherwise, undecodable| Answers {
-            refusals,
-            otherwise,
-            undecodable,
-        };
-        assert_eq!(answers(0, 2, 2).progress(), Progress::Undecodable);
-        assert_eq!(answers(1, 1, 1).progress(), Progress::Undecodable);
+        assert_eq!(answers(0, 0, 2).progress(), Progress::Undecodable);
+        assert_eq!(answers(1, 0, 1).progress(), Progress::Undecodable);
         assert_eq!(
-            answers(0, 2, 1).progress(),
+            answers(0, 1, 1).progress(),
             Progress::Unreachable,
             "a core node that answered in a readable way may have the entries"
         );
         assert_eq!(
-            answers(2, 1, 1).progress(),
+            answers(2, 0, 1).progress(),
             Progress::Undecodable,
             "an unreadable answer is not a refusal: no expulsion"
         );
+        assert_eq!(
+            answers(0, 0, 0).progress(),
+            Progress::Unreachable,
+            "nobody answered: no upgrade required"
+        );
+    }
+
+    #[test]
+    fn a_follower_is_refused_only_when_every_answer_was_a_refusal() {
         assert_eq!(answers(2, 0, 0).progress(), Progress::Refused);
+        assert_eq!(
+            answers(2, 1, 0).progress(),
+            Progress::Unreachable,
+            "a redirect or a node with no group yet is not a refusal"
+        );
     }
 }

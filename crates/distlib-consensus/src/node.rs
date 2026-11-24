@@ -2264,6 +2264,18 @@ mod retirement_tests {
             store.promotion().is_some(),
             "old founded state does not close replay trust"
         );
+        let replayed = configuration(5, vec![vec![teacher]]);
+        store
+            .apply([Entry {
+                log_id: *replayed.log_id().as_ref().unwrap(),
+                payload: EntryPayload::Membership(replayed.membership().clone()),
+            }])
+            .await
+            .unwrap();
+        assert!(
+            store.promotion().is_some(),
+            "nor does a Raft configuration from before the promotion"
+        );
         let membership = configuration(11, vec![vec![teacher]]);
         store
             .apply([Entry {

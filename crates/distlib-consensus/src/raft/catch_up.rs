@@ -259,6 +259,7 @@ impl Reading {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use iroh::SecretKey;
 
     use super::*;
@@ -298,5 +299,22 @@ mod tests {
         });
         catch_up.clear();
         assert!(catch_up.admitted(0).is_empty(), "cleared");
+    }
+
+    /// The transport exception follows the view, so it is told of each new
+    /// one, and only of a new one.
+    #[test]
+    fn a_view_is_announced_only_when_it_changes() {
+        let catch_up = CatchUp::default();
+        let mut views = catch_up.subscribe();
+        let view = CatchUpView {
+            core: BTreeSet::from([member(1)]),
+            at: 5,
+        };
+        catch_up.set(view.clone());
+        assert!(views.has_changed().unwrap());
+        views.borrow_and_update();
+        catch_up.set(view);
+        assert!(!views.has_changed().unwrap(), "the same view again");
     }
 }

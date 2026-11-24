@@ -304,6 +304,9 @@ async fn events_are_served_a_page_at_a_time_by_count_and_by_bytes_and_blanks_are
     assert_eq!(served(0, 2, any_size), (vec![1, 3], true));
     assert_eq!(served(3, 2, any_size), (vec![4, 5], false));
     assert_eq!(served(0, 10, any_size), (vec![1, 3, 4, 5], false));
+    // Exactly the bytes of two: both.
+    let stored = |index| postcard::to_stdvec(&entry(1, index)).unwrap().len();
+    assert_eq!(served(0, 10, stored(1) + stored(3)), (vec![1, 3], true));
     // Too few bytes for even one: one all the same, so a page always moves on.
     assert_eq!(served(0, 10, 1), (vec![1], true));
     assert_eq!(served(4, 10, 1), (vec![5], false));
