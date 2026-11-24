@@ -444,7 +444,8 @@ async fn fetch_log_from_core_nodes(
         if visited.len() >= 32 {
             break;
         }
-        if member == me || !visited.insert(member) {
+        // Never this node: each list it was built from leaves it out.
+        if !visited.insert(member) {
             continue;
         }
         match client.fetch(member, &addr, cursor).await {

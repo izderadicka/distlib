@@ -276,6 +276,66 @@ async fn an_expelled_voter_that_exits_is_forgotten_by_raft() {
     b.shutdown().await;
 }
 
+/// An expelled voter that stood down, and restarts before a voter could
+/// confirm its cleanup, waits for that confirmation rather than taking the
+/// log's refusal for leave to exit: the CLI exits on expulsion, and a learner
+/// gone before its cleanup is never forgotten.
+#[tokio::test]
+async fn an_expelled_voter_restarted_before_its_cleanup_waits_for_it() {
+    let mut peers = a_founded_trio().await;
+    let c = peers.pop().unwrap();
+    let b = peers.pop().unwrap();
+    let a = &peers[0];
+
+    // C applies nothing yet; A and B commit its expulsion and its removal.
+    c.node.stop_consensus().await;
+    a.node
+        .propose(
+            MembershipEvent::MemberExpelled {
+                member: c.id,
+                reason: "review".into(),
+            },
+            &a.secret,
+        )
+        .await
+        .unwrap();
+    let proposal = pending_on(&b, "c's expulsion pending").await;
+    b.node
+        .propose(MembershipEvent::Approved { proposal }, &b.secret)
+        .await
+        .unwrap();
+    let a_and_b = BTreeSet::from([RawMemberId::from(a.id), RawMemberId::from(b.id)]);
+    until_upto(PATIENTLY, "a and b vote alone", || {
+        uniform_voters(a).as_ref() == Some(&a_and_b)
+    })
+    .await;
+
+    // Without B nothing more commits, so C's cleanup cannot.
+    b.node.stop_consensus().await;
+    let c = c.restart_in_place(vec![a.id, b.id]).await;
+    until_upto(PATIENTLY, "c applies its expulsion and stands down", || {
+        c.node.raft().is_none() && !c.node.membership().is_member(&c.id)
+    })
+    .await;
+    let c = c.restart_in_place(vec![a.id, b.id]).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), c.node.expelled())
+            .await
+            .is_err(),
+        "c took the log's refusal for a confirmed cleanup"
+    );
+
+    let b = b.restart_in_place(vec![a.id, c.id]).await;
+    tokio::time::timeout(PATIENTLY, c.node.expelled())
+        .await
+        .expect("c's cleanup is confirmed once a and b commit again");
+    until_upto(PATIENTLY, "a forgets c", || nodes_known(a) == 2).await;
+
+    c.shutdown().await;
+    b.shutdown().await;
+    a.shutdown().await;
+}
+
 /// Demote C, add D without replacing A/B, elect D, then re-promote C.
 /// D was never in C's old Raft voter set.
 #[tokio::test]
