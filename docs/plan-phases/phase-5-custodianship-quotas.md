@@ -1091,9 +1091,12 @@ a hang). **87 survive.** Run with debug info off and the mold linker (31 s a bui
   - **5h-3b — what needs a cluster (6).** `read_ahead`'s `>`, `core_of`,
     `fetch_log_from_core_nodes`' visited guard, `retire_learners`, `retired_and_expelled`,
     `propose_and_retry`'s stale guard.
-    *Done:* `an_expelled_voter_restarted_before_its_cleanup_waits_for_it` (with one voter's
-    consensus stopped, nothing commits the cleanup: the restarted node waits rather than taking
-    the log's refusal for it); `a_stale_protocol_support_is_refused_rather_than_sent_again`
+    *Done:* `retired_and_expelled` reads only what is stored, so
+    `only_an_expelled_former_voter_starts_retired_and_expelled` tests it alone. A cluster test
+    of a restart between standing down and the cleanup was tried and is not deterministic: with
+    the cleanup held back by a voter that is down, nothing can elect a leader again, and the
+    restarted node's campaign deposed the one there was.
+    `a_stale_protocol_support_is_refused_rather_than_sent_again`
     (rounds of a change racing a follower's proposal, until one is stale);
     `a_reading_gives_a_view_only_past_what_was_applied` (`Reading::view_past`). The visited
     guard's `member == me` goes: every candidate list leaves this node out. **Accepted (2):**
