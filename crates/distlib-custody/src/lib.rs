@@ -49,8 +49,8 @@ pub struct CustodySources {
     pub store: Store,
     /// Where items added or changed are announced.
     pub events: broadcast::Receiver<Event>,
-    /// Bumped by each replay of the read model, which announces nothing.
-    pub replays: watch::Receiver<u64>,
+    /// Changes with each replay of the read model, which announces nothing.
+    pub replays: watch::Receiver<()>,
 }
 
 /// This node's custody, kept up to date by a background task.

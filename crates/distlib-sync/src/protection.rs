@@ -58,3 +58,29 @@ impl WritesSinceTheLastPass {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use iroh_blobs::store::mem::MemStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_values_held_are_let_go_when_a_pass_begins() {
+        let blobs = MemStore::new();
+        let (protection, protected) = CatalogueProtection::new();
+        let value = blobs
+            .add_bytes(b"Dune".as_slice())
+            .temp_tag()
+            .await
+            .expect("a memory store takes bytes");
+        protection.writes.hold(value);
+
+        // Let go as the pass asks, before the documents answer.
+        drop(protected(&mut HashSet::new()));
+
+        assert!(protection.writes.lock().is_empty());
+    }
+}

@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4 (#230), 5h-5.** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -1117,6 +1117,16 @@ a hang). **87 survive.** Run with debug info off and the mold linker (31 s a bui
   empty name, `check_room_for`'s boundary; core: `GroupSettings::check`'s boundaries (2),
   `all_probe_failures`' key, `check_format`'s not-found guard; store: `replay`'s count; sync:
   `WritesSinceTheLastPass::release`; CLI: 4 printing checks.
+  *Done:* `a_core_change_names_who_it_drops_and_moves_and_leaves_out_who_stays` (all four API
+  description survivors); the storage test adds exactly up to the limit; the settings check
+  passes a step at the cap and a settle at its limit;
+  `the_probe_prefix_covers_every_probe_failure_and_nothing_else`;
+  `an_unreadable_format_file_is_refused_rather_than_stamped_over`;
+  `the_values_held_are_let_go_when_a_pass_begins`. The replay count goes: nothing read it,
+  custody only waits for a change, so `replays` is a `watch` of `()`. The CLI's settings, pins
+  and custodians become `settings_lines`, `pins_lines` and `custodians_line`, tested like
+  `protocol_lines`; `founding_without_relays_does_not_wait_for_one` founds within
+  `ONLINE_TIMEOUT`, which `||` for `&&` would wait out.
 
 ---
 

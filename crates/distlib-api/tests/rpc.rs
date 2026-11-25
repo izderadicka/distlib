@@ -159,7 +159,7 @@ fn custody(node: &MembershipNode, store: &Store, tasks: &Tasks) -> Custody {
             membership: node.subscribe(),
             store: store.clone(),
             events: tasks.events().subscribe(),
-            replays: tokio::sync::watch::channel(0).1,
+            replays: tokio::sync::watch::channel(()).1,
         },
     )
 }

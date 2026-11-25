@@ -84,8 +84,8 @@ async fn a_replay_finished_before_the_start_still_counts() {
 
     let (_membership_tx, membership) = watch::channel(founded(&my_key, &other));
     let (_events_tx, events) = broadcast::channel(16);
-    let (replays_tx, replays) = watch::channel(0);
-    replays_tx.send_replace(1);
+    let (replays_tx, replays) = watch::channel(());
+    replays_tx.send_replace(());
 
     let custody = Custody::start(
         me,

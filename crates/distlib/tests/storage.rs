@@ -54,7 +54,8 @@ async fn storage(api: &Api) -> Value {
 }
 
 /// What is added counts as own; an add that would take own past the limit is
-/// refused, and one that adds nothing new goes through even over it.
+/// refused, one up to it is not, and one that adds nothing new goes through
+/// even over it.
 #[tokio::test]
 async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
     init_logging();
@@ -78,6 +79,9 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
     let refused = add_a_file(&api, dir.path(), 2, 600).await.unwrap_err();
     assert!(refused.contains("storage limit of 1000 bytes"), "{refused}");
     assert_eq!(storage(&api).await["own_bytes"], 600, "nothing kept");
+    // Exactly up to the limit is within it.
+    add_a_file(&api, dir.path(), 3, 400).await.unwrap();
+    assert_eq!(storage(&api).await["own_bytes"], 1_000);
 
     // The limit lowered under what is kept already: the same file again
     // grows nothing, so it goes through, and the status says it is over.

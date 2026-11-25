@@ -187,6 +187,15 @@ fn a_prefix_covers_one_kind_of_key_about_one_item() {
     );
 }
 
+#[test]
+fn the_probe_prefix_covers_every_probe_failure_and_nothing_else() {
+    let (bob, carol) = (member(), member());
+    let probes = CommunityKey::all_probe_failures();
+
+    assert!(probe_failure(carol, bob).encode().starts_with(&probes));
+    assert!(!rating(bob).encode().starts_with(&probes));
+}
+
 /// `wish/` and `wish_comment/` share four letters, and nothing else.
 #[test]
 fn a_wishs_entries_and_its_comments_are_read_apart() {

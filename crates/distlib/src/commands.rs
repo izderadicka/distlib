@@ -801,12 +801,17 @@ fn print_item_description(item_id: ItemId, answer: &Value, names: &MemberNames) 
         println!("description {description}");
     }
     println!("added by    {}", names.named(&answer["added_by"]));
-    if let Some(custodians) = answer["custodians"]
+    if let Some(line) = custodians_line(answer, names) {
+        println!("{line}");
+    }
+}
+
+/// Who keeps the item for the group, once anybody does.
+fn custodians_line(answer: &Value, names: &MemberNames) -> Option<String> {
+    answer["custodians"]
         .as_array()
         .filter(|list| !list.is_empty())
-    {
-        println!("custodians  {}", names.join(custodians));
-    }
+        .map(|custodians| format!("custodians  {}", names.join(custodians)))
 }
 
 /// What members have said about the item.
@@ -1448,12 +1453,16 @@ fn print_live_status(live: &Value) {
         0 => {}
         pending => println!("pending     {pending} awaiting approval — see `distlib pending`"),
     }
-    print_settings(&live["settings"]);
+    if let Some(lines) = settings_lines(&live["settings"]) {
+        println!("{lines}");
+    }
     if let Some(lines) = protocol_lines(&live["protocol"]) {
         println!("{lines}");
     }
     print_custody(&live["custody"]);
-    print_pins(&live["pins"]);
+    if let Some(lines) = pins_lines(&live["pins"]) {
+        println!("{lines}");
+    }
     print_storage(&live["storage"]);
     println!("node        running");
 }
@@ -1472,8 +1481,11 @@ fn print_stored_status(paths: &Paths, me: MemberId) {
                     "not a member of this group"
                 };
                 println!("role        {role}");
-                if let Ok(settings) = serde_json::to_value(membership.settings()) {
-                    print_settings(&settings);
+                if let Some(lines) = serde_json::to_value(membership.settings())
+                    .ok()
+                    .and_then(|settings| settings_lines(&settings))
+                {
+                    println!("{lines}");
                 }
             } else {
                 println!("group       none yet");
@@ -1984,15 +1996,18 @@ fn upgrade_required_warning(upgrade_required: &Value) -> Option<String> {
 }
 
 /// The group's settings, one `key = value` line each, as `[group]` spells
-/// them. Nothing before the group is founded.
-fn print_settings(settings: &Value) {
-    let Some(settings) = settings.as_object() else {
-        return;
-    };
-    for (index, (key, value)) in settings.iter().enumerate() {
-        let label = if index == 0 { "settings" } else { "" };
-        println!("{label:<12}{key} = {value}");
-    }
+/// them. None before the group is founded.
+fn settings_lines(settings: &Value) -> Option<String> {
+    let lines: Vec<String> = settings
+        .as_object()?
+        .iter()
+        .enumerate()
+        .map(|(index, (key, value))| {
+            let label = if index == 0 { "settings" } else { "" };
+            format!("{label:<12}{key} = {value}")
+        })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// This node's custody and the group's load, once computed.
@@ -2022,8 +2037,9 @@ fn past_the_pledge(custody: &Value) -> String {
     format!(", past the pledge of {pledge} bytes")
 }
 
-/// Where the items this node keeps stand, once there are any.
-fn print_pins(pins: &Value) {
+/// Where the items this node keeps stand, and a warning if custody waits for
+/// room. None while it keeps nothing.
+fn pins_lines(pins: &Value) -> Option<String> {
     let count = |state: &str| pins[state].as_u64().unwrap_or(0);
     let states = [
         "kept",
@@ -2034,16 +2050,17 @@ fn print_pins(pins: &Value) {
         "releasing",
     ];
     if states.iter().all(|state| count(state) == 0) {
-        return;
+        return None;
     }
     let counts: Vec<String> = states
         .iter()
         .map(|state| format!("{} {}", count(state), state.replace('_', " ")))
         .collect();
-    println!("pins        {}", counts.join(", "));
-    if let Some(warning) = waiting_for_room_warning(count("waiting_for_room")) {
-        println!("{warning}");
-    }
+    let line = format!("pins        {}", counts.join(", "));
+    Some(match waiting_for_room_warning(count("waiting_for_room")) {
+        Some(warning) => format!("{line}\n{warning}"),
+        None => line,
+    })
 }
 
 /// The warning for custody that does not fit within the storage limit, if
@@ -2212,6 +2229,66 @@ mod tests {
         let warning = waiting_for_room_warning(2).expect("two waiting warn");
         assert!(warning.contains("2 items"), "{warning}");
         assert_eq!(waiting_for_room_warning(0), None);
+    }
+
+    #[test]
+    fn pins_are_a_line_once_anything_is_kept_and_warn_when_custody_waits_for_room() {
+        assert_eq!(pins_lines(&json!({})), None);
+        assert_eq!(
+            pins_lines(&json!({ "kept": 3, "failed": 1 })).as_deref(),
+            Some(
+                "pins        3 kept, 0 fetching, 0 queued, 1 failed, 0 waiting for room, \
+                 0 releasing"
+            )
+        );
+        let waiting = pins_lines(&json!({ "waiting_for_room": 2 })).expect("two waiting");
+        let warning = waiting_for_room_warning(2).expect("two waiting warn");
+        assert!(waiting.ends_with(&format!("\n{warning}")), "{waiting}");
+    }
+
+    #[test]
+    fn settings_are_one_per_line_labelled_once() {
+        assert_eq!(
+            settings_lines(&json!({ "cap_bytes": 5, "replicas": 3 })).as_deref(),
+            Some("settings    cap_bytes = 5\n            replicas = 3")
+        );
+        assert_eq!(settings_lines(&Value::Null), None, "no group yet");
+    }
+
+    #[test]
+    fn custodians_are_a_line_only_once_there_are_any() {
+        let names = MemberNames::of(&json!({ "members": [{ "member": "abc", "name": "dave" }] }));
+        assert_eq!(
+            custodians_line(&json!({ "custodians": ["abc"] }), &names).as_deref(),
+            Some("custodians  dave (abc)")
+        );
+        assert_eq!(custodians_line(&json!({ "custodians": [] }), &names), None);
+    }
+
+    /// Without relays there is none to wait for: founding goes ahead at once,
+    /// not after [`ONLINE_TIMEOUT`].
+    #[tokio::test]
+    async fn founding_without_relays_does_not_wait_for_one() {
+        let dir = tempfile::TempDir::new().expect("a temporary directory");
+        let secret = SecretKey::generate();
+        let mut config = Config::default();
+        config.net.bind_addr_v4 = "127.0.0.1:0".parse().expect("a literal address");
+        config.net.relay_mode = RelayMode::Disabled;
+        config.consensus.core = vec![configured(member_id(&secret), &[])];
+        let runtime = Runtime::start(&secret, &config, &DataDir::new(dir.path()))
+            .await
+            .expect("a runtime starts");
+
+        let founding = tokio::time::timeout(
+            ONLINE_TIMEOUT,
+            found(runtime.node(), &config, &secret, member_id(&secret)),
+        )
+        .await;
+
+        runtime.shutdown().await;
+        founding
+            .expect("founding waited for a relay")
+            .expect("founding alone succeeds");
     }
 
     #[test]
