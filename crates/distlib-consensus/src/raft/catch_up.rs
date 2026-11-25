@@ -198,10 +198,7 @@ async fn read_ahead(catching: &Catching) -> Option<CatchUpView> {
         candidates.extend(reading.fold_from(client, member, &addr).await);
         candidates.extend(core_of(&reading.membership));
     }
-    (reading.cursor > applied).then(|| CatchUpView {
-        core: reading.membership.core().keys().copied().collect(),
-        at: reading.cursor,
-    })
+    reading.view_past(applied)
 }
 
 fn core_of(membership: &MembershipState) -> Vec<(MemberId, NodeAddr)> {
@@ -213,6 +210,15 @@ fn core_of(membership: &MembershipState) -> Vec<(MemberId, NodeAddr)> {
 }
 
 impl Reading {
+    /// The core it names, for a node that applied up to `applied`: none
+    /// unless it read past that.
+    fn view_past(self, applied: u64) -> Option<CatchUpView> {
+        (self.cursor > applied).then(|| CatchUpView {
+            core: self.membership.core().keys().copied().collect(),
+            at: self.cursor,
+        })
+    }
+
     /// Folds what `member` serves past the cursor, every page of it, and
     /// answers the voters it points to.
     async fn fold_from(
@@ -299,6 +305,16 @@ mod tests {
         });
         catch_up.clear();
         assert!(catch_up.admitted(0).is_empty(), "cleared");
+    }
+
+    #[test]
+    fn a_reading_gives_a_view_only_past_what_was_applied() {
+        let reading = |cursor| Reading {
+            membership: MembershipState::new(),
+            cursor,
+        };
+        assert_eq!(reading(5).view_past(5), None, "nothing more was read");
+        assert_eq!(reading(6).view_past(5).map(|view| view.at), Some(6));
     }
 
     /// The transport exception follows the view, so it is told of each new

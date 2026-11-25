@@ -1631,6 +1631,50 @@ async fn a_follower_hears_a_refusal_as_a_refusal() {
     founder.shutdown().await;
 }
 
+/// A protocol's support refused as stale is not sent again (`propose`'s
+/// retry): `announce_protocol_support` looks again at what the caught-up log
+/// says. The founder's change and the follower's proposal race, so a few
+/// rounds are tried until one is stale.
+#[tokio::test]
+async fn a_stale_protocol_support_is_refused_rather_than_sent_again() {
+    let (founder, follower) = a_founder_and_its_follower().await;
+
+    let mut refused_as_stale = false;
+    for round in 0..20 {
+        founder
+            .node
+            .propose(
+                MembershipEvent::PledgeChanged {
+                    member: founder.id,
+                    pledge_bytes: PLEDGE + round,
+                },
+                &founder.secret,
+            )
+            .await
+            .unwrap();
+        let answer = follower
+            .node
+            .propose(
+                MembershipEvent::ProtocolSupported {
+                    member: follower.id,
+                    max: FIRST_PROTOCOL,
+                },
+                &follower.secret,
+            )
+            .await;
+        if matches!(
+            answer,
+            Err(NodeError::Event(ConsensusError::StaleProposal { .. }))
+        ) {
+            refused_as_stale = true;
+            break;
+        }
+    }
+    assert!(refused_as_stale, "never refused as stale");
+    follower.shutdown().await;
+    founder.shutdown().await;
+}
+
 /// The allowlist observer may lag a freshly followed admission. Refusing our
 /// own dial is not evidence that the remote core expelled this follower.
 #[tokio::test]

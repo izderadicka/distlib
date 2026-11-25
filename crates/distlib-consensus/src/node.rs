@@ -396,7 +396,7 @@ fn initial_sources(
 /// is the leader that may. A follower fetches the log instead.
 fn start_first_role(role: &Role) {
     let Some(raft) = role.seat.raft() else {
-        if retired_and_expelled(role) {
+        if retired_and_expelled(&role.state_machine, role.me) {
             return;
         }
         start(
@@ -1413,7 +1413,7 @@ impl Role {
 /// that returned without emptying the seat would otherwise be called again at
 /// once, for ever.
 async fn serve_role(role: Role) {
-    if role.seat.raft().is_none() && retired_and_expelled(&role) {
+    if role.seat.raft().is_none() && retired_and_expelled(&role.state_machine, role.me) {
         finish_expulsion(&role).await;
         return;
     }
@@ -1564,16 +1564,13 @@ async fn finish_expulsion(role: &Role) {
     }
 }
 
-fn retired_and_expelled(role: &Role) -> bool {
-    let membership = role.state_machine.membership();
+/// Whether `me` once voted and the log has expelled it: on a restart it
+/// waits for its cleanup to be confirmed rather than following.
+fn retired_and_expelled(state_machine: &StateMachineStore, me: MemberId) -> bool {
+    let membership = state_machine.membership();
     membership.group_id().is_some()
-        && !membership.is_member(&role.me)
-        && role
-            .state_machine
-            .raft_membership()
-            .borrow()
-            .log_id()
-            .is_some()
+        && !membership.is_member(&me)
+        && state_machine.raft_membership().borrow().log_id().is_some()
 }
 
 /// Application intent alone is insufficient. Both views must have reached
@@ -2292,6 +2289,35 @@ mod retirement_tests {
                 .promotion()
                 .is_none()
         );
+    }
+
+    /// Only a node that once voted, and that the log has expelled, waits on a
+    /// restart for its cleanup rather than following.
+    #[tokio::test]
+    async fn only_an_expelled_former_voter_starts_retired_and_expelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (promoted, teacher, expelled, events) = promotion_history();
+        let me = MemberId::from(promoted.public());
+        let mut store = StateMachineStore::open(dir.path().join("expelled.redb")).unwrap();
+        store
+            .apply_followed(events.len() as u64, &events)
+            .await
+            .unwrap();
+        assert!(
+            !retired_and_expelled(&store, expelled),
+            "never voted: no cleanup to wait for"
+        );
+
+        let membership = configuration(events.len() as u64 + 1, vec![vec![teacher]]);
+        store
+            .apply([Entry {
+                log_id: *membership.log_id().as_ref().unwrap(),
+                payload: EntryPayload::Membership(membership.membership().clone()),
+            }])
+            .await
+            .unwrap();
+        assert!(retired_and_expelled(&store, expelled));
+        assert!(!retired_and_expelled(&store, me), "still a member");
     }
 
     /// #194 finding 2: a follower that crashed after following its promotion,
