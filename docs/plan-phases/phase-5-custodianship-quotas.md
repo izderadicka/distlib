@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4 (#230), 5h-5.** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4 (#230), 5h-5 (#231); 5i planned (P5-74).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -1128,6 +1128,66 @@ a hang). **87 survive.** Run with debug info off and the mold linker (31 s a bui
   `protocol_lines`; `founding_without_relays_does_not_wait_for_one` founds within
   `ONLINE_TIMEOUT`, which `||` for `&&` would wait out.
 
+### 5i — #225 and #185's findings 10–13 (6 PRs)
+
+Two reviews left after the mutation pass (P5-74). **#225:** start lets go of the files of any
+item the catalogue lacks, so a catalogue lost, restored in part or written in an older layout
+loses the only copy at the next collection. **#185's findings 10–13**, checked on a9e3632 and
+again on master: 10 holds; 11 holds in part (5f-5 fixed the holder away; a new base list still
+restarts the delay, and so does a restart, C60); 12 and 13 hold. **Decided** (Ivan, 2026-11-25):
+an add's files are kept and reported rather than let go of; an export is checked before it is
+handed over; scrubbing and repair stay in C41, a restart's lost delay in C60, and #225's other
+findings become C62–C64.
+
+- **5i-1 — start lets go of no add's files (#225).** `release_unpublished_own` takes an own item
+  the catalogue lacks for an add that stopped before it was written; a missing catalogue entry
+  does not say that. **Decided:** start lets go of nothing. It warns once, naming the own items
+  the catalogue lacks, and `node.status`' storage counts them (`unpublished_own_items`). A
+  stopped add costs its space until the operator acts (C64). **Acceptance:** #225's A: `docs/`
+  moved away, a restart, a collection pass, a restart: the own tag and the blob stay; `docs/`
+  back while stopped, `distlib download` gives the original bytes. B takes the same path.
+  `keeping.rs`' interrupted add is reversed: its files stay, counted.
+- **5i-2 — an export is checked before it is handed over (C41, in part).** iroh-blobs exports by
+  copying or cloning the store's file without reading it against its hash, so a flipped bit is
+  downloaded with exit 0. What a node serves is safe: iroh-blobs checks each chunk against the
+  outboard before sending it, and the receiver checks again. **Decided:** `Blobs::export` hashes
+  the staged file with BLAKE3 (its `mmap` and `rayon` features, off the runtime) and renames it
+  only if it matches; otherwise it removes it and fails, saying the stored copy is damaged.
+  **Acceptance:** a byte of a kept blob's data file flipped: the download fails, says so, and
+  leaves no file; an intact blob downloads as before.
+- **5i-3 — reachable sources first (#185 finding 13).** `ask_order` puts every known holder
+  first, online or not, and the pin manager passes it both kinds. **Decided:** four tiers, each
+  shuffled: online holders, the other online members, offline holders, the other offline
+  members. **Acceptance:** an offline holder comes after an online member that does not hold the
+  item.
+- **5i-4 — a failed copy is tried again on a clock (#185 finding 10).** A failed emergency copy
+  is `Due` with no deadline, and a failed custody fetch is `Failed` until availability changes:
+  in a quiet group neither is tried again. A panicked emergency copy stays `Copying` for good.
+  **Decided:** both are tried again after a backoff, a minute doubling to an hour, whatever
+  else happens; a change of availability still asks a failed custody fetch at once. An emergency
+  copy's task id names its item, so a panic is a failure like any other. **Acceptance:** #185's:
+  the first emergency attempt fails, source and destination are restored with no change of
+  holdings or membership, and the copy is made within the backoff; the same for a custody fetch.
+  Tests for the three mutants 5h left here: `Pins::fetched`' `wanted_again ||
+  availability_changed`, `Pins::fetch_panicked`, `Emergency::copied`.
+- **5i-5 — an item keeps its time alone until it has its copies (#185 finding 11).** An item
+  drops out of `AloneItems` whenever a look does not see it alone: while its holder's new base
+  list is fetched (the holder's index entries are cleared meanwhile), or while its only copy has
+  failed a probe. Seen alone again, it starts the delay again. **Decided:** an item keeps its
+  time until a look sees it is not alone (two online real copies, or this node holds it) or it
+  has left the catalogue. While no copy is known it is not due, there being nothing to fetch
+  from; once one is, it is due at once if its time has run. **Acceptance:** the holder's new base
+  list held back past a look, and its only copy failing a probe and then passing: neither starts
+  the delay again.
+- **5i-6 — the next member takes over a failing emergency copy (#185 finding 12).** The copy is
+  the first member's after the custodians that is online and lacks it; if that member's copies
+  keep failing (a full disk, no path to the source), every look picks it again. **Decided:**
+  staggered: the member *k*-th in that order makes the copy once the item has been due for
+  *k* × `EMERGENCY_FALLBACK_AFTER`, an hour. One more member starts per hour while the item stays
+  alone, each working out its rank at its own look as now; the first copy kept ends it at
+  everyone's next look. No wire or log change. **Acceptance:** #185's: the first member online
+  but failing to keep: the second keeps a copy after the hour, and the third does not start.
+
 ---
 
 ## Carried forward — take or defer, explicitly
@@ -1164,7 +1224,7 @@ Every open C-number appears here once.
 | **C39** | **No `MemberLeaving` decommission** | **No phase.** A leaving member can lower its pledge in steps meanwhile. |
 | **C40** | **Settling is per node, not a log entry** (D4) | **No phase.** Custody epochs, if lagging views ever cost real traffic. |
 | **C30** | **One failed gossip dial strands that peer until it dials us** (phase 4's ground truth 18) | **Narrowed by 5f-6 (P5-65):** a node with no neighbour on the availability topic dials its members itself and hands gossip the connections, which frees them on every topic. A peer stranded while other neighbours remain still waits for it to dial us, or for the catalogue's backstop: **upstream**, n0-computer/iroh-gossip#159 or its like. |
-| **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. **#185 finding 4 asks for it again; still deferred** (P5-57). |
+| **C41** | **Nothing scrubs a node's own custody** for bitrot. *Seen by hand in 5c-5a*: a node whose custody file was deleted says nothing — `status` still counts it kept, it stays red, a restart does not notice, and `distlib download` of it fails with "could not write … to …", naming the destination rather than the missing blob. *And on macOS CI*: where the filesystem clones files (APFS; btrfs and XFS too), iroh-blobs exports by cloning the store's file, so a download of an emptied blob succeeds and writes an empty file, unchecked | **Phase 6**, with hardening: verify custody blobs now and then, re-fetch what is damaged, let a failed export name the store when the store is what failed, and check what an export wrote. **#185 finding 4 asks for it again; still deferred** (P5-57). **#225 again:** checking what an export wrote moves to 5i-2; scrubbing and repair stay here (P5-74). |
 | **C43** | **Purging the log loses its history and strands followers** — a snapshot keeps the folded state, not the signed events, and a follower behind the purge point is told `TooFarBehind` with no way back (P1-29); at thousands of members, 5,000 entries come in ordinary use | **Closed by 5c-0** (P5-23): never purged, and served a page at a time. |
 | **C42** | **GC stops for good after a failed pass** — iroh-blobs' `run_gc` leaves its loop on the first error, logging it once, until the node restarts (found in 5a-1) | **5b-3b-1** *(detected, not fixed; P5-16)*: iroh-blobs 0.103.1 offers no way to run a pass, so the last pass is in `node.status` and an error is logged when passes stop. |
 | **C44** | **The emergency copy fires only at the last live copy** (D6) | **A later version** (Ivan, P5-25). A group setting `emergency_at_copies`, 1 by default and at most `replicas − 1`, checked at founding: an item that has had at most that many live copies for `emergency_after_secs` gets emergency copies, one after another by the same first-after-the-custodians rule, the delay running from when it first fell to the threshold. It would make up for the overflow left out (C38). |
@@ -1185,6 +1245,9 @@ Every open C-number appears here once.
 | **C59** | **iroh-docs lets an older entry from a peer undo a delete** — the root of C58. `parents` in iroh-docs 0.101's `store/fs.rs`, which `insert_remote_entry` uses to look for a newer entry, calls `get_exact(…, false)`, leaving out the empty entries a delete writes. The one-line fix is `true` there. `distlib-sync/tests/iroh_docs.rs` reproduces it without a network | **Not filed upstream** (Ivan: an earlier issue there had no answer). Kept here for when it is worth filing; until then the catalogue clears with a newer value (P5-62), and that test fails once a fixed iroh-docs arrives. |
 | **C60** | **A restart forgets how long an item has been alone** — the emergency delay is kept in memory, so a node restarted more often than the delay never finds an item due (#200 finding 1; pinned by its `a_restart_forgets_how_long_an_item_has_been_alone`) | **Phase 6.** Persist the time each item has been alone, or start it from the holdings' history. |
 | **C61** | **A later failure of another item hides the first** — a prober keeps one failure per custodian (D12), so a failure of a second item replaces that of a first still lost, which counts as a real copy again (found planning 5f-4) | **Done in 5f-4** (Ivan): a failure is kept per custodian and item. |
+| **C62** | **A good chunk clears a failure recorded at a bad one** — on a three-node check, a probe of another chunk of the same item cleared a custodian's failure while the recorded chunk stayed damaged (#225) | **Phase 6.** Re-check the recorded blob and chunk before clearing the evidence. |
+| **C63** | **Two files with the same bytes keep one filename** — an audiobook's two tracks with identical bytes come back as one file, since a file is keyed by its hash (#225) | **Phase 6.** Let an item's files name one blob more than once. |
+| **C64** | **An add stopped before it was written keeps its files** — since 5i-1, nothing at start can tell it from a catalogue lost or restored in part, so its own tags stay, counted in `node.status` (#225) | **Phase 6.** An explicit operator command, or durable evidence of the add's attempt, to let them go. |
 
 ---
 
