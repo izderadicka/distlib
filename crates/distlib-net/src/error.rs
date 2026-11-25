@@ -225,9 +225,10 @@ impl IsRejection for ConnectError {
         }
     }
 
+    /// Only an established connection can carry the remote's close: a
+    /// refused dial is our own allowlist's.
     fn is_remote_rejection(&self) -> bool {
         match self {
-            Self::Connect { source, .. } => source.is_remote_rejection(),
             Self::Connection { source, .. } => source.is_remote_rejection(),
             _ => false,
         }
@@ -276,5 +277,33 @@ impl IsRejection for ClosedStream {
     fn is_rejection(&self) -> bool {
         // Finishing a stream that is already closed says nothing about why.
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::endpoint::ApplicationClose;
+
+    use super::*;
+
+    fn closed_with(error_code: iroh::endpoint::VarInt) -> ConnectionError {
+        ConnectionError::ApplicationClosed(ApplicationClose {
+            error_code,
+            reason: b"closed".to_vec().into(),
+        })
+    }
+
+    #[test]
+    fn only_a_close_as_not_a_member_is_the_remotes_rejection() {
+        assert!(closed_with(close_code::NOT_A_MEMBER).is_remote_rejection());
+        assert!(!closed_with(close_code::NOT_A_VOTER).is_remote_rejection());
+        assert!(!ConnectionError::TimedOut.is_remote_rejection());
+    }
+
+    #[test]
+    fn a_connection_closed_as_not_a_member_is_the_remotes_rejection() {
+        let rejected = ConnectError::from(closed_with(close_code::NOT_A_MEMBER));
+        assert!(rejected.is_rejection() && rejected.is_remote_rejection());
+        assert!(!ConnectError::from(ConnectionError::TimedOut).is_remote_rejection());
     }
 }

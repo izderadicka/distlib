@@ -235,6 +235,12 @@ async fn a_member_who_stays_admitted_keeps_its_connection() {
         "an unrelated membership change must not disturb a current member"
     );
 
+    // Still tracked after that pass, so a later expulsion closes it.
+    server_writer.replace([other.id]);
+    tokio::time::timeout(Duration::from_secs(10), connection.closed())
+        .await
+        .expect("a member expelled after a change it survived must still be closed");
+
     evictions.abort();
     node.shutdown().await;
 }
