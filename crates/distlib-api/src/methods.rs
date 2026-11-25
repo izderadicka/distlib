@@ -2471,7 +2471,57 @@ fn parse<T: for<'de> Deserialize<'de>>(params: Option<Value>) -> Result<T, Error
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
+    use distlib_consensus::{SignedEvent, Timestamp};
+    use distlib_core::GroupSettings;
+
     use super::*;
+
+    /// A group founded by `founders`: each a key, a display name and an
+    /// address.
+    fn founded_by(founders: &[(&SecretKey, &str, NodeAddr)]) -> MembershipState {
+        let profiles = founders
+            .iter()
+            .map(|(key, name, addr)| {
+                let profile = MemberProfile {
+                    member_id: MemberId::from(key.public()),
+                    display_name: (*name).to_owned(),
+                };
+                (profile, addr.clone())
+            })
+            .collect();
+        let at = Timestamp::from_millis(1);
+        let event = MembershipEvent::found(profiles, GroupSettings::default(), at)
+            .expect("distinct founders");
+        let signed = SignedEvent::sign(founders[0].0, event, at, 0).expect("a founder signs");
+        let mut membership = MembershipState::new();
+        membership.apply(1, &signed).expect("a founding applies");
+        membership
+    }
+
+    fn on_port(port: u16) -> NodeAddr {
+        NodeAddr::default().with_direct(SocketAddr::from(([127, 0, 0, 1], port)))
+    }
+
+    #[test]
+    fn a_core_change_names_who_it_drops_and_moves_and_leaves_out_who_stays() {
+        let [alice, bob, carol] = [1, 2, 3].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+        let [alice_id, bob_id, carol_id] =
+            [&alice, &bob, &carol].map(|key| MemberId::from(key.public()));
+        let membership = founded_by(&[
+            (&alice, "alice", on_port(1)),
+            (&bob, "", on_port(2)),
+            (&carol, "carol", on_port(3)),
+        ]);
+
+        let proposed = [(alice_id, on_port(1)), (bob_id, on_port(4))];
+
+        assert_eq!(
+            describe_core(&proposed, &membership),
+            format!("drop carol ({carol_id}) from the core group, move {bob_id} to 127.0.0.1:4")
+        );
+    }
 
     #[test]
     fn a_catalogue_failure_says_why() {

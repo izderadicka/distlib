@@ -69,6 +69,21 @@ fn a_format_file_holding_no_format_is_refused() {
     }
 }
 
+/// Only a missing file means a new directory; one that cannot be read is
+/// refused and left as it is.
+#[test]
+fn an_unreadable_format_file_is_refused_rather_than_stamped_over() {
+    let root = TempDir::new().unwrap();
+    let data_dir = DataDir::new(root.path());
+    let not_text = [0xff, 0xfe];
+    std::fs::write(data_dir.format_file(), not_text).unwrap();
+
+    let refused = data_dir.check_format().unwrap_err();
+
+    assert!(matches!(refused, CoreError::Io { .. }), "{refused:?}");
+    assert_eq!(std::fs::read(data_dir.format_file()).unwrap(), not_text);
+}
+
 #[test]
 fn a_data_directory_given_as_a_relative_path_is_resolved_to_an_absolute_one() {
     // 5c-5b4: iroh-blobs imports only from an absolute path, so uploads under

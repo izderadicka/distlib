@@ -126,7 +126,7 @@ impl ReindexHandle {
 pub struct Projection {
     task: JoinHandle<()>,
     reindex: ReindexHandle,
-    replays: watch::Receiver<u64>,
+    replays: watch::Receiver<()>,
 }
 
 impl Drop for Projection {
@@ -150,7 +150,7 @@ impl Projection {
         events: broadcast::Sender<Event>,
     ) -> Self {
         let (reindex_tx, reindex_rx) = mpsc::channel(REINDEX_QUEUE);
-        let (replays_tx, replays) = watch::channel(0);
+        let (replays_tx, replays) = watch::channel(());
         // Names the node on every line the projection logs, as the catalogue's
         // span does: a test runs several nodes in one process.
         let span =
@@ -168,9 +168,9 @@ impl Projection {
         }
     }
 
-    /// How many replays have finished. A replay rewrites items without
+    /// Changes when a replay finishes. A replay rewrites items without
     /// publishing events, so whoever follows the items reads them all again.
-    pub fn replays(&self) -> watch::Receiver<u64> {
+    pub fn replays(&self) -> watch::Receiver<()> {
         self.replays.clone()
     }
 
@@ -208,7 +208,7 @@ async fn run(
     mut membership: watch::Receiver<MembershipState>,
     events: broadcast::Sender<Event>,
     mut reindex_rx: mpsc::Receiver<oneshot::Sender<()>>,
-    replays: watch::Sender<u64>,
+    replays: watch::Sender<()>,
 ) {
     // A node with no group yet — freshly started, not founded or joined —
     // waits here indefinitely, which `distlib run` warns about on its own. A
@@ -314,7 +314,7 @@ struct ReadModelWriter {
     /// Whose ratings, reviews and bookmarks are projected (D9).
     members: BTreeSet<MemberId>,
     /// Counts each finished [`Self::replay`].
-    replays: watch::Sender<u64>,
+    replays: watch::Sender<()>,
     /// Items last projected with an entry missing its content.
     items_waiting_for_content: BTreeSet<ItemId>,
     /// Items whose bookmarks were last projected with one missing its content.
@@ -523,7 +523,7 @@ impl ReadModelWriter {
         self.project_items(items).await;
         self.project_bookmarks(bookmarked_items).await;
         self.project_wishes(wishes).await;
-        self.replays.send_modify(|count| *count += 1);
+        self.replays.send_replace(());
     }
 }
 

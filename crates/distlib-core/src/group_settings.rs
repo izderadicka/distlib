@@ -149,18 +149,30 @@ mod tests {
     }
 
     #[test]
-    fn a_step_above_the_cap_or_a_settle_past_its_limit_is_refused() {
+    fn a_step_above_the_cap_or_a_settle_past_its_limit_is_refused_and_one_at_it_is_not() {
+        let step = NonZeroU64::new(10).expect("ten is not zero");
         let step_above_cap = GroupSettings {
             cap_bytes: 5,
-            weight_step_bytes: NonZeroU64::new(10).expect("ten is not zero"),
+            weight_step_bytes: step,
             ..GroupSettings::default()
         };
         assert!(step_above_cap.check().is_err());
+        let step_at_cap = GroupSettings {
+            cap_bytes: step.get(),
+            ..step_above_cap
+        };
+        assert_eq!(step_at_cap.check(), Ok(()));
+
         let settle_too_long = GroupSettings {
             settle_secs: DAY + 1,
             ..GroupSettings::default()
         };
         assert!(settle_too_long.check().is_err());
+        let settle_at_its_limit = GroupSettings {
+            settle_secs: settle_too_long.max_settle_secs,
+            ..settle_too_long
+        };
+        assert_eq!(settle_at_its_limit.check(), Ok(()));
     }
 
     #[test]
