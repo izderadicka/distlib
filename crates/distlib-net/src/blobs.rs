@@ -390,34 +390,56 @@ impl Blobs {
     /// it is atomic. A sibling left by a node that died mid-copy is simply
     /// overwritten by the next export of the same file.
     ///
+    /// **Checked before it is handed over.** iroh-blobs copies or clones the
+    /// store's file without reading it against its hash, so the staged copy
+    /// is hashed before the rename; a damaged one fails with
+    /// [`NetError::DamagedCopy`] and is removed.
+    ///
     /// Fails if the blob is not here in full; [`Self::has`] is how a caller
     /// asks first.
     pub async fn export(&self, hash: ContentHash, target: &Path) -> Result<()> {
+        let partial = partial_of(target);
+        let exported = self.export_checked(hash, &partial, target).await;
+        if exported.is_err() {
+            // Best effort: the error being returned is the one worth reading.
+            let _ = std::fs::remove_file(&partial);
+        }
+        exported
+    }
+
+    /// [`Self::export`] to `partial`, checked, then renamed to `target`.
+    async fn export_checked(&self, hash: ContentHash, partial: &Path, target: &Path) -> Result<()> {
         let failed = |source: Box<dyn std::error::Error + Send + Sync>| NetError::Export {
             hash,
             target: target.to_owned(),
             source,
         };
-        let partial = partial_of(target);
-        let copied = self
-            .store
+        // The byte count it answers with is the size of a file this caller is
+        // about to be told the path of, so it is not worth a return type.
+        self.store
             .blobs()
-            .export(to_blobs(hash), &partial)
+            .export(to_blobs(hash), partial)
             .await
-            .map_err(|error| failed(Box::new(error)))
-            .and_then(|_written| {
-                // The byte count it answers with is the size of a file this
-                // caller is about to be told the path of, so it is a fact
-                // they can read off the filesystem rather than one worth a
-                // return type.
-                std::fs::rename(&partial, target).map_err(|error| failed(Box::new(error)))
-            });
-        if copied.is_err() {
-            // Best effort: the error being returned is the one worth reading.
-            let _ = std::fs::remove_file(&partial);
+            .map_err(|error| failed(Box::new(error)))?;
+        if hash_of_file(partial).await.map_err(failed)? != hash {
+            return Err(NetError::DamagedCopy { hash });
         }
-        copied
+        std::fs::rename(partial, target).map_err(|error| failed(Box::new(error)))
     }
+}
+
+/// The BLAKE3 hash of the file at `path`, off the runtime.
+async fn hash_of_file(
+    path: &Path,
+) -> std::result::Result<ContentHash, Box<dyn std::error::Error + Send + Sync>> {
+    let path = path.to_owned();
+    let hashed = tokio::task::spawn_blocking(move || {
+        blake3::Hasher::new()
+            .update_mmap_rayon(&path)
+            .map(|hasher| hasher.finalize())
+    })
+    .await??;
+    Ok(ContentHash::from_bytes(*hashed.as_bytes()))
 }
 
 /// A chunk's size, BLAKE3's: what [`Blobs::probe`] asks for one of.

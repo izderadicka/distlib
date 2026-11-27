@@ -435,6 +435,8 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "memmap2",
+ "rayon-core",
 ]
 
 [[package]]
@@ -1266,6 +1268,7 @@ name = "distlib-net"
 version = "0.1.0"
 dependencies = [
  "bao-tree",
+ "blake3",
  "distlib-core",
  "futures-lite",
  "iroh",

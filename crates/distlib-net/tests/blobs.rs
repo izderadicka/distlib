@@ -31,7 +31,7 @@ use std::{
 
 use distlib_core::{ContentHash, ItemId, KeepReason, MemberId, NodeAddr, StorageUse};
 use distlib_net::{
-    AddressBook, Blobs, BytePacer,
+    AddressBook, Blobs, BytePacer, NetError,
     blobs::{Probed, ServingGate, partial_of, serving_events},
 };
 use iroh::{
@@ -456,6 +456,39 @@ async fn an_export_left_half_done_is_finished_by_the_next_one() {
 
     assert_eq!(std::fs::read(&target).unwrap(), b"the whole book");
     assert!(!partial.exists(), "the half-done copy is gone");
+}
+
+/// iroh-blobs exports without reading the store's file against its hash, so
+/// a flipped byte would be handed over as the download (#225): the export
+/// fails, says the stored copy is damaged, and leaves no file behind.
+#[tokio::test]
+async fn an_export_of_a_damaged_copy_fails_and_leaves_no_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = FsStore::load(dir.path().join("blobs")).await.unwrap();
+    let blobs = Blobs::new(&store, &endpoint(SecretKey::generate(), Vec::new()).await);
+    // Over 16 KiB, so the bytes are a file and not inline.
+    let mut bytes: Vec<u8> = (0..64 * 1024u32).map(|n| (n % 251) as u8).collect();
+    let hash = store.add_bytes(bytes.clone()).await.unwrap().hash;
+    bytes[40_000] ^= 1;
+    let data = dir
+        .path()
+        .join("blobs/data")
+        .join(format!("{}.data", hash.to_hex()));
+    std::fs::write(&data, &bytes).unwrap();
+    let hash = ContentHash::from_bytes(*hash.as_bytes());
+
+    let target = dir.path().join("dune.epub");
+    let refused = blobs.export(hash, &target).await.unwrap_err();
+
+    assert!(
+        matches!(refused, NetError::DamagedCopy { hash: damaged } if damaged == hash),
+        "{refused:?}"
+    );
+    assert!(refused.to_string().contains("damaged"), "{refused}");
+    assert!(!target.exists(), "nothing handed over");
+    assert!(!partial_of(&target).exists(), "nor left beside it");
+
+    store.shutdown().await.unwrap();
 }
 
 /// A hash the store has never seen is `has() == false` rather than an error,
