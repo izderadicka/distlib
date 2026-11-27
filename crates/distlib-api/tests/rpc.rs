@@ -16,7 +16,7 @@ use std::{
 };
 
 use distlib_api::{
-    Api, Client, Server, serve,
+    Api, Client, Server, UnpublishedOwn, serve,
     tasks::{Downloaded, Outcome, Source, TaskState, Tasks},
     uploads::Uploads,
 };
@@ -331,6 +331,7 @@ impl Harness {
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage,
                 collections: tokio::sync::watch::channel(None).1,
+                unpublished_own: UnpublishedOwn::default(),
             },
             SecretString::from(token.clone()),
         )
@@ -524,6 +525,7 @@ impl Harness {
                 pins: tokio::sync::watch::channel(PinCounts::default()).1,
                 storage,
                 collections: tokio::sync::watch::channel(None).1,
+                unpublished_own: UnpublishedOwn::default(),
             },
             SecretString::from(token.clone()),
         )

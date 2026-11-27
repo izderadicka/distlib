@@ -10,7 +10,7 @@ of it wrong — an entry that turned out to be mistaken is more useful corrected
 **Status: agreed in discussion with Ivan, in progress — 5a done: 5a-1 (#134), 5a-2 (#135),
 5a-3a (#136), 5a-3b (#137); 5b-1a (#138), 5b-1b (#139), 5b-2a (#141), 5b-2b (#142), 5b-2c (#143),
 5b-3a (#144), 5b-3b (#145 to #147), 5b-3c (#148), 5b-4 (#149), 5b-5a (#150), 5b-5b (#151), 5b-6 (#152),
-5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4 (#230), 5h-5 (#231); 5i planned (P5-74).** Four rounds of review on #133 shaped it;
+5b-7 (#153); 5c-0 (#155), 5c-1a (#156), 5c-1b (#157), 5c-1c (#158), 5c-1d (#159), 5c-2a (#161), 5c-2b (#162), 5c-2c (#163), 5c-3a (#164), 5c-3b (#165), 5c-4 (#166), 5c-5a (#167); #160; 5d in progress, before 5c-5b: 5d-1 (#168), CI flakes (#169), 5d-2 (#170), 5d-3 (#171), 5d-4a (#172), 5d-4b (#173), a catalogue error says why (#174), 5d-5 (#175), 5d-6 (#176), 5d-7a (#177), 5d-7b (#178), 5d-8a (#179), 5d-8b (#180); before 5c-5b, the dry run's fixes (P5-49); 5c-5b planned from Ivan's run and #184 (P5-50); 5c-5b1 (P5-51), 5c-5b2 (P5-52), 5c-5b3 (P5-53), 5c-5b4 (P5-54); #183's fixes: 5d-9a (#191, P5-55), 5d-9b (#193, P5-56); 5e planned from #194 and #185 (P5-57); 5e-2 (#196, P5-58), 5e-3 (#197), 5e-4 (#198), 5e-5 (#199, P5-59), 5e-6 (#201), 5e-7a (#202, P5-60), 5e-7b (#203, P5-61), 5e-8 (#204); C58 closed (P5-62); 5e-9 (#206, P5-63); 5f planned from #200 (#207, P5-64); 5f-6 (#209, P5-65); 5f-2 (#213, P5-66); 5f-7 planned (P5-67), 5f-7a (#214), 5f-7b (#215), 5f-7c (#216), 5f-7d (#217); 5f-3 (#218); 5f-4 (#219, P5-68); 5f-5 (#220); 5g planned (P5-69); 5g-1 (#221); 5g-2 (#222, P5-70), ordered epochs (#223, P5-71); 5g-3 (P5-72); the mutation pass: 5h-1 (#226, P5-73), 5h-2 (#227), 5h-3a (#228), 5h-3b (#229), 5h-4 (#230), 5h-5 (#231); 5i planned (P5-74); 5i-1 (P5-75).** Four rounds of review on #133 shaped it;
 what they decided is listed below, each with the facts it was decided on, and what is still a guess
 is under [Open questions](#open-questions).
 
@@ -1147,6 +1147,15 @@ findings become C62–C64.
   moved away, a restart, a collection pass, a restart: the own tag and the blob stay; `docs/`
   back while stopped, `distlib download` gives the original bytes. B takes the same path.
   `keeping.rs`' interrupted add is reversed: its files stay, counted.
+  **Amended (Ivan, P5-75):** iroh-docs keeps an entry's value in the blob store, so with `docs/`
+  gone a collection takes the values too, and a lone node's restored `docs/` has entries without
+  them (C65). A lone node's kept files export by hash as they were added; in a group, the
+  catalogue comes back from a peer and the kept files serve the download.
+  *Done:* `find_unpublished_own` and `UnpublishedOwn`; `node.status` re-reads only those items,
+  so one the catalogue gains (an add made again: the same files are the same item) is not
+  counted, and `distlib status` warns while any are. `starting_the_api_keeps_and_counts_the_files_of_an_add_that_stopped_before_it_was_written`,
+  `a_lost_catalogue_does_not_cost_the_only_copy_of_an_items_files`,
+  `a_lost_catalogue_comes_back_from_a_peer_and_the_kept_files_serve_it`.
 - **5i-2 — an export is checked before it is handed over (C41, in part).** iroh-blobs exports by
   copying or cloning the store's file without reading it against its hash, so a flipped bit is
   downloaded with exit 0. What a node serves is safe: iroh-blobs checks each chunk against the
@@ -1248,6 +1257,7 @@ Every open C-number appears here once.
 | **C62** | **A good chunk clears a failure recorded at a bad one** — on a three-node check, a probe of another chunk of the same item cleared a custodian's failure while the recorded chunk stayed damaged (#225) | **Phase 6.** Re-check the recorded blob and chunk before clearing the evidence. |
 | **C63** | **Two files with the same bytes keep one filename** — an audiobook's two tracks with identical bytes come back as one file, since a file is keyed by its hash (#225) | **Phase 6.** Let an item's files name one blob more than once. |
 | **C64** | **An add stopped before it was written keeps its files** — since 5i-1, nothing at start can tell it from a catalogue lost or restored in part, so its own tags stay, counted in `node.status` (#225) | **Phase 6.** An explicit operator command, or durable evidence of the add's attempt, to let them go. |
+| **C65** | **A lone node's lost catalogue loses its values too** — iroh-docs keeps entry values in the blob store, protected only while the documents name them, so with `docs/` gone the next collection takes them; a restored `docs/` then reads as entries without content (found in 5i-1). A group gets them back from a peer | **Phase 6**, with backups: back up `docs/` and the blobs together, or keep entry values under a tag of their own. |
 
 ---
 

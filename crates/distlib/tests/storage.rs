@@ -73,6 +73,7 @@ async fn an_add_that_would_grow_own_past_the_limit_is_refused() {
             "cache_bytes": 0,
             "mandatory_over_limit": false,
             "last_collection_at": null,
+            "unpublished_own_items": 0,
         })
     );
 
