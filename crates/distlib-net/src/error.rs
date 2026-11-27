@@ -150,6 +150,11 @@ pub enum NetError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// What the store wrote out does not hash to the blob: its copy is
+    /// damaged, and nothing was left at the target.
+    #[error("this node's stored copy of {hash} is damaged: its bytes do not match their hash")]
+    DamagedCopy { hash: ContentHash },
 }
 
 // `BindError` is large enough that returning it unboxed would bloat every

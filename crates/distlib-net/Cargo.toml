@@ -25,6 +25,9 @@ iroh-blobs = { workspace = true }
 # `ChunkNum`, for a probe of one chunk.
 bao-tree = { workspace = true }
 tokio = { workspace = true }
+# Checking an export against its hash: `mmap` and `rayon` hash a large file in
+# parallel without reading it into memory.
+blake3 = { workspace = true, features = ["mmap", "rayon"] }
 # `StreamExt` over the downloader's progress stream.
 futures-lite = { workspace = true }
 thiserror = { workspace = true }
