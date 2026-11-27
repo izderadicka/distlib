@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 
 use distlib_core::MemberId;
 
-/// `members` in the order to ask them: those among `holders`, then the other
-/// `online` members, then everyone else — so an offline member is dialled,
-/// and its connect timeout waited out, only once nobody online could serve.
-/// Each tier is shuffled, so one holder is not asked for everything.
+/// `members` in the order to ask them: online holders, the other online
+/// members, offline holders, then everyone else — so an offline member is
+/// dialled, and its connect timeout waited out, only once nobody online could
+/// serve. Each tier is shuffled, so one holder is not asked for everything.
 pub fn ask_order(
     holders: &[MemberId],
     online: &BTreeSet<MemberId>,
@@ -20,19 +20,25 @@ pub fn ask_order(
         .collect()
 }
 
-/// `members` in three tiers: among `holders`, `online`, and the rest.
+/// `members` in four tiers: online holders, other online members, offline
+/// holders, other offline members.
 fn tiers(
     holders: &[MemberId],
     online: &BTreeSet<MemberId>,
     members: impl IntoIterator<Item = MemberId>,
-) -> [Vec<MemberId>; 3] {
-    let (holding, others): (Vec<_>, Vec<_>) = members
-        .into_iter()
-        .partition(|member| holders.contains(member));
-    let (online, offline) = others
+) -> [Vec<MemberId>; 4] {
+    let holds = |member: &MemberId| holders.contains(member);
+    let (online, offline): (Vec<_>, Vec<_>) = members
         .into_iter()
         .partition(|member| online.contains(member));
-    [holding, online, offline]
+    let (online_holding, online_others) = online.into_iter().partition(holds);
+    let (offline_holding, offline_others) = offline.into_iter().partition(holds);
+    [
+        online_holding,
+        online_others,
+        offline_holding,
+        offline_others,
+    ]
 }
 
 /// `members` in a random order. Randomness that fails — it does not, on any
@@ -59,17 +65,16 @@ mod tests {
         MemberId::from(SecretKey::generate().public())
     }
 
-    /// Online holders first, offline members last — and nobody lost or asked
-    /// twice on the way.
+    /// An offline holder comes after an online member that does not hold the
+    /// item (#185 finding 13); one member per tier, so the order is exact.
     #[test]
-    fn members_are_asked_online_holders_first_and_offline_last() {
+    fn members_are_asked_online_first_and_holders_first_within_each() {
         let (bob, carol, dave, erin) = (member(), member(), member(), member());
         let online = BTreeSet::from([bob, carol]);
 
-        let [holding, others_online, offline] = tiers(&[bob], &online, [erin, carol, dave, bob]);
-        assert_eq!(holding, [bob]);
-        assert_eq!(others_online, [carol]);
-        assert_eq!(offline, [erin, dave]);
+        let order = ask_order(&[bob, dave], &online, [erin, dave, carol, bob]);
+
+        assert_eq!(order, [bob, carol, dave, erin]);
     }
 
     #[test]
