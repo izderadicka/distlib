@@ -10,7 +10,7 @@ use std::{
     error::Error as _,
     iter,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -108,6 +108,28 @@ pub struct Api {
     pub storage: Storage,
     /// When the last garbage collection pass began; `None` before the first.
     pub collections: watch::Receiver<Option<SystemTime>>,
+    /// Own items the catalogue lacked when the API started.
+    pub unpublished_own: UnpublishedOwn,
+}
+
+/// Own items the catalogue lacked when the API started: an add that stopped
+/// before it was written, or a catalogue lost or restored in part. Nothing
+/// tells these apart, so their files are kept (#225).
+#[derive(Debug, Clone, Default)]
+pub struct UnpublishedOwn(Arc<Mutex<BTreeSet<ItemId>>>);
+
+impl UnpublishedOwn {
+    fn items(&self) -> BTreeSet<ItemId> {
+        self.lock().clone()
+    }
+
+    fn replace(&self, items: BTreeSet<ItemId>) {
+        *self.lock() = items;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<ItemId>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Api {
@@ -213,6 +235,11 @@ impl Api {
     /// The bytes this node keeps, by reason, against its storage limit.
     async fn storage(&self) -> Result<Value, Error> {
         let usage = self.blobs.kept_blobs().await.map_err(net_error)?.usage();
+        let unpublished = self
+            .missing_from_catalogue(self.unpublished_own.items())
+            .await;
+        let unpublished_own_items = unpublished.len();
+        self.unpublished_own.replace(unpublished);
         Ok(json!({
             "limit_bytes": self.storage.limit(),
             "own_bytes": usage.own_bytes,
@@ -225,6 +252,8 @@ impl Api {
                 .limit()
                 .is_some_and(|limit| usage.mandatory_bytes() > limit.get()),
             "last_collection_at": self.collections.borrow().map(micros_since_epoch),
+            // Kept, not let go of; one the catalogue gains since is not counted.
+            "unpublished_own_items": unpublished_own_items,
         }))
     }
 
@@ -1167,11 +1196,10 @@ impl Api {
         Ok((item, imported))
     }
 
-    /// Lets go of the own tags of every item the catalogue has no entry of:
-    /// adds that stopped between keeping their files and writing (#185).
-    /// Before the first call is served, so no add is half done; a failure is
-    /// logged, and costs only space until the next start.
-    pub(crate) async fn release_unpublished_own(&self) {
+    /// Finds the own items the catalogue lacks, and warns once naming them.
+    /// Their files are kept: a missing entry may be an add that stopped
+    /// before it was written, or a catalogue lost or restored in part (#225).
+    pub(crate) async fn find_unpublished_own(&self) {
         let items: BTreeSet<ItemId> = match self.blobs.kept(KeepReason::Own).await {
             Ok(kept) => kept.into_iter().map(|(item, _)| item).collect(),
             Err(error) => {
@@ -1184,43 +1212,33 @@ impl Api {
         }
         // Own tags mean a group, whose catalogue opens shortly after start.
         self.catalogue.ready().await;
+        let unpublished = self.missing_from_catalogue(items).await;
+        if !unpublished.is_empty() {
+            tracing::warn!(
+                items = ?unpublished,
+                "keeping the files of own items the catalogue lacks: an add that stopped before \
+                 it was written, or a catalogue lost or restored in part"
+            );
+        }
+        self.unpublished_own.replace(unpublished);
+    }
+
+    /// Those of `items` the catalogue has no entry of. One that cannot be
+    /// read is left out: it is not known to be missing.
+    async fn missing_from_catalogue(&self, items: BTreeSet<ItemId>) -> BTreeSet<ItemId> {
+        let mut missing = BTreeSet::new();
         for item in items {
-            match self.release_own_if_unpublished(item).await {
-                Ok(true) => {
-                    tracing::info!(%item, "let go of the files of an add that stopped before it was written")
+            match self.catalogue.item(item).await {
+                Ok(None) => {
+                    missing.insert(item);
                 }
-                Ok(false) => {}
+                Ok(Some(_)) => {}
                 Err(error) => {
-                    tracing::warn!(%item, %error, "could not let go of an unwritten add's files")
+                    tracing::warn!(%item, %error, "could not read an own item from the catalogue");
                 }
             }
         }
-    }
-
-    /// Lets go of `item`'s own tags if the catalogue has no entry of it; says
-    /// whether it did. An item written in part keeps them.
-    async fn release_own_if_unpublished(&self, item: ItemId) -> Result<bool, Error> {
-        if self
-            .catalogue
-            .item(item)
-            .await
-            .map_err(sync_error)?
-            .is_some()
-        {
-            return Ok(false);
-        }
-        for hash in self
-            .blobs
-            .kept_for(KeepReason::Own, item)
-            .await
-            .map_err(net_error)?
-        {
-            self.blobs
-                .release(KeepReason::Own, item, hash)
-                .await
-                .map_err(net_error)?;
-        }
-        Ok(true)
+        missing
     }
 
     /// Writes `item` as a new item, with every field `params` gives.

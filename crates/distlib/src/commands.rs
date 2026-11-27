@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use distlib_api::{
-    Api, Client, ClientError, Server,
+    Api, Client, ClientError, Server, UnpublishedOwn,
     tasks::{Downloaded, Outcome, Source},
 };
 use distlib_consensus::{
@@ -204,6 +204,7 @@ async fn start_local_api(
         pins: runtime.pins().counts(),
         storage: runtime.storage().clone(),
         collections: runtime.collections(),
+        unpublished_own: UnpublishedOwn::default(),
     };
     Ok(Some(serve_api(paths, config, api).await?))
 }
@@ -2091,6 +2092,22 @@ fn print_storage(storage: &Value) {
         storage["emergency_bytes"],
         storage["cache_bytes"]
     );
+    if let Some(warning) =
+        unpublished_own_warning(storage["unpublished_own_items"].as_u64().unwrap_or(0))
+    {
+        println!("{warning}");
+    }
+}
+
+/// The warning for own items the catalogue lacks, whose files are kept, if
+/// there are any (#225).
+fn unpublished_own_warning(items: u64) -> Option<String> {
+    (items > 0).then(|| {
+        format!(
+            "WARNING     {items} own items the catalogue lacks keep their files: an add that \
+             stopped before it was written, or a catalogue lost or restored in part"
+        )
+    })
 }
 
 /// One member, named if they have a name.
@@ -2229,6 +2246,13 @@ mod tests {
         let warning = waiting_for_room_warning(2).expect("two waiting warn");
         assert!(warning.contains("2 items"), "{warning}");
         assert_eq!(waiting_for_room_warning(0), None);
+    }
+
+    #[test]
+    fn unpublished_own_items_warn_only_when_there_are_any() {
+        let warning = unpublished_own_warning(2).expect("two warn");
+        assert!(warning.contains("2 own items"), "{warning}");
+        assert_eq!(unpublished_own_warning(0), None);
     }
 
     #[test]

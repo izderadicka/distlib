@@ -24,7 +24,7 @@ use std::{
 };
 
 use distlib::Runtime;
-use distlib_api::Api;
+use distlib_api::{Api, UnpublishedOwn};
 use distlib_consensus::{MemberProfile, MembershipEvent};
 use distlib_core::{
     Config, ContentHash, CoreMember, DataDir, FileRecord, GroupSettings, Item, ItemId, MemberId,
@@ -212,6 +212,7 @@ pub fn api(runtime: &Runtime, key: &SecretKey) -> Api {
         pins: runtime.pins().counts(),
         storage: runtime.storage().clone(),
         collections: runtime.collections(),
+        unpublished_own: UnpublishedOwn::default(),
     }
 }
 
