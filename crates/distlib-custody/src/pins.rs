@@ -464,11 +464,8 @@ impl Pins {
                 }
             }
             Err(error) => {
-                if error.is_unavailable() {
-                    tracing::warn!(%item, %error, "could not fetch an item this node keeps; asking again when availability changes or its retry is due");
-                } else {
-                    tracing::error!(%item, %error, "could not keep an item for custody; trying again when availability changes or its retry is due");
-                }
+                // Asked again on its own, so a warning, whatever the cause.
+                tracing::warn!(%item, %error, "could not keep an item for custody; asking again when availability changes or its retry is due");
                 after_a_failure(fetching, self.next_turn.take(), Instant::now())
             }
         };
@@ -677,14 +674,6 @@ pub(crate) enum KeepError {
     NoRoom { short_by: u64 },
     #[error("the fetch panicked")]
     Panicked(#[source] task::JoinError),
-}
-
-impl KeepError {
-    /// Whether nobody could serve it, which is ordinary while holders are
-    /// away, rather than something wrong here.
-    fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Stalled | Self::Blobs(NetError::Fetch { .. }))
-    }
 }
 
 /// What a fetch needs, cloned into its task.
