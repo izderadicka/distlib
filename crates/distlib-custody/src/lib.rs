@@ -9,6 +9,7 @@ mod emergency;
 mod failed_copies;
 mod pins;
 mod probes;
+mod retry;
 mod service;
 mod serving;
 mod settling;

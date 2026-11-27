@@ -14,7 +14,9 @@
 //! emergency copy stays, past the limit, until the custodians hold the item,
 //! and is fetched within `max_fetches`. 5e-8's: the cache goes first where
 //! the item has the most copies elsewhere. 5f-2's: a file list somebody
-//! else writes for an item changes nothing anybody holds or keeps.
+//! else writes for an item changes nothing anybody holds or keeps. 5i-4's: a
+//! failed custody fetch or emergency copy is tried again within its backoff,
+//! with nothing else changing.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -22,7 +24,7 @@
 
 use std::{
     num::{NonZeroU8, NonZeroU32, NonZeroU64, NonZeroUsize},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -39,10 +41,12 @@ use tempfile::TempDir;
 mod common;
 use common::{
     api, bound, collecting, config, download, following, found_and_settled, init_logging, pledge,
-    until, until_a_pass_collects, until_projected, until_released, until_watched,
+    until, until_a_pass_collects, until_projected, until_released, until_watched, until_within,
 };
 
 const SOON: Duration = Duration::from_secs(60);
+/// Within a first retry, a minute after a failure, with time to fetch.
+const RETRIED_WITHIN: Duration = Duration::from_secs(90);
 const GB: u64 = 1_000_000_000;
 /// The size of a book, unless a test needs a larger one.
 const BOOK: usize = 1_000_000;
@@ -146,6 +150,35 @@ impl Node {
             ),
             tagged_and_here,
             |(tagged, here)| (*tagged && *here) == keeps,
+        )
+        .await;
+    }
+
+    /// Where the blob store keeps `file`'s bytes.
+    fn bytes_of(&self, file: ContentHash) -> PathBuf {
+        self.dir
+            .blobs_dir()
+            .join("data")
+            .join(format!("{file}.data"))
+    }
+
+    /// Flips the first byte of its copy of `file`, which its store still
+    /// calls whole, and returns the bytes that put it right.
+    fn damage(&self, file: ContentHash) -> Vec<u8> {
+        let bytes = std::fs::read(self.bytes_of(file)).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[0] ^= 1;
+        std::fs::write(self.bytes_of(file), damaged).unwrap();
+        bytes
+    }
+
+    /// Waits until it keeps `file` of `item` for `reason`, within a retry.
+    async fn until_keeps_after_a_retry(&self, reason: KeepReason, item: ItemId, file: ContentHash) {
+        until_within(
+            RETRIED_WITHIN,
+            &format!("{} keeps the book for {reason:?}", self.id.fmt_short()),
+            || self.keeps(reason, item, file),
+            |keeps| *keeps,
         )
         .await;
     }
@@ -1062,6 +1095,85 @@ async fn a_failed_fetch_is_asked_again_and_a_restart_finishes_it() {
         .await;
 
     for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// **A failed custody fetch is tried again within its backoff** (#185
+/// finding 10). The founder's copy of a book is damaged, so the second
+/// member, made its custodian, fails to fetch it. The copy is put right, and
+/// with no change of holdings or membership the fetch is made within a
+/// retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_custody_fetch_is_tried_again_within_its_backoff() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let (founder, second, third) = three_nodes(dir.path(), [100 * GB, 0, 0]).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    until_projected(&second.runtime, item, 1, "the second member").await;
+    // Its holdings told, so nothing more changes availability.
+    second.until_it_sees(founder.id, item).await;
+    let whole = founder.damage(file);
+
+    second
+        .call("group.pledge_set", json!({ "bytes": 100 * GB }))
+        .await;
+    second.until_pins("failed", 1).await;
+    std::fs::write(founder.bytes_of(file), whole).unwrap();
+    second
+        .until_keeps_after_a_retry(KeepReason::Custody, item, file)
+        .await;
+
+    for node in [founder, second, third] {
+        node.stop().await;
+    }
+}
+
+/// **A failed emergency copy is tried again within its backoff** (#185
+/// finding 10). The founder's copy of a book is damaged and its custodian
+/// stops, so the other member's emergency copy fails. The copy is put right,
+/// and with no change of holdings or membership the emergency copy is made
+/// within a retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_emergency_copy_is_tried_again_within_its_backoff() {
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: 3,
+        ..settings()
+    };
+    let (founder, second, third) = a_founder_and_two_followers(dir.path(), &settings).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    let whole = founder.damage(file);
+    custodian.stop().await;
+
+    // Tagged before it is fetched: the copy has begun.
+    until(
+        "the emergency copy begins",
+        || async {
+            other
+                .runtime
+                .blobs()
+                .kept(KeepReason::Emergency)
+                .await
+                .unwrap()
+        },
+        |kept| kept.contains(&(item, file)),
+    )
+    .await;
+    // Time for it to fail on the first chunk.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(!other.runtime.blobs().has(file).await.unwrap());
+    std::fs::write(founder.bytes_of(file), whole).unwrap();
+    other
+        .until_keeps_after_a_retry(KeepReason::Emergency, item, file)
+        .await;
+
+    for node in [founder, other] {
         node.stop().await;
     }
 }

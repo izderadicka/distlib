@@ -31,11 +31,12 @@ use crate::{
     Custody, CustodyChange,
     emergency::Emergency,
     failed_copies,
+    retry::Failures,
     storage::{Room, Storage, StorageError, copies_elsewhere},
 };
 
 /// How long a fetch may go without a byte arriving before it is given up,
-/// to be asked again when availability changes.
+/// to be asked again when availability changes or its retry is due.
 const STALLED_AFTER: Duration = Duration::from_secs(60);
 
 /// How long availability changes are gathered before they are acted on:
@@ -180,7 +181,7 @@ enum Pin {
     /// go first, counted when a slot frees, so a queue is reordered as
     /// copies come and go and a fetch under way is never restarted. Among
     /// items with as many copies, the earliest `turn` goes first.
-    Queued { turn: Turn },
+    Queued { turn: Turn, failures: Failures },
     /// Being fetched by `task`, or waiting in it for a fetch slot an
     /// emergency copy holds, and what happened meanwhile.
     Fetching {
@@ -191,9 +192,14 @@ enum Pin {
         /// A fetch that then fails is asked again at once, not at the next
         /// change.
         availability_changed: bool,
+        failures: Failures,
     },
-    /// Its fetch failed: asked again when availability changes.
-    Failed,
+    /// Its fetch failed: asked again when availability changes, and at
+    /// `retry_at` whatever happens.
+    Failed {
+        failures: Failures,
+        retry_at: Instant,
+    },
     /// Not fetched, since it would not fit within the storage limit even
     /// with the whole cache evicted: asked again when this node lets go of
     /// custody of an item, and at start.
@@ -254,6 +260,7 @@ impl Pins {
         loop {
             self.start_fetches(&mut fetches);
             self.publish_counts();
+            let next_retry = self.next_retry();
             tokio::select! {
                 change = changes.recv() => match change {
                     Ok(CustodyChange::Recomputed) => self.read_custody_again().await,
@@ -285,9 +292,16 @@ impl Pins {
                     look_at_availability = None;
                     self.availability_changed().await;
                 }
+                () = sleep_until(next_retry.unwrap_or_else(Instant::now)), if next_retry.is_some() => {
+                    self.retry_due(Instant::now());
+                }
                 Some(joined) = fetches.join_next_with_id() => match joined {
                     Ok((_, (item, kept))) => self.fetched(item, kept).await,
-                    Err(error) => self.fetch_panicked(&error),
+                    Err(error) => {
+                        if let Some(item) = fetched_by(&self.pins, error.id()) {
+                            self.fetched(item, Err(KeepError::Panicked(error))).await;
+                        }
+                    }
                 },
                 () = self.room_made.notified() => self.ask_again_for_room(),
             }
@@ -302,7 +316,7 @@ impl Pins {
                 match pin {
                     Pin::Queued { .. } => counts.queued += 1,
                     Pin::Fetching { .. } => counts.fetching += 1,
-                    Pin::Failed => counts.failed += 1,
+                    Pin::Failed { .. } => counts.failed += 1,
                     Pin::WaitingForRoom => counts.waiting_for_room += 1,
                     Pin::Kept => counts.kept += 1,
                     Pin::Releasing => counts.releasing += 1,
@@ -335,7 +349,10 @@ impl Pins {
                 Some(Pin::Kept) => !self.keeper.holdings.holds(*item),
                 // A pass makes no room: letting go of an item does.
                 Some(
-                    Pin::Queued { .. } | Pin::Fetching { .. } | Pin::Failed | Pin::WaitingForRoom,
+                    Pin::Queued { .. }
+                    | Pin::Fetching { .. }
+                    | Pin::Failed { .. }
+                    | Pin::WaitingForRoom,
                 ) => false,
             };
             if needs_keeping {
@@ -364,6 +381,7 @@ impl Pins {
     fn queued(&mut self) -> Pin {
         Pin::Queued {
             turn: self.next_turn.take(),
+            failures: Failures::default(),
         }
     }
 
@@ -381,7 +399,7 @@ impl Pins {
         if free == 0 {
             return;
         }
-        for item in self.fewest_copies_first(free) {
+        for (item, failures) in self.fewest_copies_first(free) {
             let keeper = self.keeper.clone();
             let task = fetches
                 .spawn(
@@ -395,6 +413,7 @@ impl Pins {
                     task,
                     wanted_again: false,
                     availability_changed: false,
+                    failures,
                 },
             );
         }
@@ -402,7 +421,7 @@ impl Pins {
 
     /// Up to `count` of the queued items, those with the fewest live copies
     /// first.
-    fn fewest_copies_first(&self, count: usize) -> Vec<ItemId> {
+    fn fewest_copies_first(&self, count: usize) -> Vec<(ItemId, Failures)> {
         if !self
             .pins
             .values()
@@ -418,11 +437,7 @@ impl Pins {
     }
 
     async fn fetched(&mut self, item: ItemId, kept: Result<(), KeepError>) {
-        let Some(Pin::Fetching {
-            wanted_again,
-            availability_changed,
-            ..
-        }) = self.pins.get(&item).copied()
+        let Some(fetching @ Pin::Fetching { wanted_again, .. }) = self.pins.get(&item).copied()
         else {
             return;
         };
@@ -450,28 +465,38 @@ impl Pins {
             }
             Err(error) => {
                 if error.is_unavailable() {
-                    tracing::warn!(%item, %error, "could not fetch an item this node keeps; asking again when availability changes");
+                    tracing::warn!(%item, %error, "could not fetch an item this node keeps; asking again when availability changes or its retry is due");
                 } else {
-                    tracing::error!(%item, %error, "could not keep an item for custody; trying again when availability changes");
+                    tracing::error!(%item, %error, "could not keep an item for custody; trying again when availability changes or its retry is due");
                 }
-                if wanted_again || availability_changed {
-                    self.queued()
-                } else {
-                    Pin::Failed
-                }
+                after_a_failure(fetching, self.next_turn.take(), Instant::now())
             }
         };
         self.pins.insert(item, next);
     }
 
-    fn fetch_panicked(&mut self, error: &task::JoinError) {
-        tracing::error!(%error, "a custody fetch failed");
-        let failed = self
-            .pins
-            .values_mut()
-            .find(|pin| matches!(pin, Pin::Fetching { task, .. } if *task == error.id()));
-        if let Some(pin) = failed {
-            *pin = Pin::Failed;
+    /// When the first failed fetch is due to be asked again.
+    fn next_retry(&self) -> Option<Instant> {
+        self.pins
+            .values()
+            .filter_map(|pin| match pin {
+                Pin::Failed { retry_at, .. } => Some(*retry_at),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// Queues the failed fetches whose retry is due at `now`.
+    fn retry_due(&mut self, now: Instant) {
+        for pin in self.pins.values_mut() {
+            if let Pin::Failed { failures, retry_at } = *pin
+                && retry_at <= now
+            {
+                *pin = Pin::Queued {
+                    turn: self.next_turn.take(),
+                    failures,
+                };
+            }
         }
     }
 
@@ -485,9 +510,10 @@ impl Pins {
                     availability_changed,
                     ..
                 } => *availability_changed = true,
-                Pin::Failed => {
+                Pin::Failed { failures, .. } => {
                     *pin = Pin::Queued {
                         turn: self.next_turn.take(),
+                        failures: *failures,
                     };
                 }
                 Pin::Releasing => releasing.push(*item),
@@ -549,6 +575,7 @@ impl Pins {
             if *pin == Pin::WaitingForRoom {
                 *pin = Pin::Queued {
                     turn: self.next_turn.take(),
+                    failures: Failures::default(),
                 };
             }
         }
@@ -557,45 +584,80 @@ impl Pins {
 
 /// What wanting an item makes of its `pin`: queued at `turn`, unless it is
 /// waiting already, which keeps its place, or being fetched, which is then
-/// fetched again.
+/// fetched again. A failed one keeps its count of failures.
 fn wanted(pin: Option<Pin>, turn: Turn) -> Pin {
     match pin {
-        None | Some(Pin::Failed | Pin::WaitingForRoom | Pin::Kept | Pin::Releasing) => {
-            Pin::Queued { turn }
-        }
+        None | Some(Pin::WaitingForRoom | Pin::Kept | Pin::Releasing) => Pin::Queued {
+            turn,
+            failures: Failures::default(),
+        },
+        Some(Pin::Failed { failures, .. }) => Pin::Queued { turn, failures },
         Some(queued @ Pin::Queued { .. }) => queued,
         Some(Pin::Fetching {
             task,
             availability_changed,
+            failures,
             ..
         }) => Pin::Fetching {
             task,
             wanted_again: true,
             availability_changed,
+            failures,
         },
     }
 }
 
-/// Up to `count` of the queued items in `pins`: those with the fewest live
-/// copies as `live_copies` counts them, an item down to one copy before one
-/// at two, and among as many the earliest turn.
+/// What a fetch that failed at `now` makes of its `fetching` pin: queued at
+/// `turn` if the item or availability changed meanwhile, otherwise failed
+/// until its retry is due. Any other pin is left as it is.
+fn after_a_failure(fetching: Pin, turn: Turn, now: Instant) -> Pin {
+    let Pin::Fetching {
+        wanted_again,
+        availability_changed,
+        failures,
+        ..
+    } = fetching
+    else {
+        return fetching;
+    };
+    let (failures, retry_at) = failures.one_more(now);
+    if wanted_again || availability_changed {
+        Pin::Queued { turn, failures }
+    } else {
+        Pin::Failed { failures, retry_at }
+    }
+}
+
+/// The item `task` was fetching.
+fn fetched_by(pins: &HashMap<ItemId, Pin>, task: task::Id) -> Option<ItemId> {
+    pins.iter().find_map(|(item, pin)| {
+        matches!(pin, Pin::Fetching { task: fetching, .. } if *fetching == task).then_some(*item)
+    })
+}
+
+/// Up to `count` of the queued items in `pins`, with their failures: those
+/// with the fewest live copies as `live_copies` counts them, an item down to
+/// one copy before one at two, and among as many the earliest turn.
 fn next_to_fetch(
     pins: &HashMap<ItemId, Pin>,
     count: usize,
     live_copies: impl Fn(ItemId) -> usize,
-) -> Vec<ItemId> {
-    let mut queued: Vec<((usize, Turn), ItemId)> = pins
+) -> Vec<(ItemId, Failures)> {
+    let mut queued: Vec<((usize, Turn), ItemId, Failures)> = pins
         .iter()
         .filter_map(|(item, pin)| match pin {
-            Pin::Queued { turn } => Some(((live_copies(*item), *turn), *item)),
+            Pin::Queued { turn, failures } => Some(((live_copies(*item), *turn), *item, *failures)),
             _ => None,
         })
         .collect();
     if queued.len() > count {
-        queued.select_nth_unstable(count);
+        queued.select_nth_unstable_by_key(count, |(order, ..)| *order);
         queued.truncate(count);
     }
-    queued.into_iter().map(|(_, item)| item).collect()
+    queued
+        .into_iter()
+        .map(|(_, item, failures)| (item, failures))
+        .collect()
 }
 
 /// Why an item could not be kept.
@@ -613,6 +675,8 @@ pub(crate) enum KeepError {
     Stalled,
     #[error("{short_by} bytes short of room within the storage limit")]
     NoRoom { short_by: u64 },
+    #[error("the fetch panicked")]
+    Panicked(#[source] task::JoinError),
 }
 
 impl KeepError {
@@ -812,7 +876,7 @@ mod tests {
     fn picked(queued: &[(ItemId, usize, u64)], count: usize) -> BTreeSet<ItemId> {
         let pins = queued
             .iter()
-            .map(|(item, _, turn)| (*item, Pin::Queued { turn: Turn(*turn) }))
+            .map(|(item, _, turn)| (*item, queued_at(*turn)))
             .collect();
         let copies = |wanted: ItemId| {
             queued
@@ -820,7 +884,23 @@ mod tests {
                 .find(|(item, _, _)| *item == wanted)
                 .map_or(0, |(_, copies, _)| *copies)
         };
-        next_to_fetch(&pins, count, copies).into_iter().collect()
+        next_to_fetch(&pins, count, copies)
+            .into_iter()
+            .map(|(item, _)| item)
+            .collect()
+    }
+
+    fn queued_at(turn: u64) -> Pin {
+        Pin::Queued {
+            turn: Turn(turn),
+            failures: Failures::default(),
+        }
+    }
+
+    /// A pin that failed once at `now`.
+    fn failed_once(now: Instant) -> Pin {
+        let (failures, retry_at) = Failures::default().one_more(now);
+        Pin::Failed { failures, retry_at }
     }
 
     #[test]
@@ -845,26 +925,81 @@ mod tests {
         let queued = [(item(1), 0, 0), (item(2), 0, 1)];
         assert_eq!(picked(&queued, 1).len(), 1);
         assert_eq!(picked(&queued, 5), BTreeSet::from([item(1), item(2)]));
-        let pins = HashMap::from([(item(1), Pin::Kept), (item(2), Pin::Failed)]);
+        let pins = HashMap::from([(item(1), Pin::Kept), (item(2), failed_once(Instant::now()))]);
         assert!(next_to_fetch(&pins, 5, |_| 0).is_empty());
     }
 
     #[test]
     fn an_item_wanted_while_waiting_keeps_its_place() {
-        let waiting = Pin::Queued { turn: Turn(2) };
+        let waiting = queued_at(2);
         assert_eq!(wanted(Some(waiting), Turn(9)), waiting);
     }
 
     #[test]
     fn an_item_new_kept_or_failed_joins_the_queue_at_the_turn_given() {
-        for pin in [
-            None,
-            Some(Pin::Kept),
-            Some(Pin::Failed),
-            Some(Pin::Releasing),
-        ] {
-            assert_eq!(wanted(pin, Turn(4)), Pin::Queued { turn: Turn(4) });
+        for pin in [None, Some(Pin::Kept), Some(Pin::Releasing)] {
+            assert_eq!(wanted(pin, Turn(4)), queued_at(4));
         }
+        let Pin::Failed { failures, .. } = failed_once(Instant::now()) else {
+            unreachable!("built failed")
+        };
+        assert_eq!(
+            wanted(Some(failed_once(Instant::now())), Turn(4)),
+            Pin::Queued {
+                turn: Turn(4),
+                failures
+            },
+            "and a failed one keeps its count"
+        );
+    }
+
+    /// A fetch that fails is asked again at once if the item or availability
+    /// changed meanwhile; otherwise it waits for its retry, a failure more.
+    #[tokio::test]
+    async fn a_failed_fetch_waits_for_its_retry_unless_something_changed() {
+        let now = Instant::now();
+        let task = tokio::spawn(async {}).id();
+        let fetching = |wanted_again, availability_changed| Pin::Fetching {
+            task,
+            wanted_again,
+            availability_changed,
+            failures: Failures::default(),
+        };
+        let Pin::Failed { failures, .. } = failed_once(now) else {
+            unreachable!("built failed")
+        };
+        let queued = Pin::Queued {
+            turn: Turn(3),
+            failures,
+        };
+
+        assert_eq!(
+            after_a_failure(fetching(false, false), Turn(3), now),
+            failed_once(now)
+        );
+        assert_eq!(after_a_failure(fetching(true, false), Turn(3), now), queued);
+        assert_eq!(after_a_failure(fetching(false, true), Turn(3), now), queued);
+        assert_eq!(after_a_failure(Pin::Kept, Turn(3), now), Pin::Kept);
+    }
+
+    /// A panicked fetch is told by its task, which names its item.
+    #[tokio::test]
+    async fn a_fetch_is_found_by_its_task() {
+        let (task, other) = (tokio::spawn(async {}).id(), tokio::spawn(async {}).id());
+        let fetching = |task| Pin::Fetching {
+            task,
+            wanted_again: false,
+            availability_changed: false,
+            failures: Failures::default(),
+        };
+        let pins = HashMap::from([
+            (item(1), fetching(other)),
+            (item(2), fetching(task)),
+            (item(3), Pin::Kept),
+        ]);
+
+        assert_eq!(fetched_by(&pins, task), Some(item(2)));
+        assert_eq!(fetched_by(&pins, tokio::spawn(async {}).id()), None);
     }
 
     #[test]
