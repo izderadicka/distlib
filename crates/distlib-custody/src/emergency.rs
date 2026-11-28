@@ -6,7 +6,8 @@
 //! and then moved to the cache (5e-7). Its fetch takes one of custody's
 //! `max_fetches` places, so many due at once arrive no faster than custody.
 //! An item whose last holder is away keeps how long it has been alone, and is
-//! due once the holder is back (5f-5).
+//! due once the holder is back (5f-5). A copy that failed, or panicked, is
+//! due again once its retry is (5i-4).
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may
@@ -28,7 +29,7 @@ use tokio::{
         broadcast::{self, error::RecvError},
         watch,
     },
-    task::JoinSet,
+    task::{self, JoinSet},
     time::{Instant, sleep_until},
 };
 use tracing::Instrument as _;
@@ -36,6 +37,7 @@ use tracing::Instrument as _;
 use crate::{
     Custody, CustodyChange,
     pins::{AVAILABILITY_GATHERED_FOR, KeepError, Keeper},
+    retry::Failures,
     service::custody_group,
 };
 
@@ -46,9 +48,14 @@ enum Alone {
     Since(Instant),
     /// One live copy for long enough. Whose the copy is to make depends on
     /// who is online, so it is worked out again at each look.
-    Due,
-    /// Being copied here.
-    Copying,
+    Due { failures: Failures },
+    /// Being copied here, by `task`.
+    Copying { task: task::Id, failures: Failures },
+    /// Its copy here failed: due again at `retry_at`.
+    Failed {
+        failures: Failures,
+        retry_at: Instant,
+    },
 }
 
 /// Every item down to one live copy that this node does not hold.
@@ -57,9 +64,10 @@ struct AloneItems(HashMap<ItemId, Alone>);
 
 impl AloneItems {
     /// Brings the items up to those alone `now`, and returns the ones due:
-    /// alone for `delay` since they last had more than one copy, not being
-    /// copied, and with their holder online. One whose holder is `away`
-    /// keeps its time, and one being copied stays, alone or not (5f-5).
+    /// alone for `delay` since they last had more than one copy, or past the
+    /// retry of a failed copy, not being copied, and with their holder
+    /// online. One whose holder is `away` keeps its time, and one being
+    /// copied stays, alone or not (5f-5).
     fn update(
         &mut self,
         alone_now: &HashSet<ItemId>,
@@ -79,17 +87,23 @@ impl AloneItems {
         alone.extend(
             previous
                 .into_iter()
-                .filter(|(_, alone)| *alone == Alone::Copying),
+                .filter(|(_, alone)| matches!(alone, Alone::Copying { .. })),
         );
         let due = alone
             .iter_mut()
             .filter_map(|(item, alone)| {
-                if let Alone::Since(since) = *alone
-                    && now >= since + delay
-                {
-                    *alone = Alone::Due;
+                match *alone {
+                    Alone::Since(since) if now >= since + delay => {
+                        *alone = Alone::Due {
+                            failures: Failures::default(),
+                        };
+                    }
+                    Alone::Failed { failures, retry_at } if now >= retry_at => {
+                        *alone = Alone::Due { failures };
+                    }
+                    _ => {}
                 }
-                (*alone == Alone::Due && alone_now.contains(item)).then_some(*item)
+                (matches!(alone, Alone::Due { .. }) && alone_now.contains(item)).then_some(*item)
             })
             .collect();
         self.0 = alone;
@@ -102,21 +116,39 @@ impl AloneItems {
             .values()
             .filter_map(|alone| match alone {
                 Alone::Since(since) => Some(*since + delay),
-                Alone::Due | Alone::Copying => None,
+                Alone::Failed { retry_at, .. } => Some(*retry_at),
+                Alone::Due { .. } | Alone::Copying { .. } => None,
             })
             .min()
     }
 
-    fn copying(&mut self, item: ItemId) {
-        self.0.insert(item, Alone::Copying);
+    /// `item`, due, is being copied by `task`.
+    fn copying(&mut self, item: ItemId, task: task::Id) {
+        if let Some(alone) = self.0.get_mut(&item)
+            && let Alone::Due { failures } = *alone
+        {
+            *alone = Alone::Copying { task, failures };
+        }
     }
 
-    /// A copy done is no longer alone here; one failed is due again.
-    fn copied(&mut self, item: ItemId, succeeded: bool) {
+    /// The item `task` is copying.
+    fn copied_by(&self, task: task::Id) -> Option<ItemId> {
+        self.0.iter().find_map(|(item, alone)| {
+            matches!(alone, Alone::Copying { task: copying, .. } if *copying == task)
+                .then_some(*item)
+        })
+    }
+
+    /// A copy done at `now` is no longer alone here; one failed is due again
+    /// once its retry is.
+    fn copied(&mut self, item: ItemId, succeeded: bool, now: Instant) {
         if succeeded {
             self.0.remove(&item);
-        } else {
-            self.0.insert(item, Alone::Due);
+        } else if let Some(alone) = self.0.get_mut(&item)
+            && let Alone::Copying { failures, .. } = *alone
+        {
+            let (failures, retry_at) = failures.one_more(now);
+            *alone = Alone::Failed { failures, retry_at };
         }
     }
 }
@@ -195,10 +227,12 @@ impl Emergency {
                 () = sleep_until(next_due.unwrap_or_else(Instant::now)), if next_due.is_some() => {
                     self.look(&mut copies).await;
                 }
-                Some(joined) = copies.join_next() => match joined {
-                    Ok((item, copied)) => self.copied(item, copied),
+                Some(joined) = copies.join_next_with_id() => match joined {
+                    Ok((_, (item, copied))) => self.copied(item, copied),
                     Err(error) => {
-                        tracing::error!(%error, "an emergency copy panicked; it is not made again until the item is alone again");
+                        if let Some(item) = self.alone.copied_by(error.id()) {
+                            self.copied(item, Err(KeepError::Panicked(error)));
+                        }
                     }
                 },
             }
@@ -248,12 +282,14 @@ impl Emergency {
             match self.is_mine_to_copy(item, holder, &online).await {
                 Ok(true) => {
                     tracing::info!(%item, holder = %holder.fmt_short(), "one copy left for too long; keeping an emergency copy");
-                    self.alone.copying(item);
                     let keeper = self.keeper.clone();
-                    copies.spawn(
-                        async move { (item, keeper.keep(item, KeepReason::Emergency).await) }
-                            .in_current_span(),
-                    );
+                    let task = copies
+                        .spawn(
+                            async move { (item, keeper.keep(item, KeepReason::Emergency).await) }
+                                .in_current_span(),
+                        )
+                        .id();
+                    self.alone.copying(item, task);
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -319,9 +355,9 @@ impl Emergency {
 
     fn copied(&mut self, item: ItemId, copied: Result<(), KeepError>) {
         if let Err(error) = &copied {
-            tracing::warn!(%item, %error, "could not keep an emergency copy; trying again at the next look");
+            tracing::warn!(%item, %error, "could not keep an emergency copy; trying again once its retry is due");
         }
-        self.alone.copied(item, copied.is_ok());
+        self.alone.copied(item, copied.is_ok(), Instant::now());
     }
 }
 
@@ -410,37 +446,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_item_being_copied_is_not_due_and_a_failed_copy_is() {
+    /// A copy under way is not due again, alone or not; one that failed is
+    /// due once its retry is, with no other look (5i-4); one done is gone.
+    #[tokio::test]
+    async fn an_item_being_copied_is_not_due_and_a_failed_copy_is_once_its_retry_is() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
-        alone.update(&HashSet::from([item(1), item(2)]), [], start, DELAY);
-        alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
-        alone.copying(item(1));
+        let both = HashSet::from([item(1), item(2)]);
+        alone.update(&both, [], start, DELAY);
+        alone.update(&both, [], start + DELAY, DELAY);
+        let task = tokio::spawn(async {}).id();
+        alone.copying(item(1), task);
+        assert_eq!(alone.copied_by(task), Some(item(1)));
         assert_eq!(
             alone.update(&HashSet::from([item(2)]), [], start + DELAY, DELAY),
             [item(2)]
         );
         // Alone again while still being copied: not a second copy.
-        alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
-        assert_eq!(
-            alone.update(
-                &HashSet::from([item(1), item(2)]),
-                [],
-                start + DELAY * 2,
-                DELAY
-            ),
-            [item(2)]
-        );
-        alone.copied(item(1), false);
-        let mut due = alone.update(&HashSet::from([item(1), item(2)]), [], start + DELAY, DELAY);
+        assert_eq!(alone.update(&both, [], start + DELAY * 2, DELAY), [item(2)]);
+
+        let failed_at = start + DELAY * 2;
+        alone.copied(item(1), false, failed_at);
+        assert_eq!(alone.copied_by(task), None);
+        let (_, retry_at) = Failures::default().one_more(failed_at);
+        assert_eq!(alone.next_due(DELAY), Some(retry_at), "a look then");
+        assert_eq!(alone.update(&both, [], retry_at - DELAY, DELAY), [item(2)]);
+        let mut due = alone.update(&both, [], retry_at, DELAY);
         due.sort_unstable();
         assert_eq!(due, [item(1), item(2)]);
-        alone.copying(item(1));
-        alone.copied(item(1), true);
+
+        alone.copying(item(1), task);
+        alone.copied(item(1), true, retry_at);
         assert!(
             alone
-                .update(&HashSet::from([]), [], start + DELAY, DELAY)
+                .update(&HashSet::new(), [], retry_at, DELAY)
                 .is_empty()
         );
+        assert_eq!(alone.next_due(DELAY), None);
+    }
+
+    /// Each failure in a row waits longer: the count goes from the failed
+    /// copy through the next one.
+    #[tokio::test]
+    async fn a_second_failure_in_a_row_waits_longer() {
+        let (mut alone, start) = (AloneItems::default(), Instant::now());
+        let one = HashSet::from([item(1)]);
+        alone.update(&one, [], start, DELAY);
+        alone.update(&one, [], start + DELAY, DELAY);
+        let task = tokio::spawn(async {}).id();
+        alone.copying(item(1), task);
+        alone.copied(item(1), false, start);
+        let (once, first_retry) = Failures::default().one_more(start);
+        assert_eq!(alone.next_due(DELAY), Some(first_retry));
+        assert_eq!(alone.update(&one, [], first_retry, DELAY), [item(1)]);
+        alone.copying(item(1), task);
+        alone.copied(item(1), false, start);
+
+        let (_, second_retry) = once.one_more(start);
+        assert!(second_retry > first_retry);
+        assert_eq!(alone.next_due(DELAY), Some(second_retry));
     }
 }
