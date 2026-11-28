@@ -166,6 +166,12 @@ impl CustodyGroup {
         item: &CustodyItem,
         eligible: impl Fn(MemberId) -> bool,
     ) -> Option<MemberId> {
+        self.after_custodians(item).find(|member| eligible(*member))
+    }
+
+    /// The members after `item`'s custodians, in score order: who keeps its
+    /// emergency copy, first to last (D6, 5i-6).
+    pub fn after_custodians(&self, item: &CustodyItem) -> impl Iterator<Item = MemberId> + use<> {
         let mut ranked: Vec<Ranked> = self
             .candidates(item)
             .map(|(member, weight)| Ranked::new(&self.key, item.item, member, weight))
@@ -175,7 +181,6 @@ impl CustodyGroup {
             .into_iter()
             .skip(self.slots(item))
             .map(|ranked| ranked.member)
-            .find(|member| eligible(*member))
     }
 
     /// What keeping `item` asks of the group's pledges: its size once per
