@@ -16,7 +16,8 @@
 //! the item has the most copies elsewhere. 5f-2's: a file list somebody
 //! else writes for an item changes nothing anybody holds or keeps. 5i-4's: a
 //! failed custody fetch or emergency copy is tried again within its backoff,
-//! with nothing else changing.
+//! with nothing else changing. 5i-5's: an item's only copy failing a probe
+//! and passing again does not start its time alone over.
 
 // Three whole runtimes, a founding election, settling and fetching: seconds.
 #![cfg(feature = "slow-tests")]
@@ -1172,6 +1173,85 @@ async fn a_failed_emergency_copy_is_tried_again_within_its_backoff() {
     other
         .until_keeps_after_a_retry(KeepReason::Emergency, item, file)
         .await;
+
+    for node in [founder, other] {
+        node.stop().await;
+    }
+}
+
+/// **An item keeps its time alone while its only copy fails a probe**
+/// (#185 finding 11). The custodian stops, leaving the founder's copy the
+/// only one online. Probe failures of both copies are recorded, so for a look
+/// nobody holds a real copy, and then the founder's is cleared. The emergency copy is made on the clock
+/// started when the custodian stopped, not on one started over at the clear.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_keeps_its_time_alone_while_its_only_copy_fails_a_probe() {
+    const EMERGENCY_AFTER: Duration = Duration::from_secs(30);
+    init_logging();
+    let dir = TempDir::new().unwrap();
+    let settings = GroupSettings {
+        emergency_after_secs: u32::try_from(EMERGENCY_AFTER.as_secs()).unwrap(),
+        ..settings()
+    };
+    let (founder, second, third) = a_founder_and_two_followers(dir.path(), &settings).await;
+    let (item, file) = add_a_book(&founder, dir.path(), "Dune", BOOK).await;
+    let (custodian, other) = custodian_and_other(&founder, second, third, item);
+    custodian
+        .until_keeps(true, KeepReason::Custody, item, file)
+        .await;
+    other.until_it_sees(founder.id, item).await;
+    let custodians_id = custodian.id;
+    custodian.stop().await;
+    until(
+        "the other sees the custodian gone",
+        || async { other.runtime.availability().online().borrow().clone() },
+        |online| !online.contains(&custodians_id),
+    )
+    .await;
+    // A look, which starts the item's time alone.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let catalogue = other.runtime.catalogue();
+    let failure = ProbeFailure {
+        blob: file,
+        chunk: 0,
+        in_a_row: 1,
+    };
+    for holder in [founder.id, custodians_id] {
+        catalogue
+            .record_probe_failure(holder, item, &failure)
+            .await
+            .unwrap();
+    }
+    let real_copy_is = |held: bool| {
+        until(
+            if held {
+                "the founder's copy is real again"
+            } else {
+                "the founder's copy is not real"
+            },
+            || async { other.runtime.availability().real_holders(&item) },
+            move |real| real.is_empty() != held,
+        )
+    };
+    real_copy_is(false).await;
+    // A look while nobody holds a real copy.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    catalogue
+        .clear_probe_failure(founder.id, item)
+        .await
+        .unwrap();
+    real_copy_is(true).await;
+    let cleared_at = Instant::now();
+
+    other
+        .until_keeps(true, KeepReason::Emergency, item, file)
+        .await;
+    assert!(
+        cleared_at.elapsed() < EMERGENCY_AFTER,
+        "the emergency copy waited a whole delay after the clear: {:?}",
+        cleared_at.elapsed()
+    );
 
     for node in [founder, other] {
         node.stop().await;

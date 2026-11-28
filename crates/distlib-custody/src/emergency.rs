@@ -7,7 +7,9 @@
 //! `max_fetches` places, so many due at once arrive no faster than custody.
 //! An item whose last holder is away keeps how long it has been alone, and is
 //! due once the holder is back (5f-5). A copy that failed, or panicked, is
-//! due again once its retry is (5i-4).
+//! due again once its retry is (5i-4). An item seen alone keeps its time until a
+//! look sees its copies, or it leaves the catalogue (5i-5): a copy failing a
+//! probe, or its holder's index being fetched again, does not start it over.
 //!
 //! **Per observer, like availability itself.** Each node works out from who
 //! it sees online whether the copy is its own to make; two that disagree may
@@ -66,12 +68,12 @@ impl AloneItems {
     /// Brings the items up to those alone `now`, and returns the ones due:
     /// alone for `delay` since they last had more than one copy, or past the
     /// retry of a failed copy, not being copied, and with their holder
-    /// online. One whose holder is `away` keeps its time, and one being
-    /// copied stays, alone or not (5f-5).
+    /// online. One `without_a_source`, its holder away or no copy known,
+    /// keeps its time (5f-5, 5i-5), and one being copied stays, alone or not.
     fn update(
         &mut self,
         alone_now: &HashSet<ItemId>,
-        away: impl IntoIterator<Item = ItemId>,
+        without_a_source: impl IntoIterator<Item = ItemId>,
         now: Instant,
         delay: Duration,
     ) -> Vec<ItemId> {
@@ -81,7 +83,8 @@ impl AloneItems {
             .map(|item| (*item, previous.remove(item).unwrap_or(Alone::Since(now))))
             .collect();
         alone.extend(
-            away.into_iter()
+            without_a_source
+                .into_iter()
                 .filter_map(|item| Some((item, previous.remove(&item)?))),
         );
         alone.extend(
@@ -108,6 +111,11 @@ impl AloneItems {
             .collect();
         self.0 = alone;
         due
+    }
+
+    /// Every item alone here.
+    fn items(&self) -> impl Iterator<Item = ItemId> + '_ {
+        self.0.keys().copied()
     }
 
     /// When the next item alone becomes due.
@@ -258,7 +266,7 @@ impl Emergency {
         self.move_unneeded_copies_to_cache().await;
         let online = self.keeper.availability.online().borrow().clone();
         let mut holders: HashMap<ItemId, MemberId> = HashMap::new();
-        let mut away = Vec::new();
+        let mut without_a_source = Vec::new();
         for (item, holder) in self
             .keeper
             .availability
@@ -270,13 +278,23 @@ impl Emergency {
                 SoleHolder::Online(holder) => {
                     holders.insert(item, holder);
                 }
-                SoleHolder::Away => away.push(item),
+                SoleHolder::Away => without_a_source.push(item),
+            }
+        }
+        let alone_before: Vec<ItemId> = self
+            .alone
+            .items()
+            .filter(|item| !holders.contains_key(item))
+            .collect();
+        for item in alone_before {
+            if !self.no_longer_alone(item, &online).await {
+                without_a_source.push(item);
             }
         }
         let alone_now = holders.keys().copied().collect();
         let due = self
             .alone
-            .update(&alone_now, away, Instant::now(), self.delay());
+            .update(&alone_now, without_a_source, Instant::now(), self.delay());
         for item in due {
             let holder = holders[&item];
             match self.is_mine_to_copy(item, holder, &online).await {
@@ -295,6 +313,26 @@ impl Emergency {
                 Err(error) => {
                     tracing::warn!(%item, %error, "could not work out whose emergency copy an item is; asked again at the next look");
                 }
+            }
+        }
+    }
+
+    /// Whether `item`, alone at an earlier look, has its copies now, or has
+    /// left the catalogue.
+    async fn no_longer_alone(&self, item: ItemId, online: &BTreeSet<MemberId>) -> bool {
+        let held_here = self.keeper.holdings.holds(item);
+        if has_its_copies(
+            held_here,
+            &self.keeper.availability.real_holders(&item),
+            online,
+        ) {
+            return true;
+        }
+        match self.keeper.store.item(item).await {
+            Ok(stored) => stored.is_none(),
+            Err(error) => {
+                tracing::warn!(%item, %error, "could not read an item alone; it keeps its time until the next look");
+                false
             }
         }
     }
@@ -361,11 +399,40 @@ impl Emergency {
     }
 }
 
+/// Whether an item has its copies: this node holds it, or two of
+/// `real_holders` are `online`.
+fn has_its_copies(held_here: bool, real_holders: &[MemberId], online: &BTreeSet<MemberId>) -> bool {
+    held_here
+        || real_holders
+            .iter()
+            .filter(|member| online.contains(member))
+            .nth(1)
+            .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DELAY: Duration = Duration::from_secs(10);
+
+    /// An item seen alone keeps its time until it has two online real
+    /// copies or this node holds it (5i-5): one online and one away is still
+    /// one.
+    #[test]
+    fn an_item_has_its_copies_with_two_online_or_one_here() {
+        let member = || MemberId::from(iroh::SecretKey::generate().public());
+        let (bob, carol, dave) = (member(), member(), member());
+        let online = BTreeSet::from([bob, carol]);
+
+        assert!(has_its_copies(false, &[bob, carol], &online));
+        assert!(
+            !has_its_copies(false, &[bob, dave], &online),
+            "dave is away"
+        );
+        assert!(!has_its_copies(false, &[], &online));
+        assert!(has_its_copies(true, &[], &online));
+    }
 
     fn item(seed: u8) -> ItemId {
         ItemId::from_bytes([seed; 32])
