@@ -72,9 +72,13 @@ enum CopyHere {
     },
 }
 
-/// Every item down to one live copy that this node does not hold.
+/// Every item down to one live copy that this node does not hold, and when
+/// they were last looked at.
 #[derive(Debug, Default)]
-struct AloneItems(HashMap<ItemId, Alone>);
+struct AloneItems {
+    items: HashMap<ItemId, Alone>,
+    looked_at: Option<Instant>,
+}
 
 impl AloneItems {
     /// Brings the items up to those alone `now`, and returns the ones due,
@@ -89,7 +93,8 @@ impl AloneItems {
         now: Instant,
         delay: Duration,
     ) -> Vec<(ItemId, Duration)> {
-        let mut previous = std::mem::take(&mut self.0);
+        self.looked_at = Some(now);
+        let mut previous = std::mem::take(&mut self.items);
         let new = Alone {
             since: now,
             copy: CopyHere::NotStarted {
@@ -123,22 +128,27 @@ impl AloneItems {
                     .then_some((*item, due_for))
             })
             .collect();
-        self.0 = alone;
+        self.items = alone;
         due
     }
 
     /// Every item alone here.
     fn items(&self) -> impl Iterator<Item = ItemId> + '_ {
-        self.0.keys().copied()
+        self.items.keys().copied()
     }
 
-    /// When the next look is due after `now`: an item becoming due, the next
-    /// member's turn at one due (5i-6), or a failed copy's retry.
-    fn next_due(&self, delay: Duration, now: Instant) -> Option<Instant> {
-        self.0
+    /// When the next look is due: an item becoming due, the next member's
+    /// turn at one due (5i-6), or a failed copy's retry. Counted from the
+    /// last look, so a turn that passed without one is due at once.
+    fn next_due(&self, delay: Duration) -> Option<Instant> {
+        self.items
             .values()
             .filter_map(|alone| match alone.copy {
-                CopyHere::NotStarted { .. } => next_turn(alone.since + delay, now),
+                CopyHere::NotStarted { .. } => {
+                    let due_at = alone.since + delay;
+                    self.looked_at
+                        .map_or(Some(due_at), |looked_at| next_turn(due_at, looked_at))
+                }
                 CopyHere::Failed { retry_at, .. } => Some(retry_at),
                 CopyHere::Copying { .. } => None,
             })
@@ -147,7 +157,7 @@ impl AloneItems {
 
     /// `item`, due, is being copied by `task`.
     fn copying(&mut self, item: ItemId, task: task::Id) {
-        if let Some(alone) = self.0.get_mut(&item)
+        if let Some(alone) = self.items.get_mut(&item)
             && let CopyHere::NotStarted { failures } = alone.copy
         {
             alone.copy = CopyHere::Copying { task, failures };
@@ -156,7 +166,7 @@ impl AloneItems {
 
     /// The item `task` is copying.
     fn copied_by(&self, task: task::Id) -> Option<ItemId> {
-        self.0.iter().find_map(|(item, alone)| {
+        self.items.iter().find_map(|(item, alone)| {
             matches!(alone.copy, CopyHere::Copying { task: copying, .. } if copying == task)
                 .then_some(*item)
         })
@@ -166,8 +176,8 @@ impl AloneItems {
     /// once its retry is.
     fn copied(&mut self, item: ItemId, succeeded: bool, now: Instant) {
         if succeeded {
-            self.0.remove(&item);
-        } else if let Some(alone) = self.0.get_mut(&item)
+            self.items.remove(&item);
+        } else if let Some(alone) = self.items.get_mut(&item)
             && let CopyHere::Copying { failures, .. } = alone.copy
         {
             let (failures, retry_at) = failures.one_more(now);
@@ -176,10 +186,10 @@ impl AloneItems {
     }
 }
 
-/// When the next member's turn comes, after `now`, for an item due from
-/// `due_at`: `due_at` itself, then each [`EMERGENCY_FALLBACK_AFTER`] on.
-fn next_turn(due_at: Instant, now: Instant) -> Option<Instant> {
-    let Some(due_for) = now.checked_duration_since(due_at) else {
+/// The first member's turn after the look at `looked_at`, for an item due
+/// from `due_at`: `due_at` itself, then each [`EMERGENCY_FALLBACK_AFTER`] on.
+fn next_turn(due_at: Instant, looked_at: Instant) -> Option<Instant> {
+    let Some(due_for) = looked_at.checked_duration_since(due_at) else {
         return Some(due_at);
     };
     let turns_passed = due_for.as_secs() / EMERGENCY_FALLBACK_AFTER.as_secs();
@@ -236,7 +246,7 @@ impl Emergency {
         // A first look, for whatever was alone before this started.
         let mut look_at_availability = Some(Instant::now() + AVAILABILITY_GATHERED_FOR);
         loop {
-            let next_due = self.alone.next_due(self.delay(), Instant::now());
+            let next_due = self.alone.next_due(self.delay());
             tokio::select! {
                 event = events.recv() => match event {
                     Ok(Event::AvailabilityChanged { .. }) | Err(RecvError::Lagged(_)) => {
@@ -499,6 +509,22 @@ mod tests {
         );
     }
 
+    /// A turn that passed without a look is due at once, not an hour on:
+    /// turns are counted from the last look (Codex on #238).
+    #[test]
+    fn a_turn_passed_without_a_look_is_due_at_once() {
+        let (mut alone, start) = (AloneItems::default(), Instant::now());
+        let one = HashSet::from([item(1)]);
+        alone.update(&one, [], start, DELAY);
+        assert_eq!(
+            alone.next_due(DELAY),
+            Some(start + DELAY),
+            "however late it is asked"
+        );
+        alone.update(&one, [], start + DELAY + HOUR / 2, DELAY);
+        assert_eq!(alone.next_due(DELAY), Some(start + DELAY + HOUR));
+    }
+
     #[test]
     fn an_item_due_is_told_with_how_long_it_has_been() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
@@ -540,7 +566,7 @@ mod tests {
                 .due(&HashSet::from([item(1)]), [], start, DELAY)
                 .is_empty()
         );
-        assert_eq!(alone.next_due(DELAY, start), Some(start + DELAY));
+        assert_eq!(alone.next_due(DELAY), Some(start + DELAY));
         assert!(
             alone
                 .due(&HashSet::from([item(1)]), [], start + DELAY / 2, DELAY)
@@ -551,7 +577,7 @@ mod tests {
             [item(1)]
         );
         assert_eq!(
-            alone.next_due(DELAY, start + DELAY),
+            alone.next_due(DELAY),
             Some(start + DELAY + HOUR),
             "the next member's turn"
         );
@@ -567,10 +593,7 @@ mod tests {
                 .due(&HashSet::from([item(1)]), [], start + DELAY, DELAY)
                 .is_empty()
         );
-        assert_eq!(
-            alone.next_due(DELAY, start + DELAY),
-            Some(start + DELAY * 2)
-        );
+        assert_eq!(alone.next_due(DELAY), Some(start + DELAY * 2));
     }
 
     /// #200's finding 1, reversed (5f-5): at a look made while the last
@@ -598,7 +621,7 @@ mod tests {
             "nobody online to copy it from"
         );
         assert_eq!(
-            alone.next_due(DELAY, start + DELAY * 2),
+            alone.next_due(DELAY),
             Some(start + DELAY + HOUR),
             "a look at the next member's turn, and when it is back"
         );
@@ -609,7 +632,7 @@ mod tests {
     fn an_item_away_that_was_not_alone_is_not_timed() {
         let (mut alone, start) = (AloneItems::default(), Instant::now());
         alone.due(&HashSet::new(), [item(1)], start, DELAY);
-        assert_eq!(alone.next_due(DELAY, start), None);
+        assert_eq!(alone.next_due(DELAY), None);
         assert!(
             alone
                 .due(&HashSet::from([item(1)]), [], start + DELAY, DELAY)
@@ -640,11 +663,7 @@ mod tests {
         alone.copied(item(1), false, failed_at);
         assert_eq!(alone.copied_by(task), None);
         let (_, retry_at) = Failures::default().one_more(failed_at);
-        assert_eq!(
-            alone.next_due(DELAY, failed_at),
-            Some(retry_at),
-            "a look then"
-        );
+        assert_eq!(alone.next_due(DELAY), Some(retry_at), "a look then");
         assert_eq!(alone.due(&both, [], retry_at - DELAY, DELAY), [item(2)]);
         let mut due = alone.due(&both, [], retry_at, DELAY);
         due.sort_unstable();
@@ -653,7 +672,7 @@ mod tests {
         alone.copying(item(1), task);
         alone.copied(item(1), true, retry_at);
         assert!(alone.due(&HashSet::new(), [], retry_at, DELAY).is_empty());
-        assert_eq!(alone.next_due(DELAY, retry_at), None);
+        assert_eq!(alone.next_due(DELAY), None);
     }
 
     /// Each failure in a row waits longer: the count goes from the failed
@@ -668,13 +687,13 @@ mod tests {
         alone.copying(item(1), task);
         alone.copied(item(1), false, start);
         let (once, first_retry) = Failures::default().one_more(start);
-        assert_eq!(alone.next_due(DELAY, start), Some(first_retry));
+        assert_eq!(alone.next_due(DELAY), Some(first_retry));
         assert_eq!(alone.due(&one, [], first_retry, DELAY), [item(1)]);
         alone.copying(item(1), task);
         alone.copied(item(1), false, start);
 
         let (_, second_retry) = once.one_more(start);
         assert!(second_retry > first_retry);
-        assert_eq!(alone.next_due(DELAY, start), Some(second_retry));
+        assert_eq!(alone.next_due(DELAY), Some(second_retry));
     }
 }
