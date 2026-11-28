@@ -422,20 +422,28 @@ pub async fn found_and_settled<R: Borrow<Runtime>>(
     until_custody_counts_pledges(runtimes, pledges).await;
 }
 
-/// Waits until each of `runtimes`' custody counts its own pledge in `pledges`.
+/// Waits until each of `runtimes`' custody counts every pledge in `pledges`:
+/// one that counts only some ranks items on a group about to change, and may
+/// fetch an item it then keeps as cache.
 async fn until_custody_counts_pledges<R: Borrow<Runtime>>(
     runtimes: &[R],
     pledges: &[(&SecretKey, u64)],
 ) {
-    for (runtime, (_, pledge_bytes)) in runtimes.iter().zip(pledges) {
-        let counted = || async {
-            let status = runtime.borrow().custody().status();
-            status.map(|status| status.pledge_bytes)
-        };
+    let pledged: Vec<(MemberId, u64)> = pledges
+        .iter()
+        .map(|(key, bytes)| (MemberId::from(key.public()), *bytes))
+        .collect();
+    for runtime in runtimes {
         until(
-            "custody counts the node's pledge once it has settled",
-            counted,
-            |counted| *counted == Some(*pledge_bytes),
+            "custody counts every pledge once they have settled",
+            || async { runtime.borrow().custody().group() },
+            |group| {
+                group.as_ref().is_some_and(|group| {
+                    pledged
+                        .iter()
+                        .all(|(member, bytes)| group.pledge_of(*member) == *bytes)
+                })
+            },
         )
         .await;
     }
