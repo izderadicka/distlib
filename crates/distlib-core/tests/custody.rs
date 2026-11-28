@@ -168,6 +168,10 @@ proptest! {
             prop_assert_eq!(first, one_more.custodians(&item).get(custodians.len()).copied());
             let second = group.first_after_custodians(&item, |member| Some(member) != first);
             prop_assert_eq!(second, two_more.custodians(&item).get(custodians.len() + 1).copied());
+            // Every one after the custodians, in that order (5i-6).
+            let after: Vec<MemberId> = group.after_custodians(&item).collect();
+            prop_assert_eq!(after.first().copied(), first);
+            prop_assert_eq!(after.get(1).copied(), second);
             if let Some(first) = first {
                 prop_assert!(!custodians.contains(&first));
                 prop_assert_ne!(item.creator, first);
