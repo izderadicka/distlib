@@ -149,7 +149,7 @@ impl Custody {
     }
 
     /// The settled group. `None` until custody has been computed.
-    pub(crate) fn group(&self) -> Option<CustodyGroup> {
+    pub fn group(&self) -> Option<CustodyGroup> {
         self.inner
             .view
             .borrow()
